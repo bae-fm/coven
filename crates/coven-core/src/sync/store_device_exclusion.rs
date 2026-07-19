@@ -328,7 +328,7 @@ impl DurableStoreDeviceExclusionOperation {
         })?;
         let authority = self.object().remote_record(candidate)?;
         candidate
-            .retained_authority_remote_objects(authority)
+            .retained_authority_remote_objects(vec![authority])
             .map_err(StoreDeviceExclusionJournalError::Outbound)
     }
 

@@ -2020,21 +2020,26 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         continuation.registration.device_id,
     )
     .expect("parse continuation Store registration");
-    let latest_commit = crate::sync::store_objects::load_commit_ref(
-        components.storage().as_ref(),
-        store_root.store_root_hash,
-        latest_position,
-        &source_registration,
-    )
-    .await
-    .expect("load continuation tip commit")
-    .value;
-    assert!(latest_commit
-        .order
-        .predecessor()
-        .is_some_and(|predecessor| snapshot_coverage
-            .values()
-            .any(|covered| covered == predecessor)));
+    let mut cursor = latest_position.clone();
+    loop {
+        if snapshot_coverage.values().any(|covered| covered == &cursor) {
+            break;
+        }
+        let commit = crate::sync::store_objects::load_commit_ref(
+            components.storage().as_ref(),
+            store_root.store_root_hash,
+            &cursor,
+            &source_registration,
+        )
+        .await
+        .expect("load continuation ancestry")
+        .value;
+        cursor = commit
+            .order
+            .predecessor()
+            .cloned()
+            .expect("continuation descends from the snapshot coverage");
+    }
     let device_signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
         hex::decode(&continuation.device_signing_secret)
             .expect("decode continuation device signing key")

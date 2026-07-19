@@ -509,7 +509,7 @@ async fn validate_commit_reclaim_authorization(
         ));
     }
     let activation = predecessor_commit_matching(storage, root, &commit.order, |candidate, _| {
-        candidate == &evidence.claim.activation
+        candidate == &evidence.claim.target.activation
     })
     .await?
     .ok_or_else(|| {

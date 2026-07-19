@@ -175,6 +175,15 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            reclaimed_store_packages,
+            "
+    object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),
+    authorization_hash TEXT NOT NULL UNIQUE CHECK (length(authorization_hash) = 64),
+    state TEXT NOT NULL CHECK (json_valid(state)),
+    FOREIGN KEY (authorization_hash) REFERENCES store_reclaim_operations(authorization_hash)
+"
+        );
+        $visit!(
             store_write_packages,
             "
     write_id TEXT NOT NULL,
@@ -295,6 +304,13 @@ macro_rules! coven_tables {
             "
     operation_id TEXT PRIMARY KEY CHECK (length(operation_id) = 64),
     active_key INTEGER UNIQUE CHECK (active_key IS NULL OR active_key = 1),
+    state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
+            store_reclaim_operations,
+            "
+    authorization_hash TEXT PRIMARY KEY CHECK (length(authorization_hash) = 64),
     state TEXT NOT NULL CHECK (json_valid(state))
 "
         );
@@ -513,6 +529,58 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
+END;
+CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_reclaimed_on_insert
+BEFORE INSERT ON remote_objects
+WHEN EXISTS (
+    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'remote object identity is a reclaimed Store package');
+END;
+CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_reclaimed_on_update
+BEFORE UPDATE OF object_id ON remote_objects
+WHEN EXISTS (
+    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'remote object identity is a reclaimed Store package');
+END;
+CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_insert
+BEFORE INSERT ON protocol_inert_objects
+WHEN EXISTS (
+    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
+END;
+CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_reclaimed_on_update
+BEFORE UPDATE OF object_id ON protocol_inert_objects
+WHEN EXISTS (
+    SELECT 1 FROM reclaimed_store_packages WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'protocol-inert object identity is a reclaimed Store package');
+END;
+CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_insert
+BEFORE INSERT ON reclaimed_store_packages
+WHEN EXISTS (
+    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
+    UNION ALL
+    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
+END;
+CREATE TRIGGER IF NOT EXISTS reclaimed_store_package_identity_must_be_closed_on_update
+BEFORE UPDATE OF object_id ON reclaimed_store_packages
+WHEN EXISTS (
+    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
+    UNION ALL
+    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reclaimed Store package identity has another ownership state');
 END;
 ";
 

@@ -51,6 +51,7 @@ pub mod store_outbound;
 pub mod store_protocol_root;
 pub mod store_pull;
 pub mod store_reclaim;
+pub(crate) mod store_reclaim_journal;
 pub mod store_registration;
 pub mod store_snapshot;
 #[cfg(any(test, feature = "test-utils"))]

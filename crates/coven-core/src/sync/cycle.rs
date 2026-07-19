@@ -600,7 +600,10 @@ async fn run_single_sync_cycle_with_authorization(
         .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
         Box::pin(reclaim_cycle_packages(
             storage,
+            serial_coordination,
             db,
+            device_id,
+            user_keypair,
             &authorization,
             completed.serial_membership_after_pull.as_ref(),
         ))
@@ -872,11 +875,11 @@ async fn prepare_cycle_before_pull(
     }
 
     if rotation_pending.is_none() {
-        let published = super::store_outbound::drain_store_writes_with_coordination(
+        let published = Box::pin(super::store_outbound::drain_store_writes_with_coordination(
             db,
             storage,
             serial_coordination,
-        )
+        ))
         .await
         .map_err(|error| SyncCycleFailure::operation("publish queued Store writes", error))?;
         if published > 0 {
@@ -988,13 +991,15 @@ async fn complete_cycle_after_pull(
     // predecessor enter one continuous local chain. The same pull also installs
     // the membership state that decides whether this active member may register.
     if rotation_pending.is_none() {
-        super::store_registration::ensure_active_registration_with_coordination(
-            db,
-            storage,
-            serial_coordination,
-            user_keypair,
-            merge_chain,
-            &sync_time,
+        Box::pin(
+            super::store_registration::ensure_active_registration_with_coordination(
+                db,
+                storage,
+                serial_coordination,
+                user_keypair,
+                merge_chain,
+                &sync_time,
+            ),
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("publish Store device registration", error))?;
@@ -1003,15 +1008,17 @@ async fn complete_cycle_after_pull(
     let staged_store_batch = if rotation_pending.is_none() {
         let mut staged_any = false;
         loop {
-            let staged = super::store_outbound::prepare_pending_store_write_with_coordination(
-                db,
-                storage,
-                serial_coordination,
-                device_id,
-                &sync_time,
-                user_keypair,
-                store_dir,
-                merge_chain,
+            let staged = Box::pin(
+                super::store_outbound::prepare_pending_store_write_with_coordination(
+                    db,
+                    storage,
+                    serial_coordination,
+                    device_id,
+                    &sync_time,
+                    user_keypair,
+                    store_dir,
+                    merge_chain,
+                ),
             )
             .await
             .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))?;
@@ -1019,11 +1026,11 @@ async fn complete_cycle_after_pull(
                 break;
             }
             staged_any = true;
-            let published = super::store_outbound::drain_store_writes_with_coordination(
+            let published = Box::pin(super::store_outbound::drain_store_writes_with_coordination(
                 db,
                 storage,
                 serial_coordination,
-            )
+            ))
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
             if published > 0 {
@@ -1206,7 +1213,10 @@ async fn stage_cycle_ack(
 
 async fn reclaim_cycle_packages(
     storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     db: &Database,
+    device_id: &str,
+    user_keypair: &UserKeypair,
     authorization: &CycleAuthorization,
     serial_membership_after_pull: Option<&super::membership::SerialMembershipState>,
 ) -> Result<(), SyncCycleFailure> {
@@ -1226,12 +1236,15 @@ async fn reclaim_cycle_packages(
                 .into())
         }
     };
-    match super::store_reclaim::reclaim_store_packages(
+    match Box::pin(super::store_reclaim::reclaim_store_packages(
         db,
         storage,
+        serial_coordination,
+        device_id,
+        user_keypair,
         authorization.store_root.store_root_hash,
         reclaim_membership,
-    )
+    ))
     .await
     {
         Ok(result) if result.packages_deleted > 0 => info!(
@@ -1240,7 +1253,13 @@ async fn reclaim_cycle_packages(
             "Reclaimed snapshot-covered Store packages"
         ),
         Ok(_) => {}
-        Err(error) => warn!(%error, "Store package reclamation refused"),
+        Err(
+            error @ (super::store_reclaim::StoreReclaimError::NoSnapshot
+            | super::store_reclaim::StoreReclaimError::MissingRegisteredDevice { .. }
+            | super::store_reclaim::StoreReclaimError::MissingAcknowledgement { .. }
+            | super::store_reclaim::StoreReclaimError::StaleAcknowledgement { .. }),
+        ) => info!(%error, "Store package reclamation is awaiting coverage"),
+        Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
     }
     Ok(())
 }

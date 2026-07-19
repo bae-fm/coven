@@ -131,6 +131,57 @@ impl RemoteObjectRecord {
         )
     }
 
+    pub(crate) fn candidate_activated_reclaim_evidence(
+        reference: super::store_reclaim::ReclaimEvidenceRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::ReclaimEvidence { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_reclaim_authorization(
+        reference: super::store_reclaim::ReclaimAuthorizationRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::ReclaimAuthorization { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_reclaim_receipt(
+        reference: super::store_reclaim::ReclaimReceiptRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::ReclaimReceipt { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
     pub(crate) fn snapshot_activated_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,
@@ -298,6 +349,41 @@ impl RemoteObjectRecord {
                             if !ownership.activated.is_empty()
                     )
         )
+    }
+
+    pub(crate) fn validate_reclaimable_store_package(
+        &self,
+        target: &super::store_commit::StorePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        let package = super::audience_package::AudiencePackage::parse(
+            record.bytes.canonical_semantic_bytes(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
+        let expected_size = u64::try_from(record.bytes.canonical_semantic_bytes().len())
+            .map_err(|_| RemoteObjectRecordError::InvalidReclaim)?;
+        if record.identity.domain != SharedLiveSetObjectDomain::StorePackage
+            || record.identity.semantic_hash != target.content_hash
+            || record.identity.object != target.object
+            || package.candidate_family() != target.candidate_family
+            || package.schema_version() != target.schema_version
+            || expected_size != target.changeset_size
+            || !matches!(
+                &record.state,
+                OwnedObjectState::UploadedVerified { ownership }
+                    if ownership.pending.is_empty()
+                        && ownership.activated.len() == 1
+                        && ownership.activated.contains(&expected_owner)
+            )
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
     }
 
     pub(crate) fn snapshot_owners(&self) -> impl Iterator<Item = &SnapshotObjectOwner> {
@@ -1317,6 +1403,15 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     DeviceExclusionOutcome {
         reference: super::store_commit::StoreDeviceExclusionOutcomeRef,
     },
+    ReclaimEvidence {
+        reference: super::store_reclaim::ReclaimEvidenceRef,
+    },
+    ReclaimAuthorization {
+        reference: super::store_reclaim::ReclaimAuthorizationRef,
+    },
+    ReclaimReceipt {
+        reference: super::store_reclaim::ReclaimReceiptRef,
+    },
 }
 
 fn validate_retained_authority_identity(
@@ -1375,6 +1470,39 @@ fn validate_retained_authority_identity(
                 || outcome.outcome_hash() != reference.outcome_hash()
                 || reference.object() != &identity.object
             {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::ReclaimEvidence { reference } => {
+            let value: super::store_reclaim::ReclaimEvidence =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .verify(&value)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::ReclaimAuthorization { reference } => {
+            let value: super::store_reclaim::ReclaimAuthorization =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .verify_identity(&value)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::ReclaimReceipt { reference } => {
+            let value: super::store_reclaim::ReclaimReceipt =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .verify_identity(&value)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
@@ -1726,6 +1854,8 @@ pub(crate) enum RemoteObjectRecordError {
     CandidateNonactivationMissing,
     #[error("remote object is not awaiting exact candidate cleanup")]
     InvalidCleanupTransition,
+    #[error("remote object is not the solely-owned activated Store package being reclaimed")]
+    InvalidReclaim,
 }
 
 #[cfg(test)]

@@ -741,7 +741,7 @@ fn commit_stream_id(coord: &StoreCommitCoord) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorePackageRef {
     pub candidate_family: CandidateFamilyId,

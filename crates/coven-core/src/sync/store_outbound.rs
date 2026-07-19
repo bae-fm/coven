@@ -3111,6 +3111,8 @@ pub(crate) enum StoreOperationBatch {
     CleanupReceipt(super::device_join::DeviceJoinCleanupReceiptRef),
     DeviceExclusionProposal(super::store_commit::StoreDeviceExclusionProposalRef),
     DeviceExclusionOutcome(super::store_commit::StoreDeviceExclusionOutcomeRef),
+    ReclaimAuthorization(Box<super::store_reclaim::ReclaimAuthorizationRef>),
+    ReclaimReceipt(Box<super::store_reclaim::ReclaimReceiptRef>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3444,40 +3446,45 @@ impl PreparedStoreOperationCommit {
                 self.reference.clone(),
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        self.retained_authority_remote_objects(authority)
+        self.retained_authority_remote_objects(vec![authority])
     }
 
     pub(crate) fn retained_authority_remote_objects(
         &self,
-        authority: super::remote_object::RemoteObjectRecord,
+        authorities: Vec<super::remote_object::RemoteObjectRecord>,
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
-        authority
-            .validate()
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        if !matches!(
-            &authority,
-            super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-                if matches!(
-                    &record.state,
-                    super::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
-                        if ownership.pending == std::collections::BTreeSet::from([
-                            self.reference.clone()
-                        ])
-                )
-        ) {
+        if authorities.is_empty() {
             return Err(StoreOutboundError::InvalidOutbound(
-                "Store operation retained authority has different candidate ownership".to_string(),
+                "Store operation has no retained authority objects".to_string(),
             ));
         }
-        let mut objects = vec![
-            super::remote_object::RemoteObjectRecord::candidate_commit(
-                self.reference.clone(),
-                self.commit.to_bytes(),
-                self.prepared.stored_bytes().to_vec(),
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
-            authority,
-        ];
+        let mut authority_ids = std::collections::BTreeSet::new();
+        for authority in &authorities {
+            authority
+                .validate()
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            if !matches!(authority, super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(&record.state, super::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
+                    if ownership.pending == std::collections::BTreeSet::from([self.reference.clone()])))
+            {
+                return Err(StoreOutboundError::InvalidOutbound(
+                    "Store operation retained authority has different candidate ownership"
+                        .to_string(),
+                ));
+            }
+            if !authority_ids.insert(authority.object_id()) {
+                return Err(StoreOutboundError::InvalidOutbound(
+                    "Store operation repeats a retained authority object".to_string(),
+                ));
+            }
+        }
+        let mut objects = vec![super::remote_object::RemoteObjectRecord::candidate_commit(
+            self.reference.clone(),
+            self.commit.to_bytes(),
+            self.prepared.stored_bytes().to_vec(),
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?];
+        objects.extend(authorities);
         if let StoreOperationPublication::MergeConcurrent { head, prepared } = &self.publication {
             objects.push(
                 super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
@@ -3742,6 +3749,32 @@ pub(crate) async fn prepare_store_operation_candidate(
                 &plan.device_signer,
             )
         }
+        StoreOperationBatch::ReclaimAuthorization(authorization) => {
+            StoreBatchCommit::signed_reclaim_authorization(
+                store_root_hash,
+                db.new_write_id(),
+                plan.coord.clone(),
+                plan.registration_ref.clone(),
+                &plan.registration,
+                plan.order.clone(),
+                plan.membership_state.clone(),
+                plan.device_state.clone(),
+                *authorization,
+                &plan.device_signer,
+            )
+        }
+        StoreOperationBatch::ReclaimReceipt(receipt) => StoreBatchCommit::signed_reclaim_receipt(
+            store_root_hash,
+            db.new_write_id(),
+            plan.coord.clone(),
+            plan.registration_ref.clone(),
+            &plan.registration,
+            plan.order.clone(),
+            plan.membership_state.clone(),
+            plan.device_state.clone(),
+            *receipt,
+            &plan.device_signer,
+        ),
     }
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let context =
@@ -3856,12 +3889,12 @@ pub(crate) async fn publish_prepared_store_operation(
     )
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let retained_operation_object = retained_store_operation_object(&prepared.commit)?;
+    let retained_operation_objects = retained_store_operation_objects(&prepared.commit)?;
     let publication = prepared.publication.clone();
     let activation = PreparedStoreOperationActivation {
         candidate: prepared,
         device_operations,
-        retained_operation_object,
+        retained_operation_objects,
     };
     match publication {
         StoreOperationPublication::Serial {
@@ -3899,7 +3932,7 @@ pub(crate) async fn publish_prepared_store_operation(
 struct PreparedStoreOperationActivation {
     candidate: PreparedStoreOperationCommit,
     device_operations: super::store_commit::VerifiedStoreDeviceOperations,
-    retained_operation_object: Option<ExactObjectRef>,
+    retained_operation_objects: Vec<ExactObjectRef>,
 }
 
 async fn publish_prepared_serial_store_operation(
@@ -3980,11 +4013,15 @@ async fn publish_prepared_serial_store_operation(
             }
         }
     }
-    let operation_object_ids = activation.retained_operation_object.as_ref().map(|object| {
-        vec![
-            super::remote_object::remote_object_id(&reference.object),
-            super::remote_object::remote_object_id(object),
-        ]
+    let operation_object_ids = (!activation.retained_operation_objects.is_empty()).then(|| {
+        std::iter::once(super::remote_object::remote_object_id(&reference.object))
+            .chain(
+                activation
+                    .retained_operation_objects
+                    .iter()
+                    .map(super::remote_object::remote_object_id),
+            )
+            .collect::<Vec<_>>()
     });
     if operation_object_ids.is_some() {
         db.mark_candidate_commit_uploaded(reference.clone()).await?;
@@ -4057,7 +4094,7 @@ async fn publish_prepared_merge_store_operation(
             "Store operation commit exact readback differs from its signed bytes".to_string(),
         ));
     }
-    if activation.retained_operation_object.is_some() {
+    if !activation.retained_operation_objects.is_empty() {
         db.mark_candidate_commit_uploaded(reference.clone()).await?;
     }
     let head_context = ProtocolObjectContext::signed_plaintext(
@@ -4094,17 +4131,25 @@ async fn publish_prepared_merge_store_operation(
             "Store operation head exact readback differs from its signed bytes".to_string(),
         ));
     }
-    let operation_object_ids = if let Some(authority) = activation.retained_operation_object {
+    let operation_object_ids = if !activation.retained_operation_objects.is_empty() {
         let head_ref = StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),
         };
         db.mark_store_head_uploaded(head_ref).await?;
-        Some(vec![
-            super::remote_object::remote_object_id(&reference.object),
-            super::remote_object::remote_object_id(&authority),
-            super::remote_object::remote_object_id(prepared_head.reference()),
-        ])
+        Some(
+            std::iter::once(super::remote_object::remote_object_id(&reference.object))
+                .chain(
+                    activation
+                        .retained_operation_objects
+                        .iter()
+                        .map(super::remote_object::remote_object_id),
+                )
+                .chain(std::iter::once(super::remote_object::remote_object_id(
+                    prepared_head.reference(),
+                )))
+                .collect::<Vec<_>>(),
+        )
     } else {
         None
     };
@@ -4188,10 +4233,10 @@ async fn resolve_merge_store_operation_head_collision(
     Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
 }
 
-fn retained_store_operation_object(
+fn retained_store_operation_objects(
     commit: &StoreBatchCommit,
-) -> Result<Option<ExactObjectRef>, StoreOutboundError> {
-    let mut objects = commit
+) -> Result<Vec<ExactObjectRef>, StoreOutboundError> {
+    let objects = commit
         .acknowledgement()
         .map(|reference| reference.object.clone())
         .into_iter()
@@ -4206,14 +4251,32 @@ fn retained_store_operation_object(
                 .device_exclusion_outcomes()
                 .iter()
                 .map(|reference| reference.object().clone()),
-        );
-    let first = objects.next();
-    if objects.next().is_some() {
+        )
+        .chain(
+            commit
+                .reclaim_authorization()
+                .into_iter()
+                .flat_map(|reference| {
+                    [reference.evidence.object.clone(), reference.object.clone()]
+                }),
+        )
+        .chain(
+            commit
+                .reclaim_receipt()
+                .map(|reference| reference.object.clone()),
+        )
+        .collect::<Vec<_>>();
+    if objects
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != objects.len()
+    {
         return Err(StoreOutboundError::InvalidOutbound(
-            "Store operation publication carries multiple retained authority objects".to_string(),
+            "Store operation publication repeats a retained authority object".to_string(),
         ));
     }
-    Ok(first)
+    Ok(objects)
 }
 
 pub(crate) async fn finish_nonactivating_store_ack(

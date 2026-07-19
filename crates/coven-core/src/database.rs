@@ -55,6 +55,9 @@ use crate::sync::store_device_exclusion::{
     DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
     StoreDeviceExclusionJournalError,
 };
+use crate::sync::store_reclaim_journal::{
+    DurableStoreReclaimOperation, ReclaimedStorePackage, StoreReclaimJournalError,
+};
 use crate::write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
     WriteReceipt, WriteResolution, WriteStatus,
@@ -8949,6 +8952,504 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn begin_store_reclaim_operation(
+        &self,
+        operation: DurableStoreReclaimOperation,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        operation.validate().map_err(store_reclaim_journal_error)?;
+        let DurableStoreReclaimOperation::AuthorizationCandidate { .. } = &operation else {
+            return Err(DbError::Message(
+                "a new Store reclaim operation must own an activation candidate".to_string(),
+            ));
+        };
+        let remotes = match &operation {
+            DurableStoreReclaimOperation::AuthorizationCandidate { object, candidate } => object
+                .remote_objects(candidate)
+                .map_err(store_reclaim_journal_error)?,
+            _ => unreachable!("matched reclaim candidate"),
+        };
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let operation_id = operation.operation_id();
+            if let Some(existing) = load_store_reclaim_operation_on(&tx, operation_id)? {
+                if existing != operation {
+                    return Err(DbError::Message(format!(
+                        "Store reclaim operation {operation_id} already has different durable state"
+                    )));
+                }
+                return Ok(existing);
+            }
+            for remote in &remotes {
+                persist_exact_remote_object_on(&tx, remote, "Store reclaim candidate object")?;
+            }
+            insert_store_reclaim_operation_on(&tx, &operation)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(operation)
+        })
+        .await
+    }
+
+    pub(crate) async fn store_reclaim_operations(
+        &self,
+    ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT authorization_hash, state FROM store_reclaim_operations
+                     ORDER BY authorization_hash",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            rows.into_iter()
+                .map(|(raw_id, raw)| {
+                    let id = raw_id.parse().map_err(|error| {
+                        DbError::Message(format!("Store reclaim operation id: {error}"))
+                    })?;
+                    parse_store_reclaim_operation(id, &raw)
+                })
+                .collect()
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_store_reclaim_receipt(
+        &self,
+        expected: DurableStoreReclaimOperation,
+        object: crate::sync::store_reclaim_journal::DurableStoreReclaimObject,
+        candidate: crate::sync::store_outbound::PreparedStoreOperationCommit,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let DurableStoreReclaimOperation::AbsentVerified {
+            authorization,
+            authorization_activation,
+            ..
+        } = &expected
+        else {
+            return Err(DbError::Message(
+                "only an authorized reclaim can prepare a receipt".to_string(),
+            ));
+        };
+        let next = DurableStoreReclaimOperation::ReceiptCandidate {
+            authorization: authorization.clone(),
+            authorization_activation: authorization_activation.clone(),
+            object: Box::new(object),
+            candidate: Box::new(candidate),
+        };
+        next.validate().map_err(store_reclaim_journal_error)?;
+        let remotes = match &next {
+            DurableStoreReclaimOperation::ReceiptCandidate {
+                object, candidate, ..
+            } => object
+                .remote_objects(candidate)
+                .map_err(store_reclaim_journal_error)?,
+            _ => unreachable!("constructed receipt candidate"),
+        };
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before receipt preparation".to_string(),
+                ));
+            }
+            for remote in &remotes {
+                persist_exact_remote_object_on(&tx, remote, "Store reclaim receipt candidate")?;
+            }
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn mark_store_reclaim_target_absent(
+        &self,
+        expected: DurableStoreReclaimOperation,
+        target: crate::sync::store_commit::StorePackageRef,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let DurableStoreReclaimOperation::Authorized {
+            authorization,
+            activation,
+        } = &expected
+        else {
+            return Err(DbError::Message(
+                "only an authorized reclaim can record target absence".to_string(),
+            ));
+        };
+        if &target != authorization.target() {
+            return Err(DbError::Message(
+                "verified reclaim target differs from its signed exact reference".to_string(),
+            ));
+        }
+        let next = DurableStoreReclaimOperation::AbsentVerified {
+            authorization: authorization.clone(),
+            authorization_activation: activation.clone(),
+            target,
+        };
+        let reclaimed =
+            ReclaimedStorePackage::absent_verified(authorization.clone(), activation.clone())
+                .map_err(store_reclaim_journal_error)?;
+        next.validate().map_err(store_reclaim_journal_error)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before absence recording".to_string(),
+                ));
+            }
+            record_reclaimed_store_package_on(&tx, &reclaimed)?;
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn replace_store_reclaim_candidate(
+        &self,
+        expected: DurableStoreReclaimOperation,
+        replacement: crate::sync::store_outbound::PreparedStoreOperationCommit,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let current_candidate = expected.candidate().cloned().ok_or_else(|| {
+            DbError::Message("Store reclaim state has no replaceable candidate".to_string())
+        })?;
+        if current_candidate.reference != replacement.reference
+            || current_candidate.commit != replacement.commit
+        {
+            return Err(DbError::Message(
+                "Store reclaim candidate replacement changes its signed commit".to_string(),
+            ));
+        }
+        let next = match &expected {
+            DurableStoreReclaimOperation::AuthorizationCandidate { object, .. } => {
+                DurableStoreReclaimOperation::AuthorizationCandidate {
+                    object: object.clone(),
+                    candidate: Box::new(replacement),
+                }
+            }
+            DurableStoreReclaimOperation::ReceiptCandidate {
+                authorization,
+                authorization_activation,
+                object,
+                ..
+            } => DurableStoreReclaimOperation::ReceiptCandidate {
+                authorization: authorization.clone(),
+                authorization_activation: authorization_activation.clone(),
+                object: object.clone(),
+                candidate: Box::new(replacement),
+            },
+            _ => {
+                return Err(DbError::Message(
+                    "Store reclaim state has no replaceable candidate".to_string(),
+                ));
+            }
+        };
+        next.validate().map_err(store_reclaim_journal_error)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before candidate replacement".to_string(),
+                ));
+            }
+            let next_candidate = next.candidate().expect("constructed candidate state");
+            match (
+                current_candidate.merge_head_ref(),
+                next_candidate.merge_head_ref(),
+            ) {
+                (Some(current), Some(replacement)) if current != replacement => {
+                    let (winner, prepared) =
+                        next_candidate.merge_publication().ok_or_else(|| {
+                            DbError::Message(
+                                "replacement Merge reclaim candidate has no signed head"
+                                    .to_string(),
+                            )
+                        })?;
+                    replace_prepared_merge_head_remote_on(
+                        &tx,
+                        &current.object,
+                        winner,
+                        prepared,
+                        &current_candidate.reference,
+                    )?;
+                }
+                (None, None) | (Some(_), Some(_)) => {}
+                _ => {
+                    return Err(DbError::Message(
+                        "replacement reclaim candidate changes Store write policy".to_string(),
+                    ));
+                }
+            }
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_store_reclaim_candidate_replacement(
+        &self,
+        expected: DurableStoreReclaimOperation,
+        replacement: crate::sync::store_outbound::PreparedStoreOperationCommit,
+        proof: crate::sync::remote_object::CandidateNonactivationProof,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let object = expected.object().cloned().ok_or_else(|| {
+            DbError::Message("Store reclaim operation has no replaceable object".to_string())
+        })?;
+        let losing_candidate = expected.candidate().cloned().ok_or_else(|| {
+            DbError::Message("Store reclaim operation has no losing candidate".to_string())
+        })?;
+        let loss = crate::sync::store_reclaim_journal::StoreReclaimCandidateLoss {
+            candidate: Box::new(losing_candidate.clone()),
+            proof: proof.clone(),
+        };
+        let next = match &expected {
+            DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
+                DurableStoreReclaimOperation::AuthorizationReplacing {
+                    object: Box::new(object.clone()),
+                    candidate: Box::new(replacement.clone()),
+                    losing: Box::new(loss),
+                }
+            }
+            DurableStoreReclaimOperation::ReceiptCandidate {
+                authorization,
+                authorization_activation,
+                ..
+            } => DurableStoreReclaimOperation::ReceiptReplacing {
+                authorization: authorization.clone(),
+                authorization_activation: authorization_activation.clone(),
+                object: Box::new(object.clone()),
+                candidate: Box::new(replacement.clone()),
+                losing: Box::new(loss),
+            },
+            _ => {
+                return Err(DbError::Message(
+                    "Store reclaim operation is not awaiting candidate publication".to_string(),
+                ));
+            }
+        };
+        next.validate().map_err(store_reclaim_journal_error)?;
+        let nonactivation = crate::sync::remote_object::CandidateNonactivation::for_candidate(
+            &losing_candidate.reference,
+            &losing_candidate.commit,
+            proof,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        let replacement_remotes = object
+            .remote_objects(&replacement)
+            .map_err(store_reclaim_journal_error)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before candidate replacement".to_string(),
+                ));
+            }
+            let authority_ids = replacement_remotes
+                .iter()
+                .filter(|remote| matches!(
+                    remote,
+                    RemoteObjectRecord::RetainedAuthority(record)
+                        if matches!(
+                            record.identity.domain,
+                            crate::sync::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                                | crate::sync::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                                | crate::sync::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                        )
+                ))
+                .map(RemoteObjectRecord::object_id)
+                .collect::<BTreeSet<_>>();
+            for remote in replacement_remotes
+                .iter()
+                .filter(|remote| !authority_ids.contains(&remote.object_id()))
+            {
+                persist_exact_remote_object_on(
+                    &tx,
+                    remote,
+                    "replacement Store reclaim candidate object",
+                )?;
+            }
+            for authority_id in authority_ids {
+                let mut authority = load_remote_object_on(&tx, authority_id)?;
+                authority
+                    .add_retained_authority_candidate(replacement.reference.clone())
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "attach replacement reclaim authority candidate: {error}"
+                        ))
+                    })?;
+                update_remote_object_on(&tx, authority_id, &authority)?;
+                if begin_remote_candidate_nonactivation_on(
+                    &tx,
+                    authority_id,
+                    nonactivation.clone(),
+                )?
+                .is_some()
+                {
+                    return Err(DbError::Message(
+                        "reusable reclaim authority became a deletion target".to_string(),
+                    ));
+                }
+            }
+            if let Some(head) = losing_candidate.merge_head_ref() {
+                if begin_remote_candidate_nonactivation_on(
+                    &tx,
+                    remote_object_id(&head.object),
+                    nonactivation.clone(),
+                )?
+                .is_some()
+                {
+                    return Err(DbError::Message(
+                        "losing reclaim activation head became a deletion target".to_string(),
+                    ));
+                }
+            }
+            if begin_remote_candidate_nonactivation_on(
+                &tx,
+                remote_object_id(&losing_candidate.reference.object),
+                nonactivation,
+            )?
+            .is_none()
+            {
+                return Err(DbError::Message(
+                    "losing reclaim commit has no exact deletion target".to_string(),
+                ));
+            }
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn store_reclaim_replacement_cleanup_targets(
+        &self,
+        expected: DurableStoreReclaimOperation,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        self.call(move |conn| {
+            let current = load_store_reclaim_operation_on(conn, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before cleanup".to_string(),
+                ));
+            }
+            let losing = current.losing_candidate().ok_or_else(|| {
+                DbError::Message("Store reclaim operation has no losing candidate".to_string())
+            })?;
+            let commit =
+                load_remote_object_on(conn, remote_object_id(&losing.candidate.reference.object))?;
+            if let Some(object) = commit.cleanup_target() {
+                Ok(vec![CandidateCleanupObject {
+                    object: object.clone(),
+                }])
+            } else if commit
+                .candidate_cleanup_complete(&losing.candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                Ok(Vec::new())
+            } else {
+                Err(DbError::Message(
+                    "losing reclaim commit is not awaiting exact cleanup".to_string(),
+                ))
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_store_reclaim_candidate_replacement(
+        &self,
+        expected: DurableStoreReclaimOperation,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let losing = expected.losing_candidate().cloned().ok_or_else(|| {
+            DbError::Message("Store reclaim operation has no replacement cleanup".to_string())
+        })?;
+        let next = match &expected {
+            DurableStoreReclaimOperation::AuthorizationReplacing {
+                object, candidate, ..
+            } => DurableStoreReclaimOperation::AuthorizationCandidate {
+                object: object.clone(),
+                candidate: candidate.clone(),
+            },
+            DurableStoreReclaimOperation::ReceiptReplacing {
+                authorization,
+                authorization_activation,
+                object,
+                candidate,
+                ..
+            } => DurableStoreReclaimOperation::ReceiptCandidate {
+                authorization: authorization.clone(),
+                authorization_activation: authorization_activation.clone(),
+                object: object.clone(),
+                candidate: candidate.clone(),
+            },
+            _ => {
+                return Err(DbError::Message(
+                    "Store reclaim operation has no replacement cleanup".to_string(),
+                ));
+            }
+        };
+        next.validate().map_err(store_reclaim_journal_error)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before replacement completion".to_string(),
+                ));
+            }
+            let object_id = remote_object_id(&losing.candidate.reference.object);
+            let commit = load_remote_object_on(&tx, object_id)?;
+            if !commit
+                .candidate_cleanup_complete(&losing.candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                return Err(DbError::Message(
+                    "losing reclaim commit cleanup is incomplete".to_string(),
+                ));
+            }
+            if tx
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "losing reclaim commit disappeared during completion".to_string(),
+                ));
+            }
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
     pub(crate) async fn active_outbound_store_device_exclusion(
         &self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
@@ -13681,7 +14182,8 @@ impl Database {
             commit.policy(),
             &device_state,
             device_operations,
-        )
+        )?;
+        record_store_reclaim_activation_on(conn, commit, commit_ref)
     }
 
     pub(crate) fn record_verified_circle_activations_on(
@@ -14943,6 +15445,14 @@ impl Database {
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
         self.call(move |conn| mark_remote_object_uploaded_on(conn, expected))
+            .await
+    }
+
+    pub(crate) async fn mark_reusable_retained_authority_uploaded(
+        &self,
+        expected: RemoteObjectRecord,
+    ) -> Result<RemoteObjectRecord, DbError> {
+        self.call(move |conn| mark_reusable_retained_authority_uploaded_on(conn, expected))
             .await
     }
 
@@ -18151,6 +18661,218 @@ fn store_device_exclusion_journal_error(error: StoreDeviceExclusionJournalError)
     DbError::Message(error.to_string())
 }
 
+fn store_reclaim_journal_error(error: StoreReclaimJournalError) -> DbError {
+    DbError::Message(error.to_string())
+}
+
+fn parse_store_reclaim_operation(
+    operation_id: ObjectHash,
+    raw: &str,
+) -> Result<DurableStoreReclaimOperation, DbError> {
+    let operation: DurableStoreReclaimOperation = serde_json::from_str(raw).map_err(|error| {
+        DbError::Message(format!(
+            "Store reclaim operation {operation_id} has invalid durable state: {error}"
+        ))
+    })?;
+    operation.validate().map_err(store_reclaim_journal_error)?;
+    if operation.operation_id() != operation_id {
+        return Err(DbError::Message(format!(
+            "Store reclaim operation key {operation_id} differs from its authorization {}",
+            operation.operation_id()
+        )));
+    }
+    Ok(operation)
+}
+
+fn load_store_reclaim_operation_on(
+    conn: &Connection,
+    operation_id: ObjectHash,
+) -> Result<Option<DurableStoreReclaimOperation>, DbError> {
+    conn.query_row(
+        "SELECT state FROM store_reclaim_operations WHERE authorization_hash = ?1",
+        [operation_id.to_string()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|raw| parse_store_reclaim_operation(operation_id, &raw))
+    .transpose()
+}
+
+fn insert_store_reclaim_operation_on(
+    conn: &Connection,
+    operation: &DurableStoreReclaimOperation,
+) -> Result<(), DbError> {
+    operation.validate().map_err(store_reclaim_journal_error)?;
+    let state = serde_json::to_string(operation)
+        .map_err(|error| DbError::Message(format!("serialize Store reclaim operation: {error}")))?;
+    conn.execute(
+        "INSERT INTO store_reclaim_operations (authorization_hash, state) VALUES (?1, ?2)",
+        (operation.operation_id().to_string(), state),
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
+}
+
+fn update_store_reclaim_operation_on(
+    conn: &Connection,
+    expected: &DurableStoreReclaimOperation,
+    next: &DurableStoreReclaimOperation,
+) -> Result<(), DbError> {
+    expected.validate().map_err(store_reclaim_journal_error)?;
+    next.validate().map_err(store_reclaim_journal_error)?;
+    if expected.operation_id() != next.operation_id() {
+        return Err(DbError::Message(
+            "Store reclaim transition changes its authorization identity".to_string(),
+        ));
+    }
+    let expected_state = serde_json::to_string(expected).map_err(|error| {
+        DbError::Message(format!("serialize expected Store reclaim state: {error}"))
+    })?;
+    let next_state = serde_json::to_string(next).map_err(|error| {
+        DbError::Message(format!("serialize next Store reclaim state: {error}"))
+    })?;
+    let updated = conn
+        .execute(
+            "UPDATE store_reclaim_operations SET state = ?3
+             WHERE authorization_hash = ?1 AND state = ?2",
+            (
+                expected.operation_id().to_string(),
+                expected_state,
+                next_state,
+            ),
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(
+            "Store reclaim operation changed during transition".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_store_reclaim_activation_on(
+    conn: &Connection,
+    commit: &StoreBatchCommit,
+    commit_ref: &StoreBatchCommitRef,
+) -> Result<(), DbError> {
+    if let Some(authorization) = commit.reclaim_authorization() {
+        let operation_id = authorization.authorization_hash;
+        let next = DurableStoreReclaimOperation::Authorized {
+            authorization: authorization.clone(),
+            activation: commit_ref.clone(),
+        };
+        next.validate().map_err(store_reclaim_journal_error)?;
+        match load_store_reclaim_operation_on(conn, operation_id)? {
+            Some(expected)
+                if matches!(
+                    &expected,
+                    DurableStoreReclaimOperation::AuthorizationCandidate { object, .. }
+                        | DurableStoreReclaimOperation::AuthorizationReplacing { object, .. }
+                        if object.authorization_ref() == authorization
+                ) =>
+            {
+                update_store_reclaim_operation_on(conn, &expected, &next)?;
+            }
+            Some(existing) if existing == next => {}
+            Some(_) => {
+                return Err(DbError::Message(
+                    "reclaim authorization conflicts with its durable operation".to_string(),
+                ));
+            }
+            None => insert_store_reclaim_operation_on(conn, &next)?,
+        }
+    }
+    if let Some(receipt) = commit.reclaim_receipt() {
+        let operation_id = receipt.authorization.authorization_hash;
+        let expected = load_store_reclaim_operation_on(conn, operation_id)?.ok_or_else(|| {
+            DbError::Message("reclaim receipt has no durable authorization".to_string())
+        })?;
+        let (authorization, authorization_activation) = match &expected {
+            DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
+                return Err(DbError::Message(
+                    "reclaim receipt precedes authorization activation".to_string(),
+                ));
+            }
+            DurableStoreReclaimOperation::AuthorizationReplacing { .. } => {
+                return Err(DbError::Message(
+                    "reclaim receipt precedes replacement authorization activation".to_string(),
+                ));
+            }
+            DurableStoreReclaimOperation::Authorized {
+                authorization,
+                activation,
+            } => (authorization.clone(), activation.clone()),
+            DurableStoreReclaimOperation::AbsentVerified {
+                authorization,
+                authorization_activation,
+                ..
+            } => (authorization.clone(), authorization_activation.clone()),
+            DurableStoreReclaimOperation::ReceiptCandidate {
+                authorization,
+                authorization_activation,
+                object,
+                ..
+            } if matches!(
+                &**object,
+                crate::sync::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+                    receipt_ref,
+                    ..
+                } if receipt_ref == receipt
+            ) =>
+            {
+                (authorization.clone(), authorization_activation.clone())
+            }
+            DurableStoreReclaimOperation::ReceiptReplacing {
+                authorization,
+                authorization_activation,
+                object,
+                ..
+            } if matches!(
+                &**object,
+                crate::sync::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+                    receipt_ref,
+                    ..
+                } if receipt_ref == receipt
+            ) =>
+            {
+                (authorization.clone(), authorization_activation.clone())
+            }
+            DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+                return Err(DbError::Message(
+                    "reclaim receipt differs from its durable candidate".to_string(),
+                ));
+            }
+            DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
+                return Err(DbError::Message(
+                    "reclaim receipt differs from its replacement candidate".to_string(),
+                ));
+            }
+            DurableStoreReclaimOperation::Completed { .. } => {
+                return Err(DbError::Message(
+                    "reclaim authorization already has a receipt".to_string(),
+                ));
+            }
+        };
+        let next = DurableStoreReclaimOperation::Completed {
+            authorization: authorization.clone(),
+            authorization_activation: authorization_activation.clone(),
+            receipt: receipt.clone(),
+            receipt_activation: commit_ref.clone(),
+        };
+        let reclaimed = ReclaimedStorePackage::receipted(
+            authorization,
+            authorization_activation,
+            receipt.clone(),
+            commit_ref.clone(),
+        )
+        .map_err(store_reclaim_journal_error)?;
+        record_reclaimed_store_package_on(conn, &reclaimed)?;
+        update_store_reclaim_operation_on(conn, &expected, &next)?;
+    }
+    Ok(())
+}
+
 fn parse_store_device_exclusion_operation(
     operation_id: ObjectHash,
     raw: &str,
@@ -18918,6 +19640,151 @@ fn load_protocol_inert_object_on(
     Ok(inert)
 }
 
+fn load_reclaimed_store_package_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<Option<ReclaimedStorePackage>, DbError> {
+    let stored: Option<(String, String)> = conn
+        .query_row(
+            "SELECT authorization_hash, state FROM reclaimed_store_packages WHERE object_id = ?1",
+            [object_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some((authorization_hash, state)) = stored else {
+        return Ok(None);
+    };
+    let authorization_hash = authorization_hash.parse::<ObjectHash>().map_err(|error| {
+        DbError::Message(format!(
+            "reclaimed Store package {object_id} has invalid authorization hash: {error}"
+        ))
+    })?;
+    let reclaimed: ReclaimedStorePackage = serde_json::from_str(&state).map_err(|error| {
+        DbError::Message(format!(
+            "reclaimed Store package {object_id} has invalid closed state: {error}"
+        ))
+    })?;
+    reclaimed.validate().map_err(store_reclaim_journal_error)?;
+    if reclaimed.object_id() != object_id
+        || reclaimed.authorization().authorization_hash != authorization_hash
+    {
+        return Err(DbError::Message(format!(
+            "reclaimed Store package {object_id} differs from its indexed identity"
+        )));
+    }
+    Ok(Some(reclaimed))
+}
+
+fn record_reclaimed_store_package_on(
+    conn: &Connection,
+    reclaimed: &ReclaimedStorePackage,
+) -> Result<(), DbError> {
+    reclaimed.validate().map_err(store_reclaim_journal_error)?;
+    let object_id = reclaimed.object_id();
+    if let Some(existing) = load_reclaimed_store_package_on(conn, object_id)? {
+        if existing == *reclaimed {
+            return Ok(());
+        }
+        if !matches!(
+            (&existing, reclaimed),
+            (
+                ReclaimedStorePackage::AbsentVerified {
+                    authorization: existing_authorization,
+                    authorization_activation: existing_activation,
+                },
+                ReclaimedStorePackage::Receipted {
+                    authorization,
+                    authorization_activation,
+                    ..
+                }
+            ) if existing_authorization == authorization
+                && existing_activation == authorization_activation
+        ) {
+            return Err(DbError::Message(format!(
+                "reclaimed Store package {object_id} has conflicting closed authority"
+            )));
+        }
+        let state = serde_json::to_string(reclaimed).map_err(|error| {
+            DbError::Message(format!("serialize reclaimed Store package: {error}"))
+        })?;
+        let updated = conn
+            .execute(
+                "UPDATE reclaimed_store_packages SET state = ?2 WHERE object_id = ?1",
+                (object_id.to_string(), state),
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "reclaimed Store package {object_id} disappeared during receipt closure"
+            )));
+        }
+        return Ok(());
+    }
+
+    let remote_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if remote_exists {
+        let remote = load_remote_object_on(conn, object_id)?;
+        remote
+            .validate_reclaimable_store_package(
+                reclaimed.authorization().target(),
+                reclaimed.authorization().target_activation(),
+            )
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "close reclaimed Store package {object_id}: {error}"
+                ))
+            })?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM remote_objects WHERE object_id = ?1",
+                [object_id.to_string()],
+            )
+            .map_err(DbError::from)?;
+        if deleted != 1 {
+            return Err(DbError::Message(format!(
+                "Store package {object_id} disappeared during reclaim closure"
+            )));
+        }
+    }
+    let inert_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if inert_exists {
+        return Err(DbError::Message(format!(
+            "reclaimed Store package {object_id} is protocol-inert"
+        )));
+    }
+    let state = serde_json::to_string(reclaimed)
+        .map_err(|error| DbError::Message(format!("serialize reclaimed Store package: {error}")))?;
+    let inserted = conn
+        .execute(
+            "INSERT INTO reclaimed_store_packages (object_id, authorization_hash, state) VALUES (?1, ?2, ?3)",
+            (
+                object_id.to_string(),
+                reclaimed.authorization().authorization_hash.to_string(),
+                state,
+            ),
+        )
+        .map_err(DbError::from)?;
+    if inserted != 1 {
+        return Err(DbError::Message(format!(
+            "reclaimed Store package {object_id} was not inserted"
+        )));
+    }
+    Ok(())
+}
+
 fn persist_exact_remote_object_on(
     conn: &Connection,
     remote: &RemoteObjectRecord,
@@ -18927,6 +19794,11 @@ fn persist_exact_remote_object_on(
         .validate()
         .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
     let object_id = remote.object_id();
+    if load_reclaimed_store_package_on(conn, object_id)?.is_some() {
+        return Err(DbError::Message(format!(
+            "prepared {domain} {object_id} is a reclaimed Store package"
+        )));
+    }
     let inert_exists: bool = conn
         .query_row(
             "SELECT EXISTS(
@@ -19150,6 +20022,73 @@ fn mark_remote_object_uploaded_on(
         )));
     }
     Ok(uploaded)
+}
+
+fn mark_reusable_retained_authority_uploaded_on(
+    conn: &Connection,
+    expected: RemoteObjectRecord,
+) -> Result<RemoteObjectRecord, DbError> {
+    let object_id = expected.object_id();
+    let RemoteObjectRecord::RetainedAuthority(expected_record) = &expected else {
+        return Err(DbError::Message(format!(
+            "reusable remote object {object_id} is not retained authority"
+        )));
+    };
+    let crate::sync::remote_object::RetainedAuthorityObjectState::Prepared {
+        ownership: expected_ownership,
+    } = &expected_record.state
+    else {
+        return Err(DbError::Message(format!(
+            "reusable retained authority {object_id} is not prepared"
+        )));
+    };
+    if expected_ownership.pending.len() != 1 || !expected_ownership.nonactivated.is_empty() {
+        return Err(DbError::Message(format!(
+            "reusable retained authority {object_id} has ambiguous expected ownership"
+        )));
+    }
+    let candidate = expected_ownership
+        .pending
+        .iter()
+        .next()
+        .expect("validated one expected candidate");
+    let mut current = load_remote_object_on(conn, object_id)?;
+    let RemoteObjectRecord::RetainedAuthority(current_record) = &current else {
+        return Err(DbError::Message(format!(
+            "reusable retained authority {object_id} changed domain"
+        )));
+    };
+    if current_record.identity != expected_record.identity
+        || current_record.bytes != expected_record.bytes
+    {
+        return Err(DbError::Message(format!(
+            "reusable retained authority {object_id} changed exact identity or bytes"
+        )));
+    }
+    let owns_candidate = match &current_record.state {
+        crate::sync::remote_object::RetainedAuthorityObjectState::Prepared { ownership } => {
+            ownership.pending.contains(candidate)
+        }
+        crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+            ownership,
+        } => ownership.pending.contains(candidate) || ownership.activated.contains(candidate),
+        crate::sync::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. } => false,
+    };
+    if !owns_candidate {
+        return Err(DbError::Message(format!(
+            "reusable retained authority {object_id} does not belong to its upload candidate"
+        )));
+    }
+    let before = current.clone();
+    current.mark_uploaded_verified().map_err(|error| {
+        DbError::Message(format!(
+            "mark reusable retained authority {object_id} uploaded: {error}"
+        ))
+    })?;
+    if current != before {
+        update_remote_object_on(conn, object_id, &current)?;
+    }
+    Ok(current)
 }
 
 fn merge_prepared_remote_object(
@@ -19416,6 +20355,16 @@ mod tests {
     use super::*;
     use crate::blob::BLOB_TOMBSTONE_GRACE;
 
+    fn reclaim_test_object(path: &str) -> ExactObjectRef {
+        let bytes = path.as_bytes();
+        ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(path.to_string())
+                .expect("valid reclaim test slot"),
+            u64::try_from(bytes.len()).expect("reclaim test object length fits u64"),
+            ObjectHash::digest(bytes),
+        )
+    }
+
     fn notes_migration() -> Migration {
         Migration::sql(
             1,
@@ -19498,6 +20447,151 @@ mod tests {
             StoredBlobRef::new(locator, object).expect("valid stored blob"),
         )
         .expect("valid row binding")
+    }
+
+    #[tokio::test]
+    async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
+        let db = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "closed-reclaimed-package",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create Store");
+        let first_changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('reclaim-target', 'target', NULL, \
+               '0000000001000-0000-reclaim', '2026-01-01')",
+            ],
+        )
+        .await;
+        let target_activation = store
+            .publish_changeset("founder", 1, &first_changeset, db.schema_version())
+            .await
+            .expect("publish target package");
+        let authority_changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('reclaim-authority', 'authority', NULL, \
+               '0000000002000-0000-reclaim', '2026-01-01')",
+            ],
+        )
+        .await;
+        let authorization_activation = store
+            .publish_changeset("founder", 2, &authority_changeset, db.schema_version())
+            .await
+            .expect("publish later Store position");
+        let receipt_changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('reclaim-receipt', 'receipt', NULL, \
+               '0000000003000-0000-reclaim', '2026-01-01')",
+            ],
+        )
+        .await;
+        let receipt_activation = store
+            .publish_changeset("founder", 3, &receipt_changeset, db.schema_version())
+            .await
+            .expect("publish receipt Store position");
+        let (_, founder, _) = store
+            .founder_device_authority()
+            .await
+            .expect("load founder authority");
+        let target_commit = crate::sync::store_objects::load_commit_ref(
+            &store.storage,
+            store.root.store_root_hash,
+            &target_activation,
+            &founder,
+        )
+        .await
+        .expect("load target commit")
+        .value;
+        let target = target_commit
+            .store_package()
+            .expect("target commit has a package")
+            .clone();
+        let authorization = crate::sync::store_reclaim::ReclaimAuthorizationRef {
+            authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
+            evidence: crate::sync::store_reclaim::ReclaimEvidenceRef {
+                evidence_hash: ObjectHash::digest(b"closed reclaim evidence"),
+                target: Box::new(crate::sync::store_reclaim::StorePackageReclaimTarget {
+                    package: target,
+                    activation: target_activation,
+                }),
+                object: reclaim_test_object("store-v1/reclaim/evidence/closed.json"),
+            },
+            object: reclaim_test_object("store-v1/reclaim/authorizations/closed.json"),
+        };
+        let operation = DurableStoreReclaimOperation::Authorized {
+            authorization: authorization.clone(),
+            activation: authorization_activation.clone(),
+        };
+        let absence = ReclaimedStorePackage::absent_verified(
+            authorization.clone(),
+            authorization_activation.clone(),
+        )
+        .expect("valid absence closure");
+        let object_id = absence.object_id();
+        let saved_remote = db
+            .call(move |conn| load_remote_object_on(conn, object_id))
+            .await
+            .expect("load activated package ownership");
+        let operation_for_insert = operation.clone();
+        let absence_for_insert = absence.clone();
+        db.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            insert_store_reclaim_operation_on(&tx, &operation_for_insert)?;
+            record_reclaimed_store_package_on(&tx, &absence_for_insert)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+        .expect("close reclaimed package");
+
+        let saved_remote_for_revival = saved_remote.clone();
+        db.call(move |conn| {
+            assert!(load_remote_object_on(conn, object_id).is_err());
+            assert_eq!(
+                load_reclaimed_store_package_on(conn, object_id)?,
+                Some(absence)
+            );
+            assert!(persist_exact_remote_object_on(
+                conn,
+                &saved_remote_for_revival,
+                "revived Store package",
+            )
+            .is_err());
+            Ok(())
+        })
+        .await
+        .expect("verify irreversible absence closure");
+
+        let receipt = crate::sync::store_reclaim::ReclaimReceiptRef {
+            receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
+            authorization: authorization.clone(),
+            object: reclaim_test_object("store-v1/reclaim/receipts/closed.json"),
+        };
+        let receipted = ReclaimedStorePackage::receipted(
+            authorization,
+            authorization_activation,
+            receipt,
+            receipt_activation,
+        )
+        .expect("valid receipt closure");
+        let receipted_for_insert = receipted.clone();
+        db.call(move |conn| record_reclaimed_store_package_on(conn, &receipted_for_insert))
+            .await
+            .expect("attach receipt to reclaimed package");
+        assert_eq!(
+            db.call(move |conn| load_reclaimed_store_package_on(conn, object_id))
+                .await
+                .expect("load receipted closure"),
+            Some(receipted)
+        );
     }
 
     #[test]

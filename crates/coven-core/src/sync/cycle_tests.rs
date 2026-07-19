@@ -5553,6 +5553,23 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             105,
         );
 
+        let unregistered_member = UserKeypair::generate();
+        crate::sync::membership_ops::invite_member(
+            &storage.storage,
+            storage.home.as_ref(),
+            &owner,
+            &Hlc::new("local".to_string()),
+            &pubkey_hex(&unregistered_member),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "test-lib",
+            "Test Store",
+            &db,
+        )
+        .await
+        .expect("invite unregistered member to hold back package reclamation");
+
         let (_temp, store_dir) = temp_store_dir();
         let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
             [24u8; 32],

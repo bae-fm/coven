@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::circle_control::StoreMembershipStateRef;
 use super::membership::{MemberRole, MembershipChain, MembershipGrantId, SerialMembershipState};
 use super::storage::{
-    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+    CoordinationStorage, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+    SyncStorage,
 };
 use super::store_commit::{
     ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
@@ -23,11 +24,17 @@ const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
 const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";
 const RECLAIM_RECEIPT_DOMAIN: &[u8] = b"coven.store-reclaim-receipt.v1\0";
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorePackageReclaimTarget {
+    pub package: StorePackageRef,
+    pub activation: StoreBatchCommitRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorePackageReclaimClaim {
-    pub package: StorePackageRef,
-    pub activation: StoreBatchCommitRef,
+    pub target: StorePackageReclaimTarget,
     pub covering_snapshot: StoreSnapshotRef,
     pub acknowledgements: Vec<StoreAckRef>,
 }
@@ -59,12 +66,12 @@ impl StorePackageReclaimClaim {
                 "Store package reclaim evidence repeats a device registration".to_string(),
             ));
         }
-        if self.package.object == self.activation.object
-            || self.package.object == self.covering_snapshot.object
+        if self.target.package.object == self.target.activation.object
+            || self.target.package.object == self.covering_snapshot.object
             || self
                 .acknowledgements
                 .iter()
-                .any(|acknowledgement| acknowledgement.object == self.package.object)
+                .any(|acknowledgement| acknowledgement.object == self.target.package.object)
         {
             return Err(StoreProtocolError::Malformed(
                 "Store package reclaim target aliases proof authority".to_string(),
@@ -78,6 +85,7 @@ impl StorePackageReclaimClaim {
 #[serde(deny_unknown_fields)]
 pub struct ReclaimEvidenceRef {
     pub evidence_hash: ObjectHash,
+    pub target: Box<StorePackageReclaimTarget>,
     pub object: ExactObjectRef,
 }
 
@@ -85,6 +93,7 @@ impl ReclaimEvidenceRef {
     pub fn from_evidence(evidence: &ReclaimEvidence, object: ExactObjectRef) -> Self {
         Self {
             evidence_hash: evidence.evidence_hash(),
+            target: Box::new(evidence.claim.target.clone()),
             object,
         }
     }
@@ -96,6 +105,11 @@ impl ReclaimEvidenceRef {
                 expected: self.evidence_hash,
                 actual,
             });
+        }
+        if evidence.claim.target != *self.target {
+            return Err(StoreProtocolError::Malformed(
+                "reclaim target differs from its exact evidence reference".to_string(),
+            ));
         }
         evidence.verify()
     }
@@ -202,7 +216,7 @@ impl ReclaimAuthorizationRef {
         }
     }
 
-    fn verify_identity(
+    pub(crate) fn verify_identity(
         &self,
         authorization: &ReclaimAuthorization,
     ) -> Result<(), StoreProtocolError> {
@@ -213,12 +227,23 @@ impl ReclaimAuthorizationRef {
                 actual,
             });
         }
-        if authorization.evidence != self.evidence {
+        if authorization.evidence != self.evidence
+            || authorization.target != self.evidence.target.package
+        {
             return Err(StoreProtocolError::Malformed(
-                "reclaim authorization evidence differs from its exact reference".to_string(),
+                "reclaim authorization target or evidence differs from its exact reference"
+                    .to_string(),
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn target(&self) -> &StorePackageRef {
+        &self.evidence.target.package
+    }
+
+    pub(crate) fn target_activation(&self) -> &StoreBatchCommitRef {
+        &self.evidence.target.activation
     }
 
     pub fn verify(
@@ -325,7 +350,10 @@ impl ReclaimReceiptRef {
         }
     }
 
-    fn verify_identity(&self, receipt: &ReclaimReceipt) -> Result<(), StoreProtocolError> {
+    pub(crate) fn verify_identity(
+        &self,
+        receipt: &ReclaimReceipt,
+    ) -> Result<(), StoreProtocolError> {
         let actual = receipt.receipt_hash();
         if actual != self.receipt_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {
@@ -474,6 +502,14 @@ pub struct StoreReclaimResult {
 pub enum StoreReclaimError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
+    #[error(transparent)]
+    Database(#[from] crate::database::DbError),
+    #[error(transparent)]
+    Outbound(#[from] super::store_outbound::StoreOutboundError),
+    #[error("Store reclaim journal: {0}")]
+    Journal(String),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     #[error("no authorized complete Store snapshot is available for reclamation")]
     NoSnapshot,
     #[error("snapshot authorization history is invalid: {0}")]
@@ -541,6 +577,9 @@ impl ReclaimMembership<'_> {
 pub async fn reclaim_store_packages(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
     store_root_hash: ObjectHash,
     membership: ReclaimMembership<'_>,
 ) -> Result<StoreReclaimResult, StoreReclaimError> {
@@ -554,11 +593,26 @@ pub async fn reclaim_store_packages(
             "reclamation root differs from the exact local Store root".to_string(),
         ));
     }
+    let mut packages_deleted = Box::pin(resume_store_reclaim_operations(
+        db,
+        storage,
+        coordination,
+        device_id,
+        identity_signer,
+        membership,
+    ))
+    .await?;
+    if !membership.is_owner(&keys::public_key_hex(identity_signer)) {
+        return Ok(StoreReclaimResult {
+            packages_deleted,
+            physical_copies_deleted: packages_deleted,
+        });
+    }
     let registrations = db
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    let snapshot = choose_snapshot(storage, &root, membership, &registrations).await?;
+    let snapshot = Box::pin(choose_snapshot(storage, &root, membership, &registrations)).await?;
     let acknowledgements = load_latest_acknowledgements(storage, &root, &registrations).await?;
     require_registered_device_acks(
         storage,
@@ -571,23 +625,574 @@ pub async fn reclaim_store_packages(
     .await?;
 
     let targets = exact_package_targets(storage, &root, &snapshot.meta.coverage).await?;
-    let mut packages_deleted = 0_u64;
     for (commit, package) in targets {
-        storage
-            .delete_protocol_object(&package.object)
-            .await
-            .map_err(|source| StoreReclaimError::Delete {
-                commit_hash: commit.commit_hash,
-                source,
-            })?;
-        packages_deleted = packages_deleted.checked_add(1).ok_or_else(|| {
+        if reclaim_target_is_recorded(db, &package).await? {
+            continue;
+        }
+        let acknowledgements =
+            active_acknowledgement_refs(membership, &registrations, &acknowledgements);
+        Box::pin(prepare_reclaim_authorization(
+            db,
+            storage,
+            coordination,
+            device_id,
+            identity_signer,
+            membership,
+            &root,
+            StorePackageReclaimClaim {
+                target: StorePackageReclaimTarget {
+                    package,
+                    activation: commit,
+                },
+                covering_snapshot: snapshot.reference.clone(),
+                acknowledgements,
+            },
+        ))
+        .await?;
+    }
+    packages_deleted = packages_deleted
+        .checked_add(
+            Box::pin(resume_store_reclaim_operations(
+                db,
+                storage,
+                coordination,
+                device_id,
+                identity_signer,
+                membership,
+            ))
+            .await?,
+        )
+        .ok_or_else(|| {
             StoreReclaimError::Authorization("reclaimed package count exceeded u64".to_string())
         })?;
-    }
     Ok(StoreReclaimResult {
         packages_deleted,
         physical_copies_deleted: packages_deleted,
     })
+}
+
+fn active_acknowledgement_refs(
+    membership: ReclaimMembership<'_>,
+    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+    acknowledgements: &BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>,
+) -> Vec<StoreAckRef> {
+    let active = membership
+        .current_members()
+        .into_iter()
+        .map(|(pubkey, _)| pubkey)
+        .collect::<BTreeSet<_>>();
+    let mut refs = registrations
+        .iter()
+        .filter(|(_, registration)| active.contains(&registration.author_pubkey))
+        .filter_map(|(_, registration)| {
+            acknowledgements
+                .get(&registration.device_id)
+                .map(|(reference, _)| reference.clone())
+        })
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs
+}
+
+async fn reclaim_target_is_recorded(
+    db: &crate::database::Database,
+    target: &StorePackageRef,
+) -> Result<bool, StoreReclaimError> {
+    for operation in db.store_reclaim_operations().await? {
+        if operation.authorization().target() == target {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn prepare_reclaim_authorization(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: ReclaimMembership<'_>,
+    root: &StoreRootRef,
+    claim: StorePackageReclaimClaim,
+) -> Result<(), StoreReclaimError> {
+    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+        db,
+        storage,
+        coordination,
+        device_id,
+        identity_signer,
+        match membership {
+            ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
+            ReclaimMembership::Serial(_) => None,
+        },
+    ))
+    .await?;
+    let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
+        StoreReclaimError::Authorization(
+            "Store reclaim authorization requires an active Owner grant".to_string(),
+        )
+    })?;
+    let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, identity_signer)
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let evidence_context = ProtocolObjectContext::store_encrypted(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimEvidence,
+    );
+    let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
+    let evidence_slot = storage
+        .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
+        .await?;
+    let evidence_prepared = storage.prepare_protocol_object(
+        &evidence_context,
+        evidence_slot,
+        &evidence_prefix,
+        evidence.to_bytes(),
+    )?;
+    let evidence_ref =
+        ReclaimEvidenceRef::from_evidence(&evidence, evidence_prepared.reference().clone());
+    let authorization = ReclaimAuthorization::signed(
+        root.store_root_hash,
+        evidence.claim.target.package.clone(),
+        evidence_ref.clone(),
+        StoreReclaimAuthority {
+            membership: plan.membership_state().clone(),
+            owner_grant,
+        },
+        identity_signer,
+    );
+    let authorization_context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimAuthorization,
+    );
+    let authorization_prefix =
+        reclaim_authorization_semantic_prefix(authorization.authorization_hash());
+    let authorization_slot = storage
+        .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
+        .await?;
+    let authorization_prepared = storage.prepare_protocol_object(
+        &authorization_context,
+        authorization_slot,
+        &authorization_prefix,
+        authorization.to_bytes(),
+    )?;
+    let authorization_ref = ReclaimAuthorizationRef::from_authorization(
+        &authorization,
+        authorization_prepared.reference().clone(),
+    );
+    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+        db,
+        storage,
+        plan,
+        super::store_outbound::StoreOperationBatch::ReclaimAuthorization(Box::new(
+            authorization_ref.clone(),
+        )),
+    ))
+    .await?;
+    let operation =
+        super::store_reclaim_journal::DurableStoreReclaimOperation::AuthorizationCandidate {
+            object: Box::new(
+                super::store_reclaim_journal::DurableStoreReclaimObject::Authorization {
+                    evidence_ref,
+                    evidence,
+                    evidence_prepared,
+                    authorization_ref,
+                    authorization,
+                    authorization_prepared,
+                },
+            ),
+            candidate: Box::new(candidate),
+        };
+    Box::pin(db.begin_store_reclaim_operation(operation)).await?;
+    Ok(())
+}
+
+async fn resume_store_reclaim_operations(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: ReclaimMembership<'_>,
+) -> Result<u64, StoreReclaimError> {
+    let mut completed = 0_u64;
+    loop {
+        let operations = db.store_reclaim_operations().await?;
+        let mut progressed = false;
+        for operation in operations {
+            match &operation {
+                super::store_reclaim_journal::DurableStoreReclaimOperation::AuthorizationCandidate {
+                    ..
+                }
+                | super::store_reclaim_journal::DurableStoreReclaimOperation::ReceiptCandidate {
+                    ..
+                } => {
+                    Box::pin(drive_reclaim_candidate(
+                        db,
+                        storage,
+                        coordination,
+                        device_id,
+                        identity_signer,
+                        membership,
+                        operation,
+                    ))
+                    .await?;
+                    progressed = true;
+                }
+                super::store_reclaim_journal::DurableStoreReclaimOperation::AuthorizationReplacing {
+                    ..
+                }
+                | super::store_reclaim_journal::DurableStoreReclaimOperation::ReceiptReplacing {
+                    ..
+                } => {
+                    Box::pin(finish_reclaim_candidate_replacement(
+                        db, storage, operation,
+                    ))
+                    .await?;
+                    progressed = true;
+                }
+                super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized { .. } => {
+                    Box::pin(execute_reclaim_delete(db, storage, operation)).await?;
+                    completed = completed.checked_add(1).ok_or_else(|| {
+                        StoreReclaimError::Authorization(
+                            "reclaimed package count exceeded u64".to_string(),
+                        )
+                    })?;
+                    progressed = true;
+                }
+                super::store_reclaim_journal::DurableStoreReclaimOperation::AbsentVerified {
+                    ..
+                } => {
+                    Box::pin(prepare_reclaim_receipt(
+                        db,
+                        storage,
+                        coordination,
+                        device_id,
+                        identity_signer,
+                        membership,
+                        operation,
+                    ))
+                    .await?;
+                    progressed = true;
+                }
+                super::store_reclaim_journal::DurableStoreReclaimOperation::Completed { .. } => {}
+            }
+        }
+        if !progressed {
+            return Ok(completed);
+        }
+    }
+}
+
+async fn execute_reclaim_delete(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
+) -> Result<(), StoreReclaimError> {
+    let super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
+        authorization,
+        ..
+    } = &operation
+    else {
+        return Err(StoreReclaimError::Authorization(
+            "only an authorized reclaim can delete its target".to_string(),
+        ));
+    };
+    let root = db
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
+    let opened =
+        super::store_objects::load_reclaim_authorization_ref(storage, &root, authorization).await?;
+    let target = opened.authorization.value.target.clone();
+    storage
+        .delete_protocol_object(&target.object)
+        .await
+        .map_err(|source| StoreReclaimError::Delete {
+            commit_hash: opened.evidence.value.claim.target.activation.commit_hash,
+            source,
+        })?;
+    verify_reclaim_target_absent(storage, &root, &opened).await?;
+    db.mark_store_reclaim_target_absent(operation, target)
+        .await?;
+    Ok(())
+}
+
+async fn drive_reclaim_candidate(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: ReclaimMembership<'_>,
+    mut operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
+) -> Result<(), StoreReclaimError> {
+    loop {
+        let (object, candidate) = match &operation {
+            super::store_reclaim_journal::DurableStoreReclaimOperation::AuthorizationCandidate {
+                object,
+                candidate,
+            }
+            | super::store_reclaim_journal::DurableStoreReclaimOperation::ReceiptCandidate {
+                object,
+                candidate,
+                ..
+            } => (object.clone(), candidate.clone()),
+            _ => {
+                return Err(StoreReclaimError::Authorization(
+                    "Store reclaim journal has no publication candidate".to_string(),
+                ));
+            }
+        };
+        Box::pin(object.create_exact_objects(storage))
+            .await
+            .map_err(|error| StoreReclaimError::Journal(error.to_string()))?;
+        for remote in object
+            .remote_objects(&candidate)
+            .map_err(|error| StoreReclaimError::Journal(error.to_string()))?
+        {
+            if matches!(
+                &remote,
+                super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        record.identity.domain,
+                        super::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                            | super::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                            | super::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                    )
+            ) {
+                db.mark_reusable_retained_authority_uploaded(remote).await?;
+            }
+        }
+        match Box::pin(super::store_outbound::publish_prepared_store_operation(
+            db,
+            storage,
+            coordination,
+            *candidate,
+        ))
+        .await?
+        {
+            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => return Ok(()),
+            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+                replacement,
+            ) => {
+                operation =
+                    Box::pin(db.replace_store_reclaim_candidate(operation, replacement)).await?;
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                proof,
+                ..
+            } => {
+                let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+                    db,
+                    storage,
+                    coordination,
+                    device_id,
+                    identity_signer,
+                    match membership {
+                        ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
+                        ReclaimMembership::Serial(_) => None,
+                    },
+                ))
+                .await?;
+                let batch = match &*object {
+                    super::store_reclaim_journal::DurableStoreReclaimObject::Authorization {
+                        authorization_ref,
+                        ..
+                    } => super::store_outbound::StoreOperationBatch::ReclaimAuthorization(
+                        Box::new(authorization_ref.clone()),
+                    ),
+                    super::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+                        receipt_ref,
+                        ..
+                    } => super::store_outbound::StoreOperationBatch::ReclaimReceipt(Box::new(
+                        receipt_ref.clone(),
+                    )),
+                };
+                let replacement =
+                    Box::pin(super::store_outbound::prepare_store_operation_candidate(
+                        db, storage, plan, batch,
+                    ))
+                    .await?;
+                operation = Box::pin(db.begin_store_reclaim_candidate_replacement(
+                    operation,
+                    replacement,
+                    proof,
+                ))
+                .await?;
+                Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;
+                return Ok(());
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(_)
+            | super::store_outbound::StoreOperationPublicationOutcome::Reprepared => {
+                return Err(StoreReclaimError::Authorization(
+                    "Store reclaim publication returned acknowledgement-only state".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+async fn finish_reclaim_candidate_replacement(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
+) -> Result<(), StoreReclaimError> {
+    for target in db
+        .store_reclaim_replacement_cleanup_targets(operation.clone())
+        .await?
+    {
+        super::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    db.complete_store_reclaim_candidate_replacement(operation)
+        .await?;
+    Ok(())
+}
+
+async fn prepare_reclaim_receipt(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: ReclaimMembership<'_>,
+    operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
+) -> Result<(), StoreReclaimError> {
+    let super::store_reclaim_journal::DurableStoreReclaimOperation::AbsentVerified {
+        authorization,
+        target,
+        ..
+    } = &operation
+    else {
+        return Err(StoreReclaimError::Authorization(
+            "only an authorized reclaim can be executed".to_string(),
+        ));
+    };
+    let root = db
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
+    let opened =
+        super::store_objects::load_reclaim_authorization_ref(storage, &root, authorization).await?;
+    if &opened.authorization.value.target != target {
+        return Err(StoreReclaimError::Authorization(
+            "durable absent target differs from its signed authorization".to_string(),
+        ));
+    }
+
+    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+        db,
+        storage,
+        coordination,
+        device_id,
+        identity_signer,
+        match membership {
+            ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
+            ReclaimMembership::Serial(_) => None,
+        },
+    ))
+    .await?;
+    let provider_admin = match membership {
+        ReclaimMembership::MergeConcurrent { membership, .. } => {
+            let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
+            else {
+                return Err(StoreReclaimError::Authorization(
+                    "provider execution requires resolved Store membership".to_string(),
+                ));
+            };
+            resolved.provider_admin.combined_state().clone()
+        }
+        ReclaimMembership::Serial(_) => {
+            db.serial_authorization_state()
+                .await?
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "Serial provider administrator state is absent".to_string(),
+                    )
+                })?
+                .provider_admin
+        }
+    };
+    let provider_admin_grant = provider_admin
+        .active()
+        .into_iter()
+        .find(|grant| provider_admin.authorizes(grant, plan.registration_ref()))
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(
+                "local Store device is not an effective provider administrator".to_string(),
+            )
+        })?;
+    let receipt = ReclaimReceipt::signed(
+        root.store_root_hash,
+        authorization.clone(),
+        plan.membership_state().clone(),
+        provider_admin_grant,
+        plan.registration_ref().clone(),
+        plan.registration(),
+        plan.device_signer(),
+    )
+    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimReceipt,
+    );
+    let prefix = reclaim_receipt_semantic_prefix(receipt.receipt_hash());
+    let slot = storage
+        .allocate_protocol_slot(&context, &prefix, ".json")
+        .await?;
+    let prepared = storage.prepare_protocol_object(&context, slot, &prefix, receipt.to_bytes())?;
+    let receipt_ref = ReclaimReceiptRef::from_receipt(&receipt, prepared.reference().clone());
+    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+        db,
+        storage,
+        plan,
+        super::store_outbound::StoreOperationBatch::ReclaimReceipt(Box::new(receipt_ref.clone())),
+    ))
+    .await?;
+    Box::pin(db.begin_store_reclaim_receipt(
+        operation,
+        super::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+            receipt_ref,
+            receipt,
+            receipt_prepared: prepared,
+        },
+        candidate,
+    ))
+    .await?;
+    Ok(())
+}
+
+async fn verify_reclaim_target_absent(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    opened: &super::store_objects::VerifiedReclaimAuthorization,
+) -> Result<(), StoreReclaimError> {
+    let claim = &opened.evidence.value.claim;
+    let stream_id = match &claim.target.activation.coord {
+        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+        StoreCommitCoord::Serial { .. } => super::store_commit::SERIAL_STREAM_ID.to_string(),
+    };
+    let prefix = super::store_commit::package_semantic_prefix(
+        claim.target.package.candidate_family,
+        &stream_id,
+        claim.target.activation.coord.sequence(),
+        claim.target.package.content_hash,
+    );
+    let context = ProtocolObjectContext::store_encrypted(
+        root.store_root_hash,
+        ProtocolObjectDomain::StorePackage,
+    );
+    match storage
+        .read_protocol_object(&context, &claim.target.package.object, &prefix)
+        .await
+    {
+        Err(StorageError::NotFound(_)) => Ok(()),
+        Ok(_) => Err(StoreReclaimError::Authorization(
+            "reclaim target remains readable after exact deletion".to_string(),
+        )),
+        Err(error) => Err(StoreReclaimError::Storage(error)),
+    }
 }
 
 struct ExactSnapshot {
@@ -722,7 +1327,8 @@ async fn load_latest_acknowledgements(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-) -> Result<BTreeMap<super::store_commit::StoreDeviceId, StoreAck>, StoreReclaimError> {
+) -> Result<BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>, StoreReclaimError>
+{
     let mut latest = BTreeMap::new();
     for (registration_ref, registration) in registrations {
         if let Some(ack) = load_ack_stream(storage, root, registration_ref, registration)
@@ -740,7 +1346,7 @@ async fn load_ack_stream(
     root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
-) -> Result<Vec<StoreAck>, StoreReclaimError> {
+) -> Result<Vec<(StoreAckRef, StoreAck)>, StoreReclaimError> {
     let mut slot = match &registration.acknowledgements {
         super::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
             first_slot.clone()
@@ -786,8 +1392,8 @@ async fn load_ack_stream(
             ));
         }
         slot = ack.successor.next_slot.clone();
-        predecessor = Some(reference);
-        acknowledgements.push(ack);
+        predecessor = Some(reference.clone());
+        acknowledgements.push((reference, ack));
         sequence = sequence.checked_add(1).ok_or_else(|| {
             StoreReclaimError::Authorization("acknowledgement sequence overflow".to_string())
         })?;
@@ -801,7 +1407,7 @@ async fn require_registered_device_acks(
     membership: ReclaimMembership<'_>,
     snapshot: &ExactSnapshot,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-    latest: &BTreeMap<super::store_commit::StoreDeviceId, StoreAck>,
+    latest: &BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>,
 ) -> Result<(), StoreReclaimError> {
     let active = membership
         .current_members()
@@ -824,7 +1430,7 @@ async fn require_registered_device_acks(
     }
     for (_, registration) in active_registrations {
         let device_id = registration.device_id;
-        let ack =
+        let (_, ack) =
             latest
                 .get(&device_id)
                 .ok_or_else(|| StoreReclaimError::MissingAcknowledgement {
@@ -1024,8 +1630,10 @@ mod tests {
         let evidence = ReclaimEvidence::signed(
             store.root.store_root_hash,
             StorePackageReclaimClaim {
-                package: package.clone(),
-                activation,
+                target: StorePackageReclaimTarget {
+                    package: package.clone(),
+                    activation,
+                },
                 covering_snapshot: StoreSnapshotRef {
                     sequence: 1,
                     snapshot_hash: ObjectHash::digest(b"covering snapshot"),
