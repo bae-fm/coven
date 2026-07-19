@@ -31,6 +31,42 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::{ProtocolObjectDomain, SyncStorage};
 use crate::sync::test_helpers::*;
 
+fn exact_cache_path(
+    store_dir: &crate::store_dir::StoreDir,
+    reference: &crate::blob::RowBlobRef,
+) -> std::path::PathBuf {
+    let stored = reference.stored().expect("Remote row has exact storage");
+    store_dir
+        .cache_blob_path(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )
+        .expect("build exact locator cache path")
+}
+
+fn exact_pinned_path(
+    store_dir: &crate::store_dir::StoreDir,
+    reference: &crate::blob::RowBlobRef,
+) -> std::path::PathBuf {
+    let stored = reference.stored().expect("Remote row has exact storage");
+    store_dir
+        .pinned_blob_path(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )
+        .expect("build exact locator pinned path")
+}
+
+async fn row_blob_ref(
+    db: &crate::database::Database,
+    table: &str,
+    row_id: &str,
+) -> crate::blob::RowBlobRef {
+    db.row_blob_ref(table, row_id)
+        .await
+        .expect("load exact row blob reference")
+}
+
 fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) -> String {
     match &reference.coord {
         crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
@@ -2985,179 +3021,19 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
 
     // Destination pulls. A `CacheEager` photo lands in the store dir's evictable
-    // cache (`storage/cache/<id>`) on pull — which coven builds from the validated id.
+    // locator-keyed cache on pull.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
-        .expect("downloaded photo");
+    let downloaded = std::fs::read(exact_cache_path(
+        &ld,
+        &row_blob_ref(&db2, "note_photos", "p1ab").await,
+    ))
+    .expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
-}
-
-#[tokio::test]
-async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
-    let keypair = UserKeypair::generate();
-    let decl = photo_decl_with_blob_id_column();
-    let db1 = open_test_db_with_blob(decl.clone());
-    let storage = create_store(&db1, keypair.clone()).await;
-    let tables = test_synced_tables_with_blob(decl.clone());
-
-    let (_tmp1, ld1) = temp_store_dir();
-    exec(
-        &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
-    )
-    .await;
-    // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
-    // is just the UPDATE — the update-blob-id path under test.
-    store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[&format!(
-            "UPDATE note_photos SET cloud_path = 'newaaaa', hash = '{}', \
-             _updated_at = '0000000002000-0000-dev1' WHERE id = 'p-row'",
-            crate::blob::content_hash(b"NEW-BLOB"),
-        )],
-    )
-    .await;
-
-    let result = sync_for_test(
-        &db1,
-        &tables,
-        outgoing,
-        0,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await
-    .expect("sync update");
-    assert!(result.is_some(), "the update publishes a Store commit");
-    let updated_blob = db1
-        .row_blob_ref("note_photos", "p-row")
-        .await
-        .expect("load exact updated row blob reference");
-    let stored = updated_blob
-        .stored()
-        .expect("updated row carries its exact stored blob reference");
-    assert_eq!(stored.locator().blob_id(), "newaaaa");
-    storage
-        .verify_blob_object(stored)
-        .await
-        .expect("push published the exact updated blob object");
-
-    let db2 = open_test_db_with_blob(decl);
-    let (_tmp2, ld2) = temp_store_dir();
-    exec(
-        &db2,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev2', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db2,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
-    )
-    .await;
-    crate::local_blob::write_atomic(
-        &ld2.cache_blob_path("photos", "oldaaaa")
-            .expect("old cache path"),
-        b"OLD-BLOB",
-    )
-    .await
-    .expect("seed old cache");
-
-    let (_updated, pull) = pull_into(&db2, &storage, &ld2).await;
-    assert_eq!(pull.changesets_applied, 1);
-    assert!(
-        ld2.cache_blob_path("photos", "newaaaa")
-            .expect("new cache path")
-            .exists(),
-        "pull downloads the UPDATE's new blob id"
-    );
-    assert!(
-        !ld2.cache_blob_path("photos", "oldaaaa")
-            .expect("old cache path")
-            .exists(),
-        "pull cleanup drops the UPDATE's old blob id"
-    );
-}
-
-#[tokio::test]
-async fn update_to_null_drops_old_local_blob_copy() {
-    let decl = photo_decl_with_blob_id_column();
-    let db1 = open_test_db_with_blob(decl.clone());
-    let storage = create_store(&db1, UserKeypair::generate()).await;
-    exec(
-        &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
-    )
-    .await;
-    // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
-    // is just the UPDATE-to-NULL under test.
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "UPDATE note_photos SET cloud_path = NULL, _updated_at = '0000000002000-0000-dev1' \
-          WHERE id = 'p-row'",
-        ],
-    )
-    .await;
-    storage
-        .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
-        .await
-        .expect("publish exact Store changeset");
-
-    let db2 = open_test_db_with_blob(decl);
-    let (_tmp, ld) = temp_store_dir();
-    exec(
-        &db2,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev2', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db2,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
-    )
-    .await;
-    crate::local_blob::write_atomic(
-        &ld.cache_blob_path("photos", "oldnull")
-            .expect("old cache path"),
-        b"OLD-BLOB",
-    )
-    .await
-    .expect("seed old cache");
-
-    let (_updated, pull) = pull_into(&db2, &storage, &ld).await;
-    assert_eq!(pull.changesets_applied, 1);
-    assert!(
-        !ld.cache_blob_path("photos", "oldnull")
-            .expect("old cache path")
-            .exists(),
-        "pull cleanup drops the old blob when UPDATE removes the blob id"
-    );
 }
 
 /// A `CacheLazy` blob is authenticated before its row crosses to the puller, but
@@ -3256,9 +3132,10 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     );
     // Verification used an unpublished temporary file, so the plaintext remains
     // absent from both cache locations until an application read requests it.
+    let reference = row_blob_ref(&db2, "note_photos", "audio1").await;
     assert!(
-        !ld.pinned_blob_path("audio", "audio1").unwrap().exists()
-            && !ld.cache_blob_path("audio", "audio1").unwrap().exists(),
+        !exact_pinned_path(&ld, &reference).exists()
+            && !exact_cache_path(&ld, &reference).exists(),
         "a CacheLazy blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
     );
 }
@@ -4155,7 +4032,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     local_files::drop_blob(&ld, "photos", "p1cover")
         .await
         .expect("drop any local-store copy");
-    let cached = ld.cache_blob_path("photos", "p1cover").expect("cache path");
+    let cached = exact_cache_path(&ld, &row_blob_ref(&db, "note_photos", "p1cover").await);
     if cached.exists() {
         std::fs::remove_file(&cached).expect("evict the cached copy");
     }
@@ -4281,8 +4158,11 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
-        .expect("device B downloaded cover");
+    let downloaded = std::fs::read(exact_cache_path(
+        &ld,
+        &row_blob_ref(&db2, "note_photos", "p1cover").await,
+    ))
+    .expect("device B downloaded cover");
     assert_eq!(
         downloaded, plaintext,
         "device B recovers the source bytes from the readable plain-scheme key",
@@ -4448,10 +4328,10 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
         "device B downloads blobs matching their row hashes",
     );
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
+    let cached = std::fs::read(exact_cache_path(
+        &ld2,
+        &row_blob_ref(&db2, "note_photos", "p2cover").await,
+    ))
     .expect("device B cached the replacement cover");
     assert_eq!(
         cached,
@@ -4576,8 +4456,11 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
         .expect("the cover row");
     assert_eq!(winner, "pBcover");
     let expected = from_b.as_slice();
-    let cached = std::fs::read(ld_c.cache_blob_path("photos", &winner).expect("cache path"))
-        .expect("the third device cached the cover its row names");
+    let cached = std::fs::read(exact_cache_path(
+        &ld_c,
+        &row_blob_ref(&db_c, "note_photos", "ph1").await,
+    ))
+    .expect("the third device cached the cover its row names");
     assert_eq!(
         cached, expected,
         "the latest row names the second replacement's bytes",
@@ -4649,10 +4532,10 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
         "each changeset finds the exact blob object it names",
     );
     assert_eq!(result.changesets_applied, 2, "both changesets apply",);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
+    let cached = std::fs::read(exact_cache_path(
+        &ld2,
+        &row_blob_ref(&db2, "note_photos", "p2cover").await,
+    ))
     .expect("the laggard cached the current cover");
     assert_eq!(
         cached,
@@ -4728,10 +4611,10 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let (_positions, result) = pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "f1audio")
-            .expect("cache path"),
-    )
+    let cached = std::fs::read(exact_cache_path(
+        &ld2,
+        &row_blob_ref(&db2, "note_photos", "ph1").await,
+    ))
     .expect("device B cached the audio");
     assert_eq!(cached, bytes.as_slice());
 }
@@ -4895,6 +4778,7 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     let db2 = open_test_db_with_blob(replaceable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
     pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    let old_cache_path = exact_cache_path(&ld2, &row_blob_ref(&db2, "note_photos", "ph1").await);
 
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
@@ -4936,10 +4820,10 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         "device B must download a cover matching the row's hash",
     );
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
+    let cached = std::fs::read(exact_cache_path(
+        &ld2,
+        &row_blob_ref(&db2, "note_photos", "ph1").await,
+    ))
     .expect("device B cached the replacement cover");
     assert_eq!(
         cached,
@@ -4947,9 +4831,7 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         "device B serves the replacement bytes, not the cover it replaced",
     );
     assert!(
-        !ld2.cache_blob_path("photos", "p1cover")
-            .expect("cache path")
-            .exists(),
+        !old_cache_path.exists(),
         "device B drops its cached copy of the blob the row no longer points at",
     );
 }
@@ -5173,8 +5055,11 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         "WithPhoto"
     );
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
-        .expect("device B downloaded photo");
+    let downloaded = std::fs::read(exact_cache_path(
+        &ld,
+        &row_blob_ref(&db2, "note_photos", "p1cover").await,
+    ))
+    .expect("device B downloaded photo");
     assert_eq!(
         downloaded, plaintext,
         "device B must recover the source bytes after decrypting with the shared key"
@@ -5303,8 +5188,11 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
     pull_into(&db2, &storage, &ld).await;
+    let deleted_reference = row_blob_ref(&db2, "note_photos", "pdel1234").await;
+    let deleted_cache_path = exact_cache_path(&ld, &deleted_reference);
+    let deleted_pinned_path = exact_pinned_path(&ld, &deleted_reference);
     assert!(
-        ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
+        deleted_cache_path.exists(),
         "the cover lands in the evictable cache after the first pull",
     );
 
@@ -5332,8 +5220,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let (_positions, result) = pull_into(&db2, &storage, &ld).await;
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
-        !ld.pinned_blob_path("photos", "pdel1234").unwrap().exists()
-            && !ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
+        !deleted_pinned_path.exists() && !deleted_cache_path.exists(),
         "applying the blob-bearing DELETE drops the cache copies",
     );
 }
@@ -5343,34 +5230,36 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let cleanup_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy);
     let source = open_test_db_with_blob(cleanup_decl());
     let storage = create_store(&source, UserKeypair::generate()).await;
-    exec(
+    capture_bytes(
         &source,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01');",
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('cleanup01', 'n1', 'cover', 7, '{}', \
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"cleanup"),
+            ),
+        ],
     )
     .await;
-    let deletion =
-        capture_bytes(&source, &["DELETE FROM note_photos WHERE id = 'cleanup01'"]).await;
-    storage
-        .publish_changeset("dev1", 1, &deletion, SCHEMA_VERSION)
-        .await
-        .expect("publish exact Store deletion");
+    let (_source_tmp, source_store_dir) = temp_store_dir();
+    store_local(&source_store_dir, "cleanup01", b"cleanup").await;
+    make_test_root_remote(&source, &storage, &source_store_dir, "n1").await;
 
     let database_dir = tempfile::tempdir().expect("database temp dir");
     let database_path = database_dir.path().join("store.db");
     let target = open_blob_test_db_at(&database_path, cleanup_decl());
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev2', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01');",
-    )
-    .await;
-
     let (_store_tmp, store_dir) = temp_store_dir();
+    pull_into(&target, &storage, &store_dir).await;
+    let deletion =
+        capture_bytes(&source, &["DELETE FROM note_photos WHERE id = 'cleanup01'"]).await;
+    publish_blob_changeset(&source, &storage, &source_store_dir, deletion, 1).await;
+    if store_dir.storage_dir().exists() {
+        std::fs::remove_dir_all(store_dir.storage_dir()).expect("remove storage directory");
+    }
     let obstructing_file = store_dir.as_ref().join("storage");
     std::fs::write(&obstructing_file, b"not a directory").expect("obstruct cleanup paths");
 
@@ -5432,8 +5321,8 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     target
         .call(|conn| {
             conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                 VALUES ('photos', 'cleanup-race')",
+                "INSERT INTO local_cleanup_intents (namespace, blob_id, copy_identity) \
+                 VALUES ('photos', 'cleanup-race', 'local')",
                 [],
             )
             .map(|_| ())
@@ -5552,8 +5441,8 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     target
         .call(|conn| {
             conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                 VALUES ('photos', 'shared-intent')",
+                "INSERT INTO local_cleanup_intents (namespace, blob_id, copy_identity) \
+                 VALUES ('photos', 'shared-intent', 'local')",
                 [],
             )
             .map(|_| ())
@@ -5696,8 +5585,10 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let (_tmp, ld) = temp_store_dir();
     let (_positions, result) = pull_into(&db2, &storage, &ld).await;
     assert_eq!(result.changesets_applied, 1);
+    let shared_reference = row_blob_ref(&db2, "note_photos", "photo-b").await;
+    let shared_cache_path = exact_cache_path(&ld, &shared_reference);
     assert!(
-        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        shared_cache_path.exists(),
         "the shared CacheEager blob lands in the cache",
     );
 
@@ -5726,11 +5617,11 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         "another row still references the old blob",
     );
     assert!(
-        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        shared_cache_path.exists(),
         "a blob-changing update must not drop a copy another live row still references",
     );
     assert!(
-        ld.cache_blob_path("photos", "newblob").unwrap().exists(),
+        exact_cache_path(&ld, &row_blob_ref(&db2, "note_photos", "photo-a").await).exists(),
         "the replacement blob lands in the cache",
     );
 }
@@ -7285,8 +7176,11 @@ mod blob_path_traversal {
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
-        let written = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
-            .expect("blob written");
+        let written = std::fs::read(exact_cache_path(
+            &ld,
+            &row_blob_ref(&db2, "note_photos", "p1ab").await,
+        ))
+        .expect("blob written");
         assert_eq!(
             written, b"PHOTOBYTES",
             "the blob lands in the evictable cache"

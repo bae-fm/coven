@@ -494,6 +494,16 @@ fn created_slot(entry: &crate::db::OutboxEntry) -> &ObjectSlot {
     }
 }
 
+fn created_stored(entry: &crate::db::OutboxEntry) -> &crate::blob::locator::StoredBlobRef {
+    match &entry.operation {
+        crate::db::OutboxOperation::Upload {
+            state: crate::db::OutboxUploadState::Created { stored, .. },
+            ..
+        } => stored,
+        _ => panic!("journal is not Created"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum ObsEvent {
     Started(String),
@@ -917,13 +927,14 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
             .uploaded,
         1
     );
-    let pinned = store_dir.pinned_blob_path("photos", "pinaaaa1").unwrap();
+    let entry = journal(&fixture, "pinaaaa1").await;
+    let locator_hash = created_stored(&entry).locator().locator_hash();
+    let pinned = store_dir.pinned_blob_path("photos", locator_hash).unwrap();
     assert_eq!(tokio::fs::read(pinned).await.unwrap(), bytes);
     assert!(!store_dir
-        .cache_blob_path("photos", "pinaaaa1")
+        .cache_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
-    let entry = journal(&fixture, "pinaaaa1").await;
     assert!(is_created(&entry));
     assert!(
         ExactSlotStorage::read_at(fixture.home.as_ref(), created_slot(&entry))
@@ -941,25 +952,26 @@ async fn unpinned_upload_populates_nothing_on_write() {
     run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
+    let entry = journal(&fixture, "unpaaaa1").await;
+    let locator_hash = created_stored(&entry).locator().locator_hash();
     assert!(!store_dir
-        .pinned_blob_path("photos", "unpaaaa1")
+        .pinned_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
     assert!(!store_dir
-        .cache_blob_path("photos", "unpaaaa1")
+        .cache_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
-    assert!(is_created(&journal(&fixture, "unpaaaa1").await));
+    assert!(is_created(&entry));
 }
 
 #[tokio::test]
 async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let pinned = store_dir.pinned_blob_path("photos", "pinfail1").unwrap();
-    let shard = pinned.parent().unwrap().parent().unwrap();
-    std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
-    std::fs::write(shard, b"blocker").unwrap();
+    let pinned_namespace = store_dir.storage_dir().join("pinned").join("photos");
+    std::fs::create_dir_all(pinned_namespace.parent().unwrap()).unwrap();
+    std::fs::write(&pinned_namespace, b"blocker").unwrap();
     plant_uploads(&fixture, &store_dir, &[("pinfail1", b"PIN")], true).await;
 
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)

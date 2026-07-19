@@ -93,7 +93,7 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
         &db,
         &ld,
         &cache_blob.namespace,
-        &cache_blob.id,
+        crate::sync::test_helpers::test_cache_locator_hash(&cache_blob.id),
         &vec![1u8; 4000],
     )
     .await

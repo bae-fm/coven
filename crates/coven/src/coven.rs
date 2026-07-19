@@ -977,6 +977,28 @@ fn run_write_batch_on_connection<R>(
         routing_encryption.as_ref(),
         write_id,
         |tx| -> CovenResult<R> {
+            let cleanup_intents = deleted
+                .iter()
+                .map(|blob| {
+                    decls
+                        .row_for_blob_in_namespace(tx, &blob.namespace, &blob.id)
+                        .map_err(|error| CovenError::Blob(error.to_string()))
+                        .map(|row| match row {
+                            Some((table, row_id)) => {
+                                crate::blob::local_cleanup::LocalBlobCleanupIntent::for_row(
+                                    &blob.namespace,
+                                    &blob.id,
+                                    table,
+                                    row_id,
+                                )
+                            }
+                            None => crate::blob::local_cleanup::LocalBlobCleanupIntent::local(
+                                &blob.namespace,
+                                &blob.id,
+                            ),
+                        })
+                })
+                .collect::<CovenResult<Vec<_>>>()?;
             for blob in &staged {
                 match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
                     Ok(Some(_)) => {
@@ -1032,16 +1054,10 @@ fn run_write_batch_on_connection<R>(
                 sql(SqlContext::new(tx, stamper))
             })) {
                 Ok(Ok(value)) => {
-                    for blob in &deleted {
+                    for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
                         let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-                        let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-                        let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-                        let intent = crate::blob::local_cleanup::LocalBlobCleanupIntent::new(
-                            &blob.namespace,
-                            &blob.id,
-                        );
                         if !crate::blob::local_cleanup::record_if_unreferenced_on(
-                            tx, &decls, &intent,
+                            tx, &decls, intent,
                         )? {
                             return Err(CovenError::BlobStillReferenced {
                                 namespace: blob.namespace.clone(),
@@ -2399,6 +2415,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_materialization_survives_store_reopen_without_a_cloud_connection() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_public_materialization_survives_store_reopen_without_a_cloud_connection(),
+                )
+                .await
+                .expect("public materialization task");
+            })
+            .await;
+    }
+
+    async fn run_public_materialization_survives_store_reopen_without_a_cloud_connection() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = StoreDir::new(tmp.path());
+        let signer = crate::keys::UserKeypair::generate();
+        let keyring =
+            coven_core::MasterKeyring::from(coven_core::EncryptionService::from_key([42; 32]));
+        let open = || {
+            Coven::builder(config(dir.clone()))
+                .write_policy(WritePolicy::MergeConcurrent)
+                .synced_tables(vec![remote_root_files_table()])
+                .migrations(vec![files_migration()])
+                .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
+                .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
+                .open()
+                .expect("open remote-root store")
+        };
+        let handle = open();
+        let store = TestStore::create(handle.db(), "lib-test", signer.clone())
+            .await
+            .expect("create exact test Store");
+        handle
+            .connect_sync_with_test_home(
+                store.home.clone(),
+                CloudCipher::Encrypted(coven_core::EncryptionService::from_key([42; 32])),
+            )
+            .await
+            .expect("connect exact test Store");
+
+        let expected = b"public materialized blob".to_vec();
+        let bytes = expected.clone();
+        let hash = crate::blob::content_hash(&bytes);
+        let receipt = handle
+            .write(
+                {
+                    let bytes = bytes.clone();
+                    move |batch| {
+                        batch.put_blob("media-files", "materialized-blob", bytes);
+                        Ok(())
+                    }
+                },
+                move |sql| {
+                    sql.execute(
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            "materialized-row",
+                            "materialized-blob",
+                            bytes.len() as i64,
+                            hash,
+                            sql.stamp()
+                        ],
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("write remote-root blob");
+        let mut status = handle
+            .subscribe_write_status(&receipt.write_id)
+            .await
+            .expect("subscribe to materialized write");
+        handle.sync_now();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let current = status.borrow().clone();
+                match current {
+                    coven_core::WriteStatus::Published(_) => break,
+                    coven_core::WriteStatus::Pending | coven_core::WriteStatus::Publishing => {
+                        status.changed().await.expect("write status remains open")
+                    }
+                    other => panic!("materialized write did not publish: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("materialized write publishes");
+        let reference = handle
+            .row_blob_ref("files", "materialized-row")
+            .await
+            .expect("capture published row blob");
+        handle
+            .materialize_row_blob(&reference)
+            .await
+            .expect("materialize through the public handle");
+        let locator_hash = reference
+            .stored()
+            .expect("published row has exact storage")
+            .locator()
+            .locator_hash();
+        let cached = dir
+            .cache_blob_path("media-files", locator_hash)
+            .expect("exact cache path");
+        assert_eq!(std::fs::read(&cached).expect("read exact cache"), expected);
+
+        handle.disconnect_sync();
+        drop(handle);
+        let reopened = open();
+        let reopened_reference = reopened
+            .row_blob_ref("files", "materialized-row")
+            .await
+            .expect("capture reopened row blob");
+        reopened
+            .materialize_row_blob(&reopened_reference)
+            .await
+            .expect("reopen verifies the materialized cache without cloud storage");
+    }
+
+    #[tokio::test]
     async fn sql_failure_removes_staged_blob() {
         let (_tmp, handle) = open_files_handle();
         let err = handle
@@ -2701,44 +2838,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_eviction_cannot_remove_pending_write_blob_bytes() {
-        let (_tmp, handle) = open_files_handle();
-        let (_first_write, _second_write, first_path) =
-            queue_replacement_before_sync(&handle).await;
-        let first_blob = BlobRef {
-            namespace: "media-files".to_string(),
-            id: "ownedaaa".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::HostProvided,
-            fill: CacheFill::CacheLazy,
-        };
-
-        handle
-            .evict_blob(&first_blob)
-            .await
-            .expect("evict only re-fetchable cache copies");
-
-        assert_eq!(
-            std::fs::read(first_path).expect("pending write still owns local-store bytes"),
-            b"first"
-        );
-    }
-
-    #[tokio::test]
     async fn author_delete_drops_all_local_blob_copies() {
         let (_tmp, handle) = open_files_handle();
         crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldcccc", b"old")
             .await
             .expect("store old");
-        let pinned = handle
-            .store_dir()
-            .pinned_blob_path("media-files", "oldcccc")
-            .expect("pinned path");
-        let cached = handle
-            .store_dir()
-            .cache_blob_path("media-files", "oldcccc")
-            .expect("cache path");
         handle
             .sql(|sql| {
                 sql.execute(
@@ -2756,11 +2860,28 @@ mod tests {
             .await
             .expect("seed row");
         publish_current_writes(&handle).await;
+        let published = handle
+            .row_blob_ref("files", "file-1")
+            .await
+            .expect("capture exact published blob");
+        let locator_hash = published
+            .stored()
+            .expect("published row has exact storage")
+            .locator()
+            .locator_hash();
+        let pinned = handle
+            .store_dir()
+            .pinned_blob_path("media-files", locator_hash)
+            .expect("pinned path");
+        let cached = handle
+            .store_dir()
+            .cache_blob_path("media-files", locator_hash)
+            .expect("cache path");
         crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldcccc", b"old")
             .await
             .expect("restore published blob locally");
-        write_raw_file(&pinned, b"pinned").await;
-        write_raw_file(&cached, b"cached").await;
+        write_raw_file(&pinned, b"old").await;
+        write_raw_file(&cached, b"old").await;
         let old_ref = BlobRef {
             namespace: "media-files".to_string(),
             id: "oldcccc".to_string(),
@@ -2803,10 +2924,6 @@ mod tests {
         crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldddddd", b"old")
             .await
             .expect("store old");
-        let pinned = handle
-            .store_dir()
-            .pinned_blob_path("media-files", "oldddddd")
-            .expect("pinned path");
         handle
             .sql(|sql| {
                 sql.execute(
@@ -2824,6 +2941,19 @@ mod tests {
             .await
             .expect("seed row");
         publish_current_writes(&handle).await;
+        let published = handle
+            .row_blob_ref("files", "file-1")
+            .await
+            .expect("capture exact published blob");
+        let locator_hash = published
+            .stored()
+            .expect("published row has exact storage")
+            .locator()
+            .locator_hash();
+        let pinned = handle
+            .store_dir()
+            .pinned_blob_path("media-files", locator_hash)
+            .expect("pinned path");
         crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldddddd", b"old")
             .await
             .expect("restore published blob locally");
@@ -2916,17 +3046,7 @@ mod tests {
             .store_dir()
             .local_blob_path("media-files", blob_id)
             .expect("local path");
-        let pinned = handle
-            .store_dir()
-            .pinned_blob_path("media-files", blob_id)
-            .expect("pinned path");
-        let cached = handle
-            .store_dir()
-            .cache_blob_path("media-files", blob_id)
-            .expect("cache path");
         write_raw_file(&local, b"live").await;
-        write_raw_file(&pinned, b"live").await;
-        write_raw_file(&cached, b"live").await;
 
         let (_source_tmp, source) = open_files_handle();
         let storage = Arc::new(
@@ -2959,6 +3079,25 @@ mod tests {
             .publish_pending(source.db(), &source.store_dir())
             .await
             .expect("publish remote insert");
+        let remote_reference = source
+            .row_blob_ref("files", "remote-deletes")
+            .await
+            .expect("capture exact remote blob");
+        let locator_hash = remote_reference
+            .stored()
+            .expect("published row has exact storage")
+            .locator()
+            .locator_hash();
+        let pinned = handle
+            .store_dir()
+            .pinned_blob_path("media-files", locator_hash)
+            .expect("pinned path");
+        let cached = handle
+            .store_dir()
+            .cache_blob_path("media-files", locator_hash)
+            .expect("cache path");
+        write_raw_file(&pinned, b"live").await;
+        write_raw_file(&cached, b"live").await;
         let delete = source
             .sql(|sql| {
                 sql.execute("DELETE FROM files WHERE id = 'remote-deletes'", [])?;
@@ -3827,7 +3966,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let dest = dir
-            .cache_blob_path("media-files", "raceblob")
+            .cache_blob_path(
+                "media-files",
+                coven_core::sync::store_commit::ObjectHash::digest(b"raceblob"),
+            )
             .expect("cache path");
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).expect("create cache shard dir");

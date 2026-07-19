@@ -68,7 +68,7 @@
 //! This module is the engine; its halves move a blob through its lifecycle:
 //!
 //! - [`cache`] — the device-local cache for **Remote** blobs: bytes on disk keyed
-//!   by blob id, with the folder a file lives in as the only retention truth
+//!   by exact locator hash, with the folder a file lives in as the only retention truth
 //!   (`storage/pinned/` protected, `storage/cache/` evictable). Read (whole and
 //!   ranged), pin/unpin, clear, and budget eviction.
 //! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
@@ -344,7 +344,8 @@ pub enum BlobReplacement {
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
-/// copy (`storage/pinned/<namespace>/<id>` / `storage/cache/<namespace>/<id>`, built
+/// copy (`storage/pinned/<namespace>/<locator-hash>` /
+/// `storage/cache/<namespace>/<locator-hash>`, built
 /// from the validated namespace + id — see [`cache`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlobRef {

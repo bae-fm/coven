@@ -517,6 +517,9 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             .map_err(StoreObjectError::from)?;
         let (remote_objects, audience_objects) =
             close_prepared_packages(prepared_packages, &commit_ref)?;
+        let local_cleanup =
+            super::service::bind_local_cleanup(payload.local_cleanup, &audience_objects.blobs)
+                .map_err(StoreOutboundError::Preparation)?;
         Ok::<_, StoreOutboundError>(StoreWritePreparation {
             write_id: write_id.clone(),
             remote_objects,
@@ -529,7 +532,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
                 value: head,
                 prepared: head_prepared,
             },
-            local_cleanup: payload.local_cleanup,
+            local_cleanup,
             completion: payload.completion,
         })
     }
@@ -2628,6 +2631,9 @@ async fn prepare_serial_store_branch(
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let (remote_objects, audiences) =
                 close_prepared_packages(prepared_packages, &commit_ref)?;
+            let local_cleanup =
+                super::service::bind_local_cleanup(payload.local_cleanup, &audiences.blobs)
+                    .map_err(StoreOutboundError::Preparation)?;
             predecessor = Some(commit_ref);
             prepared.push(SerialStoreWritePreparationEntry {
                 write_id: write.write_id,
@@ -2637,7 +2643,7 @@ async fn prepare_serial_store_branch(
                     value: commit,
                     prepared: commit_prepared,
                 },
-                local_cleanup: payload.local_cleanup,
+                local_cleanup,
                 completion: payload.completion,
             });
         }

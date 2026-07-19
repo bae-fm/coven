@@ -48,11 +48,22 @@ pub struct DeferredLocalBlobDrop {
     pub namespace: String,
     pub id: String,
     pub size: u64,
+    pub plaintext_hash: crate::sync::store_commit::ObjectHash,
+    pub locator_hash: crate::sync::store_commit::ObjectHash,
+    pub disposition: DeferredLocalBlobDisposition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalBlobDropRequest {
+    pub namespace: String,
+    pub id: String,
+    pub size: u64,
+    pub plaintext_hash: crate::sync::store_commit::ObjectHash,
     pub disposition: DeferredLocalBlobDisposition,
 }
 
 pub(crate) struct PreparedStorePayload {
-    pub local_cleanup: StoreBatchLocalCleanup,
+    pub local_cleanup: Vec<LocalBlobDropRequest>,
     pub completion: StoreBatchCompletion,
     pub membership_authority: Option<MembershipGrantCreationAuthority>,
 }
@@ -85,10 +96,11 @@ pub(crate) async fn prepare_store_payload(
             crate::blob::CacheFill::CacheEager => DeferredLocalBlobDisposition::Cache,
             crate::blob::CacheFill::CacheLazy => DeferredLocalBlobDisposition::Drop,
         };
-        let drop = DeferredLocalBlobDrop {
+        let drop = LocalBlobDropRequest {
             namespace: fact.blob.namespace.clone(),
             id: fact.blob.id.clone(),
             size: fact.plaintext_size,
+            plaintext_hash: fact.plaintext_hash,
             disposition,
         };
         let key = (drop.namespace.clone(), drop.id.clone());
@@ -102,12 +114,55 @@ pub(crate) async fn prepare_store_payload(
         }
     }
     Ok(PreparedStorePayload {
-        local_cleanup: StoreBatchLocalCleanup {
-            drops: drops.into_values().collect(),
-        },
+        local_cleanup: drops.into_values().collect(),
         completion: StoreBatchCompletion {},
         membership_authority: resolve_write_authority(membership_chain, keypair),
     })
+}
+
+pub(crate) fn bind_local_cleanup(
+    requests: Vec<LocalBlobDropRequest>,
+    blobs: &[crate::database::PreparedAudienceBlob],
+) -> Result<StoreBatchLocalCleanup, SyncCycleError> {
+    let mut drops = Vec::with_capacity(requests.len());
+    for request in requests {
+        let matching = blobs
+            .iter()
+            .filter(|prepared| {
+                let locator = prepared.blob().locator();
+                locator.namespace() == request.namespace
+                    && locator.blob_id() == request.id
+                    && locator.plaintext_size() == request.size
+                    && locator.plaintext_hash() == request.plaintext_hash
+            })
+            .map(|prepared| prepared.blob().locator().locator_hash())
+            .collect::<std::collections::BTreeSet<_>>();
+        let Some(locator_hash) = matching.iter().copied().next() else {
+            return Err(SyncCycleError::AssetScan(format!(
+                "published blob {}/{} has {} exact cleanup locator candidates",
+                request.namespace,
+                request.id,
+                matching.len()
+            )));
+        };
+        if matching.len() != 1 {
+            return Err(SyncCycleError::AssetScan(format!(
+                "published blob {}/{} has {} exact cleanup locator candidates",
+                request.namespace,
+                request.id,
+                matching.len()
+            )));
+        }
+        drops.push(DeferredLocalBlobDrop {
+            namespace: request.namespace,
+            id: request.id,
+            size: request.size,
+            plaintext_hash: request.plaintext_hash,
+            locator_hash,
+            disposition: request.disposition,
+        });
+    }
+    Ok(StoreBatchLocalCleanup { drops })
 }
 
 /// The storage coordinate of the membership entry that authorizes this device
@@ -142,19 +197,25 @@ pub async fn apply_deferred_local_blob_drop(
     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     match (deferred.disposition, local) {
         (DeferredLocalBlobDisposition::Pin, Some(source)) => {
-            let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, &deferred.id)
-                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-            crate::local_blob::copy_atomic(&source, &pinned)
-                .await
-                .map_err(SyncCycleError::AssetUpload)?;
+            crate::blob::cache::populate_pinned_from_file(
+                store_dir,
+                &deferred.namespace,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
+                &source,
+            )
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
         }
         (DeferredLocalBlobDisposition::Cache, Some(source)) => {
             crate::blob::cache::write_blob_from_file(
                 db,
                 store_dir,
                 &deferred.namespace,
-                &deferred.id,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
                 &source,
             )
             .await
@@ -168,13 +229,13 @@ pub async fn apply_deferred_local_blob_drop(
         // the intent — and fail loud only when the destination is ALSO empty.
         (DeferredLocalBlobDisposition::Pin, None) => {
             let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, &deferred.id)
+                .pinned_blob_path(&deferred.namespace, deferred.locator_hash)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&pinned, deferred).await;
         }
         (DeferredLocalBlobDisposition::Cache, None) => {
             let cached = store_dir
-                .cache_blob_path(&deferred.namespace, &deferred.id)
+                .cache_blob_path(&deferred.namespace, deferred.locator_hash)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }
@@ -195,15 +256,17 @@ async fn recognize_applied_disposition_or_fail(
     destination: &std::path::Path,
     deferred: &DeferredLocalBlobDrop,
 ) -> Result<(), SyncCycleError> {
-    let present = crate::local_blob::exists(destination)
-        .await
-        .map_err(SyncCycleError::AssetUpload)?
-        && crate::local_blob::file_len(destination)
-            .await
-            .map_err(SyncCycleError::AssetUpload)?
-            == deferred.size;
-    if present {
-        return Ok(());
+    match crate::local_blob::exists(destination).await {
+        Ok(true) => {
+            let (size, hash) = crate::local_blob::exact_file_facts(destination)
+                .await
+                .map_err(SyncCycleError::AssetUpload)?;
+            if size == deferred.size && hash == deferred.plaintext_hash {
+                return Ok(());
+            }
+        }
+        Ok(false) => {}
+        Err(error) => return Err(SyncCycleError::AssetUpload(error)),
     }
     Err(SyncCycleError::AssetUpload(format!(
         "published blob {}/{} is missing from both the local store and its {:?} destination",

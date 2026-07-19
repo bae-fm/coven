@@ -8,8 +8,8 @@
 //! without a cloud round-trip.
 
 use super::cache::{
-    clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
-    BlobCacheError,
+    clear_cache, drop_cached_blob, evict_to_budget, is_pinned, materialize_row_blob,
+    open_blob_stream, pin, read_blob, unpin, write_blob, BlobCacheError,
 };
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::Database;
@@ -44,6 +44,32 @@ fn blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
         provenance: Provenance::UserProvided,
         fill,
     }
+}
+
+fn locator_hash(reference: &crate::blob::RowBlobRef) -> ObjectHash {
+    reference
+        .stored()
+        .expect("Remote row blob reference has exact storage")
+        .locator()
+        .locator_hash()
+}
+
+fn cache_path(
+    store_dir: &crate::store_dir::StoreDir,
+    reference: &crate::blob::RowBlobRef,
+) -> std::path::PathBuf {
+    store_dir
+        .cache_blob_path(&reference.blob().namespace, locator_hash(reference))
+        .expect("build exact cache path")
+}
+
+fn pinned_path(
+    store_dir: &crate::store_dir::StoreDir,
+    reference: &crate::blob::RowBlobRef,
+) -> std::path::PathBuf {
+    store_dir
+        .pinned_blob_path(&reference.blob().namespace, locator_hash(reference))
+        .expect("build exact pinned path")
 }
 
 /// A host-provided `BlobRef` (its Local home is coven's local store, not a user
@@ -102,8 +128,9 @@ async fn create_exact_blob_object(
     namespace: &str,
     bytes: &[u8],
 ) -> crate::blob::locator::StoredBlobRef {
-    let plaintext_path = spool_dir.join(format!("{id}.plaintext"));
-    let spool_path = spool_dir.join(format!("{id}.stored"));
+    let content_hash = ObjectHash::digest(bytes);
+    let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
+    let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
     crate::local_blob::write_atomic(&plaintext_path, bytes)
         .await
         .expect("write exact blob plaintext");
@@ -122,7 +149,7 @@ async fn create_exact_blob_object(
         BlobScope::Master,
         protection.seal_key_fingerprint(),
         bytes.len() as u64,
-        ObjectHash::digest(bytes),
+        content_hash,
     )
     .expect("build exact blob locator");
     let slot = storage
@@ -194,6 +221,249 @@ async fn install_exact_remote_blob_for_row(
         .expect("load exact row blob reference")
 }
 
+#[tokio::test]
+async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() {
+    let db = remote_root_db(photo_decl());
+    let storage = create_store(&db).await;
+    let (tmp, store_dir) = temp_store_dir();
+    let bytes = b"exact materialized plaintext";
+    plant_blob_row(&db, "materialized-row", true, bytes).await;
+    let reference = install_exact_remote_blob(
+        &db,
+        &storage,
+        tmp.path(),
+        "materialized-row",
+        "photos",
+        bytes,
+    )
+    .await;
+    let locator_hash = reference
+        .stored()
+        .expect("remote row has an exact locator")
+        .locator()
+        .locator_hash();
+    let destination = store_dir
+        .cache_blob_path("photos", locator_hash)
+        .expect("exact cache path");
+
+    materialize_row_blob(&db, &store_dir, Some(&storage.storage), &reference)
+        .await
+        .expect("materialize exact remote row blob");
+    assert_eq!(
+        std::fs::read(&destination).expect("read materialization"),
+        bytes
+    );
+
+    let corrupt = vec![b'!'; bytes.len()];
+    std::fs::write(&destination, &corrupt).expect("replace fixture with same-length corruption");
+    materialize_row_blob(&db, &store_dir, Some(&storage.storage), &reference)
+        .await
+        .expect_err("occupied corrupt materialization must fail");
+    assert_eq!(
+        std::fs::read(&destination).expect("read occupied destination"),
+        corrupt,
+        "materialization never replaces an occupied exact path",
+    );
+}
+
+#[tokio::test]
+async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
+    let db = remote_root_db(photo_decl());
+    let storage = create_store(&db).await;
+    let (tmp, store_dir) = temp_store_dir();
+    let bytes = b"exact pinned plaintext";
+    plant_blob_row(&db, "pinned-corruption", true, bytes).await;
+    let reference = install_exact_remote_blob(
+        &db,
+        &storage,
+        tmp.path(),
+        "pinned-corruption",
+        "photos",
+        bytes,
+    )
+    .await;
+
+    pin(
+        &db,
+        &store_dir,
+        Some(&storage.storage),
+        std::slice::from_ref(&reference),
+    )
+    .await
+    .expect("pin the exact locator");
+    let destination = pinned_path(&store_dir, &reference);
+    let corrupt = vec![b'!'; bytes.len()];
+    std::fs::write(&destination, &corrupt).expect("write same-length pinned corruption");
+
+    assert!(matches!(
+        materialize_row_blob(&db, &store_dir, Some(&storage.storage), &reference).await,
+        Err(BlobCacheError::LocalIntegrity { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&destination).expect("read occupied pinned destination"),
+        corrupt,
+        "materialization never replaces an occupied pinned path",
+    );
+}
+
+#[tokio::test]
+async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
+    let db = remote_root_db(photo_decl());
+    let storage = create_store(&db).await;
+    let (tmp, store_dir) = temp_store_dir();
+    plant_blob_row(&db, "stale-materialized-row", true, b"stale source").await;
+    let reference = install_exact_remote_blob(
+        &db,
+        &storage,
+        tmp.path(),
+        "stale-materialized-row",
+        "photos",
+        b"stale source",
+    )
+    .await;
+    let destination = store_dir
+        .cache_blob_path(
+            "photos",
+            reference
+                .stored()
+                .expect("remote row has an exact locator")
+                .locator()
+                .locator_hash(),
+        )
+        .expect("exact cache path");
+    db.call(|conn| {
+        conn.execute(
+            "UPDATE note_photos SET _updated_at = '0000000002000-0000-dev1' WHERE id = 'stale-materialized-row'",
+            [],
+        )
+        .map_err(crate::database::DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("replace row stamp");
+
+    materialize_row_blob(&db, &store_dir, Some(&storage.storage), &reference)
+        .await
+        .expect_err("stale row reference must fail");
+    assert!(
+        !destination.exists(),
+        "stale materialization publishes no file"
+    );
+}
+
+#[tokio::test]
+async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() {
+    let (tmp, store_dir) = temp_store_dir();
+    let external_db = read_test_db("audio");
+    let external_bytes = b"external exact bytes";
+    plant_blob_row(&external_db, "external-corrupt", false, external_bytes).await;
+    let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
+    register_external_blob(
+        &external_db,
+        "note_photos",
+        "external-corrupt",
+        &external_path,
+    )
+    .await;
+    std::fs::write(&external_path, vec![b'!'; external_bytes.len()])
+        .expect("write same-length external corruption");
+    let external = external_db
+        .row_blob_ref("note_photos", "external-corrupt")
+        .await
+        .expect("load external row reference");
+    assert!(matches!(
+        materialize_row_blob(&external_db, &store_dir, None, &external).await,
+        Err(BlobCacheError::LocalIntegrity { .. })
+    ));
+
+    let host_db = open_test_db_with_blob(photo_decl());
+    let host_bytes = b"host local exact bytes";
+    plant_blob_row(&host_db, "host-corrupt", false, host_bytes).await;
+    crate::blob::local_files::store(&store_dir, "photos", "host-corrupt", host_bytes)
+        .await
+        .expect("store host-local source");
+    let host_path = store_dir
+        .local_blob_path("photos", "host-corrupt")
+        .expect("host-local path");
+    std::fs::write(&host_path, vec![b'?'; host_bytes.len()])
+        .expect("write same-length host-local corruption");
+    let host = host_db
+        .row_blob_ref("note_photos", "host-corrupt")
+        .await
+        .expect("load host-local row reference");
+    assert!(matches!(
+        materialize_row_blob(&host_db, &store_dir, None, &host).await,
+        Err(BlobCacheError::LocalIntegrity { .. })
+    ));
+}
+
+#[tokio::test]
+async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
+    let db = remote_root_db(photo_decl());
+    let storage = create_store(&db).await;
+    let (tmp, store_dir) = temp_store_dir();
+    let id = "same-logical-id";
+    let first_bytes = b"first exact version";
+    plant_blob_row(&db, id, true, first_bytes).await;
+    let first =
+        install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", first_bytes).await;
+    materialize_row_blob(&db, &store_dir, Some(&storage.storage), &first)
+        .await
+        .expect("materialize first exact locator");
+    let first_path = cache_path(&store_dir, &first);
+
+    let second_bytes = b"second exact version with different bytes";
+    let second_hash = crate::blob::content_hash(second_bytes);
+    let second_size = second_bytes.len() as i64;
+    let id_for_update = id.to_string();
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE note_photos
+             SET size = ?1, hash = ?2, _updated_at = '0000000002000-0000-dev1'
+             WHERE id = ?3",
+            rusqlite::params![second_size, second_hash, id_for_update],
+        )
+        .map(|_| ())
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("replace logical row with a second exact version");
+    let second =
+        install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", second_bytes).await;
+    materialize_row_blob(&db, &store_dir, Some(&storage.storage), &second)
+        .await
+        .expect("materialize second exact locator");
+    let second_cache = cache_path(&store_dir, &second);
+
+    assert_ne!(first_path, second_cache);
+    assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+    assert_eq!(std::fs::read(&second_cache).unwrap(), second_bytes);
+    assert!(is_pinned(&db, &store_dir, &first).await.is_err());
+
+    pin(
+        &db,
+        &store_dir,
+        Some(&storage.storage),
+        std::slice::from_ref(&second),
+    )
+    .await
+    .expect("pin only the current exact locator");
+    assert!(first_path.exists());
+    assert!(pinned_path(&store_dir, &second).exists());
+
+    unpin(&db, &store_dir, std::slice::from_ref(&second))
+        .await
+        .expect("unpin only the current exact locator");
+    assert!(first_path.exists());
+    assert!(second_cache.exists());
+
+    drop_cached_blob(&db, &store_dir, &second)
+        .await
+        .expect("evict only the current exact locator");
+    assert!(first_path.exists());
+    assert!(!second_cache.exists());
+}
+
 async fn install_exact_remote_blob_binding_for_row(
     db: &Database,
     storage: &TestStore,
@@ -253,6 +523,22 @@ async fn install_exact_remote_blob_binding_for_row_with_owner(
         serde_json::to_string(&PackageAudience::Store).expect("serialize exact blob audience");
     let id_for_insert = id.to_string();
     let table_for_insert = table.to_string();
+    let stamp_table = table.to_string();
+    let stamp_id = id.to_string();
+    let row_stamp = db
+        .call(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT _updated_at FROM {} WHERE id = ?1",
+                    crate::sync::session::quote_ident(&stamp_table)
+                ),
+                [stamp_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("load exact row stamp for blob binding");
     db.call(move |conn| {
         conn.execute(
             "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
@@ -267,10 +553,11 @@ async fn install_exact_remote_blob_binding_for_row_with_owner(
         conn.execute(
             "INSERT INTO row_blob_locators
              (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-             VALUES (?1, ?2, 'id', '0000000001000-0000-dev1', ?3, ?4)",
+             VALUES (?1, ?2, 'id', ?3, ?4, ?5)",
             rusqlite::params![
                 table_for_insert,
                 id_for_insert,
+                row_stamp,
                 authority,
                 record.object_id().to_string()
             ],
@@ -282,7 +569,7 @@ async fn install_exact_remote_blob_binding_for_row_with_owner(
     .expect("install exact remote blob binding");
 }
 
-/// A second read is a local hit: the first read populates `cache/<id>` from the
+/// A second read is a local hit: the first read populates the exact locator cache from the
 /// cloud, and after the cloud copy is deleted the second read still returns the
 /// bytes — served from disk, no fetch.
 #[tokio::test]
@@ -304,10 +591,8 @@ async fn second_read_is_a_local_hit() {
         .expect("first read fetches from cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "the first read populates storage/cache/<id>",
+        cache_path(&ld, &reference).exists(),
+        "the first read populates the exact locator cache path",
     );
 
     // Delete the cloud copy so a second fetch would fail: the read must be served
@@ -346,13 +631,13 @@ async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
         "invalid cache budget metadata must remain visible: {error:?}",
     );
     assert!(
-        store_dir.cache_blob_path("audio", id).unwrap().exists(),
+        cache_path(&store_dir, &reference).exists(),
         "the verified remote bytes were populated before eviction read its budget",
     );
 }
 
 #[tokio::test]
-async fn short_cached_remote_blob_is_a_miss_and_refetches() {
+async fn corrupt_cached_remote_blob_fails_without_replacement() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
     let (tmp, ld) = temp_store_dir();
@@ -367,21 +652,21 @@ async fn short_cached_remote_blob_is_a_miss_and_refetches() {
     read_blob(&db, &ld, Some(&storage.storage), &reference)
         .await
         .expect("first read populates cache");
-    let cache_path = ld.cache_blob_path(&blob.namespace, &blob.id).unwrap();
-    crate::local_blob::write_atomic(&cache_path, &bytes[..8])
+    let path = cache_path(&ld, &reference);
+    crate::local_blob::write_atomic(&path, &bytes[..8])
         .await
         .expect("simulate a torn cache file");
 
-    let refetched = read_blob(&db, &ld, Some(&storage.storage), &reference)
+    let error = read_blob(&db, &ld, Some(&storage.storage), &reference)
         .await
-        .expect("short cache file refetches from cloud");
-    assert_eq!(refetched, bytes);
+        .expect_err("corrupt cache file must fail loud");
+    assert!(matches!(error, BlobCacheError::LocalIntegrity { .. }));
     assert_eq!(
-        crate::local_blob::read(&cache_path)
+        crate::local_blob::read(&path)
             .await
-            .expect("cache was rewritten"),
-        bytes,
-        "the cache contains the complete bytes after refetch",
+            .expect("read unchanged corrupt cache"),
+        bytes[..8],
+        "the occupied cache file is never replaced",
     );
 }
 
@@ -423,10 +708,8 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
         "exact stored-byte verification remains visible: {err:?}",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "tampered stored bytes write nothing to storage/cache/<id>",
+        !cache_path(&ld, &reference).exists(),
+        "tampered stored bytes write nothing to the exact locator cache path",
     );
 
     let again = read_blob(&db, &ld, Some(&storage.storage), &reference)
@@ -501,7 +784,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
 }
 
 /// A CacheEager blob pulled in a changeset lands in the EVICTABLE CACHE: its file is
-/// in `storage/cache/<id>`, not the kept `storage/pinned/<id>`. On a peer the release
+/// in the evictable locator cache, not the kept locator cache. On a peer the release
 /// is Remote, so the blob's local copy is a cache copy (evictable + re-fetchable, not
 /// pinned). (Driven through the real pull, which routes CacheEager blobs to
 /// `download_blobs` → `cache/`.)
@@ -547,13 +830,17 @@ async fn cache_eager_lands_in_cache_on_pull() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
+    let reference = db2
+        .row_blob_ref("note_photos", "ph01abcd")
+        .await
+        .expect("load pulled exact row blob reference");
     assert!(
-        ld.cache_blob_path("photos", "ph01abcd").unwrap().exists(),
-        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<namespace>/<id>",
+        cache_path(&ld, &reference).exists(),
+        "a CacheEager blob lands in the exact locator cache path on pull",
     );
     assert!(
-        !ld.pinned_blob_path("photos", "ph01abcd").unwrap().exists(),
-        "a CacheEager blob does NOT land system-pinned in storage/pinned/<namespace>/<id>",
+        !pinned_path(&ld, &reference).exists(),
+        "a CacheEager blob does not land pinned",
     );
 }
 
@@ -578,14 +865,8 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     read_blob(&db, &ld, Some(&storage.storage), &reference)
         .await
         .expect("read populates the cache");
-    assert!(ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
-    assert!(!ld
-        .pinned_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(cache_path(&ld, &reference).exists());
+    assert!(!pinned_path(&ld, &reference).exists());
 
     // Pin it → moves cache/ → pinned/.
     pin(
@@ -597,50 +878,38 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     .await
     .expect("pin promotes the cached blob");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin moves the blob into storage/pinned/<id>",
+        pinned_path(&ld, &reference).exists(),
+        "pin moves the blob into its exact locator pinned path",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin leaves nothing behind in storage/cache/<id>",
+        !cache_path(&ld, &reference).exists(),
+        "pin leaves nothing behind in its exact locator cache path",
     );
 
     // Clear the cache → the pinned blob is untouched.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        pinned_path(&ld, &reference).exists(),
         "a pinned blob survives a cache sweep",
     );
 
     // Unpin it → moves pinned/ → cache/ (the file stays, now evictable).
-    unpin(&ld, std::slice::from_ref(&reference))
+    unpin(&db, &ld, std::slice::from_ref(&reference))
         .await
         .expect("unpin demotes the blob");
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "unpin moves the blob back into storage/cache/<id>",
+        cache_path(&ld, &reference).exists(),
+        "unpin moves the blob back into its exact locator cache path",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "unpin leaves nothing behind in storage/pinned/<id>",
+        !pinned_path(&ld, &reference).exists(),
+        "unpin leaves nothing behind in its exact locator pinned path",
     );
 
     // Clear the cache again → the now-unpinned blob is gone.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        !cache_path(&ld, &reference).exists(),
         "an unpinned blob is dropped by a cache sweep",
     );
 
@@ -659,17 +928,11 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         eager_bytes,
     )
     .await;
-    unpin(&ld, std::slice::from_ref(&eager_reference))
+    unpin(&db, &ld, std::slice::from_ref(&eager_reference))
         .await
         .expect("unpinning a never-pinned CacheEager blob is a no-op");
     assert!(
-        !ld.pinned_blob_path(&eager.namespace, &eager.id)
-            .unwrap()
-            .exists()
-            && !ld
-                .cache_blob_path(&eager.namespace, &eager.id)
-                .unwrap()
-                .exists(),
+        !pinned_path(&ld, &eager_reference).exists() && !cache_path(&ld, &eager_reference).exists(),
         "the never-pinned blob is in neither folder",
     );
 }
@@ -702,7 +965,7 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         "pin writes a cache miss through the file download path",
     );
     assert_eq!(
-        std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+        std::fs::read(pinned_path(&ld, &reference)).unwrap(),
         bytes,
         "pin writes the remote bytes into the pinned file",
     );
@@ -754,9 +1017,8 @@ async fn pin_at_limit_one_pins_every_blob() {
         "every blob is fetched"
     );
     for (reference, want) in blobs.iter().zip(&bytes) {
-        let blob = reference.blob();
         assert_eq!(
-            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            std::fs::read(pinned_path(&ld, reference)).unwrap(),
             *want,
             "the blob landed pinned with its bytes",
         );
@@ -786,9 +1048,8 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
         "exactly two downloads ran at once",
     );
     for (reference, want) in blobs.iter().zip(&bytes) {
-        let blob = reference.blob();
         assert_eq!(
-            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            std::fs::read(pinned_path(&ld, reference)).unwrap(),
             *want,
             "every concurrently-fetched blob landed pinned with its bytes",
         );
@@ -885,27 +1146,26 @@ async fn cache_lazy_fetches_on_first_read() {
     // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    assert!(
-        !ld.pinned_blob_path("audio", "aud01234").unwrap().exists()
-            && !ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
-        "a CacheLazy blob is not fetched on pull — neither folder holds it",
-    );
-
     let reference = db2
         .row_blob_ref("note_photos", "aud01234")
         .await
         .expect("load pulled exact row blob reference");
+    assert!(
+        !pinned_path(&ld, &reference).exists() && !cache_path(&ld, &reference).exists(),
+        "a CacheLazy blob is not fetched on pull — neither folder holds it",
+    );
+
     let got = read_blob(&db2, &ld, Some(&storage.storage), &reference)
         .await
         .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
     assert!(
-        ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
-        "the on-demand fetch populates storage/cache/<namespace>/<id>",
+        cache_path(&ld, &reference).exists(),
+        "the on-demand fetch populates the exact locator cache path",
     );
 }
 
-/// `write_blob` writes host bytes straight into the cache (`cache/<id>`), and a
+/// `write_blob` writes host bytes straight into the synthetic locator cache, and a
 /// later `pin` promotes them by renaming — with NO cloud fetch. The cloud copy is
 /// deleted first, so a pin that tried to fetch would fail: it must not.
 #[tokio::test]
@@ -926,20 +1186,16 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .expect("delete exact remote blob");
 
     // Write the bytes into the cache.
-    write_blob(&db, &ld, &blob.namespace, &blob.id, &bytes)
+    write_blob(&db, &ld, &blob.namespace, locator_hash(&reference), &bytes)
         .await
         .expect("write_blob writes into the cache");
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "write_blob writes to storage/cache/<id>",
+        cache_path(&ld, &reference).exists(),
+        "write_blob writes to the exact locator cache path",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "write_blob does not pin — nothing in storage/pinned/<id>",
+        !pinned_path(&ld, &reference).exists(),
+        "write_blob does not pin",
     );
 
     // The blob is NOT in the cloud (nothing was ever put there). A pin that fetched
@@ -953,16 +1209,12 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     .await
     .expect("pin promotes the staged file without a cloud fetch");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin renames the staged blob into storage/pinned/<id>",
+        pinned_path(&ld, &reference).exists(),
+        "pin promotes the staged blob into its exact locator pinned path",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin moves the staged blob out of storage/cache/<id>",
+        !cache_path(&ld, &reference).exists(),
+        "pin removes the staged blob from its exact locator cache path",
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
     let got = read_blob(&db, &ld, Some(&storage.storage), &reference)
@@ -990,7 +1242,7 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 }
 
 /// A ranged read of a CACHED blob is served from the local plaintext file: after a
-/// whole-file read populates `cache/<id>`, the cloud copy is deleted so any cloud
+/// whole-file read populates the exact locator cache, the cloud copy is deleted so any cloud
 /// fallback would fail, and ranged reads (a mid-file window and an `offset > 0`
 /// tail) still return the correct slices — proving they came from disk, not a
 /// re-fetch.
@@ -1012,10 +1264,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     read_blob(&db, &ld, Some(&storage.storage), &reference)
         .await
         .expect("whole-file read populates the cache");
-    assert!(ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(cache_path(&ld, &reference).exists());
     storage
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
@@ -1053,8 +1302,8 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 }
 
 /// A ranged read of a NON-cached blob fetches and decrypts just the requested
-/// range from the cloud AND leaves the cache empty: neither `pinned/<id>` nor
-/// `cache/<id>` exists afterward. A ranged read must never write a truncated cache
+/// range from the cloud AND leaves both exact locator cache paths absent afterward.
+/// A ranged read must never write a truncated cache
 /// file — only the whole-file `read_blob` populates.
 #[tokio::test]
 async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file() {
@@ -1070,14 +1319,8 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
             .await;
 
     // The blob is in neither folder before the read.
-    assert!(!ld
-        .pinned_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
-    assert!(!ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(!pinned_path(&ld, &reference).exists());
+    assert!(!cache_path(&ld, &reference).exists());
 
     let (offset, len) = (2000u64, 1500u64);
     let got = open_blob_stream(&db, &ld, Some(&storage.storage), &reference, offset, len)
@@ -1093,21 +1336,17 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     // read would have to fetch fresh, and `read_blob`'s presence check is never
     // fooled by a truncated file.
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a ranged miss must not write storage/pinned/<id>",
+        !pinned_path(&ld, &reference).exists(),
+        "a ranged miss must not write the exact locator pinned path",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a ranged miss must not write storage/cache/<id> (no truncated cache file)",
+        !cache_path(&ld, &reference).exists(),
+        "a ranged miss must not write the exact locator cache path",
     );
 }
 
 /// A full `read_blob` still populates the evictable cache (Phase 2 behavior intact,
-/// unchanged by adding the ranged path): after one whole-file read, `cache/<id>`
+/// unchanged by adding the ranged path): after one whole-file read, the exact cache path
 /// exists and a second read is served from it even with the cloud copy gone.
 #[tokio::test]
 async fn full_read_blob_still_populates_the_cache() {
@@ -1127,10 +1366,8 @@ async fn full_read_blob_still_populates_the_cache() {
         .expect("first whole-file read fetches from the cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a whole-file read populates storage/cache/<id>",
+        cache_path(&ld, &reference).exists(),
+        "a whole-file read populates the exact locator cache path",
     );
 
     // Cloud copy gone → the second whole-file read must be a local hit.
@@ -1278,11 +1515,17 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists()
+        !ld.pinned_blob_path(
+            &blob.namespace,
+            crate::sync::test_helpers::test_cache_locator_hash(&blob.id)
+        )
+        .unwrap()
+        .exists()
             && !ld
-                .cache_blob_path(&blob.namespace, &blob.id)
+                .cache_blob_path(
+                    &blob.namespace,
+                    crate::sync::test_helpers::test_cache_locator_hash(&blob.id)
+                )
                 .unwrap()
                 .exists(),
         "an external read populates neither cache folder",
@@ -1432,9 +1675,7 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
         "once Remote the blob resolves through cache/cloud",
     );
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        cache_path(&ld, &remote_reference).exists(),
         "the cloud fetch populated the evictable cache",
     );
 }
@@ -1454,9 +1695,15 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     plant_blob_row(&db, &blob.id, false, &ext_bytes).await;
 
     // Decoys at the other on-device stores — both must be ignored.
-    write_blob(&db, &ld, &blob.namespace, &blob.id, b"OWNED-CACHE-BYTES")
-        .await
-        .expect("write a same-id cache decoy");
+    write_blob(
+        &db,
+        &ld,
+        &blob.namespace,
+        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+        b"OWNED-CACHE-BYTES",
+    )
+    .await
+    .expect("write a same-id cache decoy");
     crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
         .await
         .expect("write a same-id local-store decoy");
@@ -1515,9 +1762,15 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         b"FROM-CLOUD",
     )
     .await;
-    write_blob(&db, &ld, &blob.namespace, &blob.id, b"FROM-CACHE")
-        .await
-        .expect("write a same-id cache decoy");
+    write_blob(
+        &db,
+        &ld,
+        &blob.namespace,
+        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+        b"FROM-CACHE",
+    )
+    .await
+    .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
     register_external_blob(&db, "note_photos", &blob.id, &ext_path).await;
@@ -1587,9 +1840,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
         "a Remote + user-provided read serves the cloud copy, not the stale local-store file",
     );
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        cache_path(&ld, &reference).exists(),
         "the Remote read populated the evictable cache",
     );
 
@@ -1716,23 +1967,23 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     let (_updated, result) = pull_into(&db2, &storage, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(
-        !ld.cache_blob_path("photos", "lazy0001").unwrap().exists()
-            && !ld.pinned_blob_path("photos", "lazy0001").unwrap().exists()
-            && !ld.local_blob_path("photos", "lazy0001").unwrap().exists(),
-        "CacheLazy host-provided blobs under a remote root are not downloaded on pull"
-    );
-
     let reference = db2
         .row_blob_ref("note_photos", "lazy0001")
         .await
         .expect("load pulled exact row blob reference");
+    assert!(
+        !cache_path(&ld, &reference).exists()
+            && !pinned_path(&ld, &reference).exists()
+            && !ld.local_blob_path("photos", "lazy0001").unwrap().exists(),
+        "CacheLazy host-provided blobs under a remote root are not downloaded on pull"
+    );
+
     let got = read_blob(&db2, &ld, Some(&storage.storage), &reference)
         .await
         .expect("CacheLazy remote-root blob reads on demand");
     assert_eq!(got, b"LAZY-REMOTE-ROOT");
     assert!(
-        ld.cache_blob_path("photos", "lazy0001").unwrap().exists(),
+        cache_path(&ld, &reference).exists(),
         "the on-demand read populates the evictable cache"
     );
 }
@@ -2021,16 +2272,25 @@ async fn cache_total_bytes(ld: &crate::store_dir::StoreDir, namespace: &str) -> 
 /// deterministic (the cache evicts oldest-mtime first). `secs` is an offset from
 /// the unix epoch — smaller is older.
 fn set_cache_mtime(ld: &crate::store_dir::StoreDir, namespace: &str, id: &str, secs: u64) {
-    let path = ld.cache_blob_path(namespace, id).expect("cache path");
+    let path = ld
+        .cache_blob_path(
+            namespace,
+            crate::sync::test_helpers::test_cache_locator_hash(id),
+        )
+        .expect("cache path");
+    set_path_mtime(&path, secs);
+}
+
+fn set_path_mtime(path: &std::path::Path, secs: u64) {
     let file = std::fs::OpenOptions::new()
         .write(true)
-        .open(&path)
+        .open(path)
         .expect("open cache file to set mtime");
     file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
         .expect("set cache file mtime");
 }
 
-/// Stage `bytes` into `cache/<namespace>/<id>` with a fixed modification time, with
+/// Stage `bytes` into a synthetic locator-keyed cache path with a fixed modification time, with
 /// NO budget set so the stage itself never evicts. Builds the over-budget cache a
 /// later eviction test then trims.
 async fn stage_with_mtime(
@@ -2042,9 +2302,15 @@ async fn stage_with_mtime(
     mtime_secs: u64,
 ) {
     let blob = blob_ref(id, namespace, CacheFill::CacheLazy);
-    write_blob(db, ld, &blob.namespace, &blob.id, bytes)
-        .await
-        .expect("stage blob into cache");
+    write_blob(
+        db,
+        ld,
+        &blob.namespace,
+        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+        bytes,
+    )
+    .await
+    .expect("stage blob into cache");
     set_cache_mtime(ld, namespace, id, mtime_secs);
 }
 
@@ -2081,27 +2347,39 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         .expect("evict to budget");
 
     assert!(
-        !ld.cache_blob_path("release_files", "old1aaaa")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("old1aaaa")
+        )
+        .unwrap()
+        .exists(),
         "the oldest file is evicted first",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "old2bbbb")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("old2bbbb")
+        )
+        .unwrap()
+        .exists(),
         "the second-oldest file is evicted next",
     );
     assert!(
-        ld.cache_blob_path("release_files", "new3cccc")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("new3cccc")
+        )
+        .unwrap()
+        .exists(),
         "a newer file survives once the total is back under budget",
     );
     assert!(
-        ld.cache_blob_path("release_files", "new4dddd")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("new4dddd")
+        )
+        .unwrap()
+        .exists(),
         "the newest file survives",
     );
     assert!(
@@ -2135,15 +2413,21 @@ async fn release_files_eviction_leaves_covers_intact() {
         .expect("evict release_files to budget");
 
     assert!(
-        !ld.cache_blob_path("release_files", "aud01aaa")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("aud01aaa")
+        )
+        .unwrap()
+        .exists(),
         "the oldest audio file is evicted under release_files pressure",
     );
     assert!(
-        ld.cache_blob_path("release_files", "aud04ddd")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("aud04ddd")
+        )
+        .unwrap()
+        .exists(),
         "the newest audio file survives within release_files' budget",
     );
     assert!(
@@ -2151,7 +2435,12 @@ async fn release_files_eviction_leaves_covers_intact() {
         "release_files is back within its budget",
     );
     assert!(
-        ld.cache_blob_path("covers", "cov00aaa").unwrap().exists(),
+        ld.cache_blob_path(
+            "covers",
+            crate::sync::test_helpers::test_cache_locator_hash("cov00aaa")
+        )
+        .unwrap()
+        .exists(),
         "the cover in another namespace is untouched by release_files eviction",
     );
     assert_eq!(
@@ -2205,7 +2494,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     read_blob(&db, &ld, Some(&storage.storage), &cov1_reference)
         .await
         .expect("first cover read populates the cache");
-    set_cache_mtime(&ld, "covers", &cov1.id, 1000);
+    set_path_mtime(&cache_path(&ld, &cov1_reference), 1000);
 
     // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
     // read's own sweep evicts the oldest (the first cover), leaving only the second.
@@ -2213,11 +2502,11 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .await
         .expect("second cover read populates and evicts to budget");
     assert!(
-        !ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        !cache_path(&ld, &cov1_reference).exists(),
         "the oldest cover is evicted when covers goes over its small budget",
     );
     assert!(
-        ld.cache_blob_path("covers", &cov2.id).unwrap().exists(),
+        cache_path(&ld, &cov2_reference).exists(),
         "the just-read cover stays",
     );
 
@@ -2227,7 +2516,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .expect("a read of the evicted cover re-fetches it");
     assert_eq!(refetched, vec![1u8; 200], "the re-fetch returns the bytes");
     assert!(
-        ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        cache_path(&ld, &cov1_reference).exists(),
         "the re-fetched cover is back in cache/covers/",
     );
 }
@@ -2281,14 +2570,14 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let (tmp, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, &ld).await;
     assert_eq!(result.changesets_applied, 1);
-    assert!(
-        ld.cache_blob_path("photos", "mir0aaaa").unwrap().exists(),
-        "the CacheEager blob lands in the evictable cache on pull",
-    );
     let eager = db2
         .row_blob_ref("note_photos", "mir0aaaa")
         .await
         .expect("load pulled exact row blob reference");
+    assert!(
+        cache_path(&ld, &eager).exists(),
+        "the CacheEager blob lands in the evictable cache on pull",
+    );
     pin(
         &db2,
         &ld,
@@ -2297,7 +2586,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     )
     .await
     .expect("pin the eager blob into pinned/");
-    assert!(ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists());
+    assert!(pinned_path(&ld, &eager).exists());
 
     // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
@@ -2330,9 +2619,15 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .row_blob_ref("note_covers", &lazy.id)
         .await
         .expect("load exact lazy row blob reference");
-    write_blob(&db2, &ld, &lazy.namespace, &lazy.id, &[7u8; 500])
-        .await
-        .expect("write the lazy blob into the cache");
+    write_blob(
+        &db2,
+        &ld,
+        &lazy.namespace,
+        locator_hash(&lazy_reference),
+        &[7u8; 500],
+    )
+    .await
+    .expect("write the lazy blob into the cache");
     pin(
         &db2,
         &ld,
@@ -2341,7 +2636,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     )
     .await
     .expect("user-pin the lazy blob");
-    assert!(ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists());
+    assert!(pinned_path(&ld, &lazy_reference).exists());
 
     // Flood BOTH namespaces' evictable caches, set a tiny budget on EACH, and sweep
     // each. The pinned files live in pinned/ — the per-namespace sweep never touches
@@ -2362,11 +2657,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .expect("evict audio to budget");
 
     assert!(
-        ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists(),
+        pinned_path(&ld, &eager).exists(),
         "a pinned CacheEager blob survives its namespace's eviction (it is in pinned/)",
     );
     assert!(
-        ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists(),
+        pinned_path(&ld, &lazy_reference).exists(),
         "a user-pinned CacheLazy blob survives its namespace's eviction (it is in pinned/)",
     );
     storage
@@ -2427,7 +2722,12 @@ async fn unset_namespace_budget_never_evicts() {
     );
     for id in ["keep1aaa", "keep2bbb", "keep3ccc"] {
         assert!(
-            ld.cache_blob_path("release_files", id).unwrap().exists(),
+            ld.cache_blob_path(
+                "release_files",
+                crate::sync::test_helpers::test_cache_locator_hash(id)
+            )
+            .unwrap()
+            .exists(),
             "{id} survives with no budget",
         );
     }
@@ -2465,15 +2765,16 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .expect("read fetches and populates, then evicts to budget");
     assert_eq!(got, bytes, "the triggering read still returns its bytes");
     assert!(
-        ld.cache_blob_path("release_files", "newer2bb")
-            .unwrap()
-            .exists(),
+        cache_path(&ld, &reference).exists(),
         "the just-populated (newest) blob survives its own over-budget eviction",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "older1aa")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("older1aa")
+        )
+        .unwrap()
+        .exists(),
         "the older blob is the one evicted",
     );
     assert!(
@@ -2497,6 +2798,8 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         .await
         .expect("set budget");
 
+    let mut first_path = None;
+    let mut last_path = None;
     for i in 0..6u8 {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
         let bytes = vec![i; 100];
@@ -2504,6 +2807,13 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         let reference =
             install_exact_remote_blob(&db, &storage, tmp.path(), &id, "release_files", &bytes)
                 .await;
+        let exact_cache_path = cache_path(&ld, &reference);
+        if i == 0 {
+            first_path = Some(exact_cache_path.clone());
+        }
+        if i == 5 {
+            last_path = Some(exact_cache_path);
+        }
 
         let got = read_blob(&db, &ld, Some(&storage.storage), &reference)
             .await
@@ -2526,15 +2836,11 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         "at most two 100-byte blobs remain under the 250-byte budget",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "seqr0000")
-            .unwrap()
-            .exists(),
+        !first_path.expect("first exact cache path").exists(),
         "the first blob read was evicted by later populates",
     );
     assert!(
-        ld.cache_blob_path("release_files", "seqr0005")
-            .unwrap()
-            .exists(),
+        last_path.expect("last exact cache path").exists(),
         "the most-recently read blob is still cached",
     );
 }
@@ -2560,21 +2866,32 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
     db.set_cache_budget("release_files", 100)
         .await
         .expect("set budget");
-    let protected = ld.cache_blob_path("release_files", "prot0aaa").unwrap();
+    let protected = ld
+        .cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("prot0aaa"),
+        )
+        .unwrap();
     evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("evict to budget, protecting the older file");
 
     assert!(
-        ld.cache_blob_path("release_files", "prot0aaa")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("prot0aaa")
+        )
+        .unwrap()
+        .exists(),
         "the protected file survives even though it is the older by mtime",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "othr0bbb")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("othr0bbb")
+        )
+        .unwrap()
+        .exists(),
         "the newer, unprotected file is the one evicted instead",
     );
     assert!(
@@ -2601,21 +2918,32 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
     db.set_cache_budget("release_files", 50)
         .await
         .expect("set budget");
-    let protected = ld.cache_blob_path("release_files", "biginuse").unwrap();
+    let protected = ld
+        .cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("biginuse"),
+        )
+        .unwrap();
     evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("eviction returns Ok even when the in-use file alone exceeds budget");
 
     assert!(
-        ld.cache_blob_path("release_files", "biginuse")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("biginuse")
+        )
+        .unwrap()
+        .exists(),
         "the protected in-use file is kept even though it alone exceeds the budget",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "othr0bbb")
-            .unwrap()
-            .exists(),
+        !ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("othr0bbb")
+        )
+        .unwrap()
+        .exists(),
         "every other candidate is still evicted",
     );
     assert_eq!(
@@ -2643,7 +2971,12 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
     // A concurrent populate's in-flight temp: a `.tmp.<uuid>` sibling in the shard dir
     // where its committed blob will land, aged OLDER than the committed file so a sweep
     // that treated it as a candidate would evict it first.
-    let dest = ld.cache_blob_path("release_files", "new0bbbb").unwrap();
+    let dest = ld
+        .cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("new0bbbb"),
+        )
+        .unwrap();
     let shard = dest.parent().unwrap();
     std::fs::create_dir_all(shard).expect("create shard dir");
     let temp_path = shard.join(format!(
@@ -2673,9 +3006,12 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         "eviction leaves a concurrent populate's temp in place",
     );
     assert!(
-        ld.cache_blob_path("release_files", "keep0aaa")
-            .unwrap()
-            .exists(),
+        ld.cache_blob_path(
+            "release_files",
+            crate::sync::test_helpers::test_cache_locator_hash("keep0aaa")
+        )
+        .unwrap()
+        .exists(),
         "the committed cache file survives — the temp's bytes never counted toward the budget",
     );
 

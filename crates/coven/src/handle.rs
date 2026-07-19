@@ -848,6 +848,20 @@ impl CovenHandle {
         crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
     }
 
+    /// Ensure the exact current row blob plaintext is durable on this device.
+    /// Remote blobs materialize into their locator-keyed cache path; Local and
+    /// pending-remote blobs exact-verify their authoritative local source.
+    pub async fn materialize_row_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
+        let storage = self.blob_storage().await?;
+        crate::blob::cache::materialize_row_blob(
+            &self.db,
+            &self.store_dir,
+            storage.as_deref(),
+            blob,
+        )
+        .await
+    }
+
     /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
     /// streaming or seeking without loading the whole file. The [`RowBlobRef`]
     /// carries the plaintext length used to bound the range. The ranged sibling
@@ -881,7 +895,7 @@ impl CovenHandle {
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        crate::blob::cache::unpin(&self.store_dir, blobs).await
+        crate::blob::cache::unpin(&self.db, &self.store_dir, blobs).await
     }
 
     /// The cloud object key a blob's bytes live at, derived under the connected
@@ -925,9 +939,9 @@ impl CovenHandle {
     /// An empty set is vacuously pinned. A blob not pinned (in the evictable cache
     /// or absent) makes the whole set unpinned; an existence-check failure is
     /// surfaced, never read as "not pinned".
-    pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
+    pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
                 return Ok(false);
             }
         }
@@ -939,8 +953,8 @@ impl CovenHandle {
     /// whose bytes may be the only usable copy owned by an unpublished write.
     /// It does not delete the cloud blob or its carrying row; a later read can
     /// fetch the bytes again.
-    pub async fn evict_blob(&self, blob: &BlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_cached_blob(&self.store_dir, &blob.namespace, &blob.id).await
+    pub async fn evict_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
+        crate::blob::cache::drop_cached_blob(&self.db, &self.store_dir, blob).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per

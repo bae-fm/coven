@@ -4245,21 +4245,6 @@ pub(crate) fn apply_prepared_serial_commit_on(
                 )));
             }
         }
-        Database::install_pulled_blob_activations_on(conn, package, &resolution.commit_ref)
-            .map_err(|error| {
-                DbError::Message(format!("record Serial blob activations: {error}"))
-            })?;
-        Database::install_winning_blob_bindings_on(
-            conn,
-            gates,
-            synced_tables,
-            package,
-            &BlobActivation {
-                coord: resolution.commit_ref.coord.clone(),
-            },
-            &winning_rows,
-        )
-        .map_err(|error| DbError::Message(format!("record Serial blob bindings: {error}")))?;
     }
     let inactive_circles = resolution
         .circle_activations
@@ -4286,6 +4271,28 @@ pub(crate) fn apply_prepared_serial_commit_on(
         .map_err(|error| DbError::Message(error.to_string()))?
     {
         local_cleanup::record_if_unreferenced_on(conn, blob_decls, &intent)?;
+    }
+    for package in &resolution.packages {
+        let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
+            conn,
+            &schema,
+            package.changeset(),
+        )?;
+        Database::install_pulled_blob_activations_on(conn, package, &resolution.commit_ref)
+            .map_err(|error| {
+                DbError::Message(format!("record Serial blob activations: {error}"))
+            })?;
+        Database::install_winning_blob_bindings_on(
+            conn,
+            gates,
+            synced_tables,
+            package,
+            &BlobActivation {
+                coord: resolution.commit_ref.coord.clone(),
+            },
+            &winning_rows,
+        )
+        .map_err(|error| DbError::Message(format!("record Serial blob bindings: {error}")))?;
     }
     Database::record_materialized_serial_commit_with_device_operations_on(
         conn,
@@ -5254,6 +5261,9 @@ async fn commit_candidate(
                     changeset.schema(),
                     &applied_bytes,
                 )?;
+                for intent in cleanup {
+                    local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
+                }
                 Database::install_pulled_blob_activations_on(&tx, &package, &commit_ref)?;
                 Database::install_winning_blob_bindings_on(
                     &tx,
@@ -5265,9 +5275,6 @@ async fn commit_candidate(
                     },
                     &winning_rows,
                 )?;
-                for intent in cleanup {
-                    local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
-                }
             }
             let mut removal_session =
                 rusqlite::session::Session::new(&tx).map_err(DbError::from)?;

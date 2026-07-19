@@ -330,21 +330,31 @@ pub(super) fn local_blob_cleanup_intents(
             crate::changeset::ChangeOp::Insert => None,
         };
         if let Some(blob) = old_blob_to_drop {
-            intents.push(LocalBlobCleanupIntent::new(blob.namespace, blob.id));
+            let row_id = old.pk().ok_or_else(|| {
+                crate::blob::decl::BlobDeclError::MissingPublicationPrimaryKey {
+                    table: old.table.clone(),
+                }
+            })?;
+            intents.push(LocalBlobCleanupIntent::for_row(
+                blob.namespace,
+                blob.id,
+                old.table.clone(),
+                row_id,
+            ));
         }
     }
     Ok(intents)
 }
 
 /// Download each blob in `blobs` into the evictable cache
-/// `storage/cache/<namespace>/<id>` under `store_dir`, decrypting via storage
+/// its exact locator-keyed path under `storage/cache/<namespace>`, decrypting via storage
 /// (which returns plaintext) and writing the bytes atomically. Every blob is read and
 /// verified from the exact remote object. An existing exact plaintext copy in either
 /// cache folder (`pinned/` or `cache/`) prevents only the duplicate cache write.
 ///
 /// Only `CacheEager` blobs reach here (callers filter). On a peer the release is
 /// Remote, so a `CacheEager` blob's bytes are a cache copy — evictable +
-/// re-fetchable, not pinned: it lands in `storage/cache/<namespace>/<id>`, where it
+/// re-fetchable, not pinned: it lands in the locator-keyed evictable cache, where it
 /// evicts against its own namespace's budget (a cover never wiped by audio pressure).
 /// (A cover that later falls out of that budget shows a placeholder until the next
 /// read re-fetches it; covers are not pinned.) The destination is coven-built from
@@ -453,15 +463,16 @@ async fn verify_blob_plaintext(
 ) -> Result<(), BlobDownloadFailureCause> {
     let namespace = stored.locator().namespace();
     let id = stored.locator().blob_id();
+    let locator_hash = stored.locator().locator_hash();
     crate::store_dir::validate_path_token(namespace)
         .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
     crate::store_dir::validate_path_token(id)
         .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
     let cache = store_dir
-        .cache_blob_path(namespace, id)
+        .cache_blob_path(namespace, locator_hash)
         .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
     let pinned = store_dir
-        .pinned_blob_path(namespace, id)
+        .pinned_blob_path(namespace, locator_hash)
         .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
     let staged = storage
         .stage_verified_blob_plaintext(stored, protection, &cache)
@@ -481,10 +492,25 @@ async fn verify_blob_plaintext(
     {
         return Ok(());
     }
-    staged
-        .commit()
-        .await
-        .map_err(BlobDownloadFailureCause::Local)?;
+    match staged.commit_new().await {
+        Ok(()) => {}
+        Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
+            if !cached_exact_in_either_folder(
+                &cache,
+                &pinned,
+                stored.locator().plaintext_size(),
+                stored.locator().plaintext_hash(),
+            )
+            .await
+            .map_err(BlobDownloadFailureCause::Local)?
+            {
+                return Err(BlobDownloadFailureCause::Local(
+                    "occupied exact blob cache path differs from its locator".to_string(),
+                ));
+            }
+        }
+        Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
+    }
     crate::blob::cache::evict_to_budget(db, store_dir, namespace, Some(&cache))
         .await
         .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))

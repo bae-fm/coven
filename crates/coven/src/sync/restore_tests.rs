@@ -1952,8 +1952,19 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     .chain
     .expect("owner membership chain");
     let (_tmp_b, lib_b) = temp_store_dir();
+    let owner_blob = db_owner
+        .row_blob_ref("note_photos", "photo1")
+        .await
+        .expect("capture exact snapshot blob");
     let expected_blob = lib_b
-        .cache_blob_path("photos", "photo1")
+        .cache_blob_path(
+            "photos",
+            owner_blob
+                .stored()
+                .expect("published snapshot blob has exact storage")
+                .locator()
+                .locator_hash(),
+        )
         .expect("cache blob path");
 
     let joiner_keypair = owner_keypair.clone();

@@ -289,29 +289,12 @@ impl StoreDir {
     }
 
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
-    /// `storage/pinned/<namespace>/{ab}/{cd}/<id>`. The kept sibling of
+    /// `storage/pinned/<namespace>/{ab}/{cd}/<locator-hash>`. The kept sibling of
     /// [`Self::cache_blob_path`] — same per-namespace shard layout, in the `pinned`
     /// folder instead of `cache`. The cache's truth is the folder a blob's file lives
     /// in, not a table; a file here is a Remote blob's cache copy the user pinned for
-    /// offline (kept from eviction). `Err` if `namespace`/`id` is unsafe or `id` is
-    /// not indexable (see [`Self::id_shard`]).
-    pub fn pinned_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        self.cache_folder_blob_path("pinned", namespace, id)
-    }
-
-    /// An opportunistic (evictable) cache copy of a **Remote** blob:
-    /// `storage/cache/<namespace>/{ab}/{cd}/<id>`. A file here is a cached-but-unpinned
-    /// blob — fetched on read or eagerly on pull, droppable by the budget sweep. The
-    /// folder it lives in, not a table, is what makes it evictable rather than kept.
-    /// Segmented by `namespace` so each namespace's budget evicts only its own
-    /// subtree (see [`Self::cache_namespace_dir`]). `Err` if
-    /// `namespace`/`id` is unsafe or `id` is not indexable (see [`Self::id_shard`]).
-    pub fn cache_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        self.cache_folder_blob_path("cache", namespace, id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pinned_locator_path(
+    /// offline (kept from eviction). `Err` if `namespace` is unsafe.
+    pub fn pinned_blob_path(
         &self,
         namespace: &str,
         locator_hash: crate::sync::store_commit::ObjectHash,
@@ -319,8 +302,14 @@ impl StoreDir {
         self.cache_folder_blob_path("pinned", namespace, &locator_hash.to_string())
     }
 
-    #[cfg(test)]
-    pub(crate) fn cache_locator_path(
+    /// An opportunistic (evictable) cache copy of a **Remote** blob:
+    /// `storage/cache/<namespace>/{ab}/{cd}/<locator-hash>`. A file here is a cached-but-unpinned
+    /// blob — fetched on read or eagerly on pull, droppable by the budget sweep. The
+    /// folder it lives in, not a table, is what makes it evictable rather than kept.
+    /// Segmented by `namespace` so each namespace's budget evicts only its own
+    /// subtree (see [`Self::cache_namespace_dir`]). `Err` if
+    /// `namespace` is unsafe.
+    pub fn cache_blob_path(
         &self,
         namespace: &str,
         locator_hash: crate::sync::store_commit::ObjectHash,
@@ -328,12 +317,12 @@ impl StoreDir {
         self.cache_folder_blob_path("cache", namespace, &locator_hash.to_string())
     }
 
-    /// `storage/<folder>/<namespace>/{ab}/{cd}/<id>` — the single blob-path builder
+    /// `storage/<folder>/<namespace>/{ab}/{cd}/<locator-hash>` — the single blob-path builder
     /// behind [`Self::cache_blob_path`] (`folder` = `cache`) and
     /// [`Self::pinned_blob_path`] (`folder` = `pinned`), which differ only by the
     /// folder token. Composes the per-namespace dir
-    /// ([`Self::cache_folder_namespace_dir`]) with the id shard, so the layout lives
-    /// in one place. `namespace`/`id` validated.
+    /// ([`Self::cache_folder_namespace_dir`]) with the locator-hash shard, so the layout lives
+    /// in one place. `namespace` and the locator hash are validated.
     fn cache_folder_blob_path(
         &self,
         folder: &str,
@@ -585,13 +574,13 @@ mod tests {
 
         assert_eq!(
             store
-                .cache_locator_path("images", locator_hash)
+                .cache_blob_path("images", locator_hash)
                 .expect("cache path"),
             store.storage_dir().join("cache/images").join(&shard)
         );
         assert_eq!(
             store
-                .pinned_locator_path("images", locator_hash)
+                .pinned_blob_path("images", locator_hash)
                 .expect("pinned path"),
             store.storage_dir().join("pinned/images").join(shard)
         );

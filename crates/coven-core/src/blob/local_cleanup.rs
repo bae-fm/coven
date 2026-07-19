@@ -12,14 +12,75 @@ use crate::store_dir::StoreDir;
 pub struct LocalBlobCleanupIntent {
     namespace: String,
     blob_id: String,
+    identity: LocalBlobCleanupIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocalBlobCleanupIdentity {
+    Local,
+    Row { table: String, row_id: String },
+    Exact(crate::sync::store_commit::ObjectHash),
 }
 
 impl LocalBlobCleanupIntent {
-    pub fn new(namespace: impl Into<String>, blob_id: impl Into<String>) -> Self {
+    pub fn local(namespace: impl Into<String>, blob_id: impl Into<String>) -> Self {
         Self {
             namespace: namespace.into(),
             blob_id: blob_id.into(),
+            identity: LocalBlobCleanupIdentity::Local,
         }
+    }
+
+    pub fn for_row(
+        namespace: impl Into<String>,
+        blob_id: impl Into<String>,
+        table: impl Into<String>,
+        row_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            blob_id: blob_id.into(),
+            identity: LocalBlobCleanupIdentity::Row {
+                table: table.into(),
+                row_id: row_id.into(),
+            },
+        }
+    }
+
+    fn exact(
+        namespace: impl Into<String>,
+        blob_id: impl Into<String>,
+        locator_hash: crate::sync::store_commit::ObjectHash,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            blob_id: blob_id.into(),
+            identity: LocalBlobCleanupIdentity::Exact(locator_hash),
+        }
+    }
+
+    fn persisted_identity(&self) -> Result<String, DbError> {
+        match &self.identity {
+            LocalBlobCleanupIdentity::Local => Ok("local".to_string()),
+            LocalBlobCleanupIdentity::Exact(locator_hash) => Ok(locator_hash.to_string()),
+            LocalBlobCleanupIdentity::Row { .. } => Err(DbError::Message(
+                "row-bound local cleanup identity is not durable".to_string(),
+            )),
+        }
+    }
+
+    fn from_persisted(
+        namespace: String,
+        blob_id: String,
+        identity: String,
+    ) -> Result<Self, String> {
+        if identity == "local" {
+            return Ok(Self::local(namespace, blob_id));
+        }
+        let locator_hash = identity
+            .parse()
+            .map_err(|error| format!("invalid exact local cleanup identity: {error}"))?;
+        Ok(Self::exact(namespace, blob_id, locator_hash))
     }
 
     pub fn namespace(&self) -> &str {
@@ -46,10 +107,55 @@ pub fn record_if_unreferenced_on(
     {
         return Ok(false);
     }
+    let durable = match &intent.identity {
+        LocalBlobCleanupIdentity::Local => intent.clone(),
+        LocalBlobCleanupIdentity::Exact(_) => {
+            return Err(DbError::Message(
+                "exact local cleanup identity is already durable".to_string(),
+            ));
+        }
+        LocalBlobCleanupIdentity::Row { table, row_id } => {
+            let mut statement = conn
+                .prepare(
+                    "SELECT locator.locator_hash
+                     FROM row_blob_locators AS binding
+                     JOIN blob_locators AS locator
+                       ON locator.remote_object_id = binding.remote_object_id
+                     WHERE binding.table_name = ?1 AND binding.row_id = ?2",
+                )
+                .map_err(DbError::from)?;
+            let locator_hashes = statement
+                .query_map((table, row_id), |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                .map_err(DbError::from)?;
+            match locator_hashes.len() {
+                0 => LocalBlobCleanupIntent::local(&intent.namespace, &intent.blob_id),
+                1 => {
+                    let locator_hash = locator_hashes
+                        .iter()
+                        .next()
+                        .expect("one exact locator hash")
+                        .parse::<crate::sync::store_commit::ObjectHash>()
+                        .map_err(|error| {
+                            DbError::Message(format!("parse local cleanup locator hash: {error}"))
+                        })?;
+                    LocalBlobCleanupIntent::exact(&intent.namespace, &intent.blob_id, locator_hash)
+                }
+                count => {
+                    return Err(DbError::Message(format!(
+                        "local cleanup for {table}.{row_id} has {count} distinct exact locator bindings"
+                    )));
+                }
+            }
+        }
+    };
+    let persisted_identity = durable.persisted_identity()?;
     let inserted = conn
         .execute(
-            "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) VALUES (?1, ?2)",
-            (intent.namespace(), intent.blob_id()),
+            "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id, copy_identity)
+             VALUES (?1, ?2, ?3)",
+            (intent.namespace(), intent.blob_id(), persisted_identity),
         )
         .map_err(DbError::from)?;
     if inserted == 0 {
@@ -78,7 +184,7 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         .call(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT intent.namespace, intent.blob_id, EXISTS (\
+                    "SELECT intent.namespace, intent.blob_id, intent.copy_identity, EXISTS (\
                          SELECT 1 FROM store_write_blob_leases lease \
                          WHERE lease.namespace = intent.namespace \
                            AND lease.blob_id = intent.blob_id\
@@ -90,11 +196,22 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
             let rows = stmt
                 .query_map([], |row| {
                     Ok((
-                        LocalBlobCleanupIntent::new(
+                        LocalBlobCleanupIntent::from_persisted(
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
-                        ),
-                        row.get::<_, bool>(2)?,
+                            row.get::<_, String>(2)?,
+                        )
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    error,
+                                )),
+                            )
+                        })?,
+                        row.get::<_, bool>(3)?,
                     ))
                 })
                 .map_err(DbError::from)?;
@@ -116,10 +233,21 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
             },
         )
         .await;
+        let persisted_identity = intent.persisted_identity()?;
+        let locator_hash = match &intent.identity {
+            LocalBlobCleanupIdentity::Local => None,
+            LocalBlobCleanupIdentity::Exact(locator_hash) => Some(*locator_hash),
+            LocalBlobCleanupIdentity::Row { .. } => {
+                return Err(DbError::Message(
+                    "persisted local cleanup intent is row-bound".to_string(),
+                ));
+            }
+        };
         if let Err(error) = crate::blob::cache::drop_all_local_copies(
             store_dir,
             intent.namespace(),
             intent.blob_id(),
+            locator_hash,
         )
         .await
         {
@@ -134,8 +262,9 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         let blob_id = intent.blob_id;
         db.call(move |conn| {
             conn.execute(
-                "DELETE FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2",
-                (&namespace, &blob_id),
+                "DELETE FROM local_cleanup_intents
+                 WHERE namespace = ?1 AND blob_id = ?2 AND copy_identity = ?3",
+                (&namespace, &blob_id, &persisted_identity),
             )
             .map(|_| ())
             .map_err(DbError::from)

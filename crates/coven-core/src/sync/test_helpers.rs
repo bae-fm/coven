@@ -17,6 +17,12 @@ use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::membership::{MembershipChain, MembershipEntry};
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::ProtocolObjectDomain;
+use crate::sync::store_commit::ObjectHash;
+
+#[cfg(test)]
+pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {
+    ObjectHash::digest(label.as_bytes())
+}
 
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_membership_grant_id(label: &str) -> crate::sync::causal_grants::MembershipGrantId {
@@ -38,8 +44,6 @@ pub fn test_founder_provider_admin(
     use crate::sync::storage::{
         ProviderDeviceBinding, ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
     };
-    use crate::sync::store_commit::ObjectHash;
-
     let probe_id = ProviderProbeId::from_bytes(*ObjectHash::digest(label.as_bytes()).as_bytes());
     let slot = crate::storage::cloud::ObjectSlot::logical(format!(
         "store-v1/test/{label}/provider-probe/exact"

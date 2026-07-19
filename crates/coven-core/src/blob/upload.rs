@@ -182,7 +182,7 @@ impl std::error::Error for UploadFailures {
 
 /// Drain pending blob uploads: read each local file, seal it under its scope,
 /// create its exact cloud object — and, for an entry marked `retain_pinned`, keep the
-/// plaintext in the protected local cache (`storage/pinned/<id>`) so the blob
+/// plaintext in the protected locator-keyed local cache so the blob
 /// stays local without a later fetch.
 ///
 /// A failing entry is recorded and skipped rather than stopping the drain, with a
@@ -380,7 +380,7 @@ async fn upload_entry(
     match cancelling {
         Ok(Some(crate::database::MakeRemoteIntentState::Cancelling)) => {
             return finish_cancelled_upload(
-                db, storage, store_dir, &entry, &row, &state, &file_id, now, observer,
+                db, storage, store_dir, &entry, &state, &file_id, now, observer,
             )
             .await;
         }
@@ -583,13 +583,8 @@ async fn upload_entry(
     }
 
     if retain_pinned {
-        if let Err(error) = crate::blob::cache::populate_pinned(
-            store_dir,
-            &row.blob().namespace,
-            &file_id,
-            &source_path,
-        )
-        .await
+        if let Err(error) =
+            crate::blob::cache::populate_pinned(store_dir, &stored, &source_path).await
         {
             let message = format!("pin uploaded blob: {error}");
             record_failure(db, &entry, &file_id, &message, now, observer).await;
@@ -627,7 +622,6 @@ async fn upload_entry(
                 storage,
                 store_dir,
                 &entry,
-                &row,
                 &OutboxUploadState::Created {
                     authority: crate::sync::audience_package::PackageAudience::Store,
                     stored,
@@ -657,7 +651,6 @@ async fn finish_cancelled_upload(
     storage: &dyn crate::sync::storage::SyncStorage,
     store_dir: &StoreDir,
     entry: &OutboxEntry,
-    row: &crate::blob::RowBlobRef,
     state: &OutboxUploadState,
     file_id: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -679,7 +672,7 @@ async fn finish_cancelled_upload(
                 remove_spool(spool_path)
                     .await
                     .map_err(UploadFailureCause::Local)?;
-                crate::blob::cache::drop_cached_blob(store_dir, &row.blob().namespace, file_id)
+                crate::blob::cache::drop_cached_stored_blob(store_dir, stored)
                     .await
                     .map_err(|error| {
                         UploadFailureCause::Local(format!("drop cancelled cache copy: {error}"))

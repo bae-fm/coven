@@ -228,7 +228,7 @@ async fn load_published_blob_drop_intents(
     db.call(move |conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT seq, namespace, blob_id, size, disposition \
+                "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition \
                  FROM published_blob_drop_intents \
                  WHERE seq <= ?1 \
                    AND NOT EXISTS (\
@@ -236,7 +236,7 @@ async fn load_published_blob_drop_intents(
                        WHERE lease.namespace = published_blob_drop_intents.namespace \
                          AND lease.blob_id = published_blob_drop_intents.blob_id\
                    ) \
-                 ORDER BY seq, namespace, blob_id",
+                 ORDER BY seq, namespace, blob_id, locator_hash",
             )
             .map_err(DbError::from)?;
         let intents = stmt
@@ -262,10 +262,30 @@ async fn load_published_blob_drop_intents(
                         )),
                     ));
                 }
-                let disposition_raw: String = row.get(4)?;
-                let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
+                let plaintext_hash = row.get::<_, String>(4)?.parse().map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid published blob plaintext hash: {error}"),
+                        )),
+                    )
+                })?;
+                let locator_hash = row.get::<_, String>(5)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid published blob locator hash: {error}"),
+                        )),
+                    )
+                })?;
+                let disposition_raw: String = row.get(6)?;
+                let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
                         rusqlite::types::Type::Text,
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
@@ -279,6 +299,8 @@ async fn load_published_blob_drop_intents(
                         namespace: row.get(1)?,
                         id: row.get(2)?,
                         size: size as u64,
+                        plaintext_hash,
+                        locator_hash,
                         disposition,
                     },
                 })
@@ -309,11 +331,12 @@ async fn clear_published_blob_drop_intent(
     let seq = intent.seq;
     let namespace = intent.drop.namespace.clone();
     let id = intent.drop.id.clone();
+    let locator_hash = intent.drop.locator_hash.to_string();
     db.call(move |conn| {
         conn.execute(
             "DELETE FROM published_blob_drop_intents \
-             WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3",
-            rusqlite::params![seq as i64, namespace, id],
+             WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND locator_hash = ?4",
+            rusqlite::params![seq as i64, namespace, id, locator_hash],
         )
         .map(|_| ())
         .map_err(DbError::from)

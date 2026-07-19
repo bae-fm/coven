@@ -106,7 +106,8 @@ macro_rules! coven_tables {
             "
     namespace TEXT NOT NULL,
     blob_id   TEXT NOT NULL,
-    PRIMARY KEY (namespace, blob_id)
+    copy_identity TEXT NOT NULL CHECK (copy_identity = 'local' OR length(copy_identity) = 64),
+    PRIMARY KEY (namespace, blob_id, copy_identity)
 "
         );
         $visit!(
@@ -116,8 +117,10 @@ macro_rules! coven_tables {
     namespace TEXT NOT NULL,
     blob_id TEXT NOT NULL,
     size INTEGER NOT NULL CHECK (size >= 0),
+    plaintext_hash TEXT NOT NULL,
+    locator_hash TEXT NOT NULL,
     disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
-    PRIMARY KEY (seq, namespace, blob_id)
+    PRIMARY KEY (seq, namespace, blob_id, locator_hash)
 "
         );
         $visit!(

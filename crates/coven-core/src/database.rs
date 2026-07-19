@@ -15467,9 +15467,9 @@ impl Database {
         for drop in local_cleanup.drops {
             conn.execute(
                 "INSERT INTO published_blob_drop_intents
-                 (seq, namespace, blob_id, size, disposition)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+                 (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
                 rusqlite::params![
                     Self::sequence_to_sqlite(
                         &match &commit_ref.coord {
@@ -15485,6 +15485,8 @@ impl Database {
                     i64::try_from(drop.size).map_err(|_| DbError::Message(
                         "outbound local cleanup size exceeds SQLite integer".to_string()
                     ))?,
+                    drop.plaintext_hash.to_string(),
+                    drop.locator_hash.to_string(),
                     drop.disposition.as_db(),
                 ],
             )

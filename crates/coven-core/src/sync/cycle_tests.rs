@@ -2387,9 +2387,15 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         crate::sync::snapshot::SnapshotBlobReconcile::Complete,
     );
     assert_eq!(
-        crate::blob::cache::read_staged(&restore_dir, "photos", "cover1", 5)
-            .await
-            .expect("read restored snapshot blob"),
+        crate::blob::cache::read_staged(
+            &restore_dir,
+            &restored
+                .row_blob_ref("note_photos", "cover1")
+                .await
+                .expect("load restored exact blob reference"),
+        )
+        .await
+        .expect("read restored snapshot blob"),
         Some(b"cover".to_vec()),
     );
     drop(restore_temp);
@@ -4942,7 +4948,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .expect("the activated host blob reads back exactly");
     assert_eq!(
         crate::local_blob::read(
-            &ld.cache_blob_path("photos", "hponly")
+            &ld.cache_blob_path("photos", activated.locator().locator_hash())
                 .expect("host-blob cache path"),
         )
         .await

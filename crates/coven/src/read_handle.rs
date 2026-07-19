@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use crate::blob::cache::BlobCacheError;
-use crate::blob::{BlobRef, RowBlobRef};
+use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
@@ -211,9 +211,9 @@ impl CovenReadHandle {
     /// Whether every blob in `blobs` is pinned for offline — present in coven's kept
     /// cache folder (`storage/pinned/`). An empty set is vacuously pinned. A read; it
     /// stats the folder, never writes.
-    pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
+    pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
                 return Ok(false);
             }
         }

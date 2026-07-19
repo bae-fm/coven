@@ -809,7 +809,7 @@ pub async fn bootstrap_from_snapshot(
 /// coven derives the blobs the DB at `db_path` references from the blob
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
 /// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
-/// evictable cache `storage/cache/<namespace>/<id>` under `store_dir`, skipping
+/// locator-keyed evictable cache under `storage/cache/<namespace>`, skipping
 /// any already present in either cache folder. A failed download is logged there
 /// and reflected in the returned flag; the bootstrap that calls this refuses to
 /// save the store unless the flag is true.
@@ -869,7 +869,7 @@ pub async fn reconcile_snapshot_blobs(
 
     let total = blobs.len();
     // The blobs are `CacheEager`, so `download_blobs` writes each into the
-    // evictable cache `storage/cache/<namespace>/<id>` under `store_dir`.
+    // locator-keyed evictable cache under `storage/cache/<namespace>`.
     // A snapshot carries the authenticated uploader index, so each blob read
     // dispatches directly to its recorded member prefix.
     //

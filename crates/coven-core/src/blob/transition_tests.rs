@@ -34,11 +34,32 @@ use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
     host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
     TestStore,
 };
+
+fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
+    let stored = reference.stored().expect("Remote row has exact storage");
+    store_dir
+        .cache_blob_path(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )
+        .expect("build exact locator cache path")
+}
+
+fn exact_pinned_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
+    let stored = reference.stored().expect("Remote row has exact storage");
+    store_dir
+        .pinned_blob_path(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )
+        .expect("build exact locator pinned path")
+}
 
 /// The blob declaration for `note_photos`: a release file — user-provided ·
 /// `CacheLazy`, keyed by the readable cloud path (browsable home), master-scoped.
@@ -598,7 +619,8 @@ async fn insert_published_drop_intent(
     seq: i64,
     namespace: &str,
     blob_id: &str,
-    size: u64,
+    bytes: &[u8],
+    locator_hash: ObjectHash,
     disposition: &str,
 ) {
     let (ns, id, disp) = (
@@ -606,17 +628,45 @@ async fn insert_published_drop_intent(
         blob_id.to_string(),
         disposition.to_string(),
     );
+    let size = bytes.len() as i64;
+    let plaintext_hash = ObjectHash::digest(bytes).to_string();
+    let locator_hash = locator_hash.to_string();
     db.call(move |conn| {
         conn.execute(
-            "INSERT INTO published_blob_drop_intents (seq, namespace, blob_id, size, disposition) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![seq, ns, id, size as i64, disp],
+            "INSERT INTO published_blob_drop_intents \
+             (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![seq, ns, id, size, plaintext_hash, locator_hash, disp],
         )
         .map(|_| ())
         .map_err(crate::database::DbError::from)
     })
     .await
     .expect("insert published blob drop intent");
+}
+
+#[tokio::test]
+async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() {
+    let db = open_test_db();
+    let first = ObjectHash::digest(b"first locator");
+    let second = ObjectHash::digest(b"second locator");
+
+    insert_published_drop_intent(&db, 1, "covers", "shared-id", b"first", first, "cache").await;
+    insert_published_drop_intent(&db, 1, "covers", "shared-id", b"second", second, "pin").await;
+
+    let count = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM published_blob_drop_intents
+                 WHERE seq = 1 AND namespace = 'covers' AND blob_id = 'shared-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("count exact drop intents");
+    assert_eq!(count, 2);
 }
 
 async fn drop_intent_present(db: &Database, blob_id: &str) -> bool {
@@ -728,7 +778,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         src.exists(),
         "the user-provided source file is left in place post-commit"
     );
-    let pinned = lib_a.pinned_blob_path("photos", "photoaaa").unwrap();
+    let pinned = exact_pinned_path(&lib_a, &photo_ref(&db_a, "photoaaa").await);
     assert_eq!(
         std::fs::read(&pinned).unwrap(),
         bytes,
@@ -836,7 +886,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the release is Remote");
     assert!(
-        lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        exact_pinned_path(&lib, &photo_ref(&db, "photoaaa").await).exists(),
         "the drained upload pins, honoring the second make_remote's choice",
     );
 }
@@ -1512,10 +1562,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "the host-provided cover is uploaded to the cloud",
     );
     assert!(
-        lib_a
-            .pinned_blob_path("covers", "coveraaa")
-            .unwrap()
-            .exists(),
+        exact_pinned_path(&lib_a, &cover_ref(&db_a, "coveraaa").await).exists(),
         "the cover's local-store copy moved into the pinned cache",
     );
     assert!(
@@ -1529,21 +1576,12 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
     crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
     assert!(
-        lib_b
-            .cache_blob_path("covers", "coveraaa")
-            .unwrap()
-            .exists(),
+        exact_cache_path(&lib_b, &cover_ref(&db_b, "coveraaa").await).exists(),
         "B fetches the CacheEager cover eagerly into its cache",
     );
     assert!(
-        !lib_b
-            .cache_blob_path("photos", "photoaaa")
-            .unwrap()
-            .exists()
-            && !lib_b
-                .pinned_blob_path("photos", "photoaaa")
-                .unwrap()
-                .exists(),
+        !exact_cache_path(&lib_b, &photo_ref(&db_b, "photoaaa").await).exists()
+            && !exact_pinned_path(&lib_b, &photo_ref(&db_b, "photoaaa").await).exists(),
         "B does not fetch the CacheLazy photo on pull",
     );
     assert_eq!(
@@ -1700,10 +1738,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "inline upload consumes the make_remote intent"
     );
     assert!(
-        lib_a
-            .pinned_blob_path("covers", "coverhost")
-            .unwrap()
-            .exists(),
+        exact_pinned_path(&lib_a, &cover_ref(&db_a, "coverhost").await).exists(),
         "pin=true keeps the host-provided blob in the protected cache"
     );
     assert!(
@@ -1812,9 +1847,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the prepared Store write durably owns the pin disposition",
     );
     assert!(
-        lib.pinned_blob_path("covers", "cover-pin")
-            .unwrap()
-            .exists(),
+        exact_pinned_path(&lib, &cover_ref(&db, "cover-pin").await).exists(),
         "upload durability created the requested pin before the gate flipped",
     );
     assert!(
@@ -1832,13 +1865,13 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
     assert!(
-        lib.pinned_blob_path("covers", "cover-pin")
-            .unwrap()
-            .exists(),
+        exact_pinned_path(&lib, &cover_ref(&db, "cover-pin").await).exists(),
         "recovery pins the retained cover",
     );
     assert!(
-        cache::is_pinned(&lib, "covers", "cover-pin").await.unwrap(),
+        cache::is_pinned(&db, &lib, &cover_ref(&db, "cover-pin").await)
+            .await
+            .unwrap(),
         "is_pinned reports the recovered pin",
     );
     assert!(
@@ -1852,7 +1885,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "recovery drops the un-pinned cover's local copy",
     );
     assert!(
-        !cache::is_pinned(&lib, "covers", "cover-drop")
+        !cache::is_pinned(&db, &lib, &cover_ref(&db, "cover-drop").await)
             .await
             .unwrap(),
         "the dropped cover is not pinned",
@@ -1876,7 +1909,12 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-PINNED".to_vec();
 
-    let pinned = lib.pinned_blob_path("covers", "cov-pin").unwrap();
+    let pinned = lib
+        .pinned_blob_path(
+            "covers",
+            crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
+        )
+        .unwrap();
     crate::local_blob::create_dir_all(pinned.parent().unwrap())
         .await
         .unwrap();
@@ -1889,7 +1927,8 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
         sequence as i64,
         "covers",
         "cov-pin",
-        bytes.len() as u64,
+        &bytes,
+        crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
         "pin",
     )
     .await;
@@ -1915,7 +1954,12 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-CACHED".to_vec();
 
-    let cached = lib.cache_blob_path("covers", "cov-cache").unwrap();
+    let cached = lib
+        .cache_blob_path(
+            "covers",
+            crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
+        )
+        .unwrap();
     crate::local_blob::create_dir_all(cached.parent().unwrap())
         .await
         .unwrap();
@@ -1928,7 +1972,8 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
         sequence as i64,
         "covers",
         "cov-cache",
-        bytes.len() as u64,
+        &bytes,
+        crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
         "cache",
     )
     .await;
@@ -1952,7 +1997,16 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let (_tmp, lib) = temp_store_dir();
 
     let sequence = publish_fixture_position(&storage, &db, &lib, "lost-position").await;
-    insert_published_drop_intent(&db, sequence as i64, "covers", "cov-lost", 7, "pin").await;
+    insert_published_drop_intent(
+        &db,
+        sequence as i64,
+        "covers",
+        "cov-lost",
+        b"missing",
+        crate::sync::test_helpers::test_cache_locator_hash("cov-lost"),
+        "pin",
+    )
+    .await;
 
     let error = crate::sync::cycle::drain_published_blob_drop_intents(&db, &lib, sequence)
         .await
@@ -1964,7 +2018,12 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
         "a disposition missing from both the local store and its destination stays pending",
     );
     assert!(
-        !lib.pinned_blob_path("covers", "cov-lost").unwrap().exists(),
+        !lib.pinned_blob_path(
+            "covers",
+            crate::sync::test_helpers::test_cache_locator_hash("cov-lost")
+        )
+        .unwrap()
+        .exists(),
         "no destination copy was conjured",
     );
 }
@@ -2022,10 +2081,14 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the peer receives the remote-root row"
     );
     assert!(
-        lib_b
-            .cache_blob_path("covers", "coverrrr")
-            .unwrap()
-            .exists(),
+        exact_cache_path(
+            &lib_b,
+            &db_b
+                .row_blob_ref("note_photos", "coverrrr")
+                .await
+                .expect("load exact remote-root cover reference"),
+        )
+        .exists(),
         "the peer eagerly caches the host-provided blob"
     );
     let got = cache::read_blob(
@@ -2390,7 +2453,9 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     assert!(pending_deletes(&db).await.is_empty());
     assert!(storage.verify_blob_object(&uploaded).await.is_err());
     assert!(
-        !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        !lib.pinned_blob_path("photos", uploaded.locator().locator_hash())
+            .unwrap()
+            .exists(),
         "the orphan's pinned cache copy is dropped",
     );
 }
@@ -2611,7 +2676,9 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
         .await
         .expect("the exact created object is preserved with its journal");
     assert!(
-        lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        lib.pinned_blob_path("photos", created.locator().locator_hash())
+            .unwrap()
+            .exists(),
         "the durable cache copy is preserved with the exact object",
     );
 }
