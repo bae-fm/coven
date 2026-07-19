@@ -564,6 +564,22 @@ impl DeviceJoinClient {
         )
     }
 
+    pub async fn accept_device_join_abandonment(
+        &self,
+        abandonment: crate::DeviceJoinAbandonment,
+    ) -> Result<crate::DeviceJoinAbandonment, BootstrapError> {
+        let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+        let join = self.build_storage(&signer).await?;
+        let pending = self.open_pending_journal()?;
+        Ok(crate::sync::device_join::observe_device_join_abandonment(
+            &pending,
+            &join.storage,
+            &self.code.store_root,
+            abandonment,
+        )
+        .await?)
+    }
+
     pub async fn prepare_registration_request(
         &self,
         approval: crate::DeviceProviderAdmissionApproval,
