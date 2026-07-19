@@ -189,11 +189,11 @@ pub use sync::device_join::{
     DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt, DeviceJoinError,
     DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinProducer,
     DeviceJoinProducerWriteRevocation, DeviceJoinRole, DeviceJoinStatus,
-    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
-    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
-    ProvisionalDeviceBootstrap,
+    DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
+    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
+    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
 };
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{MemberInfo, MemberRole};

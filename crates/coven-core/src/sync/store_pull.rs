@@ -552,8 +552,7 @@ pub(crate) async fn verify_device_join_cleanup_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     activation: &super::device_join::DeviceJoinCleanupActivation,
-    expected_joiner_terminal: &super::device_join::JoinerJoinTerminal,
-) -> Result<(), StorePullError> {
+) -> Result<super::device_join::JoinerJoinTerminal, StorePullError> {
     let (commit, author) = load_commit_with_author(storage, root, &activation.activation).await?;
     if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
         return Err(StorePullError::Database(
@@ -583,13 +582,12 @@ pub(crate) async fn verify_device_join_cleanup_activation(
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
             })?;
-    if receipts.len() != 1 || receipts[0].joiner_terminal != *expected_joiner_terminal {
+    let [receipt] = receipts.as_slice() else {
         return Err(StorePullError::Database(
-            "device join cleanup receipt differs from the joining device's terminal record"
-                .to_string(),
+            "device join cleanup activation does not resolve to one verified receipt".to_string(),
         ));
-    }
-    Ok(())
+    };
+    Ok(receipt.joiner_terminal.clone())
 }
 
 async fn validate_commit_acknowledgement(

@@ -1224,6 +1224,50 @@ impl CovenHandle {
         .await?)
     }
 
+    pub async fn revoke_device_provider_admission_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+        executor_grant: crate::ProviderAdminGrantId,
+    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        Ok(
+            crate::sync::device_join::revoke_device_provider_admission_writes(
+                &self.db,
+                storage.as_ref(),
+                &authorization,
+                &signer,
+                cancellation,
+                revocation_executor,
+                executor_grant,
+            )
+            .await?,
+        )
+    }
+
+    pub async fn revoke_joining_device_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+        executor_grant: crate::ProviderAdminGrantId,
+    ) -> Result<crate::JoinerJoinTerminal, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        Ok(crate::sync::device_join::revoke_joining_device_writes(
+            &self.db,
+            storage.as_ref(),
+            &authorization,
+            &signer,
+            cancellation,
+            revocation_executor,
+            executor_grant,
+        )
+        .await?)
+    }
+
     pub async fn cleanup_cancelled_device_join(
         &self,
         cancellation: crate::DeviceJoinCancellation,

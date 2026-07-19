@@ -1654,6 +1654,20 @@ pub trait DeviceProviderAccessAdministrator: Send + Sync {
     ) -> Result<crate::sync::provider::ProviderAccessLocator, DeviceJoinError>;
 }
 
+#[async_trait::async_trait]
+pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
+    /// Idempotently withdraws the exact provider authority, then verifies that
+    /// the withdrawn authority cannot write any `protected_slots` before
+    /// returning its provider-specific evidence.
+    async fn revoke_write_authority(
+        &self,
+        producer: DeviceJoinProducer,
+        authority: &ProviderWriteAuthorityRef,
+        locator: &crate::sync::provider::ProviderAccessLocator,
+        protected_slots: &[ObjectSlot],
+    ) -> Result<ProviderAccessWithdrawal, DeviceJoinError>;
+}
+
 #[derive(Clone, Debug)]
 pub enum DeviceJoinAuthorization {
     MergeConcurrent(MembershipChain),
@@ -3614,7 +3628,7 @@ async fn sign_device_join_producer_write_revocation(
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
     producer: DeviceJoinProducer,
-    withdrawal: ProviderAccessWithdrawal,
+    revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
     require_authorization_policy(db, storage, authorization).await?;
@@ -3724,6 +3738,9 @@ async fn sign_device_join_producer_write_revocation(
             )
         }
     };
+    let withdrawal = revocation_executor
+        .revoke_write_authority(producer, &authority, locator, &protected_slots)
+        .await?;
     if !withdrawal_matches_locator(&withdrawal, locator) {
         return Err(DeviceJoinError::CleanupMismatch);
     }
@@ -3747,32 +3764,32 @@ pub async fn revoke_device_provider_admission_writes(
     authorization: &DeviceJoinAuthorization,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
-    withdrawal: ProviderAccessWithdrawal,
+    revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
     let attempt_id = cancellation.outcome.attempt().attempt_id;
-    let current = load_store_journal(db, attempt_id, DeviceJoinRole::ProviderAdministrator)
-        .await?
-        .ok_or(DeviceJoinError::JournalConflict)?;
-    match &*current.progress {
-        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::Completed(
-            completion,
-        )) => return Ok(ProviderAdminJoinTerminal::Completed(completion.clone())),
-        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::Cancelled(
-            closure,
-        )) => return Ok(ProviderAdminJoinTerminal::Cancelled(closure.clone())),
-        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::WriteRevoked(
-            revocation,
-        )) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
-        DeviceJoinRoleProgress::ProviderAdministrator(
-            ProviderAdminJoinProgress::ApprovalPrepared(_)
-            | ProviderAdminJoinProgress::AttemptObserved(_)
-            | ProviderAdminJoinProgress::ChallengeCreateIntent(_)
-            | ProviderAdminJoinProgress::ProviderReady(_)
-            | ProviderAdminJoinProgress::ResponseObserved(_)
-            | ProviderAdminJoinProgress::CleanupIntent { .. },
-        ) => {}
-        _ => return Err(DeviceJoinError::JournalConflict),
+    let current = load_store_journal(db, attempt_id, DeviceJoinRole::ProviderAdministrator).await?;
+    if let Some(current) = &current {
+        match &*current.progress {
+            DeviceJoinRoleProgress::ProviderAdministrator(
+                ProviderAdminJoinProgress::Completed(completion),
+            ) => return Ok(ProviderAdminJoinTerminal::Completed(completion.clone())),
+            DeviceJoinRoleProgress::ProviderAdministrator(
+                ProviderAdminJoinProgress::Cancelled(closure),
+            ) => return Ok(ProviderAdminJoinTerminal::Cancelled(closure.clone())),
+            DeviceJoinRoleProgress::ProviderAdministrator(
+                ProviderAdminJoinProgress::WriteRevoked(revocation),
+            ) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
+            DeviceJoinRoleProgress::ProviderAdministrator(
+                ProviderAdminJoinProgress::ApprovalPrepared(_)
+                | ProviderAdminJoinProgress::AttemptObserved(_)
+                | ProviderAdminJoinProgress::ChallengeCreateIntent(_)
+                | ProviderAdminJoinProgress::ProviderReady(_)
+                | ProviderAdminJoinProgress::ResponseObserved(_)
+                | ProviderAdminJoinProgress::CleanupIntent { .. },
+            ) => {}
+            _ => return Err(DeviceJoinError::JournalConflict),
+        }
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
         db,
@@ -3781,60 +3798,42 @@ pub async fn revoke_device_provider_admission_writes(
         identity_signer,
         cancellation,
         DeviceJoinProducer::ProviderAdministrator,
-        withdrawal,
+        revocation_executor,
         executor_grant,
     ))
     .await?;
-    advance_store_journal(
-        db,
-        &current,
-        DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::WriteRevoked(revocation.clone()),
-            )),
-        },
-    )
-    .await?;
+    let terminal = DeviceJoinJournalRecord {
+        attempt_id,
+        progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+            ProviderAdminJoinProgress::WriteRevoked(revocation.clone()),
+        )),
+    };
+    if let Some(current) = current {
+        advance_store_journal(db, &current, terminal).await?;
+    } else {
+        begin_store_replacement_terminal(db, terminal).await?;
+    }
     Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn revoke_joining_device_writes(
-    pending: &DeviceJoinJournalDatabase,
     db: &Database,
     storage: &dyn SyncStorage,
     authorization: &DeviceJoinAuthorization,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
-    withdrawal: ProviderAccessWithdrawal,
+    revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
     let attempt_id = cancellation.outcome.attempt().attempt_id;
-    let current = pending
-        .load(attempt_id, DeviceJoinRole::Joiner)?
-        .ok_or(DeviceJoinError::JournalConflict)?;
-    match &*current.progress {
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(readiness)) => {
-            return Ok(JoinerJoinTerminal::Ready(readiness.clone()));
-        }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
-            return Ok(JoinerJoinTerminal::Cancelled(closure.clone()));
-        }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
-            return Ok(JoinerJoinTerminal::WriteRevoked(revocation.clone()));
-        }
-        DeviceJoinRoleProgress::Joiner(
-            JoinerJoinProgress::RegistrationPrepared(_)
-            | JoinerJoinProgress::ProviderReady(_)
-            | JoinerJoinProgress::RegistrationCreateIntent(_)
-            | JoinerJoinProgress::RegistrationCreated(_)
-            | JoinerJoinProgress::AckCreateIntent(_)
-            | JoinerJoinProgress::AckCreated(_)
-            | JoinerJoinProgress::ResponseCreateIntent(_)
-            | JoinerJoinProgress::CleanupIntent { .. },
-        ) => {}
-        _ => return Err(DeviceJoinError::JournalConflict),
+    if let Some(current) = load_store_journal(db, attempt_id, DeviceJoinRole::Joiner).await? {
+        return match &*current.progress {
+            DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
+                Ok(JoinerJoinTerminal::WriteRevoked(revocation.clone()))
+            }
+            _ => Err(DeviceJoinError::JournalConflict),
+        };
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
         db,
@@ -3843,19 +3842,20 @@ pub async fn revoke_joining_device_writes(
         identity_signer,
         cancellation,
         DeviceJoinProducer::Joiner,
-        withdrawal,
+        revocation_executor,
         executor_grant,
     ))
     .await?;
-    pending.advance(
-        &current,
+    begin_store_replacement_terminal(
+        db,
         DeviceJoinJournalRecord {
             attempt_id,
             progress: Box::new(DeviceJoinRoleProgress::Joiner(
                 JoinerJoinProgress::WriteRevoked(revocation.clone()),
             )),
         },
-    )?;
+    )
+    .await?;
     Ok(JoinerJoinTerminal::WriteRevoked(revocation))
 }
 
@@ -4019,30 +4019,100 @@ pub async fn accept_joiner_device_join_cleanup(
         }
         return Err(DeviceJoinError::JournalConflict);
     }
-    let terminal = match &*current.progress {
+    let local_terminal = match &*current.progress {
         DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
-            JoinerJoinTerminal::Cancelled(closure.clone())
+            Some(JoinerJoinTerminal::Cancelled(closure.clone()))
         }
         DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
-            JoinerJoinTerminal::WriteRevoked(revocation.clone())
+            Some(JoinerJoinTerminal::WriteRevoked(revocation.clone()))
         }
+        DeviceJoinRoleProgress::Joiner(
+            JoinerJoinProgress::RegistrationPrepared(_)
+            | JoinerJoinProgress::ProviderReady(_)
+            | JoinerJoinProgress::RegistrationCreateIntent(_)
+            | JoinerJoinProgress::RegistrationCreated(_)
+            | JoinerJoinProgress::AckCreateIntent(_)
+            | JoinerJoinProgress::AckCreated(_)
+            | JoinerJoinProgress::ResponseCreateIntent(_)
+            | JoinerJoinProgress::Ready(_)
+            | JoinerJoinProgress::CleanupIntent { .. },
+        ) => None,
         _ => return Err(DeviceJoinError::JournalConflict),
     };
-    crate::sync::store_pull::verify_device_join_cleanup_activation(
-        storage,
-        root,
-        &activation,
-        &terminal,
-    )
-    .await?;
+    let receipt_terminal =
+        crate::sync::store_pull::verify_device_join_cleanup_activation(storage, root, &activation)
+            .await?;
+    match &local_terminal {
+        Some(terminal) if terminal != &receipt_terminal => {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        None if !matches!(
+            &receipt_terminal,
+            JoinerJoinTerminal::WriteRevoked(revocation)
+                if revocation.producer == DeviceJoinProducer::Joiner
+        ) =>
+        {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        _ => {}
+    }
     let activated = DeviceJoinJournalRecord {
         attempt_id,
         progress: Box::new(DeviceJoinRoleProgress::Joiner(
             JoinerJoinProgress::CleanupActivated(activation.clone()),
         )),
     };
-    pending.advance(&current, activated)?;
+    if local_terminal.is_some() {
+        pending.advance(&current, activated)?;
+    } else {
+        advance_joiner_cleanup_from_replacement(pending, &current, activated)?;
+    }
     Ok(activation)
+}
+
+fn advance_joiner_cleanup_from_replacement(
+    pending: &DeviceJoinJournalDatabase,
+    previous: &DeviceJoinJournalRecord,
+    next: DeviceJoinJournalRecord,
+) -> Result<(), DeviceJoinError> {
+    if previous.attempt_id != next.attempt_id
+        || !matches!(
+            &*previous.progress,
+            DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::RegistrationPrepared(_)
+                    | JoinerJoinProgress::ProviderReady(_)
+                    | JoinerJoinProgress::RegistrationCreateIntent(_)
+                    | JoinerJoinProgress::RegistrationCreated(_)
+                    | JoinerJoinProgress::AckCreateIntent(_)
+                    | JoinerJoinProgress::AckCreated(_)
+                    | JoinerJoinProgress::ResponseCreateIntent(_)
+                    | JoinerJoinProgress::Ready(_)
+                    | JoinerJoinProgress::CleanupIntent { .. }
+            )
+        )
+        || !matches!(
+            &*next.progress,
+            DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(_))
+        )
+    {
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    let previous_payload = serde_json::to_string(previous)?;
+    let next_payload = serde_json::to_string(&next)?;
+    let connection = Connection::open(pending.path())?;
+    let changed = connection.execute(
+        "UPDATE device_join_journals SET payload = ?1
+         WHERE attempt_id = ?2 AND role = 'joiner' AND payload = ?3",
+        (
+            &next_payload,
+            attempt_key(previous.attempt_id),
+            &previous_payload,
+        ),
+    )?;
+    if changed != 1 {
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    Ok(())
 }
 
 pub fn complete_joiner_device_join_cleanup(
@@ -5172,6 +5242,43 @@ async fn begin_store_journal(
     })
     .await
     .map_err(database_error)
+}
+
+async fn begin_store_replacement_terminal(
+    db: &Database,
+    record: DeviceJoinJournalRecord,
+) -> Result<(), DeviceJoinError> {
+    if !matches!(
+        &*record.progress,
+        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::WriteRevoked(_))
+            | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(_))
+    ) {
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    let key = store_journal_key(record.attempt_id, record.progress.role_name());
+    let value = serde_json::to_string(&record)?;
+    let durable = db
+        .call(move |connection| {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                    (&key, &value),
+                )
+                .map_err(crate::database::DbError::from)?;
+            connection
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .map_err(database_error)?;
+    if durable != serde_json::to_string(&record)? {
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    Ok(())
 }
 
 async fn load_store_journal(

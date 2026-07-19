@@ -5,9 +5,12 @@ use coven::{
     CloudFileReadError, CloudHeadCreateError, CloudHeadReplaceError, CloudHeadVersion, CloudHome,
     CloudHomeError, CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment,
     CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion,
-    CloudKitScope, CloudKitShare, CloudObjectStream, CloudVersionedHead, ExactSlotStorage,
-    ObjectSlot, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
-    ResolvedProviderBinding, StoreProviderBinding,
+    CloudKitScope, CloudKitShare, CloudObjectStream, CloudVersionedHead, CovenHandle,
+    DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer, DeviceJoinWriteRevocationExecutor,
+    ExactSlotStorage, JoinerJoinTerminal, ObjectSlot, PhysicalObjectLocator, ProviderAccessLocator,
+    ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderAdminJoinTerminal,
+    ProviderDeviceBinding, ProviderPrincipalId, ProviderWriteAuthorityRef, ResolvedProviderBinding,
+    StoreProviderBinding,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,6 +20,50 @@ struct ExternalProvider {
 }
 
 struct ExternalCloudKitBridge;
+
+struct ExternalWriteRevocationExecutor;
+
+#[async_trait]
+impl DeviceJoinWriteRevocationExecutor for ExternalWriteRevocationExecutor {
+    async fn revoke_write_authority(
+        &self,
+        _producer: DeviceJoinProducer,
+        _authority: &ProviderWriteAuthorityRef,
+        locator: &ProviderAccessLocator,
+        _protected_slots: &[ObjectSlot],
+    ) -> Result<ProviderAccessWithdrawal, DeviceJoinError> {
+        Ok(ProviderAccessWithdrawal::Direct {
+            locator: locator.clone(),
+            verified_absent: true,
+        })
+    }
+}
+
+async fn external_host_can_revoke_missing_device_join_producers(
+    handle: &CovenHandle,
+    cancellation: DeviceJoinCancellation,
+    executor_grant: ProviderAdminGrantId,
+) -> Result<(), coven::SyncError> {
+    let executor = ExternalWriteRevocationExecutor;
+    let _: ProviderAdminJoinTerminal = handle
+        .revoke_device_provider_admission_writes(
+            cancellation.clone(),
+            &executor,
+            executor_grant.clone(),
+        )
+        .await?;
+    let _: JoinerJoinTerminal = handle
+        .revoke_joining_device_writes(cancellation, &executor, executor_grant)
+        .await?;
+    Ok(())
+}
+
+#[test]
+fn external_host_can_name_device_join_revocation_surface() {
+    fn assert_executor<T: DeviceJoinWriteRevocationExecutor>() {}
+    assert_executor::<ExternalWriteRevocationExecutor>();
+    let _ = external_host_can_revoke_missing_device_join_producers;
+}
 
 impl CloudKitOps for ExternalCloudKitBridge {
     fn provider_identity(

@@ -699,11 +699,12 @@ pub use coven_core::sync::device_join::{
     DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
     DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
     DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness,
-    DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
-    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
-    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
-    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
+    DeviceJoinRole, DeviceJoinStatus, DeviceJoinWriteRevocationExecutor,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
+    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
+    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
+    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
+    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
 };
 pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
@@ -736,9 +737,10 @@ pub use coven_core::storage::cloud::{
     PhysicalObjectLocator,
 };
 pub use coven_core::sync::provider::{
-    CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt, ProviderAdminChange,
-    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
-    ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, SerialCoordinationProbeReceipt,
+    CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt,
+    ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange, ProviderAdminGrantId,
+    ProviderAdminGrantRecord, ProviderAdminMembershipChange, ProviderAdminState,
+    ProviderCapabilityProof, ProviderProbeId, SerialCoordinationProbeReceipt,
 };
 pub use coven_core::sync::storage::{
     AwsPrincipal, GoogleDriveCorpus, ProviderDeviceBinding, ProviderPrincipalId,

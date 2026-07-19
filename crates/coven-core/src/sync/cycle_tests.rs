@@ -11,7 +11,7 @@
 //! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
@@ -33,6 +33,63 @@ const T0: &str = "2024-01-01T00:00:00Z";
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WriteRevocationRequest {
+    producer: crate::sync::device_join::DeviceJoinProducer,
+    authority: crate::sync::device_join::ProviderWriteAuthorityRef,
+    locator: crate::sync::provider::ProviderAccessLocator,
+    protected_slots: Vec<crate::storage::cloud::ObjectSlot>,
+}
+
+struct ConfirmedWriteRevocation {
+    withdrawal: crate::sync::provider::ProviderAccessWithdrawal,
+    requests: Mutex<Vec<WriteRevocationRequest>>,
+}
+
+impl ConfirmedWriteRevocation {
+    fn direct(locator: crate::sync::provider::ProviderAccessLocator) -> Self {
+        Self {
+            withdrawal: crate::sync::provider::ProviderAccessWithdrawal::Direct {
+                locator,
+                verified_absent: true,
+            },
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<WriteRevocationRequest> {
+        self.requests
+            .lock()
+            .expect("write-revocation request lock")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::sync::device_join::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRevocation {
+    async fn revoke_write_authority(
+        &self,
+        producer: crate::sync::device_join::DeviceJoinProducer,
+        authority: &crate::sync::device_join::ProviderWriteAuthorityRef,
+        locator: &crate::sync::provider::ProviderAccessLocator,
+        protected_slots: &[crate::storage::cloud::ObjectSlot],
+    ) -> Result<
+        crate::sync::provider::ProviderAccessWithdrawal,
+        crate::sync::device_join::DeviceJoinError,
+    > {
+        self.requests
+            .lock()
+            .expect("write-revocation request lock")
+            .push(WriteRevocationRequest {
+                producer,
+                authority: authority.clone(),
+                locator: locator.clone(),
+                protected_slots: protected_slots.to_vec(),
+            });
+        Ok(self.withdrawal.clone())
+    }
+}
 
 fn cycle_cloud_storage(
     home: Arc<dyn CloudHome>,
@@ -945,6 +1002,7 @@ fn exercise_post_attempt_cancellation<'a>(
             ProviderAdminJoinTerminal::Cancelled(_)
         ));
 
+        let joiner_revocation = ConfirmedWriteRevocation::direct(joiner_access_locator.clone());
         let joiner_terminal = Box::new(match joiner_disposition {
             JoinerCancellationDisposition::Closure => {
                 Box::pin(crate::sync::device_join::close_joining_device(
@@ -960,16 +1018,12 @@ fn exercise_post_attempt_cancellation<'a>(
             }
             JoinerCancellationDisposition::WriteRevocation => {
                 Box::pin(crate::sync::device_join::revoke_joining_device_writes(
-                    &pending,
                     owner_db,
                     &storage.storage,
                     &authorization,
                     owner,
                     (*cancellation).clone(),
-                    crate::sync::provider::ProviderAccessWithdrawal::Direct {
-                        locator: joiner_access_locator.clone(),
-                        verified_absent: true,
-                    },
+                    &joiner_revocation,
                     storage
                         .protocol_root
                         .descriptor
@@ -981,6 +1035,38 @@ fn exercise_post_attempt_cancellation<'a>(
                 .expect("revoke absent joining-device writes")
             }
         });
+        if matches!(
+            joiner_disposition,
+            JoinerCancellationDisposition::WriteRevocation
+        ) {
+            let crate::sync::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: first_ack,
+            } = &provisional.request.expected_registration.acknowledgements
+            else {
+                panic!("joining registration has a non-Store acknowledgement stream");
+            };
+            let mut expected_slots = vec![
+                provisional.request.registration_slot.clone(),
+                first_ack.clone(),
+            ];
+            if let crate::sync::device_join::DeviceProviderResponseReservation::CrossPrincipal {
+                response_slot,
+            } = &provisional.request.response
+            {
+                expected_slots.push(response_slot.clone());
+            }
+            assert_eq!(
+                joiner_revocation.requests(),
+                vec![WriteRevocationRequest {
+                    producer: crate::sync::device_join::DeviceJoinProducer::Joiner,
+                    authority: crate::sync::device_join::ProviderWriteAuthorityRef::MemberAccess(
+                        provisional.request.approval.access_grant.grant_ref.clone(),
+                    ),
+                    locator: joiner_access_locator.clone(),
+                    protected_slots: expected_slots,
+                }],
+            );
+        }
         let joiner_retry = match joiner_disposition {
             JoinerCancellationDisposition::Closure => {
                 Box::pin(crate::sync::device_join::close_joining_device(
@@ -995,17 +1081,14 @@ fn exercise_post_attempt_cancellation<'a>(
                 .expect("retry exact joining-device closure")
             }
             JoinerCancellationDisposition::WriteRevocation => {
-                Box::pin(crate::sync::device_join::revoke_joining_device_writes(
-                    &pending,
+                let revocation = ConfirmedWriteRevocation::direct(joiner_access_locator);
+                let terminal = Box::pin(crate::sync::device_join::revoke_joining_device_writes(
                     owner_db,
                     &storage.storage,
                     &authorization,
                     owner,
                     (*cancellation).clone(),
-                    crate::sync::provider::ProviderAccessWithdrawal::Direct {
-                        locator: joiner_access_locator,
-                        verified_absent: true,
-                    },
+                    &revocation,
                     storage
                         .protocol_root
                         .descriptor
@@ -1014,7 +1097,9 @@ fn exercise_post_attempt_cancellation<'a>(
                         .clone(),
                 ))
                 .await
-                .expect("retry absent joining-device write revocation")
+                .expect("retry absent joining-device write revocation");
+                assert!(revocation.requests().is_empty());
+                terminal
             }
         };
         assert_eq!(joiner_retry, *joiner_terminal);
@@ -1036,16 +1121,23 @@ fn exercise_post_attempt_cancellation<'a>(
                     ),
                 )
         );
-        assert_eq!(
-            pending
-                .actions()
-                .expect("enumerate terminal joiner actions"),
-            vec![
-                crate::sync::device_join::DeviceJoinAction::TransferJoinerTerminal(
-                    (*joiner_terminal).clone(),
-                ),
-            ],
+        let joiner_action = crate::sync::device_join::DeviceJoinAction::TransferJoinerTerminal(
+            (*joiner_terminal).clone(),
         );
+        match joiner_disposition {
+            JoinerCancellationDisposition::Closure => assert_eq!(
+                pending
+                    .actions()
+                    .expect("enumerate terminal joiner actions"),
+                vec![joiner_action],
+            ),
+            JoinerCancellationDisposition::WriteRevocation => assert!(
+                crate::sync::device_join::load_store_device_join_actions(owner_db)
+                    .await
+                    .expect("enumerate replacement joiner terminal")
+                    .contains(&joiner_action),
+            ),
+        }
 
         storage.home.fail_exact_create_before_call(1);
         let interrupted_cleanup = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
@@ -1202,7 +1294,6 @@ fn exercise_missing_provider_administrator<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         use crate::sync::device_join::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
-        use crate::sync::provider::ProviderAccessWithdrawal;
         use crate::sync::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
         };
@@ -1335,6 +1426,19 @@ fn exercise_missing_provider_administrator<'a>(
             .await
             .expect("cancel cross-principal join attempt"),
         );
+        owner_db
+            .call(|connection| {
+                connection
+                    .execute(
+                        "DELETE FROM protocol_state
+                         WHERE key GLOB 'device_join/*/provider_administrator'",
+                        [],
+                    )
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("remove unavailable provider administrator's local journal");
+        let revocation = ConfirmedWriteRevocation::direct(provider_locator.clone());
         let administrator_terminal = Box::new(
             Box::pin(
                 crate::sync::device_join::revoke_device_provider_admission_writes(
@@ -1343,10 +1447,7 @@ fn exercise_missing_provider_administrator<'a>(
                     &authorization,
                     owner,
                     (*cancellation).clone(),
-                    ProviderAccessWithdrawal::Direct {
-                        locator: provider_locator.clone(),
-                        verified_absent: true,
-                    },
+                    &revocation,
                     storage
                         .protocol_root
                         .descriptor
@@ -1358,6 +1459,31 @@ fn exercise_missing_provider_administrator<'a>(
             .await
             .expect("revoke absent provider-administrator writes"),
         );
+        let crate::sync::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
+            &provisional.request.approval.admission
+        else {
+            panic!("missing-provider test did not create a cross-principal challenge");
+        };
+        assert_eq!(
+            revocation.requests(),
+            vec![WriteRevocationRequest {
+                producer: crate::sync::device_join::DeviceJoinProducer::ProviderAdministrator,
+                authority:
+                    crate::sync::device_join::ProviderWriteAuthorityRef::ProviderAdministrator(
+                        provisional
+                            .request
+                            .approval
+                            .request
+                            .offer
+                            .provider_admin
+                            .grant_id
+                            .clone(),
+                    ),
+                locator: provider_locator.clone(),
+                protected_slots: vec![challenge.administrator_object.slot.clone()],
+            }],
+        );
+        let retry_revocation = ConfirmedWriteRevocation::direct(provider_locator);
         let administrator_retry = Box::pin(
             crate::sync::device_join::revoke_device_provider_admission_writes(
                 owner_db,
@@ -1365,10 +1491,7 @@ fn exercise_missing_provider_administrator<'a>(
                 &authorization,
                 owner,
                 (*cancellation).clone(),
-                ProviderAccessWithdrawal::Direct {
-                    locator: provider_locator,
-                    verified_absent: true,
-                },
+                &retry_revocation,
                 storage
                     .protocol_root
                     .descriptor
@@ -1379,6 +1502,7 @@ fn exercise_missing_provider_administrator<'a>(
         )
         .await
         .expect("retry provider-administrator write revocation");
+        assert!(retry_revocation.requests().is_empty());
         assert_eq!(administrator_retry, *administrator_terminal);
         assert!(matches!(
             administrator_terminal.as_ref(),
