@@ -495,14 +495,27 @@ async fn validate_commit_reclaim_authorization(
         .map_err(RegistrationLoadError::Object)?;
     let evidence = &opened.evidence.value;
     let authorization = &opened.authorization.value;
-    if evidence.author_pubkey != activating_author.author_pubkey
-        || authorization.authority.membership != commit.membership_state
-        || !predecessor.verifies_owner(
-            &authorization.authority.membership,
-            &evidence.author_pubkey,
-            &authorization.authority.owner_grant,
-        )
-    {
+    let owner_authorized = match &authorization.authority.membership {
+        StoreMembershipStateRef::MergeConcurrent { .. } => {
+            authorization.authority.membership == commit.membership_state
+                && predecessor.verifies_owner(
+                    &authorization.authority.membership,
+                    &evidence.author_pubkey,
+                    &authorization.authority.owner_grant,
+                )
+        }
+        StoreMembershipStateRef::Serial { .. } => {
+            serial_reclaim_owner_authority_is_ancestor(
+                storage,
+                root,
+                commit,
+                &authorization.authority,
+                &evidence.author_pubkey,
+            )
+            .await?
+        }
+    };
+    if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
         return Err(RegistrationLoadError::Invalid(
             "reclaim authorization signer is not an active Owner at its exact predecessor"
                 .to_string(),
@@ -523,6 +536,54 @@ async fn validate_commit_reclaim_authorization(
         ));
     }
     Ok(())
+}
+
+async fn serial_reclaim_owner_authority_is_ancestor(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    authority: &super::store_reclaim::StoreReclaimAuthority,
+    author_pubkey: &str,
+) -> Result<bool, RegistrationLoadError> {
+    let loaded = Box::pin(load_device_join_authorization(
+        storage,
+        root,
+        &authority.membership,
+    ))
+    .await
+    .map_err(|error| match error {
+        StorePullError::Object(error) => RegistrationLoadError::Object(error),
+        error => RegistrationLoadError::Invalid(error.to_string()),
+    })?;
+    let DeviceJoinBootstrapAuthorization::Serial {
+        state,
+        position,
+        authorization,
+    } = loaded
+    else {
+        return Ok(false);
+    };
+    let historical = RegistrationPredecessorAuthority::Serial {
+        authorization: &authorization,
+        position: position.clone(),
+    };
+    if state != authority.membership
+        || !historical.verifies_owner(&state, author_pubkey, &authority.owner_grant)
+    {
+        return Ok(false);
+    }
+    match position {
+        super::store_commit::SerialStorePosition::Genesis {
+            root: exact_root, ..
+        } => Ok(exact_root == *root),
+        super::store_commit::SerialStorePosition::Commit(reference) => Ok(
+            predecessor_commit_matching(storage, root, &commit.order, |candidate, _| {
+                candidate == &reference
+            })
+            .await?
+            .is_some(),
+        ),
+    }
 }
 
 async fn validate_commit_reclaim_receipt(
