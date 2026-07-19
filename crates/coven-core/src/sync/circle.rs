@@ -132,6 +132,13 @@ pub struct CircleInfo {
     pub role: CircleRole,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircleMemberInfo {
+    pub pubkey: String,
+    pub role: CircleRole,
+    pub is_self: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationState {

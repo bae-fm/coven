@@ -12843,6 +12843,41 @@ impl Database {
         .await
     }
 
+    pub async fn get_circle_members(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        identity_pubkey: &str,
+        store_members: std::collections::BTreeSet<String>,
+    ) -> Result<Vec<crate::sync::circle::CircleMemberInfo>, DbError> {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.call(move |conn| {
+            let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                DbError::Message(format!("Circle {circle_id} has no current state"))
+            })?;
+            let Some((_current, access, roster, _metadata)) = state.active() else {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} has no active local state"
+                )));
+            };
+            if access.recipient_pubkey != identity_pubkey {
+                return Err(DbError::Message(format!(
+                    "active Circle {circle_id} belongs to another local identity"
+                )));
+            }
+            Ok(roster
+                .members()
+                .into_iter()
+                .filter(|(pubkey, _)| store_members.contains(pubkey))
+                .map(|(pubkey, role)| crate::sync::circle::CircleMemberInfo {
+                    is_self: pubkey == identity_pubkey,
+                    pubkey,
+                    role,
+                })
+                .collect())
+        })
+        .await
+    }
+
     pub(crate) async fn circle_publication_context(
         &self,
         circle_id: crate::sync::circle::CircleId,

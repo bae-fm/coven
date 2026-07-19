@@ -170,7 +170,8 @@ pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the public handle.
 pub use sync::circle::{
-    Audience, CircleId, CircleInfo, CircleOperationInfo, CircleOperationState, CircleRole,
+    Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationInfo, CircleOperationState,
+    CircleRole,
 };
 pub use sync::device_join::{
     abandon_device_join, accept_device_registration_request, activate_device_join_cleanup,

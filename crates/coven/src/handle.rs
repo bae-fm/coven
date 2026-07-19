@@ -1278,6 +1278,15 @@ impl CovenHandle {
             .map_err(SyncError::from)
     }
 
+    /// Return current Circle members who remain current Store members.
+    pub async fn get_circle_members(
+        &self,
+        circle_id: &crate::CircleId,
+    ) -> Result<Vec<crate::CircleMemberInfo>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.get_circle_members(circle_id).await
+    }
+
     /// Return durable circle commands that have not activated.
     pub async fn get_circle_operations(
         &self,
@@ -2727,6 +2736,31 @@ mod tests {
                     role: crate::CircleRole::Owner,
                 }]
             );
+            assert_eq!(
+                handle
+                    .get_circle_members(&circle_id)
+                    .await
+                    .expect("read active Circle members"),
+                vec![crate::CircleMemberInfo {
+                    pubkey: crate::keys::public_key_hex(
+                        &crate::keys::require_identity(handle.identity_custody.as_ref())
+                            .expect("read test identity"),
+                    ),
+                    role: crate::CircleRole::Owner,
+                    is_self: true,
+                }]
+            );
+            let identity = crate::keys::require_identity(handle.identity_custody.as_ref())
+                .expect("read test identity");
+            assert!(db
+                .get_circle_members(
+                    circle_id,
+                    &crate::keys::public_key_hex(&identity),
+                    std::collections::BTreeSet::new(),
+                )
+                .await
+                .expect("intersect Circle roster with an empty Store membership")
+                .is_empty());
             assert!(handle
                 .get_circle_operations()
                 .await

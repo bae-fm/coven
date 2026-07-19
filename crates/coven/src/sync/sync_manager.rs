@@ -905,6 +905,24 @@ impl SyncManager {
         let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
         sync_loop.create_circle(name).await.map_err(SyncError::from)
     }
+
+    pub(crate) async fn get_circle_members(
+        &self,
+        circle_id: &crate::CircleId,
+    ) -> Result<Vec<crate::CircleMemberInfo>, SyncError> {
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let identity_pubkey = crate::keys::public_key_hex(&identity);
+        let store_members = self
+            .get_members()
+            .await?
+            .into_iter()
+            .map(|member| member.pubkey)
+            .collect();
+        self.db
+            .get_circle_members(*circle_id, &identity_pubkey, store_members)
+            .await
+            .map_err(SyncError::from)
+    }
 }
 
 #[cfg(test)]

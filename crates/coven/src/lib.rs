@@ -708,7 +708,8 @@ pub use coven_core::sync::device_join::{
 pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
-    Audience, CircleId, CircleInfo, CircleOperationInfo, CircleOperationState, CircleRole,
+    Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationInfo, CircleOperationState,
+    CircleRole,
 };
 pub use coven_core::{MemberInfo, MemberRole};
 
