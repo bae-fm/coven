@@ -52,11 +52,9 @@ pub(crate) enum CircleOperationPolicy {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleOperationJournal {
-    pub operation_id: CircleOperationId,
-    pub status: CircleOperationState,
+pub(crate) struct PreparedCircleOperation {
     pub creation: CircleCreation,
     pub commit_bytes: Vec<u8>,
     pub commit_ref: StoreBatchCommitRef,
@@ -65,18 +63,79 @@ pub(crate) struct CircleOperationJournal {
     pub uploaded: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CircleOperationIntent {
+    Create { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CircleOperationProgress {
+    Ready(Box<PreparedCircleOperation>),
+    Blocked {
+        reason: String,
+        operation: Box<PreparedCircleOperation>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CircleOperationJournal {
+    pub operation_id: CircleOperationId,
+    pub intent: CircleOperationIntent,
+    pub progress: CircleOperationProgress,
+}
+
 impl CircleOperationJournal {
     pub(crate) fn circle_id(&self) -> CircleId {
-        self.creation.circle_id
+        self.operation().creation.circle_id
+    }
+
+    pub(crate) fn operation(&self) -> &PreparedCircleOperation {
+        match &self.progress {
+            CircleOperationProgress::Ready(operation)
+            | CircleOperationProgress::Blocked { operation, .. } => operation,
+        }
+    }
+
+    pub(crate) fn operation_mut(&mut self) -> &mut PreparedCircleOperation {
+        match &mut self.progress {
+            CircleOperationProgress::Ready(operation)
+            | CircleOperationProgress::Blocked { operation, .. } => operation,
+        }
+    }
+
+    pub(crate) fn state(&self) -> CircleOperationState {
+        match &self.progress {
+            CircleOperationProgress::Ready(_) => CircleOperationState::Pending,
+            CircleOperationProgress::Blocked { reason, .. } => CircleOperationState::Blocked {
+                reason: reason.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn block(&mut self, reason: String) -> Result<(), CircleOperationError> {
+        let CircleOperationProgress::Ready(operation) = &mut self.progress else {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} is already blocked",
+                self.operation_id
+            )));
+        };
+        let operation = operation.clone();
+        self.progress = CircleOperationProgress::Blocked { reason, operation };
+        Ok(())
     }
 
     pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleOperationError> {
-        serde_json::from_slice(&self.commit_bytes)
+        serde_json::from_slice(&self.operation().commit_bytes)
             .map_err(|error| CircleOperationError::Journal(format!("parse Store commit: {error}")))
     }
 
     pub(crate) fn kind(&self) -> CircleOperationKind {
-        CircleOperationKind::Create
+        match self.intent {
+            CircleOperationIntent::Create { .. } => CircleOperationKind::Create,
+        }
     }
 }
 
@@ -84,9 +143,10 @@ fn verify_prepared_objects_are_signed(
     journal: &CircleOperationJournal,
     reference: &super::store_commit::CircleControlRef,
 ) -> Result<(), CircleOperationError> {
+    let operation = journal.operation();
     let objects = reference.objects();
     let mut signed = BTreeSet::<ExactObjectRef>::from([
-        journal.commit_ref.object.clone(),
+        operation.commit_ref.object.clone(),
         objects.control.clone(),
     ]);
     signed.extend(objects.control_head.iter().map(|head| head.object.clone()));
@@ -114,10 +174,10 @@ fn verify_prepared_objects_are_signed(
         signed.insert(access.leaf.object.clone());
         signed.insert(access.envelope.object.clone());
     }
-    for (step, prepared) in &journal.prepared_objects {
+    for (step, prepared) in &operation.prepared_objects {
         let is_merge_head = step == "store-head"
             && matches!(
-                journal.policy,
+                operation.policy,
                 CircleOperationPolicy::MergeConcurrent { .. }
             );
         if !is_merge_head && !signed.contains(prepared.reference()) {
@@ -556,7 +616,7 @@ pub(crate) async fn resume_circle_operations(
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
     while let Some(journal) = db.oldest_pending_circle_operation().await? {
-        if !matches!(journal.status, CircleOperationState::Pending) {
+        if !matches!(journal.state(), CircleOperationState::Pending) {
             return Err(CircleOperationError::Journal(format!(
                 "pending circle operation {} contains a blocked payload",
                 journal.circle_id()
@@ -883,13 +943,17 @@ async fn prepare_circle_operation(
     };
     Ok(CircleOperationJournal {
         operation_id,
-        status: CircleOperationState::Pending,
-        creation,
-        commit_bytes: commit.to_bytes(),
-        commit_ref,
-        prepared_objects,
-        policy,
-        uploaded: BTreeSet::new(),
+        intent: CircleOperationIntent::Create {
+            name: creation.metadata.name.clone(),
+        },
+        progress: CircleOperationProgress::Ready(Box::new(PreparedCircleOperation {
+            creation,
+            commit_bytes: commit.to_bytes(),
+            commit_ref,
+            prepared_objects,
+            policy,
+            uploaded: BTreeSet::new(),
+        })),
     })
 }
 
@@ -904,13 +968,10 @@ async fn publish_circle_operation(
         .circle_operation(circle_id)
         .await?
         .ok_or_else(|| CircleOperationError::Journal(format!("circle {circle_id} is absent")))?;
-    if let CircleOperationState::Blocked { reason } = &journal.status {
-        return Err(CircleOperationError::Blocked {
-            circle_id,
-            reason: reason.clone(),
-        });
+    if let CircleOperationState::Blocked { reason } = journal.state() {
+        return Err(CircleOperationError::Blocked { circle_id, reason });
     }
-    let creation = journal.creation.clone();
+    let creation = journal.operation().creation.clone();
     let store_root_hash = creation.control.value.store_root_hash;
     let circle_encryption = EncryptionService::from(
         MasterKeyring::from_serialized(&creation.keyring)
@@ -929,7 +990,7 @@ async fn publish_circle_operation(
     verify_control_context(
         reference,
         &creation.control,
-        &journal.commit_ref,
+        &journal.operation().commit_ref,
         &commit,
         &author,
     )?;
@@ -954,7 +1015,7 @@ async fn publish_circle_operation(
         db.block_circle_operation(circle_id, reason.clone()).await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
     }
-    if let CircleOperationPolicy::MergeConcurrent { head } = &journal.policy {
+    if let CircleOperationPolicy::MergeConcurrent { head } = &journal.operation().policy {
         let root = db
             .local_store_root_ref()
             .await?
@@ -968,16 +1029,20 @@ async fn publish_circle_operation(
                 commit.order.predecessor(),
             )
             .await?;
-        let prepared_head = journal.prepared_objects.get("store-head").ok_or_else(|| {
-            CircleOperationError::Journal(
-                "Merge Circle operation lacks its prepared Store head".to_string(),
-            )
-        })?;
+        let prepared_head = journal
+            .operation()
+            .prepared_objects
+            .get("store-head")
+            .ok_or_else(|| {
+                CircleOperationError::Journal(
+                    "Merge Circle operation lacks its prepared Store head".to_string(),
+                )
+            })?;
         StoreDeviceHead::parse_at(
             &head.to_bytes(),
             store_root_hash,
             &author,
-            &journal.commit_ref,
+            &journal.operation().commit_ref,
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if prepared_head.reference().slot() != &expected_slot
@@ -1155,12 +1220,13 @@ async fn publish_circle_operation(
         )
         .await?;
     }
-    let policy = journal.policy.clone();
+    let policy = journal.operation().policy.clone();
     match policy {
         CircleOperationPolicy::MergeConcurrent { head } => {
-            let commit_bytes = journal.commit_bytes.clone();
-            let commit_hash = journal.commit_ref.commit_hash;
-            let StoreCommitCoord::MergeConcurrent { stream_id, .. } = journal.commit_ref.coord
+            let commit_bytes = journal.operation().commit_bytes.clone();
+            let commit_hash = journal.operation().commit_ref.commit_hash;
+            let StoreCommitCoord::MergeConcurrent { stream_id, .. } =
+                journal.operation().commit_ref.coord
             else {
                 return Err(CircleOperationError::InvalidState(
                     "Merge Circle policy carries a Serial commit ref".to_string(),
@@ -1219,6 +1285,7 @@ async fn publish_circle_operation(
                 &base_head,
                 &commit,
                 journal
+                    .operation()
                     .prepared_objects
                     .get("store-commit")
                     .ok_or_else(|| {
@@ -1226,7 +1293,7 @@ async fn publish_circle_operation(
                             "Circle operation lacks its prepared Store commit".to_string(),
                         )
                     })?,
-                &journal.commit_ref,
+                &journal.operation().commit_ref,
                 &head,
             )
             .await
@@ -1287,12 +1354,17 @@ async fn append_step(
     semantic_prefix: &str,
     bytes: &[u8],
 ) -> Result<(), CircleOperationError> {
-    let prepared = journal.prepared_objects.get(step).cloned().ok_or_else(|| {
-        CircleOperationError::Journal(format!(
-            "Circle upload step {step:?} lacks its prepared exact object"
-        ))
-    })?;
-    if journal.uploaded.contains(step) {
+    let prepared = journal
+        .operation()
+        .prepared_objects
+        .get(step)
+        .cloned()
+        .ok_or_else(|| {
+            CircleOperationError::Journal(format!(
+                "Circle upload step {step:?} lacks its prepared exact object"
+            ))
+        })?;
+    if journal.operation().uploaded.contains(step) {
         let persisted =
             load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix).await?;
         if persisted != bytes {
@@ -1313,7 +1385,7 @@ async fn append_step(
             "circle upload step {step:?} differs from its prepared journal bytes"
         )));
     }
-    journal.uploaded.insert(step.to_string());
+    journal.operation_mut().uploaded.insert(step.to_string());
     db.update_circle_operation(journal.clone()).await?;
     Ok(())
 }
@@ -1553,9 +1625,13 @@ mod tests {
 
     fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOperationJournal) {
         assert_eq!(actual.operation_id, expected.operation_id);
-        assert_eq!(actual.creation, expected.creation);
-        assert_eq!(actual.commit_bytes, expected.commit_bytes);
-        assert_eq!(actual.policy, expected.policy);
+        assert_eq!(actual.intent, expected.intent);
+        assert_eq!(actual.operation().creation, expected.operation().creation);
+        assert_eq!(
+            actual.operation().commit_bytes,
+            expected.operation().commit_bytes
+        );
+        assert_eq!(actual.operation().policy, expected.operation().policy);
     }
 
     #[tokio::test]
@@ -1574,7 +1650,7 @@ mod tests {
                         }
                     );
                     let (store, signer, expected) = persist_merge_operation(&db, &name).await;
-                    if call > expected.prepared_objects.len() {
+                    if call > expected.operation().prepared_objects.len() {
                         break;
                     }
                     assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
@@ -1613,7 +1689,7 @@ mod tests {
                             .expect("read interrupted operation")
                             .expect("interrupted operation remains durable");
                         assert_exact_operation(&expected, &persisted);
-                        assert_eq!(persisted.status, CircleOperationState::Pending);
+                        assert_eq!(persisted.state(), CircleOperationState::Pending);
                         assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
 
                         resume_circle_operations(&db, &store.storage, None, &signer)
@@ -1685,7 +1761,7 @@ mod tests {
             .expect("read reopened circle operation")
             .expect("circle operation survives restart");
         assert_exact_operation(&expected, &persisted);
-        assert_eq!(persisted.status, CircleOperationState::Pending);
+        assert_eq!(persisted.state(), CircleOperationState::Pending);
 
         resume_circle_operations(&reopened, &store.storage, None, &signer)
             .await
@@ -1731,7 +1807,7 @@ mod tests {
         .await
         .expect("prepare Serial Circle operation");
         assert!(matches!(
-            expected.policy,
+            expected.operation().policy,
             CircleOperationPolicy::Serial { .. }
         ));
         db.insert_circle_operation(expected.clone())
@@ -1771,7 +1847,9 @@ mod tests {
             persist_merge_operation(&db, "circle-merge-serial-state").await;
         let mut payload = serde_json::to_value(&journal).expect("serialize Merge journal");
         let policy = payload
-            .get_mut("policy")
+            .get_mut("progress")
+            .and_then(|progress| progress.get_mut("ready"))
+            .and_then(|operation| operation.get_mut("policy"))
             .and_then(|policy| policy.get_mut("merge_concurrent"))
             .and_then(serde_json::Value::as_object_mut)
             .expect("Merge policy object");
@@ -1829,9 +1907,10 @@ mod tests {
                 .await
                 .expect("read interrupted circle operation")
                 .expect("interrupted circle operation remains durable");
-            assert!(persisted.uploaded.contains("metadata"));
+            assert!(persisted.operation().uploaded.contains("metadata"));
 
             let metadata = expected
+                .operation()
                 .prepared_objects
                 .get("metadata")
                 .expect("operation carries exact metadata object");
@@ -1876,6 +1955,7 @@ mod tests {
             persist_merge_operation(&db, "circle-tampered-local-access").await;
         let author = keys::public_key_hex(&signer);
         let own_access = journal
+            .operation_mut()
             .creation
             .access
             .iter_mut()
@@ -1909,6 +1989,7 @@ mod tests {
             persist_merge_operation(&db, "circle-mismatched-local-keyring").await;
         let author = keys::public_key_hex(&signer);
         let own_access = journal
+            .operation_mut()
             .creation
             .access
             .iter_mut()
@@ -1934,7 +2015,7 @@ mod tests {
             .expect("load exact Circle commit author");
         let error = verify_local_circle_activation(
             &journal,
-            &journal.commit_ref,
+            &journal.operation().commit_ref,
             &commit,
             &author,
             &signer,
@@ -1952,6 +2033,7 @@ mod tests {
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-substituted-local-object-ref").await;
         let original = journal
+            .operation()
             .prepared_objects
             .get("metadata")
             .expect("operation carries exact metadata object");
@@ -1970,6 +2052,7 @@ mod tests {
         )
         .expect("construct substituted prepared metadata object");
         journal
+            .operation_mut()
             .prepared_objects
             .insert("metadata".to_string(), substituted);
         db.update_circle_operation(journal.clone())
@@ -1989,6 +2072,7 @@ mod tests {
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-substituted-local-head-slot").await;
         let original = journal
+            .operation()
             .prepared_objects
             .get("store-head")
             .expect("Merge operation carries an exact Store head");
@@ -2007,6 +2091,7 @@ mod tests {
         )
         .expect("construct substituted prepared Store head");
         journal
+            .operation_mut()
             .prepared_objects
             .insert("store-head".to_string(), substituted);
         db.update_circle_operation(journal.clone())
@@ -2026,7 +2111,7 @@ mod tests {
         let (store, signer, journal) =
             persist_merge_operation(&db, "circle-invented-access-refs").await;
         let old_commit = journal.commit().expect("parse prepared Store commit");
-        for object in journal.prepared_objects.values() {
+        for object in journal.operation().prepared_objects.values() {
             super::super::store_objects::create_exact_object(&store.storage, object)
                 .await
                 .expect("publish original exact Circle activation object");
@@ -2038,11 +2123,11 @@ mod tests {
             .objects()
             .clone();
         let original_ref = objects.access[0].clone();
-        let original_access = &journal.creation.access[0];
+        let original_access = &journal.operation().creation.access[0];
         let invented_recipient_slot = format!("{}-invented", original_ref.leaf.recipient_slot);
         let candidate_family = old_commit.candidate_family();
         let leaf_prefix = circle_access_leaf_semantic_prefix(
-            journal.creation.circle_id,
+            journal.operation().creation.circle_id,
             candidate_family,
             &original_ref.leaf.owner_pubkey,
             original_ref.leaf.epoch_id,
@@ -2062,7 +2147,7 @@ mod tests {
         .await
         .expect("prepare invented access leaf path");
         let envelope_prefix = circle_access_envelope_semantic_prefix(
-            journal.creation.circle_id,
+            journal.operation().creation.circle_id,
             candidate_family,
             &original_ref.envelope.owner_pubkey,
             &invented_recipient_slot,
@@ -2106,7 +2191,7 @@ mod tests {
         let device_signer = author
             .device_signer(&signer)
             .expect("derive Circle commit device signer");
-        let commit_coord = journal.commit_ref.coord.clone();
+        let commit_coord = journal.operation().commit_ref.coord.clone();
         let commit = signed_circle_commit(
             old_commit.store_root_hash,
             old_commit.write_id,
@@ -2117,7 +2202,7 @@ mod tests {
             old_commit.membership_state,
             old_commit.device_state,
             old_commit.membership_authority,
-            &journal.creation,
+            &journal.operation().creation,
             objects,
             &device_signer,
         )
@@ -2172,7 +2257,7 @@ mod tests {
 
         let CircleOperationPolicy::MergeConcurrent {
             head: original_head,
-        } = &journal.policy
+        } = &journal.operation().policy
         else {
             panic!("invented access test requires a MergeConcurrent head")
         };
@@ -2185,6 +2270,7 @@ mod tests {
         )
         .expect("sign Store head naming the re-signed commit");
         let original_head_object = journal
+            .operation()
             .prepared_objects
             .get("store-head")
             .expect("Circle operation carries its Store head");
@@ -2274,7 +2360,7 @@ mod tests {
         .await
         .expect("prepare Circle with inactive Store-member access");
         promote_store_member_access_without_adding_to_circle_roster(
-            &mut journal.creation,
+            &mut journal.operation_mut().creation,
             &founder,
             &peer,
         );
@@ -2283,7 +2369,7 @@ mod tests {
         let (objects, prepared) = prepare_circle_activation_objects(
             &store.storage,
             &store.root,
-            &journal.creation,
+            &journal.operation().creation,
             candidate_family,
         )
         .await
@@ -2300,7 +2386,7 @@ mod tests {
         let device_signer = author
             .device_signer(&founder)
             .expect("derive Circle commit device signer");
-        let commit_coord = journal.commit_ref.coord.clone();
+        let commit_coord = journal.operation().commit_ref.coord.clone();
         let commit = signed_circle_commit(
             old_commit.store_root_hash,
             old_commit.write_id,
@@ -2311,7 +2397,7 @@ mod tests {
             old_commit.membership_state,
             old_commit.device_state,
             old_commit.membership_authority,
-            &journal.creation,
+            &journal.operation().creation,
             objects,
             &device_signer,
         )
@@ -2371,7 +2457,7 @@ mod tests {
         let (baseline_store, baseline_signer, baseline) =
             persist_merge_operation(&baseline_db, "circle-remote-metadata-baseline").await;
         let baseline_commit = baseline.commit().expect("parse baseline Store commit");
-        for object in baseline.prepared_objects.values() {
+        for object in baseline.operation().prepared_objects.values() {
             super::super::store_objects::create_exact_object(&baseline_store.storage, object)
                 .await
                 .expect("publish baseline exact Circle activation object");
@@ -2383,7 +2469,7 @@ mod tests {
         load_circle_activations(
             &baseline_store.storage,
             &baseline_store.root,
-            &baseline.commit_ref,
+            &baseline.operation().commit_ref,
             &baseline_commit,
             &baseline_author,
             &baseline_signer,
@@ -2396,8 +2482,8 @@ mod tests {
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-remote-metadata-roster").await;
         let old_commit = journal.commit().expect("parse prepared Store commit");
-        let commit_coord = journal.commit_ref.coord.clone();
-        let creation = &mut journal.creation;
+        let commit_coord = journal.operation().commit_ref.coord.clone();
+        let creation = &mut journal.operation_mut().creation;
         let store_root_hash = creation.control.value.store_root_hash;
         let super::super::circle::CircleRosterStateRef::MergeConcurrent(roster_state) =
             &mut creation.metadata.author_roster
@@ -2646,7 +2732,7 @@ mod tests {
             .expect("read revoked journal")
             .expect("revoked journal remains durable");
         assert!(matches!(
-            blocked.status,
+            blocked.state(),
             CircleOperationState::Blocked { .. }
         ));
         assert!(successor_db
@@ -2869,7 +2955,7 @@ mod tests {
         .expect("prepare Circle operation at the first exact head");
         let CircleOperationPolicy::Serial {
             base: Some(base), ..
-        } = &journal.policy
+        } = &journal.operation().policy
         else {
             panic!("expected Serial Circle operation with a base")
         };
@@ -2916,7 +3002,7 @@ mod tests {
 
         assert!(matches!(error, CircleOperationError::Blocked { .. }));
         assert!(home
-            .get(journal.commit_ref.object.slot().logical_key())
+            .get(journal.operation().commit_ref.object.slot().logical_key())
             .is_none());
     }
 
@@ -2946,7 +3032,7 @@ mod tests {
         )
         .await
         .expect("prepare Circle operation");
-        let CircleOperationPolicy::Serial { head, .. } = &journal.policy else {
+        let CircleOperationPolicy::Serial { head, .. } = &journal.operation().policy else {
             panic!("expected Serial Circle head")
         };
         let current_head = coordination
@@ -2978,7 +3064,7 @@ mod tests {
             .expect("read Circle journal")
             .is_some());
         assert!(home
-            .get(journal.commit_ref.object.slot().logical_key())
+            .get(journal.operation().commit_ref.object.slot().logical_key())
             .is_none());
     }
 
@@ -3063,7 +3149,7 @@ mod tests {
             .expect("blocked Serial operation remains durable");
         assert_exact_operation(&expected, &blocked);
         assert!(matches!(
-            blocked.status,
+            blocked.state(),
             CircleOperationState::Blocked { .. }
         ));
         let operations = db

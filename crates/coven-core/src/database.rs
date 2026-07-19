@@ -12704,7 +12704,7 @@ impl Database {
                         DbError::Message(format!("parse circle operation journal: {error}"))
                     })?;
                 if matches!(
-                    journal.status,
+                    journal.state(),
                     crate::sync::circle::CircleOperationState::Pending
                 ) {
                     return Ok(Some(journal));
@@ -12739,7 +12739,7 @@ impl Database {
                 serde_json::from_slice(&payload).map_err(|error| {
                     DbError::Message(format!("parse circle operation journal: {error}"))
                 })?;
-            match journal.status {
+            match journal.state() {
                 crate::sync::circle::CircleOperationState::Pending => {
                     return Err(DbError::Message(format!(
                         "pending circle operation {circle_id} cannot be discarded"
@@ -12783,7 +12783,7 @@ impl Database {
                         operation_id: journal.operation_id.clone(),
                         circle_id: journal.circle_id(),
                         kind: journal.kind(),
-                        state: journal.status,
+                        state: journal.state(),
                     })
                 })
                 .collect();
@@ -13046,7 +13046,9 @@ impl Database {
             .circle_operation(circle_id)
             .await?
             .ok_or_else(|| DbError::Message(format!("circle operation {circle_id} is absent")))?;
-        journal.status = crate::sync::circle::CircleOperationState::Blocked { reason };
+        journal
+            .block(reason)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         self.update_circle_operation(journal).await
     }
 
@@ -13059,14 +13061,15 @@ impl Database {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if !matches!(
-                journal.status,
+                journal.state(),
                 crate::sync::circle::CircleOperationState::Pending
             ) {
                 return Err(DbError::Message(
                     "blocked circle operation cannot activate".to_string(),
                 ));
             }
-            let creation = &journal.creation;
+            let operation = journal.operation();
+            let creation = &operation.creation;
             let resolved_roster = creation.resolved_roster();
             if !creation.control.verify()
                 || !creation.metadata.verify()
@@ -13076,29 +13079,31 @@ impl Database {
                     "circle operation contains invalid signed objects".to_string(),
                 ));
             }
-            let unverified_commit: StoreBatchCommit = serde_json::from_slice(&journal.commit_bytes)
-                .map_err(|error| DbError::Message(format!("parse circle Store commit: {error}")))?;
+            let unverified_commit: StoreBatchCommit =
+                serde_json::from_slice(&operation.commit_bytes).map_err(|error| {
+                    DbError::Message(format!("parse circle Store commit: {error}"))
+                })?;
             let root = required_store_root_authority_on(&tx)?;
             let author =
                 load_activated_registration_on(&tx, &root, &unverified_commit.author_registration)?;
             let verify_commit = || {
                 let commit = StoreBatchCommit::parse_at(
-                    &journal.commit_bytes,
+                    &operation.commit_bytes,
                     root.store_root_hash,
-                    &journal.commit_ref.coord,
+                    &operation.commit_ref.coord,
                     &author,
                 )
                 .map_err(|error| {
                     DbError::Message(format!("verify circle Store commit: {error}"))
                 })?;
-                journal
+                operation
                     .commit_ref
                     .verify_commit(&commit)
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                if journal.commit_ref.object.slot().logical_key()
+                if operation.commit_ref.object.slot().logical_key()
                     != commit_semantic_prefix(
                         commit.candidate_family(),
-                        &match &journal.commit_ref.coord {
+                        &match &operation.commit_ref.coord {
                             StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
                                 stream_id.to_string()
                             }
@@ -13132,7 +13137,7 @@ impl Database {
                 }
                 let activation = crate::sync::circle_ops::verify_local_circle_activation(
                     &journal,
-                    &journal.commit_ref,
+                    &operation.commit_ref,
                     &commit,
                     &author,
                     &identity,
@@ -13140,24 +13145,24 @@ impl Database {
                 .map_err(|error| DbError::Message(error.to_string()))?;
                 Ok((commit, activation))
             };
-            let (commit, activation) = match &journal.policy {
+            let (commit, activation) = match &operation.policy {
                 crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent { head } => {
                     let (commit, activation) = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
                         commit.store_root_hash,
                         &author,
-                        &journal.commit_ref,
+                        &operation.commit_ref,
                     )
                     .map_err(|error| {
                         DbError::Message(format!("verify circle activation head: {error}"))
                     })?;
-                    if parsed.commit != journal.commit_ref {
+                    if parsed.commit != operation.commit_ref {
                         return Err(DbError::Message(
                             "circle activation head names a different commit".to_string(),
                         ));
                     }
-                    Self::record_materialized_commit_on(&tx, &commit, &journal.commit_ref)?;
+                    Self::record_materialized_commit_on(&tx, &commit, &operation.commit_ref)?;
                     (commit, activation)
                 }
                 crate::sync::circle_ops::CircleOperationPolicy::Serial {
@@ -13174,7 +13179,7 @@ impl Database {
                     if !matches!(
                         parsed.state,
                         StoreSerialHeadState::Commit { ref commit, .. }
-                            if commit == &journal.commit_ref
+                            if commit == &operation.commit_ref
                     ) {
                         return Err(DbError::Message(
                             "circle Serial head names a different commit".to_string(),
@@ -13183,7 +13188,7 @@ impl Database {
                     Self::record_materialized_serial_commit_on(
                         &tx,
                         &commit,
-                        &journal.commit_ref,
+                        &operation.commit_ref,
                         authorization,
                     )?;
                     (commit, activation)
@@ -13192,7 +13197,7 @@ impl Database {
             Self::record_verified_circle_activations_on(
                 &tx,
                 &commit,
-                &journal.commit_ref,
+                &operation.commit_ref,
                 &[activation],
             )?;
             let deleted = tx

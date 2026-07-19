@@ -1975,7 +1975,7 @@ pub(crate) fn verify_local_circle_activation(
     author: &StoreDeviceRegistration,
     identity: &UserKeypair,
 ) -> Result<VerifiedCircleReference, CircleOperationError> {
-    let creation = &journal.creation;
+    let creation = &journal.operation().creation;
     let control = &creation.control;
     let [reference] = commit.circle_controls() else {
         return Err(CircleOperationError::InvalidState(
