@@ -1027,6 +1027,33 @@ fn exercise_post_attempt_cancellation<'a>(
             ),
         });
 
+        storage.home.fail_exact_create_before_call(1);
+        let interrupted_cleanup = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
+            owner_db,
+            &storage.storage,
+            coordination,
+            storage.home.as_ref(),
+            &authorization,
+            owner,
+            (*cancellation).clone(),
+            (*administrator_terminal).clone(),
+            (*joiner_terminal).clone(),
+        ))
+        .await;
+        assert!(
+            interrupted_cleanup.is_err(),
+            "the cleanup-receipt create interruption surfaces"
+        );
+        assert!(matches!(
+            crate::sync::device_join::load_store_device_join_status(
+                owner_db,
+                attempt_id,
+                DeviceJoinRole::Owner,
+            )
+            .await
+            .expect("load interrupted cleanup status"),
+            Some(DeviceJoinStatus::CleanupReceiptCreatePending { .. })
+        ));
         let receipt = Box::new(
             Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
                 owner_db,
@@ -1040,7 +1067,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 (*joiner_terminal).clone(),
             ))
             .await
-            .expect("prepare exact cleanup receipt"),
+            .expect("resume exact cleanup receipt"),
         );
         let receipt_retry = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
             owner_db,

@@ -1265,6 +1265,7 @@ pub enum OwnerJoinProgress {
     CleanupReceiptCreateIntent {
         cancellation: DeviceJoinCancellation,
         receipt: DeviceJoinCleanupReceiptRef,
+        receipt_bytes: Vec<u8>,
         prepared: PreparedDeviceJoinObject,
     },
     CleanupReceipt(DeviceJoinCleanupReceipt),
@@ -2951,16 +2952,43 @@ pub async fn cancel_device_join(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn prepare_device_join_cleanup(
+pub fn prepare_device_join_cleanup<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    coordination: Option<&'a dyn CoordinationStorage>,
+    executor_exact: &'a dyn ExactSlotStorage,
+    authorization: &'a DeviceJoinAuthorization,
+    identity_signer: &'a UserKeypair,
+    cancellation: DeviceJoinCancellation,
+    administrator_terminal: ProviderAdminJoinTerminal,
+    joiner_terminal: JoinerJoinTerminal,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<DeviceJoinCleanupReceipt, DeviceJoinError>> + 'a>,
+> {
+    Box::pin(prepare_device_join_cleanup_inner(
+        db,
+        storage,
+        coordination,
+        executor_exact,
+        authorization,
+        identity_signer,
+        Box::new(cancellation),
+        Box::new(administrator_terminal),
+        Box::new(joiner_terminal),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_device_join_cleanup_inner(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn CoordinationStorage>,
     executor_exact: &dyn ExactSlotStorage,
     authorization: &DeviceJoinAuthorization,
     identity_signer: &UserKeypair,
-    cancellation: DeviceJoinCancellation,
-    administrator_terminal: ProviderAdminJoinTerminal,
-    joiner_terminal: JoinerJoinTerminal,
+    cancellation: Box<DeviceJoinCancellation>,
+    administrator_terminal: Box<ProviderAdminJoinTerminal>,
+    joiner_terminal: Box<JoinerJoinTerminal>,
 ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
     require_authorization_policy(db, storage, authorization).await?;
     require_cancelled_outcome(&cancellation.outcome)?;
@@ -2981,7 +3009,7 @@ pub async fn prepare_device_join_cleanup(
         }) => durable,
         _ => return Err(DeviceJoinError::JournalConflict),
     };
-    if durable_cancellation != &cancellation {
+    if durable_cancellation != cancellation.as_ref() {
         return Err(DeviceJoinError::JournalConflict);
     }
     let root = db
@@ -3027,10 +3055,15 @@ pub async fn prepare_device_join_cleanup(
     }
     validate_terminals(
         &cancellation.outcome,
-        &administrator_terminal,
-        &joiner_terminal,
+        administrator_terminal.as_ref(),
+        joiner_terminal.as_ref(),
     )?;
-    verify_cleanup_terminals(db, &administrator_terminal, &joiner_terminal).await?;
+    verify_cleanup_terminals(
+        db,
+        administrator_terminal.as_ref(),
+        joiner_terminal.as_ref(),
+    )
+    .await?;
     let local_device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -3060,34 +3093,6 @@ pub async fn prepare_device_join_cleanup(
     {
         return Err(DeviceJoinError::ProviderAdministratorRequired);
     }
-    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
-        db,
-        storage,
-        coordination,
-        &local_device_id,
-        identity_signer,
-        authorization.merge_chain(),
-    )
-    .await?;
-    let deleted_slots = canonical_cleanup_slots(&attempt)?;
-    let receipt_object = DeviceJoinCleanupReceiptObject::signed(
-        &attempt,
-        cancellation.outcome.clone(),
-        administrator_terminal,
-        joiner_terminal,
-        deleted_slots.clone(),
-        plan.membership_state().clone(),
-        attempt
-            .provider_approval
-            .request
-            .offer
-            .provider_admin
-            .grant_id
-            .clone(),
-        executor_ref,
-        &executor,
-        &executor_signer,
-    )?;
     let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinCleanupReceipt,
@@ -3095,39 +3100,95 @@ pub async fn prepare_device_join_cleanup(
     let prefix = crate::sync::store_commit::device_join_cleanup_receipt_semantic_prefix(
         attempt_ref.attempt_id,
     );
-    let slot = storage
-        .allocate_protocol_slot(&context, &prefix, ".json")
-        .await?;
-    let prepared =
-        storage.prepare_protocol_object(&context, slot, &prefix, receipt_object.to_bytes())?;
-    let receipt_ref = DeviceJoinCleanupReceiptRef {
-        attempt_id: attempt_ref.attempt_id,
-        receipt_hash: receipt_object.receipt_hash(),
-        object: prepared.reference().clone(),
-    };
-    let intent = DeviceJoinJournalRecord {
-        attempt_id: attempt_ref.attempt_id,
-        progress: Box::new(DeviceJoinRoleProgress::Owner(
-            OwnerJoinProgress::CleanupReceiptCreateIntent {
-                cancellation: cancellation.clone(),
-                receipt: receipt_ref.clone(),
-                prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
-            },
-        )),
-    };
-    match &*current.progress {
+    let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(_)) => {
+            let plan = crate::sync::store_outbound::prepare_store_operation_commit(
+                db,
+                storage,
+                coordination,
+                &local_device_id,
+                identity_signer,
+                authorization.merge_chain(),
+            )
+            .await?;
+            let receipt_object = DeviceJoinCleanupReceiptObject::signed(
+                &attempt,
+                cancellation.outcome.clone(),
+                administrator_terminal.as_ref().clone(),
+                joiner_terminal.as_ref().clone(),
+                canonical_cleanup_slots(&attempt)?,
+                plan.membership_state().clone(),
+                attempt
+                    .provider_approval
+                    .request
+                    .offer
+                    .provider_admin
+                    .grant_id
+                    .clone(),
+                executor_ref,
+                &executor,
+                &executor_signer,
+            )?;
+            let slot = storage
+                .allocate_protocol_slot(&context, &prefix, ".json")
+                .await?;
+            let prepared = storage.prepare_protocol_object(
+                &context,
+                slot,
+                &prefix,
+                receipt_object.to_bytes(),
+            )?;
+            let receipt_ref = DeviceJoinCleanupReceiptRef {
+                attempt_id: attempt_ref.attempt_id,
+                receipt_hash: receipt_object.receipt_hash(),
+                object: prepared.reference().clone(),
+            };
+            let intent = DeviceJoinJournalRecord {
+                attempt_id: attempt_ref.attempt_id,
+                progress: Box::new(DeviceJoinRoleProgress::Owner(
+                    OwnerJoinProgress::CleanupReceiptCreateIntent {
+                        cancellation: cancellation.as_ref().clone(),
+                        receipt: receipt_ref.clone(),
+                        receipt_bytes: receipt_object.to_bytes(),
+                        prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
+                    },
+                )),
+            };
             advance_store_journal(db, &current, intent.clone()).await?;
+            (Box::new(receipt_object), receipt_ref, prepared, intent)
         }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceiptCreateIntent {
             receipt,
-            prepared: durable_prepared,
+            receipt_bytes,
+            prepared,
             ..
-        }) if receipt == &receipt_ref
-            && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
+        }) => {
+            let receipt_object: DeviceJoinCleanupReceiptObject =
+                serde_json::from_slice(receipt_bytes)?;
+            if receipt_object.to_bytes() != *receipt_bytes
+                || receipt_object.cancellation != cancellation.outcome
+                || &receipt_object.administrator_terminal != administrator_terminal.as_ref()
+                || &receipt_object.joiner_terminal != joiner_terminal.as_ref()
+                || receipt.attempt_id != attempt_ref.attempt_id
+                || receipt.receipt_hash != receipt_object.receipt_hash()
+                || receipt.object != prepared.object
+            {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            (
+                Box::new(receipt_object),
+                receipt.clone(),
+                crate::sync::storage::PreparedExactObject::new(
+                    prepared.object.clone(),
+                    prepared.stored_bytes.clone(),
+                )?,
+                current.clone(),
+            )
+        }
         _ => return Err(DeviceJoinError::JournalConflict),
-    }
-    for slot in &deleted_slots {
+    };
+    receipt_object.verify(&attempt, &executor)?;
+    for slot in &receipt_object.deleted_slots {
         ensure_exact_slot_absent(executor_exact, slot).await?;
     }
     storage.create_protocol_object(&prepared).await?;
