@@ -1125,6 +1125,15 @@ mod tests {
             .await
             .expect("read cached access owner");
         assert_eq!(cached_owner, author_pubkey);
+        let (publication_encryption, publication_fingerprint) = db
+            .circle_publication_context(creation.circle_id, control.coord.clone())
+            .await
+            .expect("load publication authority from verified access cache");
+        assert_eq!(
+            publication_encryption.seal_key_fingerprint(),
+            publication_fingerprint
+        );
+        assert_eq!(publication_fingerprint, control.value.key_fingerprint);
 
         let mut second_value = control.value.clone();
         second_value.access_root = ObjectHash::digest(b"different founder access root");

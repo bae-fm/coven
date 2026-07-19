@@ -14316,6 +14316,9 @@ impl Database {
                 crate::sync::circle::CircleAccessDisposition::Active { .. } => "active",
                 crate::sync::circle::CircleAccessDisposition::Inactive => "inactive",
             };
+            let access_bytes = serde_json::to_vec(&access.leaf.value).map_err(|error| {
+                DbError::Message(format!("serialize verified circle access: {error}"))
+            })?;
             conn.execute(
                 "INSERT INTO circle_access_cache
                  (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
@@ -14325,7 +14328,7 @@ impl Database {
                     &control_coord,
                     &access.leaf.value.owner_pubkey,
                     disposition,
-                    &access.leaf.bytes,
+                    access_bytes,
                 ],
             )
             .map_err(DbError::from)?;
