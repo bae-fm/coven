@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleCreation, CircleCreationPolicyObjects, CircleId,
-    CircleMetadataHeadRef, CircleOperationState, CircleRosterHeadRef, CircleSemanticSlot,
-    StoreMembershipStateRef,
+    CircleMetadataHeadRef, CircleOperationId, CircleOperationKind, CircleOperationState,
+    CircleRosterHeadRef, CircleSemanticSlot, StoreMembershipStateRef,
 };
 use super::membership::SerialAuthorizationState;
 use super::storage::{
@@ -55,7 +55,7 @@ pub(crate) enum CircleOperationPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CircleOperationJournal {
-    pub operation_id: String,
+    pub operation_id: CircleOperationId,
     pub status: CircleOperationState,
     pub creation: CircleCreation,
     pub commit_bytes: Vec<u8>,
@@ -73,6 +73,10 @@ impl CircleOperationJournal {
     pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleOperationError> {
         serde_json::from_slice(&self.commit_bytes)
             .map_err(|error| CircleOperationError::Journal(format!("parse Store commit: {error}")))
+    }
+
+    pub(crate) fn kind(&self) -> CircleOperationKind {
+        CircleOperationKind::Create
     }
 }
 
@@ -586,7 +590,8 @@ async fn prepare_circle_operation(
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let author_pubkey = keys::public_key_hex(signer);
-    let operation_id = db.new_write_id();
+    let write_id = db.new_write_id();
+    let operation_id = CircleOperationId::from_write_id(write_id.clone());
     let (creation, commit, commit_ref, policy, prepared_objects) = match db.write_policy() {
         crate::WritePolicy::MergeConcurrent => {
             let current =
@@ -650,12 +655,8 @@ async fn prepare_circle_operation(
                 state_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let candidate_family = CandidateFamilyId::derive(
-                store_root_hash,
-                &author_registration,
-                &operation_id,
-                &order,
-            );
+            let candidate_family =
+                CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
             let creation = CircleCreation::founder(
                 store_root_hash,
                 candidate_family,
@@ -673,7 +674,7 @@ async fn prepare_circle_operation(
                     .await?;
             let commit = signed_circle_commit(
                 store_root_hash,
-                operation_id.clone(),
+                write_id.clone(),
                 coord.clone(),
                 author_registration.clone(),
                 &author,
@@ -801,12 +802,8 @@ async fn prepare_circle_operation(
                 &snapshot.authorization,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let candidate_family = CandidateFamilyId::derive(
-                store_root_hash,
-                &author_registration,
-                &operation_id,
-                &order,
-            );
+            let candidate_family =
+                CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
             let creation = CircleCreation::founder(
                 store_root_hash,
                 candidate_family,
@@ -824,7 +821,7 @@ async fn prepare_circle_operation(
                     .await?;
             let commit = signed_circle_commit(
                 store_root_hash,
-                operation_id.clone(),
+                write_id,
                 coord.clone(),
                 author_registration.clone(),
                 &author,
@@ -885,7 +882,7 @@ async fn prepare_circle_operation(
         }
     };
     Ok(CircleOperationJournal {
-        operation_id: operation_id.as_str().to_string(),
+        operation_id,
         status: CircleOperationState::Pending,
         creation,
         commit_bytes: commit.to_bytes(),
@@ -1591,8 +1588,9 @@ mod tests {
                             .await
                             .expect("read pending circle operations"),
                         vec![crate::sync::circle::CircleOperationInfo {
+                            operation_id: expected.operation_id.clone(),
                             circle_id: expected.circle_id(),
-                            name: "Household".to_string(),
+                            kind: crate::sync::circle::CircleOperationKind::Create,
                             state: crate::sync::circle::CircleOperationState::Pending,
                         }]
                     );

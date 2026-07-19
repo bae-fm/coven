@@ -139,6 +139,31 @@ pub struct CircleMemberInfo {
     pub is_self: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CircleOperationId(crate::WriteId);
+
+impl CircleOperationId {
+    pub(crate) fn from_write_id(write_id: crate::WriteId) -> Self {
+        Self(write_id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for CircleOperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircleOperationKind {
+    Create,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationState {
@@ -148,8 +173,9 @@ pub enum CircleOperationState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CircleOperationInfo {
+    pub operation_id: CircleOperationId,
     pub circle_id: CircleId,
-    pub name: String,
+    pub kind: CircleOperationKind,
     pub state: CircleOperationState,
 }
 

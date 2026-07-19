@@ -3291,7 +3291,7 @@ impl PreparedCircleOperationRow {
     fn from_journal(
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<Self, DbError> {
-        let operation_id = journal.operation_id.clone();
+        let operation_id = journal.operation_id.as_str().to_string();
         let circle_id = journal.circle_id().to_string();
         let payload = serde_json::to_vec(&journal).map_err(|error| {
             DbError::Message(format!("serialize circle operation journal: {error}"))
@@ -12779,10 +12779,10 @@ impl Database {
                         serde_json::from_slice(&payload).map_err(|error| {
                             DbError::Message(format!("parse circle operation journal: {error}"))
                         })?;
-                    let circle_id = journal.circle_id();
                     Ok(crate::sync::circle::CircleOperationInfo {
-                        circle_id,
-                        name: journal.creation.metadata.name,
+                        operation_id: journal.operation_id.clone(),
+                        circle_id: journal.circle_id(),
+                        kind: journal.kind(),
                         state: journal.status,
                     })
                 })
@@ -13198,7 +13198,10 @@ impl Database {
             let deleted = tx
                 .execute(
                     "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
-                    rusqlite::params![journal.operation_id, creation.circle_id.to_string()],
+                    rusqlite::params![
+                        journal.operation_id.as_str(),
+                        creation.circle_id.to_string()
+                    ],
                 )
                 .map_err(DbError::from)?;
             if deleted != 1 {
