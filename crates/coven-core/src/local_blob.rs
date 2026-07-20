@@ -404,11 +404,66 @@ pub async fn file_len(path: &Path) -> Result<u64, String> {
 pub(crate) async fn exact_file_facts(
     path: &Path,
 ) -> Result<(u64, crate::sync::store_commit::ObjectHash), String> {
-    use sha2::{Digest, Sha256};
+    let (_, size, hash) = read_selected_with_facts(path, ExactReadSelection::IdentityOnly).await?;
+    Ok((size, hash))
+}
 
-    let mut file = tokio::fs::File::open(path)
+#[derive(Clone, Copy)]
+enum ExactReadSelection {
+    IdentityOnly,
+    Whole,
+    Range { offset: u64, len: u64 },
+}
+
+/// Read bytes and calculate their whole-file identity through one open file
+/// handle. Replacing the path during the read cannot make the returned bytes come
+/// from a different inode than the size and hash.
+pub(crate) async fn read_with_facts(
+    path: &Path,
+) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
+    read_selected_with_facts(path, ExactReadSelection::Whole).await
+}
+
+/// Read one range while calculating the whole-file identity through the same open
+/// handle. The full scan proves the exact file; only the selected bytes are retained.
+pub(crate) async fn read_range_with_facts(
+    path: &Path,
+    offset: u64,
+    len: u64,
+) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
+    read_selected_with_facts(path, ExactReadSelection::Range { offset, len }).await
+}
+
+async fn read_selected_with_facts(
+    path: &Path,
+    selection: ExactReadSelection,
+) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
+    let file = tokio::fs::File::open(path)
         .await
         .map_err(|error| format!("open exact file {}: {error}", path.display()))?;
+    read_open_file_with_facts(file, path, selection).await
+}
+
+async fn read_open_file_with_facts(
+    mut file: tokio::fs::File,
+    path: &Path,
+    selection: ExactReadSelection,
+) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
+    use sha2::{Digest, Sha256};
+
+    let mut selected = match selection {
+        ExactReadSelection::IdentityOnly | ExactReadSelection::Whole => Vec::new(),
+        ExactReadSelection::Range { len, .. } => Vec::with_capacity(
+            usize::try_from(len)
+                .map_err(|_| format!("exact file range is too large: {len} bytes"))?,
+        ),
+    };
+    let range_end = match selection {
+        ExactReadSelection::IdentityOnly | ExactReadSelection::Whole => 0,
+        ExactReadSelection::Range { offset, len } => offset
+            .checked_add(len)
+            .ok_or_else(|| format!("exact file range overflow: {offset} + {len}"))?,
+    };
     let mut size = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
@@ -420,12 +475,30 @@ pub(crate) async fn exact_file_facts(
         if read == 0 {
             break;
         }
-        size = size
+        let chunk_start = size;
+        let chunk_end = size
             .checked_add(read as u64)
             .ok_or_else(|| format!("exact file size overflow: {}", path.display()))?;
         hasher.update(&buffer[..read]);
+        match selection {
+            ExactReadSelection::IdentityOnly => {}
+            ExactReadSelection::Whole => selected.extend_from_slice(&buffer[..read]),
+            ExactReadSelection::Range { offset, .. } => {
+                let overlap_start = chunk_start.max(offset);
+                let overlap_end = chunk_end.min(range_end);
+                if overlap_start < overlap_end {
+                    let start = usize::try_from(overlap_start - chunk_start)
+                        .expect("overlap starts inside the in-memory chunk");
+                    let end = usize::try_from(overlap_end - chunk_start)
+                        .expect("overlap ends inside the in-memory chunk");
+                    selected.extend_from_slice(&buffer[start..end]);
+                }
+            }
+        }
+        size = chunk_end;
     }
     Ok((
+        selected,
         size,
         crate::sync::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
     ))
@@ -471,6 +544,27 @@ pub async fn stage_atomic_destination(path: &Path) -> Result<AtomicStagedFile, S
 }
 
 pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+    copy_atomic_with_facts(src, dst).await.map(|_| ())
+}
+
+/// Copy one file atomically while calculating the exact identity of the bytes
+/// written from the same open source handle.
+pub(crate) async fn copy_atomic_with_facts(
+    src: &Path,
+    dst: &Path,
+) -> Result<(u64, crate::sync::store_commit::ObjectHash), String> {
+    let input = tokio::fs::File::open(src)
+        .await
+        .map_err(|error| format!("open copy source {}: {error}", src.display()))?;
+    copy_open_file_atomic_with_facts(input, src, dst).await
+}
+
+async fn copy_open_file_atomic_with_facts(
+    mut input: tokio::fs::File,
+    src: &Path,
+    dst: &Path,
+) -> Result<(u64, crate::sync::store_commit::ObjectHash), String> {
+    use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
 
     let parent = dst
@@ -482,13 +576,12 @@ pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     let tmp = temp_sibling(parent);
 
     let copy = async {
-        let mut input = tokio::fs::File::open(src)
-            .await
-            .map_err(|e| format!("open pin source {}: {e}", src.display()))?;
         let mut output = tokio::fs::File::create(&tmp)
             .await
             .map_err(|e| format!("create temp pin {}: {e}", tmp.display()))?;
         let mut buf = vec![0u8; 1 << 20];
+        let mut size = 0_u64;
+        let mut hasher = Sha256::new();
         loop {
             let read = input
                 .read(&mut buf)
@@ -497,6 +590,10 @@ pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
             if read == 0 {
                 break;
             }
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| format!("copy source size overflow: {}", src.display()))?;
+            hasher.update(&buf[..read]);
             output
                 .write_all(&buf[..read])
                 .await
@@ -505,13 +602,20 @@ pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
         output
             .sync_all()
             .await
-            .map_err(|e| format!("fsync temp pin {}: {e}", tmp.display()))
+            .map_err(|e| format!("fsync temp pin {}: {e}", tmp.display()))?;
+        Ok::<_, String>((
+            size,
+            crate::sync::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
+        ))
     }
     .await;
-    if let Err(error) = copy {
-        remove_failed_temp(&tmp, "copy").await;
-        return Err(error);
-    }
+    let facts = match copy {
+        Ok(facts) => facts,
+        Err(error) => {
+            remove_failed_temp(&tmp, "copy").await;
+            return Err(error);
+        }
+    };
     if let Err(error) = tokio::fs::rename(&tmp, dst).await {
         remove_failed_temp(&tmp, "rename").await;
         return Err(format!(
@@ -520,7 +624,7 @@ pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
             dst.display()
         ));
     }
-    Ok(())
+    Ok(facts)
 }
 
 pub async fn write_stream_atomic(
@@ -914,6 +1018,60 @@ mod tests {
         assert_eq!(read(&renamed).await.expect("read renamed"), bytes);
         assert!(remove_file(&renamed).await.expect("remove renamed"));
         assert!(!remove_file(&renamed).await.expect("renamed already absent"));
+    }
+
+    #[tokio::test]
+    async fn exact_read_keeps_bytes_and_identity_on_one_open_inode() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("blob.bin");
+        let original = b"original exact bytes";
+        let replacement = b"replacement bytes";
+        write_atomic(&path, original).await.expect("write original");
+        let open = tokio::fs::File::open(&path).await.expect("open original");
+
+        write_atomic(&path, replacement)
+            .await
+            .expect("replace path after open");
+        let (bytes, size, hash) =
+            read_open_file_with_facts(open, &path, ExactReadSelection::Range { offset: 9, len: 5 })
+                .await
+                .expect("read the already-open exact file");
+
+        assert_eq!(bytes, b"exact");
+        assert_eq!(size, original.len() as u64);
+        assert_eq!(
+            hash,
+            crate::sync::store_commit::ObjectHash::digest(original)
+        );
+        assert_eq!(read(&path).await.expect("read replacement"), replacement);
+    }
+
+    #[tokio::test]
+    async fn exact_copy_keeps_bytes_and_identity_on_one_open_inode() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let source = tmp.path().join("source.bin");
+        let destination = tmp.path().join("destination.bin");
+        let original = b"original exact bytes";
+        let replacement = b"replacement bytes";
+        write_atomic(&source, original)
+            .await
+            .expect("write original");
+        let open = tokio::fs::File::open(&source).await.expect("open original");
+
+        write_atomic(&source, replacement)
+            .await
+            .expect("replace source path after open");
+        let (size, hash) = copy_open_file_atomic_with_facts(open, &source, &destination)
+            .await
+            .expect("copy the already-open exact file");
+
+        assert_eq!(read(&destination).await.expect("read copy"), original);
+        assert_eq!(size, original.len() as u64);
+        assert_eq!(
+            hash,
+            crate::sync::store_commit::ObjectHash::digest(original)
+        );
+        assert_eq!(read(&source).await.expect("read replacement"), replacement);
     }
 
     #[tokio::test]

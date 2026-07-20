@@ -4270,7 +4270,7 @@ pub(crate) fn apply_prepared_serial_commit_on(
     for intent in local_blob_cleanup_intents(blob_decls, &old_changes, &changes)
         .map_err(|error| DbError::Message(error.to_string()))?
     {
-        local_cleanup::record_if_unreferenced_on(conn, blob_decls, &intent)?;
+        local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
     }
     for package in &resolution.packages {
         let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
@@ -5262,7 +5262,7 @@ async fn commit_candidate(
                     &applied_bytes,
                 )?;
                 for intent in cleanup {
-                    local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
+                    local_cleanup::record_obsolete_copy_intents_on(&tx, &blob_decls, &intent)?;
                 }
                 Database::install_pulled_blob_activations_on(&tx, &package, &commit_ref)?;
                 Database::install_winning_blob_bindings_on(
@@ -5297,7 +5297,7 @@ async fn commit_candidate(
             returned_changes
                 .extend(crate::changeset::walk(&removal_changeset).map_err(DbError::Message)?);
             for intent in removal_cleanup {
-                local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
+                local_cleanup::record_obsolete_copy_intents_on(&tx, &blob_decls, &intent)?;
             }
             if package_reported_fk_violation {
                 let violations: bool = tx

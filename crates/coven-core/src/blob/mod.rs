@@ -346,7 +346,7 @@ pub enum BlobReplacement {
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
 /// copy (`storage/pinned/<namespace>/<locator-hash>` /
 /// `storage/cache/<namespace>/<locator-hash>`, built
-/// from the validated namespace + id — see [`cache`]).
+/// from the validated namespace + exact locator hash — see [`cache`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`

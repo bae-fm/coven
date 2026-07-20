@@ -1301,8 +1301,8 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     );
 }
 
-/// A ranged read of a NON-cached blob fetches and decrypts just the requested
-/// range from the cloud AND leaves both exact locator cache paths absent afterward.
+/// A ranged read of a non-cached blob stages and verifies the cloud plaintext,
+/// returns the requested range, and leaves both exact locator cache paths absent.
 /// A ranged read must never write a truncated cache
 /// file — only the whole-file `read_blob` populates.
 #[tokio::test]
@@ -1345,8 +1345,7 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     );
 }
 
-/// A full `read_blob` still populates the evictable cache (Phase 2 behavior intact,
-/// unchanged by adding the ranged path): after one whole-file read, the exact cache path
+/// A full `read_blob` populates the evictable cache: after one whole-file read, the exact cache path
 /// exists and a second read is served from it even with the cloud copy gone.
 #[tokio::test]
 async fn full_read_blob_still_populates_the_cache() {

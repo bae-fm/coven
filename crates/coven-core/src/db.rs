@@ -1007,7 +1007,7 @@ mod tests {
 /// An external user-owned file a blob id resolves to, read back from a
 /// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
 /// coven references but does not own); `size` is its registered plaintext length,
-/// against which a read validates the file by presence + size. The `namespace`
+/// combined with the row's signed content hash to validate the exact file. The `namespace`
 /// stays on the row but is not part of the read shape, so it is not carried here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalBlob {

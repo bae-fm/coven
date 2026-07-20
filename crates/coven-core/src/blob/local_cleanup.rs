@@ -1,4 +1,4 @@
-//! Durable deletion of a blob's on-device copies after its last row reference.
+//! Durable deletion of obsolete logical-source and exact-locator copies.
 
 use rusqlite::Connection;
 use tracing::debug;
@@ -7,7 +7,8 @@ use crate::blob::decl::BlobDecls;
 use crate::database::{Database, DbError};
 use crate::store_dir::StoreDir;
 
-/// A committed obligation to remove every on-device copy of an unreferenced blob.
+/// A transaction-local request that resolves into committed copy-specific cleanup
+/// obligations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalBlobCleanupIntent {
     namespace: String,
@@ -92,23 +93,39 @@ impl LocalBlobCleanupIntent {
     }
 }
 
-/// Record `intent` only when no row references the blob in this transaction.
-/// The caller must use the transaction that mutates the carrying rows, so a
-/// cleanup intent can never commit beside a live reference.
-pub fn record_if_unreferenced_on(
+/// Whether any live row still carries this logical blob ID. Author-requested
+/// deletion uses this as its transaction-local policy gate before recording
+/// copy-specific cleanup obligations.
+pub fn logical_blob_is_referenced_on(
+    conn: &Connection,
+    decls: &BlobDecls,
+    namespace: &str,
+    blob_id: &str,
+) -> Result<bool, DbError> {
+    decls
+        .blob_id_is_referenced(conn, namespace, blob_id)
+        .map_err(|error| DbError::Message(error.to_string()))
+}
+
+/// Record cleanup obligations for each copy identity no live row needs in this
+/// transaction. The caller must use the transaction that mutates the carrying
+/// rows, so each obligation commits atomically with the state that makes that
+/// copy obsolete. A caller enforcing logical-ID deletion policy checks that
+/// policy before calling; obsolete exact copies are independent of that policy.
+pub fn record_obsolete_copy_intents_on(
     conn: &Connection,
     decls: &BlobDecls,
     intent: &LocalBlobCleanupIntent,
-) -> Result<bool, DbError> {
-    if decls
-        .row_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
-        .map_err(|error| DbError::Message(error.to_string()))?
-        .is_some()
-    {
-        return Ok(false);
-    }
-    let durable = match &intent.identity {
-        LocalBlobCleanupIdentity::Local => intent.clone(),
+) -> Result<(), DbError> {
+    match &intent.identity {
+        LocalBlobCleanupIdentity::Local => {
+            let local_referenced = decls
+                .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            if !local_referenced {
+                record_durable_intent(conn, intent)?;
+            }
+        }
         LocalBlobCleanupIdentity::Exact(_) => {
             return Err(DbError::Message(
                 "exact local cleanup identity is already durable".to_string(),
@@ -129,8 +146,8 @@ pub fn record_if_unreferenced_on(
                 .map_err(DbError::from)?
                 .collect::<Result<std::collections::BTreeSet<_>, _>>()
                 .map_err(DbError::from)?;
-            match locator_hashes.len() {
-                0 => LocalBlobCleanupIntent::local(&intent.namespace, &intent.blob_id),
+            let exact_locator_hash = match locator_hashes.len() {
+                0 => None,
                 1 => {
                     let locator_hash = locator_hashes
                         .iter()
@@ -140,17 +157,48 @@ pub fn record_if_unreferenced_on(
                         .map_err(|error| {
                             DbError::Message(format!("parse local cleanup locator hash: {error}"))
                         })?;
-                    LocalBlobCleanupIntent::exact(&intent.namespace, &intent.blob_id, locator_hash)
+                    Some(locator_hash)
                 }
                 count => {
                     return Err(DbError::Message(format!(
                         "local cleanup for {table}.{row_id} has {count} distinct exact locator bindings"
                     )));
                 }
+            };
+            if let Some(locator_hash) = exact_locator_hash {
+                let exact =
+                    LocalBlobCleanupIntent::exact(&intent.namespace, &intent.blob_id, locator_hash);
+                let referenced = decls
+                    .exact_copy_is_referenced(
+                        conn,
+                        exact.namespace(),
+                        exact.blob_id(),
+                        locator_hash,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                if !referenced {
+                    record_durable_intent(conn, &exact)?;
+                }
+            }
+            let local_referenced = decls
+                .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            if !local_referenced {
+                record_durable_intent(
+                    conn,
+                    &LocalBlobCleanupIntent::local(intent.namespace(), intent.blob_id()),
+                )?;
             }
         }
-    };
-    let persisted_identity = durable.persisted_identity()?;
+    }
+    Ok(())
+}
+
+fn record_durable_intent(
+    conn: &Connection,
+    intent: &LocalBlobCleanupIntent,
+) -> Result<(), DbError> {
+    let persisted_identity = intent.persisted_identity()?;
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id, copy_identity)
@@ -165,7 +213,7 @@ pub fn record_if_unreferenced_on(
             "local blob cleanup intent already exists"
         );
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Drain every committed cleanup obligation. A filesystem or database failure
@@ -187,10 +235,13 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
                     "SELECT intent.namespace, intent.blob_id, intent.copy_identity, EXISTS (\
                          SELECT 1 FROM store_write_blob_leases lease \
                          WHERE lease.namespace = intent.namespace \
-                           AND lease.blob_id = intent.blob_id\
+                           AND lease.blob_id = intent.blob_id \
+                           AND intent.copy_identity = 'local'\
                      ) \
                      FROM local_cleanup_intents intent \
-                     ORDER BY namespace, blob_id",
+                     ORDER BY namespace, blob_id,
+                              CASE WHEN copy_identity = 'local' THEN 1 ELSE 0 END,
+                              copy_identity",
                 )
                 .map_err(DbError::from)?;
             let rows = stmt
@@ -234,23 +285,29 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         )
         .await;
         let persisted_identity = intent.persisted_identity()?;
-        let locator_hash = match &intent.identity {
-            LocalBlobCleanupIdentity::Local => None,
-            LocalBlobCleanupIdentity::Exact(locator_hash) => Some(*locator_hash),
+        let cleanup = match &intent.identity {
+            LocalBlobCleanupIdentity::Local => {
+                crate::blob::local_files::drop_blob(store_dir, intent.namespace(), intent.blob_id())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            LocalBlobCleanupIdentity::Exact(locator_hash) => {
+                crate::blob::cache::drop_cached_locator(
+                    store_dir,
+                    intent.namespace(),
+                    *locator_hash,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            }
             LocalBlobCleanupIdentity::Row { .. } => {
                 return Err(DbError::Message(
                     "persisted local cleanup intent is row-bound".to_string(),
                 ));
             }
         };
-        if let Err(error) = crate::blob::cache::drop_all_local_copies(
-            store_dir,
-            intent.namespace(),
-            intent.blob_id(),
-            locator_hash,
-        )
-        .await
-        {
+        if let Err(error) = cleanup {
             return Err(DbError::Message(format!(
                 "remove local copies for {}/{}: {error}",
                 intent.namespace(),
@@ -275,4 +332,98 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
     db.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupFinished)
         .await;
     Ok(pending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blob::{CacheFill, Provenance};
+    use crate::sync::session::BlobDecl;
+    use crate::sync::store_commit::ObjectHash;
+    use crate::sync::test_helpers::open_test_db_with_blob;
+
+    #[tokio::test]
+    async fn a_live_same_id_row_with_another_locator_does_not_suppress_exact_cleanup() {
+        let db = open_test_db_with_blob(
+            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+                .with_id_column("blob_id"),
+        );
+        let removed_locator = ObjectHash::digest(b"removed locator");
+        let live_locator = ObjectHash::digest(b"live locator");
+        let removed_object = ObjectHash::digest(b"removed object");
+        let live_object = ObjectHash::digest(b"live object");
+        let decls = db.blob_decls();
+
+        db.call(move |conn| {
+            conn.execute_batch(&format!(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                 VALUES ('parent', 'parent', 1, '0000000001000-0000-test', '2026-01-01');
+                 INSERT INTO note_photos
+                    (id, note_id, kind, size, hash, blob_id, _updated_at, created_at)
+                 VALUES
+                    ('removed-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
+                     '0000000001000-0000-test', '2026-01-01'),
+                    ('live-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
+                     '0000000001001-0000-test', '2026-01-01');",
+                hash = crate::blob::content_hash(b"bytes"),
+            ))
+            .map_err(DbError::from)?;
+            for (object, locator) in [
+                (removed_object, removed_locator),
+                (live_object, live_locator),
+            ] {
+                conn.execute(
+                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+                    [object.to_string()],
+                )
+                .map_err(DbError::from)?;
+                conn.execute(
+                    "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)",
+                    (object.to_string(), locator.to_string()),
+                )
+                .map_err(DbError::from)?;
+            }
+            for (row_id, row_stamp, object) in [
+                ("removed-row", "0000000001000-0000-test", removed_object),
+                ("live-row", "0000000001001-0000-test", live_object),
+            ] {
+                conn.execute(
+                    "INSERT INTO row_blob_locators
+                     (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+                     VALUES ('note_photos', ?1, 'blob_id', ?2, '\"store\"', ?3)",
+                    (row_id, row_stamp, object.to_string()),
+                )
+                .map_err(DbError::from)?;
+            }
+            conn.execute("DELETE FROM note_photos WHERE id = 'removed-row'", [])
+                .map_err(DbError::from)?;
+
+            let intent = LocalBlobCleanupIntent::for_row(
+                "photos",
+                "shared-id",
+                "note_photos",
+                "removed-row",
+            );
+            record_obsolete_copy_intents_on(conn, &decls, &intent)?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
+                )
+                .map_err(DbError::from)?;
+            let identities = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            Ok(identities)
+        })
+        .await
+        .map(|identities| {
+            assert_eq!(
+                identities,
+                [removed_locator.to_string(), "local".to_string()]
+            );
+        })
+        .expect("record exact cleanup despite a live same-id row");
+    }
 }

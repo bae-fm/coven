@@ -1056,14 +1056,20 @@ fn run_write_batch_on_connection<R>(
                 Ok(Ok(value)) => {
                     for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
                         let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-                        if !crate::blob::local_cleanup::record_if_unreferenced_on(
-                            tx, &decls, intent,
+                        if crate::blob::local_cleanup::logical_blob_is_referenced_on(
+                            tx,
+                            &decls,
+                            &blob.namespace,
+                            &blob.id,
                         )? {
                             return Err(CovenError::BlobStillReferenced {
                                 namespace: blob.namespace.clone(),
                                 id: blob.id.clone(),
                             });
                         }
+                        crate::blob::local_cleanup::record_obsolete_copy_intents_on(
+                            tx, &decls, intent,
+                        )?;
                     }
                     Ok(value)
                 }
@@ -2987,7 +2993,7 @@ mod tests {
 
         assert_eq!(
             cleanup_intent_count(&handle, "media-files", "oldddddd").await,
-            1
+            2
         );
         assert!(handle
             .store_dir()
@@ -3023,7 +3029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_drain_preserves_a_blob_still_referenced_after_remote_delete() {
+    async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
         let (_tmp, handle) = open_files_handle();
         let blob_id = "shared01";
         handle
@@ -3175,8 +3181,14 @@ mod tests {
         );
         assert!(row_exists(handle.db(), "SELECT 1 FROM files WHERE id = 'still-live'").await);
         assert!(local.exists(), "the live blob's local copy survives");
-        assert!(pinned.exists(), "the live blob's pinned copy survives");
-        assert!(cached.exists(), "the live blob's cache copy survives");
+        assert!(
+            !pinned.exists(),
+            "the deleted locator's pinned copy is removed"
+        );
+        assert!(
+            !cached.exists(),
+            "the deleted locator's cache copy is removed"
+        );
         assert_eq!(
             cleanup_intent_count(&handle, "media-files", blob_id).await,
             0,

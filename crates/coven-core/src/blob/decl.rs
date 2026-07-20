@@ -699,6 +699,115 @@ impl BlobDecls {
         Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
     }
 
+    /// Whether a live row still needs the logical-id-keyed local source for this
+    /// blob. A row needs that source exactly when its current stamp has no installed
+    /// remote locator binding.
+    pub(crate) fn local_copy_is_referenced(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<bool, BlobDeclError> {
+        let Some((table, blob)) = self
+            .tables
+            .iter()
+            .find(|(_, blob)| blob.namespace == namespace)
+        else {
+            return Ok(false);
+        };
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM {table} AS live
+                 WHERE CAST(live.{blob_column} AS TEXT) = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM row_blob_locators AS binding
+                       WHERE binding.table_name = ?2
+                         AND binding.row_id = CAST(live.id AS TEXT)
+                         AND binding.column_name = ?3
+                         AND binding.row_stamp = CAST(live._updated_at AS TEXT)
+                   )
+             )",
+            table = quote_ident(table),
+            blob_column = quote_ident(&blob.id_col_name),
+        );
+        conn.query_row(
+            &sql,
+            rusqlite::params![blob_id, table, blob.id_col_name],
+            |row| row.get(0),
+        )
+        .map_err(BlobDeclError::from)
+    }
+
+    /// Whether any live row still carries this logical blob ID, independent of
+    /// whether that row currently resolves to a local source or an exact remote
+    /// locator.
+    pub(crate) fn blob_id_is_referenced(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<bool, BlobDeclError> {
+        let Some((table, blob)) = self
+            .tables
+            .iter()
+            .find(|(_, blob)| blob.namespace == namespace)
+        else {
+            return Ok(false);
+        };
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM {table}
+                 WHERE CAST({blob_column} AS TEXT) = ?1
+             )",
+            table = quote_ident(table),
+            blob_column = quote_ident(&blob.id_col_name),
+        );
+        conn.query_row(&sql, [blob_id], |row| row.get(0))
+            .map_err(BlobDeclError::from)
+    }
+
+    /// Whether a live row's current stamp still names one exact locator. A row
+    /// that merely reuses the same logical blob id under another locator does not
+    /// retain this locator's cache or pinned file.
+    pub(crate) fn exact_copy_is_referenced(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+        locator_hash: crate::sync::store_commit::ObjectHash,
+    ) -> Result<bool, BlobDeclError> {
+        let Some((table, blob)) = self
+            .tables
+            .iter()
+            .find(|(_, blob)| blob.namespace == namespace)
+        else {
+            return Ok(false);
+        };
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM {table} AS live
+                 JOIN row_blob_locators AS binding
+                   ON binding.table_name = ?2
+                  AND binding.row_id = CAST(live.id AS TEXT)
+                  AND binding.column_name = ?3
+                  AND binding.row_stamp = CAST(live._updated_at AS TEXT)
+                 JOIN blob_locators AS locator
+                   ON locator.remote_object_id = binding.remote_object_id
+                 WHERE CAST(live.{blob_column} AS TEXT) = ?1
+                   AND locator.locator_hash = ?4
+             )",
+            table = quote_ident(table),
+            blob_column = quote_ident(&blob.id_col_name),
+        );
+        conn.query_row(
+            &sql,
+            rusqlite::params![blob_id, table, blob.id_col_name, locator_hash.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(BlobDeclError::from)
+    }
+
     /// The plaintext byte length from the row carrying `blob_id` in `namespace`.
     pub fn size_for_blob_in_namespace(
         &self,

@@ -5254,6 +5254,15 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let target = open_blob_test_db_at(&database_path, cleanup_decl());
     let (_store_tmp, store_dir) = temp_store_dir();
     pull_into(&target, &storage, &store_dir).await;
+    let deleted_locator_hash = target
+        .row_blob_ref("note_photos", "cleanup01")
+        .await
+        .expect("load exact blob before deletion")
+        .stored()
+        .expect("pulled blob has exact storage")
+        .locator()
+        .locator_hash()
+        .to_string();
     let deletion =
         capture_bytes(&source, &["DELETE FROM note_photos WHERE id = 'cleanup01'"]).await;
     publish_blob_changeset(&source, &storage, &source_store_dir, deletion, 1).await;
@@ -5268,16 +5277,24 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
         .expect_err("post-commit filesystem cleanup failure fails the pull");
     assert!(error.to_string().contains("local blob cleanup"), "{error}");
     assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'cleanup01'").await);
-    let pending_before_restart: i64 = target
+    let pending_before_restart = target
         .call(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
-                row.get(0)
-            })
-            .map_err(crate::database::DbError::from)
+            let mut statement = conn
+                .prepare("SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity")
+                .map_err(crate::database::DbError::from)?;
+            let identities = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(crate::database::DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::database::DbError::from)?;
+            Ok(identities)
         })
         .await
         .unwrap();
-    assert_eq!(pending_before_restart, 1);
+    assert_eq!(
+        pending_before_restart,
+        [deleted_locator_hash, "local".to_string()]
+    );
 
     tokio::task::spawn_blocking(move || drop(target))
         .await

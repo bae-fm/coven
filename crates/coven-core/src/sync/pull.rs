@@ -346,8 +346,8 @@ pub(super) fn local_blob_cleanup_intents(
     Ok(intents)
 }
 
-/// Download each blob in `blobs` into the evictable cache
-/// its exact locator-keyed path under `storage/cache/<namespace>`, decrypting via storage
+/// Download each blob in `blobs` into its exact locator-keyed path in the
+/// evictable cache under `storage/cache/<namespace>`, decrypting via storage
 /// (which returns plaintext) and writing the bytes atomically. Every blob is read and
 /// verified from the exact remote object. An existing exact plaintext copy in either
 /// cache folder (`pinned/` or `cache/`) prevents only the duplicate cache write.
@@ -358,18 +358,13 @@ pub(super) fn local_blob_cleanup_intents(
 /// evicts against its own namespace's budget (a cover never wiped by audio pressure).
 /// (A cover that later falls out of that budget shows a placeholder until the next
 /// read re-fetches it; covers are not pinned.) The destination is coven-built from
-/// the validated namespace + blob id.
+/// the validated namespace + locator hash.
 ///
 /// Shared by the incremental pull (per applied changeset) and the snapshot
 /// bootstrap backfill (per row in the freshly bootstrapped DB), so the
-/// download/decrypt/write path lives in one place.
-/// Download a set of blobs into the cache. `known_uploader` is the prefix each
-/// blob lives under when the caller already knows it — the changeset author for an
-/// incremental pull, since the author of a changeset uploaded the blobs it
-/// introduces. `None` when the caller doesn't know (a snapshot backfill, whose
-/// restored rows carry no per-blob uploader): each blob's uploader is then
-/// resolved from the local index, falling back to a listing scan that records what
-/// it finds. A browsable/plain home resolves to no uploader segment.
+/// download/decrypt/write path lives in one place. Each [`BlobDownload`] carries
+/// the exact stored object and the authority needed to open it; this path performs
+/// no cloud listing or identity search.
 pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<BlobDownload>,
