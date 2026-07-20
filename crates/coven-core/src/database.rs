@@ -2996,6 +2996,15 @@ struct RetainedCommitActivationInput {
     registrations: RetainedStoreDeviceRegistrationActivations,
     device_operations: RetainedStoreDeviceOperations,
     circle_activations: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package_application: Option<RetainedPackageApplication>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RetainedPackageApplication {
+    LocallyAuthored,
+    Received { receiver_wall_ms: u64 },
 }
 
 struct RetainedMergeMaterializationKey {
@@ -3016,6 +3025,7 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
     packages: &'a [AudiencePackage],
+    package_application: Option<RetainedPackageApplication>,
     registrations: RetainedStoreDeviceRegistrationActivations,
 }
 
@@ -3033,6 +3043,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         activation_head: &'a StoreDeviceHead,
         activation_head_object: &'a ExactObjectRef,
         packages: &'a [AudiencePackage],
+        package_application: Option<RetainedPackageApplication>,
     ) -> Result<Self, DbError> {
         commit_ref
             .verify_commit(commit)
@@ -3048,6 +3059,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 .iter()
                 .zip(commit.circle_controls())
                 .any(|(activation, reference)| activation.reference != *reference)
+            || packages.is_empty() != package_application.is_none()
         {
             return Err(DbError::Message(
                 "verified Merge materialization differs from its exact Store commit".to_string(),
@@ -3064,6 +3076,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             activation_head,
             activation_head_object,
             packages,
+            package_application,
             registrations,
         })
     }
@@ -8001,6 +8014,7 @@ impl Database {
                     &authority.head,
                     authority.head_prepared.reference(),
                     &[],
+                    None,
                 )?;
                 let mut completed_preparation = prepared.clone();
                 let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
@@ -12451,6 +12465,7 @@ impl Database {
                 &activation_head,
                 &activation_head_object,
                 &[],
+                None,
             )?;
             tx.commit().map_err(DbError::from)
         })
@@ -13021,6 +13036,7 @@ impl Database {
                         &head,
                         &head_object,
                         &[],
+                        None,
                     )?
                 }
                 LocalRetirementMaterialization::Serial { authorization } => {
@@ -14449,6 +14465,7 @@ impl Database {
                         head,
                         prepared_head.reference(),
                         &[],
+                        None,
                     )?;
                     Self::record_verified_merge_materialization_on(&tx, materialization)?;
                     (
@@ -15548,6 +15565,12 @@ impl Database {
                 "retained Merge packages are not in commit order".to_string(),
             ));
         }
+        if packages.is_empty() != input.activation.package_application.is_none() {
+            return Err(DbError::Message(
+                "retained Merge package application does not match its applied packages"
+                    .to_string(),
+            ));
+        }
         input
             .activation
             .device_operations
@@ -15599,6 +15622,7 @@ impl Database {
                     .circle_activations
                     .to_retained()
                     .map_err(|error| DbError::Message(error.to_string()))?,
+                package_application: materialization.package_application,
             },
         };
         Self::validate_retained_merge_materialization_input_on(
@@ -15728,6 +15752,7 @@ impl Database {
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
         packages: &[AudiencePackage],
+        package_application: Option<RetainedPackageApplication>,
     ) -> Result<(), DbError> {
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -15743,6 +15768,7 @@ impl Database {
             activation_head,
             activation_head_object,
             packages,
+            package_application,
         )?;
         Self::record_verified_merge_materialization_on(conn, materialization)
     }
@@ -16866,6 +16892,7 @@ impl Database {
                             head,
                             object,
                             &[],
+                            None,
                         )?;
                         Self::record_verified_merge_materialization_on(&tx, materialization)?;
                     }
@@ -17344,6 +17371,8 @@ impl Database {
                     head,
                     head_object,
                     &retained_packages,
+                    (!retained_packages.is_empty())
+                        .then_some(RetainedPackageApplication::LocallyAuthored),
                 )?;
             }
             PreparedWriteMaterialization::Serial => {

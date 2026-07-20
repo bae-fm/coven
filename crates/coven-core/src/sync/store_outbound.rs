@@ -4683,6 +4683,7 @@ async fn publish_prepared_merge_store_operation(
             &head,
             &activation_head.object,
             &[],
+            None,
         )?;
         Database::record_verified_merge_materialization_on(&tx, materialization)?;
         tx.commit().map_err(crate::database::DbError::from)
@@ -7017,6 +7018,27 @@ mod tests {
                 .await
                 .expect("publish prepared Store package"),
             1,
+        );
+
+        let stream_id = commit_stream(&fixture.commit_ref);
+        let retained_input: Vec<u8> = fixture
+            .db
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT canonical_input FROM retained_merge_materializations
+                     WHERE device_id = ?1 AND seq = 1",
+                    [stream_id],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)
+            })
+            .await
+            .expect("load retained local package application");
+        let retained_input: serde_json::Value = serde_json::from_slice(&retained_input)
+            .expect("parse retained local package application");
+        assert_eq!(
+            retained_input["activation"]["package_application"],
+            serde_json::Value::String("locally_authored".to_string()),
         );
 
         let remote = stored_remote_object(&fixture.db, &fixture.package_object).await;

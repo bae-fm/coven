@@ -3917,6 +3917,7 @@ pub(crate) async fn materialize_device_join_activation(
                     &head,
                     &object,
                     &[],
+                    None,
                 )?;
             }
             Materialization::Serial(authorization) => {
@@ -6151,6 +6152,9 @@ async fn commit_candidate(
                 &activation_head,
                 &activation_head_object,
                 &retained_packages,
+                (!retained_packages.is_empty()).then_some(
+                    crate::database::RetainedPackageApplication::Received { receiver_wall_ms },
+                ),
             )?;
             Database::record_verified_merge_materialization_on(&tx, materialization)?;
             tx.commit().map_err(DbError::from)?;

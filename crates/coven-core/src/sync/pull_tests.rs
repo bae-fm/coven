@@ -1831,11 +1831,92 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["circle_activations", "device_operations", "registrations"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "circle_activations",
+            "device_operations",
+            "package_application",
+            "registrations",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     );
+    let receiver_wall_ms = activation["package_application"]["received"]["receiver_wall_ms"]
+        .as_u64()
+        .expect("retained package has its receive-time conflict bound");
+
+    let encoded = String::from_utf8(canonical_input.clone()).expect("retained input is UTF-8");
+    let package_application = format!(
+        ",\"package_application\":{{\"received\":{{\"receiver_wall_ms\":{receiver_wall_ms}}}}}"
+    );
+    assert!(encoded.contains(&package_application));
+    let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
+    let missing_receiver_hash =
+        crate::sync::store_commit::ObjectHash::digest(&missing_receiver).to_string();
+    let missing_receiver_stream = stream_id.clone();
+    let stored_input_hash = input_hash.clone();
+    target
+        .call(move |conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            tx.pragma_update(None, "defer_foreign_keys", true)
+                .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "UPDATE retained_merge_materializations
+                 SET input_hash = ?2, canonical_input = ?3
+                 WHERE device_id = ?1 AND seq = 1",
+                rusqlite::params![
+                    &missing_receiver_stream,
+                    &missing_receiver_hash,
+                    &missing_receiver
+                ],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "UPDATE materialized_commits SET retained_input_hash = ?2
+                 WHERE device_id = ?1 AND seq = 1",
+                rusqlite::params![&missing_receiver_stream, &missing_receiver_hash],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("remove retained receive-time conflict bound");
+    let error = target
+        .materialized_frontier()
+        .await
+        .expect_err("a retained package must carry its receive-time conflict bound");
+    assert!(error
+        .to_string()
+        .contains("package application does not match its applied packages"));
+
+    let restore_stream = stream_id.clone();
+    let restore_input = canonical_input.clone();
+    target
+        .call(move |conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            tx.pragma_update(None, "defer_foreign_keys", true)
+                .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "UPDATE retained_merge_materializations
+                 SET input_hash = ?2, canonical_input = ?3
+                 WHERE device_id = ?1 AND seq = 1",
+                rusqlite::params![&restore_stream, &stored_input_hash, &restore_input],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "UPDATE materialized_commits SET retained_input_hash = ?2
+                 WHERE device_id = ?1 AND seq = 1",
+                rusqlite::params![&restore_stream, &stored_input_hash],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("restore retained Merge input");
 
     let corrupt_stream = stream_id.clone();
     target
