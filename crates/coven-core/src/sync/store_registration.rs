@@ -2623,6 +2623,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_materialization_surfaces_a_corrupt_activated_registration() {
+        let (store, db) = initialized().await;
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load exact membership")
+            .chain
+            .expect("resolved founder membership");
+        let authority = founder_recovery_authority(&store);
+        let registration =
+            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
+                .await
+                .expect("recover MergeConcurrent Owner device");
+        let mut recovered_commit = None;
+        for reference in db
+            .materialized_frontier()
+            .await
+            .expect("load materialized Store frontier")
+            .into_values()
+        {
+            let (commit, _) = super::super::store_pull::load_commit_with_author(
+                &store.storage,
+                &store.root,
+                &reference,
+            )
+            .await
+            .expect("load materialized recovery commit");
+            if commit.author_registration == registration {
+                recovered_commit = Some((commit, reference));
+                break;
+            }
+        }
+        let (commit, reference) = recovered_commit.expect("recovery commit is materialized");
+        let device_id = registration.device_id.to_string();
+        let registration_hash = registration.registration_hash.to_string();
+        db.call(move |conn| {
+            conn.execute(
+                "UPDATE store_device_registration_activations
+                 SET registration_bytes = X'00'
+                 WHERE device_id = ?1 AND registration_hash = ?2",
+                (&device_id, &registration_hash),
+            )
+            .map_err(crate::database::DbError::from)?;
+            Ok(())
+        })
+        .await
+        .expect("corrupt activated recovery registration fixture");
+
+        let error = db
+            .call(move |conn| {
+                crate::database::Database::record_materialized_commit_on(conn, &commit, &reference)
+            })
+            .await
+            .expect_err("recovery materialization must surface corrupt registration bytes");
+        assert!(
+            error.to_string().contains("activated Store registration"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn merge_owner_recovery_retry_reuses_each_published_readiness_prefix() {
         for failed_call in [2, 3, 4] {
             let signer = UserKeypair::generate();

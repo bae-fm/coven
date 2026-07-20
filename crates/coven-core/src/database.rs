@@ -14286,36 +14286,45 @@ impl Database {
             )));
         }
         let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
-        let recovery_author = commit.device_registrations().iter().find_map(|activation| {
-            if activation.registration != commit.author_registration {
-                return None;
-            }
-            let crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
-                node,
-                ..
-            } = &activation.authority
-            else {
-                return None;
-            };
-            let registration =
-                load_activated_registration_on(conn, &root, &activation.registration).ok()?;
-            let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
-                owner_grant,
-                ..
-            } = registration.origin
-            else {
-                return None;
-            };
-            Some((
-                activation.registration.clone(),
-                crate::sync::store_commit::OwnerRecoveryCursor {
+        let recovery_author = commit
+            .device_registrations()
+            .iter()
+            .find_map(|activation| {
+                if activation.registration != commit.author_registration {
+                    return None;
+                }
+                let crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                    node,
+                    ..
+                } = &activation.authority
+                else {
+                    return None;
+                };
+                Some((&activation.registration, node))
+            })
+            .map(|(registration_ref, node)| {
+                let registration = load_activated_registration_on(conn, &root, registration_ref)?;
+                let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                     owner_grant,
-                    position: crate::sync::store_commit::OwnerRecoveryPosition::At {
-                        node: node.clone(),
+                    ..
+                } = registration.origin
+                else {
+                    return Err(DbError::Message(
+                        "recovery activation author has a non-recovery registration origin"
+                            .to_string(),
+                    ));
+                };
+                Ok((
+                    registration_ref.clone(),
+                    crate::sync::store_commit::OwnerRecoveryCursor {
+                        owner_grant,
+                        position: crate::sync::store_commit::OwnerRecoveryPosition::At {
+                            node: node.clone(),
+                        },
                     },
-                },
-            ))
-        });
+                ))
+            })
+            .transpose()?;
         if let Some((registration, recovery)) = &recovery_author {
             device_state = device_state
                 .activate_registration(registration.clone(), Some(recovery.clone()))
