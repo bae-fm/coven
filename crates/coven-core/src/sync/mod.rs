@@ -35,6 +35,7 @@ mod pull_tests;
 mod refresh_tests;
 pub(crate) mod remote_object;
 pub mod restore_code;
+pub(crate) mod retained_replay;
 #[cfg(test)]
 mod rotation_pending_tests;
 pub(crate) mod routing_contract;

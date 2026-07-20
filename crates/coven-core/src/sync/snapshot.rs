@@ -606,7 +606,9 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         ))
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
-    for table in list_user_tables(conn)? {
+    for table in crate::db::user_table_names(conn)
+        .map_err(|error| SnapshotError::ClearFailed(format!("list user tables: {error}")))?
+    {
         if synced.iter().any(|t| t.name() == table) {
             continue;
         }
@@ -700,18 +702,6 @@ fn scope_authenticated_blob_graph(
     )
     .map_err(|error| SnapshotError::ClearFailed(format!("scope blob ownership graph: {error}")))?;
     Ok(())
-}
-
-/// List user table names (excluding sqlite internal `sqlite_%` tables).
-fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        .map_err(|e| SnapshotError::ClearFailed(format!("prepare table list: {e}")))?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(|e| SnapshotError::ClearFailed(format!("query table list: {e}")))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| SnapshotError::ClearFailed(format!("step table list: {e}")))
 }
 
 /// Check whether it's time to create a new snapshot.

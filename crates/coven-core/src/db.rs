@@ -20,6 +20,20 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            retained_replay_baselines,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    write_policy TEXT NOT NULL CHECK (json_valid(write_policy)),
+    exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
+    routing_hash TEXT NOT NULL CHECK (length(routing_hash) = 64),
+    image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
+    image_bytes BLOB NOT NULL CHECK (length(image_bytes) > 0),
+    authority_bytes BLOB NOT NULL CHECK (length(authority_bytes) > 0)
+"
+        );
+        $visit!(
             retained_merge_materializations,
             "
     device_id TEXT NOT NULL,
@@ -830,6 +844,21 @@ pub(crate) fn is_reserved_table_name(name: &str) -> bool {
     false
 }
 
+/// Every application and Coven table in the main schema, excluding SQLite's
+/// internal tables. Snapshot and retained-replay projections share this one
+/// enumeration so a new table cannot be omitted by one image path.
+pub(crate) fn user_table_names(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT name FROM main.sqlite_schema
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(tables)
+}
+
 /// The name of every table [`apply_coven_schema`] creates, for a test to assert a
 /// schema property (STRICT) holds across all of them without re-listing the set
 /// by hand.
@@ -1016,6 +1045,28 @@ mod tests {
             [],
         )
         .expect("Serial materialization has no Merge retained input");
+    }
+
+    #[test]
+    fn retained_replay_baseline_has_one_closed_active_row() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let insert = |singleton: i64, generation: i64| {
+            conn.execute(
+                "INSERT INTO retained_replay_baselines
+                 (singleton, generation, write_policy, exact_cut, schema_version,
+                  routing_hash, image_hash, image_bytes, authority_bytes)
+                 VALUES (?1, ?2, '\"merge_concurrent\"',
+                         '{\"merge_concurrent\":{}}', 1, ?3, ?4, x'01', x'01')",
+                rusqlite::params![singleton, generation, "a".repeat(64), "b".repeat(64)],
+            )
+        };
+
+        insert(1, -1).expect_err("baseline generation cannot be negative");
+        insert(1, 0).expect("insert generation-zero baseline");
+        insert(1, 1).expect_err("a second active baseline must fail");
+        insert(2, 1).expect_err("the baseline key must remain the singleton");
+        insert(0, 1).expect_err("baseline generation cannot use another singleton key");
     }
 
     #[test]

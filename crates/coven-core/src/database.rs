@@ -39,6 +39,9 @@ use crate::sync::provider::ProviderAdminState;
 use crate::sync::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, SharedLiveSetObjectDomain,
 };
+use crate::sync::retained_replay::{
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, GENERATION_ZERO,
+};
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionedObject};
@@ -69,17 +72,17 @@ use crate::WritePolicy;
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 const HOST_DEVICE_ID_STATE_KEY: &str = "host_device_id";
 pub const WRITE_POLICY_STATE_KEY: &str = "write_policy";
-const SYNC_ROUTING_CONTRACT_STATE_KEY: &str = "sync_routing_contract";
+pub(crate) const SYNC_ROUTING_CONTRACT_STATE_KEY: &str = "sync_routing_contract";
 pub const SYNC_ROUTING_HASH_STATE_KEY: &str = "sync_routing_hash";
-const COVEN_SCHEMA_MANIFEST_STATE_KEY: &str = "coven_schema_manifest";
-const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
-const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
+pub(crate) const COVEN_SCHEMA_MANIFEST_STATE_KEY: &str = "coven_schema_manifest";
+pub(crate) const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
+pub(crate) const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
 pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
 pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
 pub const SERIAL_WRAPPED_KEYS_STATE_KEY: &str = "serial_wrapped_keys";
 const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
-const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
+pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
 fn load_store_device_genesis_state_on(
@@ -1618,6 +1621,220 @@ fn install_store_root_authority_on(
     )
     .map(|_| ())
     .map_err(DbError::from)
+}
+
+fn validate_generation_zero_replay_authority_on(
+    conn: &Connection,
+    baseline: &RetainedReplayBaseline,
+) -> Result<(), DbError> {
+    let (root_ref, root) = load_store_root_authority_on(conn)?.ok_or_else(|| {
+        DbError::Message("retained replay genesis image has no Store root authority".to_string())
+    })?;
+    if root_ref != baseline.authority.store_root
+        || root.descriptor.write_policy != baseline.write_policy
+        || root.descriptor.schema_version != baseline.schema_version
+        || root.descriptor.sync_routing_hash != baseline.routing_hash
+    {
+        return Err(DbError::Message(
+            "retained replay genesis authority differs from its Store root".to_string(),
+        ));
+    }
+    let founder =
+        load_activated_registration_on(conn, &root_ref, &baseline.authority.founder_registration)?;
+    let authority: String = conn
+        .query_row(
+            "SELECT activation_authority
+             FROM store_device_registration_activations
+             WHERE device_id = ?1 AND registration_hash = ?2",
+            (
+                baseline
+                    .authority
+                    .founder_registration
+                    .device_id
+                    .to_string(),
+                baseline
+                    .authority
+                    .founder_registration
+                    .registration_hash
+                    .to_string(),
+            ),
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let authority: crate::sync::store_commit::StoreDeviceRegistrationActivation =
+        serde_json::from_str(&authority).map_err(|error| {
+            DbError::Message(format!(
+                "retained replay founder activation authority: {error}"
+            ))
+        })?;
+    if founder.store_root != root_ref
+        || authority
+            != (crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                root: root_ref,
+            })
+    {
+        return Err(DbError::Message(
+            "retained replay genesis founder differs from its exact activation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_generation_zero_replay_baseline_on(
+    conn: &Connection,
+    baseline: &RetainedReplayBaseline,
+) -> Result<(), DbError> {
+    baseline.validate_image()?;
+    validate_generation_zero_replay_authority_on(conn, baseline)?;
+    let image = crate::sync::retained_replay::open_image(&baseline.image_bytes)?;
+    let routing = load_coven_metadata(&image, baseline.write_policy)?;
+    if routing.hash() != baseline.routing_hash {
+        return Err(DbError::Message(
+            "retained replay image routing contract differs from its baseline".to_string(),
+        ));
+    }
+    validate_initialized_coven_schema(
+        &image,
+        baseline.write_policy == WritePolicy::MergeConcurrent && routing.has_scoped_graph(),
+    )?;
+    validate_generation_zero_replay_authority_on(&image, baseline)
+}
+
+struct StoredGenerationZeroReplayBaseline {
+    generation: i64,
+    write_policy: String,
+    exact_cut: String,
+    schema_version: i64,
+    routing_hash: String,
+    image_hash: String,
+    image_bytes: Vec<u8>,
+    authority_bytes: Vec<u8>,
+}
+
+fn load_generation_zero_replay_baseline_on(
+    conn: &Connection,
+) -> Result<Option<RetainedReplayBaseline>, DbError> {
+    let stored: Option<StoredGenerationZeroReplayBaseline> = conn
+        .query_row(
+            "SELECT generation, write_policy, exact_cut, schema_version,
+                    routing_hash, image_hash, image_bytes, authority_bytes
+             FROM retained_replay_baselines WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(StoredGenerationZeroReplayBaseline {
+                    generation: row.get(0)?,
+                    write_policy: row.get(1)?,
+                    exact_cut: row.get(2)?,
+                    schema_version: row.get(3)?,
+                    routing_hash: row.get(4)?,
+                    image_hash: row.get(5)?,
+                    image_bytes: row.get(6)?,
+                    authority_bytes: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let generation = u64::try_from(stored.generation)
+        .map_err(|_| DbError::Message("retained replay generation is negative".to_string()))?;
+    let schema_version = u32::try_from(stored.schema_version)
+        .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
+    let parsed_write_policy: WritePolicy = serde_json::from_str(&stored.write_policy)
+        .map_err(|error| DbError::Message(format!("retained replay write policy: {error}")))?;
+    let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
+        .map_err(|error| DbError::Message(format!("retained replay exact cut: {error}")))?;
+    let authority: RetainedReplayGenesisAuthority = serde_json::from_slice(&stored.authority_bytes)
+        .map_err(|error| DbError::Message(format!("retained replay genesis authority: {error}")))?;
+    if serde_json::to_string(&parsed_write_policy)
+        .map_err(|error| DbError::Message(format!("serialize retained replay policy: {error}")))?
+        != stored.write_policy
+        || serde_json::to_string(&parsed_exact_cut).map_err(|error| {
+            DbError::Message(format!("serialize retained replay exact cut: {error}"))
+        })? != stored.exact_cut
+        || serde_json::to_vec(&authority).map_err(|error| {
+            DbError::Message(format!(
+                "serialize retained replay genesis authority: {error}"
+            ))
+        })? != stored.authority_bytes
+    {
+        return Err(DbError::Message(
+            "retained replay baseline metadata is not canonical".to_string(),
+        ));
+    }
+    let baseline =
+        RetainedReplayBaseline {
+            generation,
+            write_policy: parsed_write_policy,
+            exact_cut: parsed_exact_cut,
+            schema_version,
+            routing_hash: stored.routing_hash.parse().map_err(|error| {
+                DbError::Message(format!("retained replay routing hash: {error}"))
+            })?,
+            image_hash: stored.image_hash.parse().map_err(|error| {
+                DbError::Message(format!("retained replay image hash: {error}"))
+            })?,
+            image_bytes: stored.image_bytes,
+            authority,
+        };
+    validate_generation_zero_replay_baseline_on(conn, &baseline)?;
+    Ok(Some(baseline))
+}
+
+fn install_generation_zero_replay_baseline_on(
+    conn: &Connection,
+    write_policy: WritePolicy,
+    schema_version: u32,
+    routing_hash: ObjectHash,
+    authority: RetainedReplayGenesisAuthority,
+) -> Result<(), DbError> {
+    if load_generation_zero_replay_baseline_on(conn)?.is_some() {
+        return Err(DbError::Message(
+            "retained replay baseline already exists before founder activation".to_string(),
+        ));
+    }
+    let baseline = RetainedReplayBaseline::generation_zero(
+        conn,
+        write_policy,
+        schema_version,
+        routing_hash,
+        authority,
+    )?;
+    validate_generation_zero_replay_authority_on(conn, &baseline)?;
+    conn.execute(
+        "INSERT INTO retained_replay_baselines
+         (singleton, generation, write_policy, exact_cut, schema_version,
+          routing_hash, image_hash, image_bytes, authority_bytes)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            i64::try_from(baseline.generation).map_err(|_| {
+                DbError::Message("retained replay generation exceeds SQLite INTEGER".to_string())
+            })?,
+            serde_json::to_string(&baseline.write_policy).map_err(|error| {
+                DbError::Message(format!("serialize retained replay policy: {error}"))
+            })?,
+            serde_json::to_string(&baseline.exact_cut).map_err(|error| {
+                DbError::Message(format!("serialize retained replay exact cut: {error}"))
+            })?,
+            i64::from(baseline.schema_version),
+            baseline.routing_hash.to_string(),
+            baseline.image_hash.to_string(),
+            &baseline.image_bytes,
+            baseline.canonical_authority_bytes()?,
+        ],
+    )
+    .map_err(DbError::from)?;
+    let installed = load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+        DbError::Message("installed retained replay baseline is absent".to_string())
+    })?;
+    if installed != baseline {
+        return Err(DbError::Message(
+            "installed retained replay baseline differs from its verified image".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn install_store_founder_state_on(
@@ -11395,6 +11612,9 @@ impl Database {
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
     ) -> Result<(), DbError> {
+        let write_policy = self.write_policy();
+        let schema_version = self.schema_version();
+        let routing_hash = self.sync_routing_hash();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let graph = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
@@ -11520,6 +11740,27 @@ impl Database {
                                 .to_string(),
                         ));
                     }
+                    let baseline = load_generation_zero_replay_baseline_on(&tx)?.ok_or_else(|| {
+                        DbError::Message(
+                            "activated founder state has no generation-zero replay baseline"
+                                .to_string(),
+                        )
+                    })?;
+                    if baseline.generation != GENERATION_ZERO
+                        || baseline.write_policy != write_policy
+                        || baseline.schema_version != schema_version
+                        || baseline.routing_hash != routing_hash
+                        || baseline.authority
+                            != (RetainedReplayGenesisAuthority {
+                                store_root: root.clone(),
+                                founder_registration: registration.clone(),
+                            })
+                    {
+                        return Err(DbError::Message(
+                            "activated founder state differs from its generation-zero replay baseline"
+                                .to_string(),
+                        ));
+                    }
                     return Ok(());
                 }
                 LocalDeviceRegistrationState::Retired { .. } => {
@@ -11642,6 +11883,16 @@ impl Database {
                     )?;
                 }
             }
+            install_generation_zero_replay_baseline_on(
+                &tx,
+                write_policy,
+                schema_version,
+                routing_hash,
+                RetainedReplayGenesisAuthority {
+                    store_root: root,
+                    founder_registration: registration,
+                },
+            )?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -22970,6 +23221,43 @@ fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
 mod tests {
     use super::*;
     use crate::blob::BLOB_TOMBSTONE_GRACE;
+
+    async fn assert_store_creation_installs_generation_zero_replay_baseline(
+        write_policy: WritePolicy,
+    ) {
+        let db = match write_policy {
+            WritePolicy::MergeConcurrent => crate::sync::test_helpers::open_test_db(),
+            WritePolicy::Serial => crate::sync::test_helpers::open_serial_test_db(),
+        };
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "retained-replay-genesis",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create Store");
+        let baseline = db
+            .call(load_generation_zero_replay_baseline_on)
+            .await
+            .expect("load retained replay baseline")
+            .expect("Store creation installs retained replay baseline");
+
+        assert_eq!(baseline.write_policy, write_policy);
+        assert_eq!(baseline.schema_version, db.schema_version());
+        assert_eq!(baseline.routing_hash, db.sync_routing_hash());
+        assert_eq!(baseline.authority.store_root, store.root);
+        assert_eq!(baseline.exact_cut.policy(), write_policy);
+        baseline.validate_image().expect("validate replay image");
+    }
+
+    #[tokio::test]
+    async fn store_creation_installs_generation_zero_replay_baseline() {
+        assert_store_creation_installs_generation_zero_replay_baseline(
+            WritePolicy::MergeConcurrent,
+        )
+        .await;
+        assert_store_creation_installs_generation_zero_replay_baseline(WritePolicy::Serial).await;
+    }
 
     fn reclaim_test_object(path: &str) -> ExactObjectRef {
         let bytes = path.as_bytes();

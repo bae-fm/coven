@@ -134,6 +134,7 @@ async fn load_current_exact_chain(
 /// The membership chain is anchored to it: a chain whose founder differs is a
 /// takeover attempt and is rejected (issue #95).
 pub const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
+pub(crate) const MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX: &str = "membership_head_cursor/";
 
 pub struct SerialMembershipContext<'a> {
     pub coordination: &'a dyn CoordinationStorage,
@@ -1667,13 +1668,15 @@ fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {
 
 fn head_cursor_key(reference: &MembershipHeadRef) -> String {
     format!(
-        "membership_head_cursor/{}/{}",
-        reference.coord.author_owner_grant, reference.coord.stream_id
+        "{}{}/{}",
+        MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX,
+        reference.coord.author_owner_grant,
+        reference.coord.stream_id
     )
 }
 
 async fn read_head_cursors(db: &Database) -> Result<Vec<MembershipHeadRef>, String> {
-    let prefix = "membership_head_cursor/".to_string();
+    let prefix = MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX.to_string();
     db.call(move |conn| {
         let mut statement = conn
             .prepare(
