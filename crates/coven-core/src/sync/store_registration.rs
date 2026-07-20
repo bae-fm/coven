@@ -740,7 +740,7 @@ async fn publish_self_retirement(
     db.mark_remote_object_uploaded(retirement_remote)
         .await
         .map_err(database_error)?;
-    let serial_authorization = match &durable.publication {
+    let materialization = match &durable.publication {
         RetirementPublication::MergeConcurrent {
             head_bytes,
             head_prepared,
@@ -794,6 +794,13 @@ async fn publish_self_retirement(
                     "retirement commit or head exact readback differs".into(),
                 ));
             }
+            let head = StoreDeviceHead::parse_at(
+                head_bytes,
+                root.store_root_hash,
+                &registration,
+                &durable.commit_ref,
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             for object in [
                 durable.commit_prepared.reference(),
                 head_prepared.reference(),
@@ -812,7 +819,10 @@ async fn publish_self_retirement(
                     .await
                     .map_err(database_error)?;
             }
-            None
+            crate::database::LocalRetirementMaterialization::MergeConcurrent {
+                head,
+                head_object: head_prepared.reference().clone(),
+            }
         }
         RetirementPublication::Serial {
             base_head,
@@ -849,7 +859,9 @@ async fn publish_self_retirement(
             db.mark_remote_object_uploaded(commit_remote)
                 .await
                 .map_err(database_error)?;
-            Some(authorization_after.clone())
+            crate::database::LocalRetirementMaterialization::Serial {
+                authorization: authorization_after.clone(),
+            }
         }
     };
     db.complete_local_store_device_retirement(
@@ -857,7 +869,7 @@ async fn publish_self_retirement(
         retirement_ref.clone(),
         commit,
         durable.commit_ref,
-        serial_authorization,
+        materialization,
         closed_remotes
             .iter()
             .map(|remote| remote.object_id())
@@ -1880,9 +1892,16 @@ pub async fn recover_owner_device_merge(
         .create_protocol_object(&head_prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    db.complete_merge_owner_recovery(commit, commit_ref, registration, registration_activation)
-        .await
-        .map_err(database_error)?;
+    db.complete_merge_owner_recovery(
+        commit,
+        commit_ref,
+        head,
+        head_prepared.reference().clone(),
+        registration,
+        registration_activation,
+    )
+    .await
+    .map_err(database_error)?;
     Ok(registration_ref)
 }
 
@@ -2755,7 +2774,7 @@ mod tests {
             .expect("load materialized Store frontier")
             .into_values()
         {
-            let (commit, _) = super::super::store_pull::load_commit_with_author(
+            let (commit, author) = super::super::store_pull::load_commit_with_author(
                 &store.storage,
                 &store.root,
                 &reference,
@@ -2763,11 +2782,30 @@ mod tests {
             .await
             .expect("load materialized recovery commit");
             if commit.author_registration == registration {
-                recovered_commit = Some((commit, reference));
+                let (_, head_ref) = super::super::store_outbound::exact_next_announcement_slot(
+                    &store.storage,
+                    &store.root,
+                    &registration,
+                    &author,
+                    Some(&reference),
+                )
+                .await
+                .expect("load recovery activation slot");
+                let head_ref = head_ref.expect("recovery activation head exists");
+                let head = super::super::store_objects::load_head_ref(
+                    &store.storage,
+                    store.root.store_root_hash,
+                    &head_ref,
+                    &author,
+                    &reference,
+                )
+                .await
+                .expect("load recovery activation head");
+                recovered_commit = Some((commit, reference, head));
                 break;
             }
         }
-        let (commit, reference) = recovered_commit.expect("recovery commit is materialized");
+        let (commit, reference, head) = recovered_commit.expect("recovery commit is materialized");
         let device_id = registration.device_id.to_string();
         let registration_hash = registration.registration_hash.to_string();
         db.call(move |conn| {
@@ -2785,7 +2823,16 @@ mod tests {
 
         let error = db
             .call(move |conn| {
-                crate::database::Database::record_materialized_commit_on(conn, &commit, &reference)
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(crate::database::DbError::from)?;
+                crate::database::Database::record_materialized_merge_commit_on(
+                    &tx,
+                    &commit,
+                    &reference,
+                    &head.value,
+                    &head.object,
+                )
             })
             .await
             .expect_err("recovery materialization must surface corrupt registration bytes");

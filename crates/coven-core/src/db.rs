@@ -404,6 +404,14 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            store_author_exclusion_activations,
+            "
+    exclusion_ref TEXT PRIMARY KEY CHECK (json_valid(exclusion_ref)),
+    accepted_cut TEXT NOT NULL CHECK (json_valid(accepted_cut)),
+    activation_head TEXT NOT NULL CHECK (json_valid(activation_head))
+"
+        );
+        $visit!(
             circle_control_activations,
             "
     circle_id TEXT NOT NULL,
@@ -925,6 +933,30 @@ mod tests {
             .expect("read circle_operations columns");
 
         assert_eq!(columns, ["operation_id", "circle_id", "payload"]);
+    }
+
+    #[test]
+    fn author_exclusion_activation_locator_has_one_exact_row_shape() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let columns = conn
+            .prepare("PRAGMA table_info(store_author_exclusion_activations)")
+            .expect("prepare exclusion activation table_info")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .expect("query exclusion activation columns")
+            .map(|row| row.expect("read exclusion activation column"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            columns,
+            [
+                ("exclusion_ref".to_string(), 1),
+                ("accepted_cut".to_string(), 0),
+                ("activation_head".to_string(), 0),
+            ]
+        );
     }
 
     #[test]

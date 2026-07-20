@@ -578,6 +578,7 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "row_blob_locators",
     "store_device_registration_activations",
     "store_device_state_snapshots",
+    "store_author_exclusion_activations",
 ];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to

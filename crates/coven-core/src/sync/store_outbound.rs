@@ -12,7 +12,7 @@ use super::store_commit::{
     CandidateCleanupManifest, CandidateFamilyId, CirclePackageInput, DeviceJoinAttemptRef,
     DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget,
     StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
-    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
+    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreHistoryCut, StoreOperationMembershipAuthority,
     StorePackageInput, StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor,
     SuccessorLink, SERIAL_STREAM_ID,
@@ -84,6 +84,8 @@ pub enum StoreOutboundError {
     CandidateCleanup(#[from] super::store_pull::StorePullError),
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
+    #[error("Store author {device_id} was excluded before candidate activation")]
+    AuthorExcluded { device_id: StoreDeviceId },
 }
 
 impl From<crate::database::DbError> for StoreOutboundError {
@@ -247,9 +249,27 @@ impl StoreOutboundError {
             | Self::MissingBlob { .. }
             | Self::MissingSerialCoordination
             | Self::SerialControlConflict { .. }
-            | Self::SequenceExhausted { .. } => true,
+            | Self::SequenceExhausted { .. }
+            | Self::AuthorExcluded { .. } => true,
         }
     }
+}
+
+async fn reject_excluded_merge_candidate(
+    db: &Database,
+    candidate: &StoreBatchCommitRef,
+    author: &StoreDeviceRegistrationRef,
+) -> Result<(), StoreOutboundError> {
+    if db
+        .author_exclusion_activation_for_candidate(candidate.clone(), author.clone())
+        .await?
+        .is_some()
+    {
+        return Err(StoreOutboundError::AuthorExcluded {
+            device_id: author.device_id,
+        });
+    }
+    Ok(())
 }
 
 /// Prepare the oldest pending write as exact signed bytes. A blocked or already
@@ -1730,6 +1750,17 @@ pub async fn abandon_merge_candidate(
                 super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
                 return Ok(MergeCandidateAbandonment::Abandoned);
             }
+            if let Some(candidate) = db.blocked_merge_candidate(write_id.clone()).await? {
+                if let Some(nonactivation) =
+                    excluded_candidate_nonactivation(db, storage, &candidate).await?
+                {
+                    db.begin_blocked_merge_candidate_nonactivation(write_id.clone(), nonactivation)
+                        .await?;
+                    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                        .await?;
+                    return Ok(MergeCandidateAbandonment::Abandoned);
+                }
+            }
             if !prepare_merge_candidate_abandonment(
                 db,
                 storage,
@@ -1742,7 +1773,42 @@ pub async fn abandon_merge_candidate(
                 return Ok(MergeCandidateAbandonment::NotRequired);
             }
         }
-        crate::database::MergeAbandonmentState::Prepared => {}
+        crate::database::MergeAbandonmentState::Prepared => {
+            let candidates = db
+                .prepared_merge_abandonment_candidates(write_id.clone())
+                .await?
+                .ok_or_else(|| {
+                    StoreOutboundError::InvalidOutbound(
+                        "prepared Merge abandonment has no exact candidates".to_string(),
+                    )
+                })?;
+            let candidate =
+                excluded_candidate_nonactivation(db, storage, &candidates.candidate).await?;
+            let authority =
+                excluded_candidate_nonactivation(db, storage, &candidates.authority).await?;
+            match (candidate, authority) {
+                (Some(candidate), Some(authority)) => {
+                    db.begin_prepared_merge_abandonment_nonactivation(
+                        write_id.clone(),
+                        candidate,
+                        authority,
+                    )
+                    .await?;
+                    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                        .await?;
+                    db.finish_author_excluded_merge_abandonment(write_id)
+                        .await?;
+                    return Ok(MergeCandidateAbandonment::Abandoned);
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(StoreOutboundError::InvalidOutbound(
+                        "prepared Merge abandonment candidates disagree on author exclusion"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         crate::database::MergeAbandonmentState::Accepted
         | crate::database::MergeAbandonmentState::CandidateWon
         | crate::database::MergeAbandonmentState::OtherWon => {
@@ -1750,6 +1816,14 @@ pub async fn abandon_merge_candidate(
                 super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
             }
             return finish_merge_abandonment(db, storage, write_id).await;
+        }
+        crate::database::MergeAbandonmentState::AuthorExcluded => {
+            if db.merge_candidate_cleanup_pending(&write_id).await? {
+                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+            }
+            db.finish_author_excluded_merge_abandonment(write_id)
+                .await?;
+            return Ok(MergeCandidateAbandonment::Abandoned);
         }
     }
     drain_store_writes(db, storage).await?;
@@ -1786,7 +1860,82 @@ async fn finish_merge_abandonment(
                 "Merge abandonment has no accepted head outcome".to_string(),
             ))
         }
+        crate::database::MergeAbandonmentState::AuthorExcluded => {
+            if db.merge_candidate_cleanup_pending(&write_id).await? {
+                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+            }
+            db.finish_author_excluded_merge_abandonment(write_id)
+                .await?;
+            Ok(MergeCandidateAbandonment::Abandoned)
+        }
     }
+}
+
+async fn excluded_candidate_nonactivation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    candidate: &crate::database::BlockedMergeCandidate,
+) -> Result<Option<super::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
+    let candidate_ref = candidate.head.value.commit.clone();
+    let Some(locator) = db
+        .author_exclusion_activation_for_candidate(
+            candidate_ref.clone(),
+            candidate.commit.value.author_registration.clone(),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let root = db.local_store_root_ref().await?.ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound("blocked Merge candidate has no Store root".to_string())
+    })?;
+    let candidate_target = StoreBatchCommitDeletionTarget {
+        coord: candidate_ref.coord.clone(),
+        object: candidate.commit.object.clone(),
+        canonical_signed_bytes: candidate.commit.bytes.clone(),
+    };
+    let nonactivation = match observe_excluded_candidate_head(
+        db,
+        storage,
+        root.store_root_hash,
+        &candidate.head.value,
+        &candidate.commit.value,
+        &candidate.head.object,
+    )
+    .await?
+    {
+        ExcludedCandidateHeadObservation::AuthorExclusion => {
+            let activation = Box::pin(super::store_pull::verify_author_exclusion_activation(
+                storage,
+                &root,
+                &locator,
+                &candidate_ref,
+                &candidate.commit.value,
+                &candidate.head.value,
+                &candidate.head.object,
+            ))
+            .await?;
+            super::remote_object::VerifiedCandidateNonactivation::author_exclusion(
+                &activation,
+                candidate_target,
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+        }
+        ExcludedCandidateHeadObservation::MergeWinner(observation) => {
+            let registration = db
+                .activated_store_device_registration(
+                    candidate.commit.value.author_registration.clone(),
+                )
+                .await?;
+            super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                candidate_target,
+                &registration,
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+        }
+    };
+    Ok(Some(nonactivation))
 }
 
 /// Publish the exact prepared object graph in sequence order. Every remote object
@@ -1836,6 +1985,48 @@ impl VerifiedMergeWinner {
     }
 }
 
+enum ExcludedCandidateHeadObservation {
+    AuthorExclusion,
+    MergeWinner(VerifiedMergeWinner),
+}
+
+async fn observe_excluded_candidate_head(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    candidate: &StoreDeviceHead,
+    candidate_commit: &StoreBatchCommit,
+    candidate_object: &ExactObjectRef,
+) -> Result<ExcludedCandidateHeadObservation, StoreOutboundError> {
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
+    let prefix = head_slot_prefix(
+        &candidate.author_registration.device_id.to_string(),
+        candidate.commit.coord.sequence(),
+    );
+    match storage
+        .read_protocol_slot(&context, candidate_object.slot(), &prefix)
+        .await
+    {
+        Err(StorageError::NotFound(_)) => Ok(ExcludedCandidateHeadObservation::AuthorExclusion),
+        Ok((bytes, object)) if bytes == candidate.to_bytes() && object == *candidate_object => {
+            Ok(ExcludedCandidateHeadObservation::AuthorExclusion)
+        }
+        Ok(_) => read_occupied_merge_head(
+            db,
+            storage,
+            store_root_hash,
+            candidate,
+            candidate_commit,
+            candidate_object.slot(),
+            &prefix,
+        )
+        .await
+        .map(ExcludedCandidateHeadObservation::MergeWinner),
+        Err(error) => Err(StoreObjectError::Storage(error).into()),
+    }
+}
+
 fn verify_merge_candidate_nonactivations(
     observation: &VerifiedMergeWinner,
     targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
@@ -1866,6 +2057,7 @@ async fn read_occupied_merge_head(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     expected: &StoreDeviceHead,
+    expected_commit: &StoreBatchCommit,
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
 ) -> Result<VerifiedMergeWinner, StoreOutboundError> {
@@ -1890,14 +2082,24 @@ async fn read_occupied_merge_head(
     let registration = db
         .activated_store_device_registration(expected.author_registration.clone())
         .await?;
-    let expected_commit = super::store_objects::load_commit_ref(
-        storage,
+    expected
+        .commit
+        .verify_commit(expected_commit)
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    StoreBatchCommit::parse_at(
+        &expected_commit.to_bytes(),
         store_root_hash,
-        &expected.commit,
+        &expected.commit.coord,
         &registration,
     )
-    .await?
-    .value;
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    StoreDeviceHead::parse_at(
+        &expected.to_bytes(),
+        store_root_hash,
+        &registration,
+        &expected.commit,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let winner_commit = super::store_objects::load_commit_ref(
         storage,
         store_root_hash,
@@ -1919,7 +2121,7 @@ async fn read_occupied_merge_head(
         store_root_hash,
         expected_slot: slot.clone(),
         expected: expected.clone(),
-        expected_commit: Box::new(expected_commit),
+        expected_commit: Box::new(expected_commit.clone()),
         winner,
         winner_prepared,
         winner_commit: Box::new(winner_commit),
@@ -1952,6 +2154,12 @@ pub(crate) async fn drain_store_writes_with_coordination(
         db.set_write_status(&write_id, crate::WriteStatus::Publishing)
             .await?;
         let attempt = async {
+            Box::pin(reject_excluded_merge_candidate(
+                db,
+                &batch.head.value.commit,
+                &batch.commit.value.author_registration,
+            ))
+            .await?;
             let store_root_hash = required_store_root(db).await?.store_root_hash;
             let commit = &batch.commit.value;
             if !matches!(
@@ -1994,6 +2202,19 @@ pub(crate) async fn drain_store_writes_with_coordination(
             }
             db.mark_candidate_commit_uploaded(head.commit.clone())
                 .await?;
+            #[cfg(any(test, feature = "test-utils"))]
+            db.reach_test_point(
+                crate::database::DatabaseTestPoint::StoreWriteCommitUploaded {
+                    write_id: write_id.clone(),
+                },
+            )
+            .await;
+            Box::pin(reject_excluded_merge_candidate(
+                db,
+                &head.commit,
+                &commit.author_registration,
+            ))
+            .await?;
             let head_prefix = head_slot_prefix(
                 &head.author_registration.device_id.to_string(),
                 commit.seq(),
@@ -2007,6 +2228,7 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     storage,
                     store_root_hash,
                     head,
+                    commit,
                     batch.head.object.slot(),
                     &head_prefix,
                 )
@@ -2026,8 +2248,22 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     let (winner, winner_prepared) = observation.into_head();
                     db.adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
                         .await?;
-                    db.complete_prepared_store_write(head.commit.clone(), nonactivations)
-                        .await?;
+                    #[cfg(any(test, feature = "test-utils"))]
+                    db.reach_test_point(
+                        crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+                            write_id: write_id.clone(),
+                        },
+                    )
+                    .await;
+                    match db
+                        .complete_prepared_store_write(head.commit.clone(), nonactivations)
+                        .await?
+                    {
+                        crate::database::CompletePreparedStoreWriteOutcome::Published => {}
+                        crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
+                            device_id,
+                        } => return Err(StoreOutboundError::AuthorExcluded { device_id }),
+                    }
                     return Ok::<bool, StoreOutboundError>(true);
                 }
                 let registration = db
@@ -2057,6 +2293,7 @@ pub(crate) async fn drain_store_writes_with_coordination(
                 storage,
                 store_root_hash,
                 head,
+                commit,
                 batch.head.object.slot(),
                 &head_prefix,
             )
@@ -2084,8 +2321,20 @@ pub(crate) async fn drain_store_writes_with_coordination(
                 object: batch.head.object.clone(),
             })
             .await?;
-            db.complete_prepared_store_write(head.commit.clone(), nonactivations)
-                .await?;
+            #[cfg(any(test, feature = "test-utils"))]
+            db.reach_test_point(crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+                write_id: write_id.clone(),
+            })
+            .await;
+            match db
+                .complete_prepared_store_write(head.commit.clone(), nonactivations)
+                .await?
+            {
+                crate::database::CompletePreparedStoreWriteOutcome::Published => {}
+                crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
+                    device_id,
+                } => return Err(StoreOutboundError::AuthorExcluded { device_id }),
+            }
             Ok::<bool, StoreOutboundError>(true)
         }
         .await;
@@ -3018,6 +3267,11 @@ fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
             })
         }
         StoreOutboundError::SequenceExhausted { .. } => {
+            Some(crate::WriteBlock::InvalidProtocolState {
+                reason: error.to_string(),
+            })
+        }
+        StoreOutboundError::AuthorExcluded { .. } => {
             Some(crate::WriteBlock::InvalidProtocolState {
                 reason: error.to_string(),
             })
@@ -4374,12 +4628,12 @@ async fn publish_prepared_merge_store_operation(
             "Store operation head exact readback differs from its signed bytes".to_string(),
         ));
     }
+    let activation_head = StoreDeviceHeadRef {
+        head_hash: head.head_hash(),
+        object: prepared_head.reference().clone(),
+    };
     let operation_object_ids = if !activation.retained_operation_objects.is_empty() {
-        let head_ref = StoreDeviceHeadRef {
-            head_hash: head.head_hash(),
-            object: prepared_head.reference().clone(),
-        };
-        db.mark_store_head_uploaded(head_ref).await?;
+        db.mark_store_head_uploaded(activation_head.clone()).await?;
         Some(
             std::iter::once(super::remote_object::remote_object_id(&reference.object))
                 .chain(
@@ -4416,12 +4670,14 @@ async fn publish_prepared_merge_store_operation(
                 &[(activation.registration, activation.authority)],
             )?;
         }
-        Database::record_materialized_commit_with_device_operations_on(
+        Database::record_materialized_merge_commit_with_device_operations_on(
             &tx,
             &commit,
             &recorded_ref,
             &device_operations,
             &stream_activations,
+            &head,
+            &activation_head.object,
         )?;
         tx.commit().map_err(crate::database::DbError::from)
     })
@@ -4444,6 +4700,7 @@ async fn resolve_merge_store_operation_head_collision(
         storage,
         commit.store_root_hash,
         &head,
+        &commit,
         prepared_head.reference().slot(),
         &head_prefix,
     )
@@ -6252,23 +6509,24 @@ mod tests {
             .await
             .expect("load prepared Merge write")
             .expect("prepared Merge write exists");
-        fixture
-            .storage
-            .create_protocol_object(&batch.commit.prepared)
-            .await
-            .expect("publish exact losing Merge commit");
+        assert!(!exact_object_exists(&fixture.home, &batch.commit.object));
         publish_competing_merge_head(&fixture).await;
-        let head_prefix = head_slot_prefix(&fixture.device_id, batch.commit.value.seq());
-        let observation = read_occupied_merge_head(
+        let observation = match observe_excluded_candidate_head(
             &fixture.db,
             &fixture.storage,
             fixture.root.store_root_hash,
             &batch.head.value,
-            batch.head.object.slot(),
-            &head_prefix,
+            &batch.commit.value,
+            &batch.head.object,
         )
         .await
-        .expect("verify occupied Merge winner");
+        .expect("observe occupied Merge winner")
+        {
+            ExcludedCandidateHeadObservation::MergeWinner(observation) => observation,
+            ExcludedCandidateHeadObservation::AuthorExclusion => {
+                panic!("competing Merge head was classified as author exclusion")
+            }
+        };
         let author = fixture
             .db
             .activated_store_device_registration(batch.commit.value.author_registration.clone())

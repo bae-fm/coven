@@ -1,6 +1,6 @@
 //! Closed local publication and ownership state for remote protocol objects.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -711,8 +711,96 @@ impl RemoteObjectRecord {
         &mut self,
         nonactivation: CandidateNonactivation,
     ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
+        self.begin_candidate_nonactivation_with_head_evidence(
+            nonactivation,
+            CandidateHeadEvidence::OccupiedByProof,
+        )
+    }
+
+    pub(crate) fn begin_candidate_nonactivation_with_verified_head_nonactivation(
+        &mut self,
+        nonactivation: CandidateNonactivation,
+        head_nonactivation: &VerifiedCandidateHeadNonactivation,
+    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
+        self.begin_candidate_nonactivation_with_head_evidence(
+            nonactivation,
+            CandidateHeadEvidence::Verified(head_nonactivation),
+        )
+    }
+
+    pub(crate) fn reconcile_verified_candidate_head_nonactivation(
+        &mut self,
+        nonactivation: &CandidateNonactivation,
+        head_nonactivation: &VerifiedCandidateHeadNonactivation,
+    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
         nonactivation.validate()?;
         let candidate = nonactivation.reference()?;
+        let Self::RetainedAuthority(record) = self else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        if !matches!(
+            record.identity.domain,
+            RetainedAuthorityObjectDomain::DeviceHead { .. }
+        ) || head_nonactivation.candidate != candidate
+            || head_nonactivation.head.object() != &record.identity.object
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "fresh excluded-author head evidence names another prepared object".to_string(),
+            ));
+        }
+        let RetainedAuthorityObjectState::UncreatedVerified { former_candidates } = &record.state
+        else {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "fresh excluded-author head evidence reached a nonterminal head state".to_string(),
+            ));
+        };
+        let mut stored = None;
+        for former_candidate in former_candidates {
+            if former_candidate.reference()? == candidate {
+                stored = Some(former_candidate);
+                break;
+            }
+        }
+        let stored = stored.ok_or(RemoteObjectRecordError::CandidateOwnerMismatch)?;
+        if stored != nonactivation {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "fresh excluded-author head evidence differs from its durable proof".to_string(),
+            ));
+        }
+        match &head_nonactivation.head {
+            VerifiedCandidateHead::ExactCandidateAbsent { .. } => Ok(None),
+            VerifiedCandidateHead::ExactLateCandidate { .. } => ProtocolInertObject::new(
+                record.identity.clone(),
+                record.bytes.canonical_semantic_bytes().to_vec(),
+                former_candidates.clone(),
+            )
+            .map(Some),
+        }
+    }
+
+    fn begin_candidate_nonactivation_with_head_evidence(
+        &mut self,
+        nonactivation: CandidateNonactivation,
+        head_evidence: CandidateHeadEvidence<'_>,
+    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
+        nonactivation.validate()?;
+        let candidate = nonactivation.reference()?;
+        if matches!(head_evidence, CandidateHeadEvidence::Verified(_))
+            && !matches!(
+                self,
+                Self::RetainedAuthority(RetainedAuthorityRecord {
+                    identity: RetainedAuthorityObjectRef {
+                        domain: RetainedAuthorityObjectDomain::DeviceHead { .. },
+                        ..
+                    },
+                    ..
+                })
+            )
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "candidate head absence evidence reached a non-head object".to_string(),
+            ));
+        }
         match self {
             Self::CandidateCommit(record) => {
                 if record.identity != candidate {
@@ -752,32 +840,85 @@ impl RemoteObjectRecord {
                     else {
                         return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                     };
-                    let CandidateNonactivationProof::MergeWinner { winner_head } =
-                        &nonactivation.proof
-                    else {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "a prepared Store head requires a Merge winner proof".to_string(),
-                        ));
-                    };
-                    if winner_head.object.slot() != record.identity.object.slot()
-                        || winner_head.object == record.identity.object
-                    {
-                        return Err(RemoteObjectRecordError::InvalidProof(
-                            "Merge winner does not occupy the prepared head's exact slot"
-                                .to_string(),
-                        ));
+                    match &head_evidence {
+                        CandidateHeadEvidence::OccupiedByProof => {
+                            let CandidateNonactivationProof::MergeWinner { winner_head } =
+                                &nonactivation.proof
+                            else {
+                                return Err(RemoteObjectRecordError::InvalidProof(
+                                    "a prepared Store head requires winner or verified-absence evidence"
+                                        .to_string(),
+                                ));
+                            };
+                            if winner_head.object.slot() != record.identity.object.slot()
+                                || winner_head.object == record.identity.object
+                            {
+                                return Err(RemoteObjectRecordError::InvalidProof(
+                                    "Merge winner does not occupy the prepared head's exact slot"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        CandidateHeadEvidence::Verified(head_nonactivation) => {
+                            if !matches!(
+                                nonactivation.proof,
+                                CandidateNonactivationProof::AuthorExclusion { .. }
+                            ) || head_nonactivation.candidate != candidate
+                                || head_nonactivation.head.object() != &record.identity.object
+                            {
+                                return Err(RemoteObjectRecordError::InvalidProof(
+                                    "excluded-author head observation names another prepared object"
+                                        .to_string(),
+                                ));
+                            }
+                        }
                     }
                     if !ownership.pending.remove(&candidate) {
                         return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                     }
                     ownership.nonactivated.push(nonactivation);
                     if ownership.pending.is_empty() {
-                        record.state = RetainedAuthorityObjectState::UncreatedVerified {
-                            former_candidates: ownership.nonactivated.clone(),
-                        };
+                        match head_evidence {
+                            CandidateHeadEvidence::Verified(
+                                VerifiedCandidateHeadNonactivation {
+                                    head: VerifiedCandidateHead::ExactLateCandidate { .. },
+                                    ..
+                                },
+                            ) => {
+                                return ProtocolInertObject::new(
+                                    record.identity.clone(),
+                                    record.bytes.canonical_semantic_bytes().to_vec(),
+                                    ownership.nonactivated.clone(),
+                                )
+                                .map(Some);
+                            }
+                            CandidateHeadEvidence::OccupiedByProof
+                            | CandidateHeadEvidence::Verified(
+                                VerifiedCandidateHeadNonactivation {
+                                    head: VerifiedCandidateHead::ExactCandidateAbsent { .. },
+                                    ..
+                                },
+                            ) => {
+                                record.state = RetainedAuthorityObjectState::UncreatedVerified {
+                                    former_candidates: ownership.nonactivated.clone(),
+                                };
+                            }
+                        }
                     }
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {
+                    if matches!(
+                        head_evidence,
+                        CandidateHeadEvidence::Verified(VerifiedCandidateHeadNonactivation {
+                            head: VerifiedCandidateHead::ExactCandidateAbsent { .. },
+                            ..
+                        })
+                    ) {
+                        return Err(RemoteObjectRecordError::InvalidProof(
+                            "excluded-author head was verified absent but is marked uploaded"
+                                .to_string(),
+                        ));
+                    }
                     let RetainedAuthorityObjectState::UploadedVerified { ownership } =
                         &record.state
                     else {
@@ -800,6 +941,17 @@ impl RemoteObjectRecord {
                     record.state = RetainedAuthorityObjectState::UploadedVerified { ownership };
                 }
                 RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                    if matches!(
+                        head_evidence,
+                        CandidateHeadEvidence::Verified(VerifiedCandidateHeadNonactivation {
+                            head: VerifiedCandidateHead::ExactLateCandidate { .. },
+                            ..
+                        })
+                    ) {
+                        return Err(RemoteObjectRecordError::InvalidProof(
+                            "excluded-author head is present but is marked uncreated".to_string(),
+                        ));
+                    }
                     ensure_candidate_nonactivation(former_candidates, &candidate)?;
                 }
             },
@@ -985,6 +1137,50 @@ impl RemoteObjectRecord {
                 }
                 OwnedObjectState::RetirementPending { former_candidates } => {
                     find_nonactivation_proof(former_candidates, candidate)
+                }
+            },
+        }
+    }
+
+    pub(crate) fn nonactivation_proofs(&self) -> Vec<&CandidateNonactivationProof> {
+        match self {
+            Self::CandidateCommit(record) => match &record.state {
+                CandidateCommitState::CleanupPending { proof }
+                | CandidateCommitState::AbsentVerified { proof } => vec![proof],
+                CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {
+                    Vec::new()
+                }
+            },
+            Self::CandidateExclusive(record) => match &record.state {
+                CandidateObjectState::Prepared { ownership }
+                | CandidateObjectState::UploadedVerified { ownership } => {
+                    nonactivation_proofs(&ownership.nonactivated)
+                }
+                CandidateObjectState::CleanupPending { former_candidates }
+                | CandidateObjectState::AbsentVerified { former_candidates } => {
+                    nonactivation_proofs(former_candidates)
+                }
+            },
+            Self::RetainedAuthority(record) => match &record.state {
+                RetainedAuthorityObjectState::Prepared { ownership } => {
+                    nonactivation_proofs(&ownership.nonactivated)
+                }
+                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+                    nonactivation_proofs(&ownership.nonactivated)
+                }
+                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                    nonactivation_proofs(former_candidates)
+                }
+            },
+            Self::SharedLiveSet(record) => match &record.state {
+                OwnedObjectState::Prepared { ownership } => {
+                    nonactivation_proofs(&ownership.nonactivated)
+                }
+                OwnedObjectState::UploadedVerified { ownership } => {
+                    nonactivation_proofs(&ownership.nonactivated)
+                }
+                OwnedObjectState::RetirementPending { former_candidates } => {
+                    nonactivation_proofs(former_candidates)
                 }
             },
         }
@@ -1789,6 +1985,41 @@ impl ProtocolInertObject {
         self.validate()?;
         find_nonactivation_proof(&self.former_candidates, candidate)
     }
+
+    pub(crate) fn nonactivation_proofs(&self) -> Vec<&CandidateNonactivationProof> {
+        nonactivation_proofs(&self.former_candidates)
+    }
+
+    pub(crate) fn is_author_exclusion_head_for(
+        &self,
+        candidate: &StoreBatchCommitRef,
+        object: &ExactObjectRef,
+    ) -> Result<bool, RemoteObjectRecordError> {
+        self.validate()?;
+        let head: super::store_commit::StoreDeviceHead =
+            serde_json::from_slice(&self.canonical_semantic_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        Ok(self.identity.object == *object
+            && head.commit == *candidate
+            && matches!(
+                &self.identity.domain,
+                RetainedAuthorityObjectDomain::DeviceHead { reference }
+                    if reference.object == *object
+            )
+            && matches!(
+                self.candidate_nonactivation_proof(candidate)?,
+                Some(CandidateNonactivationProof::AuthorExclusion { .. })
+            ))
+    }
+}
+
+fn nonactivation_proofs(
+    candidates: &[CandidateNonactivation],
+) -> Vec<&CandidateNonactivationProof> {
+    candidates
+        .iter()
+        .map(CandidateNonactivation::proof)
+        .collect()
 }
 
 impl RetainedAuthorityObjectRef {
@@ -1966,6 +2197,31 @@ fn validate_retained_authority_identity(
 
 pub(crate) use super::store_commit::StoreBatchCommitDeletionTarget;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedCandidateHeadNonactivation {
+    candidate: StoreBatchCommitRef,
+    head: VerifiedCandidateHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerifiedCandidateHead {
+    ExactCandidateAbsent { object: ExactObjectRef },
+    ExactLateCandidate { object: ExactObjectRef },
+}
+
+impl VerifiedCandidateHead {
+    pub(crate) fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::ExactCandidateAbsent { object } | Self::ExactLateCandidate { object } => object,
+        }
+    }
+}
+
+enum CandidateHeadEvidence<'a> {
+    OccupiedByProof,
+    Verified(&'a VerifiedCandidateHeadNonactivation),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CandidateNonactivation {
@@ -2059,6 +2315,10 @@ enum VerifiedCandidateNonactivationEvidence {
     },
     Serial {
         durable: CandidateNonactivation,
+    },
+    AuthorExclusion {
+        durable: CandidateNonactivation,
+        head_nonactivation: VerifiedCandidateHeadNonactivation,
     },
 }
 
@@ -2163,6 +2423,50 @@ impl VerifiedCandidateNonactivation {
         Ok(value)
     }
 
+    pub(crate) fn author_exclusion(
+        observation: &super::store_pull::VerifiedAuthorExclusionActivation,
+        candidate: StoreBatchCommitDeletionTarget,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let commit = candidate
+            .verify_nonactivation_candidate(
+                observation.store_root_hash(),
+                observation.target_registration(),
+            )
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        if commit.author_registration != *observation.target()
+            || observation.exclusion().proposal.target != commit.author_registration
+            || observation.candidate() != &candidate_reference
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "author exclusion targets another candidate registration".to_string(),
+            ));
+        }
+        let value = Self {
+            evidence: Box::new(VerifiedCandidateNonactivationEvidence::AuthorExclusion {
+                durable: CandidateNonactivation {
+                    candidate,
+                    proof: CandidateNonactivationProof::AuthorExclusion {
+                        exclusion: observation.exclusion().clone(),
+                        accepted_cut: observation.accepted_cut().clone(),
+                        activation_head: observation.activation_head().clone(),
+                    },
+                },
+                head_nonactivation: VerifiedCandidateHeadNonactivation {
+                    candidate: candidate_reference,
+                    head: observation.candidate_head().clone(),
+                },
+            }),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
     pub(crate) fn candidate_reference(
         &self,
     ) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
@@ -2185,20 +2489,46 @@ impl VerifiedCandidateNonactivation {
                     "Serial candidate nonactivation has no Merge winner".to_string(),
                 ))
             }
+            VerifiedCandidateNonactivationEvidence::AuthorExclusion { .. } => {
+                Err(RemoteObjectRecordError::InvalidProof(
+                    "author-exclusion nonactivation has no Merge slot winner".to_string(),
+                ))
+            }
         }
     }
 
     pub(crate) fn into_durable(self) -> CandidateNonactivation {
         match *self.evidence {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::Serial { durable } => durable,
+            | VerifiedCandidateNonactivationEvidence::Serial { durable }
+            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. } => durable,
+        }
+    }
+
+    pub(crate) fn into_author_exclusion(
+        self,
+    ) -> Result<(CandidateNonactivation, VerifiedCandidateHeadNonactivation), RemoteObjectRecordError>
+    {
+        match *self.evidence {
+            VerifiedCandidateNonactivationEvidence::AuthorExclusion {
+                durable,
+                head_nonactivation,
+            } => Ok((durable, head_nonactivation)),
+            VerifiedCandidateNonactivationEvidence::Merge { .. }
+            | VerifiedCandidateNonactivationEvidence::Serial { .. } => {
+                Err(RemoteObjectRecordError::InvalidProof(
+                    "candidate nonactivation is not verified by an excluded-author head observation"
+                        .to_string(),
+                ))
+            }
         }
     }
 
     fn durable(&self) -> &CandidateNonactivation {
         match self.evidence.as_ref() {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::Serial { durable } => durable,
+            | VerifiedCandidateNonactivationEvidence::Serial { durable }
+            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. } => durable,
         }
     }
 }
@@ -2213,6 +2543,11 @@ pub(crate) enum CandidateNonactivationProof {
         accepted_suffix: SerialAcceptedSuffix,
         losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
     },
+    AuthorExclusion {
+        exclusion: super::store_commit::StoreDeviceExclusionRef,
+        accepted_cut: BTreeMap<super::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+        activation_head: super::store_commit::StoreDeviceHeadRef,
+    },
 }
 
 impl CandidateNonactivationProof {
@@ -2225,6 +2560,12 @@ impl CandidateNonactivationProof {
             } => {
                 accepted_suffix.validate()?;
                 validate_losing_prefix(accepted_suffix, losing_prefix)
+            }
+            Self::AuthorExclusion { accepted_cut, .. } => {
+                super::store_commit::validate_store_history_cut(
+                    &super::store_commit::StoreHistoryCut::merge_concurrent(accepted_cut.clone()),
+                )
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
             }
         }
     }
@@ -2260,6 +2601,42 @@ impl CandidateNonactivationProof {
                 {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "losing Serial prefix does not end at the discarded candidate".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::AuthorExclusion {
+                exclusion,
+                accepted_cut,
+                ..
+            } => {
+                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent
+                    || commit.author_registration != exclusion.proposal.target
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "author exclusion names another candidate author or policy".to_string(),
+                    ));
+                }
+                let expected_stream =
+                    super::store_commit::StreamActivation::device_authorized_stream_id(
+                        commit.store_root_hash,
+                        &commit.author_registration,
+                        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    );
+                let super::store_commit::StoreCommitCoord::MergeConcurrent {
+                    stream_id,
+                    sequence,
+                } = candidate.coord
+                else {
+                    unreachable!("checked Merge candidate policy")
+                };
+                let beyond_cutoff = match accepted_cut.get(&expected_stream) {
+                    Some(reference) => sequence > reference.coord.sequence(),
+                    None => true,
+                };
+                if stream_id != expected_stream || !beyond_cutoff {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "candidate is not strictly beyond its excluded author cutoff".to_string(),
                     ));
                 }
                 Ok(())

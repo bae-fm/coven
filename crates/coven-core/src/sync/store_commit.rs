@@ -4267,6 +4267,18 @@ impl VerifiedStoreDeviceOperations {
         &self.proposals
     }
 
+    pub(crate) fn exclusions(
+        &self,
+    ) -> impl Iterator<Item = (&StoreDeviceExclusionRef, &StoreHistoryCut)> {
+        self.outcomes.iter().filter_map(|outcome| match outcome {
+            VerifiedStoreDeviceExclusionOutcome::Excluded {
+                reference,
+                accepted_cut,
+            } => Some((reference, accepted_cut)),
+            VerifiedStoreDeviceExclusionOutcome::Cancelled(_) => None,
+        })
+    }
+
     pub(crate) fn from_commit(
         commit: &StoreBatchCommit,
         proposals: Vec<(
@@ -5343,7 +5355,7 @@ fn merge_device_status(
             },
         ) => Ok(StoreDeviceStatus::Inactive {
             terminals: merge_terminal_refs(left_terminals, right_terminals)?,
-            accepted_cut: merge_history_cuts(left_cut, right_cut)?,
+            accepted_cut: intersect_terminal_history_cuts(left_cut, right_cut)?,
         }),
     }
 }
@@ -5386,6 +5398,39 @@ fn merge_history_cuts(
                 }
             }
             Ok(StoreHistoryCut::MergeConcurrent(left))
+        }
+        (StoreHistoryCut::Serial(left), StoreHistoryCut::Serial(right)) if left == right => {
+            Ok(StoreHistoryCut::Serial(left))
+        }
+        _ => Err(StoreProtocolError::DeviceStateMismatch),
+    }
+}
+
+fn intersect_terminal_history_cuts(
+    left: StoreHistoryCut,
+    right: StoreHistoryCut,
+) -> Result<StoreHistoryCut, StoreProtocolError> {
+    match (left, right) {
+        (StoreHistoryCut::MergeConcurrent(left), StoreHistoryCut::MergeConcurrent(right)) => {
+            let mut intersection = BTreeMap::new();
+            for (stream, left_reference) in left {
+                let Some(right_reference) = right.get(&stream) else {
+                    continue;
+                };
+                let left_sequence = left_reference.coord.sequence();
+                let right_sequence = right_reference.coord.sequence();
+                let reference = if left_sequence < right_sequence {
+                    left_reference
+                } else if right_sequence < left_sequence {
+                    right_reference.clone()
+                } else if left_reference == *right_reference {
+                    left_reference
+                } else {
+                    return Err(StoreProtocolError::DeviceStateMismatch);
+                };
+                intersection.insert(stream, reference);
+            }
+            Ok(StoreHistoryCut::MergeConcurrent(intersection))
         }
         (StoreHistoryCut::Serial(left), StoreHistoryCut::Serial(right)) if left == right => {
             Ok(StoreHistoryCut::Serial(left))
@@ -7090,7 +7135,9 @@ fn validate_commit_frontier(frontier: &CommitFrontier) -> Result<(), StoreProtoc
     }
 }
 
-fn validate_store_history_cut(frontier: &StoreHistoryCut) -> Result<(), StoreProtocolError> {
+pub(crate) fn validate_store_history_cut(
+    frontier: &StoreHistoryCut,
+) -> Result<(), StoreProtocolError> {
     match frontier {
         StoreHistoryCut::MergeConcurrent(commits) => {
             validate_commit_frontier(&CommitFrontier::MergeConcurrent(commits.clone()))
@@ -9098,6 +9145,140 @@ mod tests {
                     .expect("membership control")
             )
             .is_ok());
+    }
+
+    fn merge_cut_reference(
+        stream_byte: u8,
+        sequence: u64,
+        identity_byte: u8,
+    ) -> (AuthorStreamId, StoreBatchCommitRef) {
+        let stream = AuthorStreamId::from_bytes([stream_byte; 32]);
+        (
+            stream,
+            StoreBatchCommitRef {
+                coord: StoreCommitCoord::MergeConcurrent {
+                    stream_id: stream,
+                    sequence,
+                },
+                commit_hash: ObjectHash::digest(&[identity_byte]),
+                object: exact(
+                    format!("test/terminal-cut/{stream_byte}/{sequence}/{identity_byte}.json"),
+                    &[identity_byte],
+                ),
+            },
+        )
+    }
+
+    fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceTerminalRef {
+        StoreDeviceTerminalRef::SelfRetirement(StoreDeviceSelfRetirementRef {
+            candidate_family: fixture.commit.candidate_family(),
+            target: fixture.registration_ref.clone(),
+            retiring_cut: StoreHistoryCut::MergeConcurrent(BTreeMap::new()),
+            retirement_hash: ObjectHash::digest(&[identity_byte]),
+            object: exact(
+                format!("test/terminal/{identity_byte}.json"),
+                &[identity_byte],
+            ),
+        })
+    }
+
+    fn inactive_status(
+        terminals: Vec<StoreDeviceTerminalRef>,
+        cut: impl IntoIterator<Item = (AuthorStreamId, StoreBatchCommitRef)>,
+    ) -> StoreDeviceStatus {
+        StoreDeviceStatus::Inactive {
+            terminals,
+            accepted_cut: StoreHistoryCut::MergeConcurrent(cut.into_iter().collect()),
+        }
+    }
+
+    #[test]
+    fn concurrent_terminal_states_union_terminals_and_intersect_cuts_in_both_orders() {
+        let fixture = fixture();
+        let (stream_a, a3) = merge_cut_reference(1, 3, 31);
+        let (_, a5) = merge_cut_reference(1, 5, 51);
+        let (stream_b, b4) = merge_cut_reference(2, 4, 42);
+        let left_terminal = terminal_ref(&fixture, 1);
+        let right_terminal = terminal_ref(&fixture, 2);
+        let left = inactive_status(
+            vec![left_terminal.clone()],
+            [(stream_a, a5), (stream_b, b4.clone())],
+        );
+        let right = inactive_status(vec![right_terminal.clone()], [(stream_a, a3.clone())]);
+        let expected = inactive_status(vec![left_terminal, right_terminal], [(stream_a, a3)]);
+
+        assert_eq!(
+            merge_device_status(left.clone(), right.clone()).unwrap(),
+            expected
+        );
+        assert_eq!(merge_device_status(right, left).unwrap(), expected);
+    }
+
+    #[test]
+    fn concurrent_terminal_cut_rejects_different_refs_at_the_same_coordinate() {
+        let fixture = fixture();
+        let (stream, left) = merge_cut_reference(1, 3, 31);
+        let (_, right) = merge_cut_reference(1, 3, 32);
+        let terminal = terminal_ref(&fixture, 1);
+
+        assert_eq!(
+            merge_device_status(
+                inactive_status(vec![terminal.clone()], [(stream, left)]),
+                inactive_status(vec![terminal], [(stream, right)]),
+            ),
+            Err(StoreProtocolError::DeviceStateMismatch)
+        );
+    }
+
+    #[test]
+    fn concurrent_terminal_cut_intersection_is_associative_and_idempotent() {
+        let fixture = fixture();
+        let terminal = terminal_ref(&fixture, 1);
+        let (stream_a, a2) = merge_cut_reference(1, 2, 21);
+        let (_, a3) = merge_cut_reference(1, 3, 31);
+        let (_, a4) = merge_cut_reference(1, 4, 41);
+        let (stream_b, b1) = merge_cut_reference(2, 1, 12);
+        let (_, b2) = merge_cut_reference(2, 2, 22);
+        let left = inactive_status(
+            vec![terminal.clone()],
+            [(stream_a, a4), (stream_b, b2.clone())],
+        );
+        let middle = inactive_status(
+            vec![terminal.clone()],
+            [(stream_a, a3), (stream_b, b1.clone())],
+        );
+        let right = inactive_status(vec![terminal], [(stream_a, a2)]);
+
+        assert_eq!(
+            merge_device_status(
+                merge_device_status(left.clone(), middle.clone()).unwrap(),
+                right.clone(),
+            )
+            .unwrap(),
+            merge_device_status(left.clone(), merge_device_status(middle, right).unwrap()).unwrap()
+        );
+        assert_eq!(
+            merge_device_status(left.clone(), left.clone()).unwrap(),
+            left
+        );
+    }
+
+    #[test]
+    fn acknowledgement_cut_join_remains_componentwise_maximum() {
+        let (stream_a, a2) = merge_cut_reference(1, 2, 21);
+        let (_, a4) = merge_cut_reference(1, 4, 41);
+        let (stream_b, b1) = merge_cut_reference(2, 1, 12);
+        let joined = StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_a, a2)]))
+            .join(StoreHistoryCut::MergeConcurrent(BTreeMap::from([
+                (stream_a, a4.clone()),
+                (stream_b, b1.clone()),
+            ])))
+            .unwrap();
+
+        assert_eq!(
+            joined,
+            StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_a, a4), (stream_b, b1),]))
+        );
     }
 
     #[test]

@@ -1471,8 +1471,14 @@ mod tests {
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-    use crate::sync::store_commit::StoreAckExclusionState;
-    use crate::sync::test_helpers::{install_active_device_fixture, open_test_db, TestStore};
+    use crate::sync::store_commit::{
+        StoreAckExclusionState, StoreBatchCommit, StoreCommitCoord, StoreDeviceExclusionRef,
+        StoreDeviceHead, StoreDeviceRegistrationRef,
+    };
+    use crate::sync::test_helpers::{
+        host_exec, install_active_device_fixture, open_test_db, temp_store_dir, TestStore,
+    };
+    use crate::{StoreDir, WriteId};
 
     fn open(path: &Path, device_id: &str) -> Database {
         Database::open(
@@ -1536,13 +1542,15 @@ mod tests {
     async fn run_remaining_device_exclusion() {
         let signer = UserKeypair::generate();
         let owner_db = open_test_db();
-        let store = Box::pin(TestStore::create(
-            &owner_db,
-            "device-exclusion-two-device-store",
-            signer.clone(),
-        ))
-        .await
-        .expect("create two-device exclusion Store");
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "device-exclusion-two-device-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create two-device exclusion Store"),
+        );
         Box::pin(store.open_into(&owner_db))
             .await
             .expect("open two-device exclusion Store");
@@ -1566,12 +1574,427 @@ mod tests {
             .map(|(reference, _)| reference)
             .find(|reference| reference.device_id.to_string() != local_device_id)
             .expect("peer Store registration");
-        let proposal = match Box::pin(propose_device_exclusion(
+        finalize_peer_exclusion_detached(&owner_db, store, &signer, &target).await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_preserves_author_exclusion_activation_evidence() {
+        let signer = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "snapshot-author-exclusion-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create snapshot exclusion Store"),
+        );
+        Box::pin(store.open_into(&owner_db))
+            .await
+            .expect("open snapshot exclusion Store");
+        let peer_db = open_test_db();
+        Box::pin(install_active_device_fixture(
+            &store,
             &owner_db,
+            &peer_db,
+            &signer,
+            "2026-07-18T00:00:00Z",
+        ))
+        .await
+        .expect("activate snapshot exclusion peer");
+        let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
+            prepare_transfer_candidate(&peer_db, &store, &signer, "snapshot-excluded-candidate"),
+        )
+        .await;
+        let owner_device_id = local_device_id(&owner_db).await.expect("owner device id");
+        let target = owner_db
+            .activated_store_device_registration_records()
+            .await
+            .expect("list snapshot exclusion registrations")
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .find(|reference| reference.device_id.to_string() != owner_device_id)
+            .expect("snapshot exclusion peer registration");
+        let exclusion = finalize_peer_exclusion(&owner_db, &store, &signer, &target).await;
+        let membership = Box::pin(super::super::pull::load_cycle_membership(
+            &store.storage,
+            &owner_db,
+        ))
+        .await
+        .expect("load post-exclusion snapshot membership")
+        .chain
+        .expect("post-exclusion snapshot has membership authority");
+        let live_evidence = owner_db
+            .call(|connection| {
+                connection
+                    .query_row(
+                        "SELECT exclusion_ref, accepted_cut, activation_head
+                         FROM store_author_exclusion_activations",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("read live author exclusion evidence");
+
+        let directory = tempfile::tempdir().expect("snapshot exclusion image directory");
+        let snapshot_dir = directory.path().to_path_buf();
+        let synced_tables = owner_db.synced_tables().to_vec();
+        let image = owner_db
+            .call(move |connection| {
+                super::super::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create author exclusion snapshot");
+        let snapshot_coverage = super::super::store_commit::CommitFrontier::from_refs(
+            owner_db.write_policy(),
+            owner_db
+                .materialized_frontier()
+                .await
+                .expect("read author exclusion snapshot frontier"),
+        )
+        .expect("shape author exclusion snapshot frontier");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            image.clone(),
+            snapshot_coverage,
+            &signer,
+            Some(&membership),
+            &owner_db,
+        )
+        .await
+        .expect("publish author exclusion snapshot");
+        let image_path = directory.path().join("inspected.db");
+        std::fs::write(&image_path, &image).expect("write author exclusion snapshot image");
+        let image =
+            rusqlite::Connection::open(&image_path).expect("open author exclusion snapshot image");
+        let stored: (String, String, String) = image
+            .query_row(
+                "SELECT exclusion_ref, accepted_cut, activation_head
+                 FROM store_author_exclusion_activations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("snapshot carries author exclusion evidence");
+        assert_eq!(stored, live_evidence);
+        assert_eq!(
+            serde_json::from_str::<StoreDeviceExclusionRef>(&stored.0)
+                .expect("parse snapshotted exclusion reference"),
+            exclusion,
+        );
+        drop(image);
+
+        for tamper in [
+            AuthorExclusionLocatorTamper::Missing,
+            AuthorExclusionLocatorTamper::ExclusionReference,
+            AuthorExclusionLocatorTamper::AcceptedCut,
+            AuthorExclusionLocatorTamper::ActivationHead,
+        ] {
+            let (_restored_directory, restored) = Box::pin(open_published_exclusion_snapshot(
+                &store,
+                "snapshot-author-exclusion-store",
+                &membership,
+                owner_db.schema_version(),
+                target.device_id.to_string(),
+            ))
+            .await;
+            Box::pin(transfer_prepared_write(
+                &peer_db,
+                &restored,
+                &candidate_write_id,
+            ))
+            .await;
+            let transferred_candidate = restored
+                .blocked_merge_candidate(candidate_write_id.clone())
+                .await
+                .expect("load candidate before tampering with snapshot evidence")
+                .expect("transferred candidate exists before snapshot evidence tamper");
+            Box::pin(tamper_author_exclusion_locator(
+                &restored,
+                &exclusion,
+                &transferred_candidate.head.value.commit,
+                tamper,
+            ))
+            .await;
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                &restored,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
+            .await
+            .expect_err("tampered snapshot exclusion evidence must fail loud");
+            assert!(restored
+                .blocked_merge_candidate(candidate_write_id.clone())
+                .await
+                .expect("reload candidate after tampered snapshot evidence")
+                .is_some());
+            assert!(!restored
+                .merge_candidate_cleanup_pending(&candidate_write_id)
+                .await
+                .expect("tampered snapshot evidence cannot start cleanup"));
+        }
+
+        let (_restored_directory, restored) = Box::pin(open_published_exclusion_snapshot(
+            &store,
+            "snapshot-author-exclusion-store",
+            &membership,
+            owner_db.schema_version(),
+            target.device_id.to_string(),
+        ))
+        .await;
+        Box::pin(transfer_prepared_write(
+            &peer_db,
+            &restored,
+            &candidate_write_id,
+        ))
+        .await;
+        let transferred_candidate = restored
+            .blocked_merge_candidate(candidate_write_id.clone())
+            .await
+            .expect("load restored exclusion candidate")
+            .expect("restored exclusion candidate exists");
+        restored
+            .author_exclusion_activation_for_candidate(
+                transferred_candidate.head.value.commit.clone(),
+                transferred_candidate
+                    .commit
+                    .value
+                    .author_registration
+                    .clone(),
+            )
+            .await
+            .expect("select snapshotted exclusion locator")
+            .expect("snapshotted exclusion covers restored candidate");
+        assert_eq!(
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                &restored,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
+            .await
+            .expect("consume snapshotted exclusion evidence"),
+            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!restored
+            .merge_candidate_cleanup_pending(&candidate_write_id)
+            .await
+            .expect("restored candidate cleanup completes"));
+    }
+
+    #[tokio::test]
+    async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
+        let signer = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "bootstrap-author-exclusion-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create bootstrap exclusion Store"),
+        );
+        let membership = Box::pin(store.open_into(&owner_db))
+            .await
+            .expect("open bootstrap exclusion Store");
+        let peer_db = open_test_db();
+        Box::pin(install_active_device_fixture(
+            &store,
+            &owner_db,
+            &peer_db,
+            &signer,
+            "2026-07-18T00:00:00Z",
+        ))
+        .await
+        .expect("activate bootstrap exclusion peer");
+        let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
+            prepare_transfer_candidate(&peer_db, &store, &signer, "bootstrap-excluded-candidate"),
+        )
+        .await;
+        let owner_device_id = local_device_id(&owner_db).await.expect("owner device id");
+        let target = owner_db
+            .activated_store_device_registration_records()
+            .await
+            .expect("list bootstrap exclusion registrations")
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .find(|reference| reference.device_id.to_string() != owner_device_id)
+            .expect("bootstrap exclusion peer registration");
+        let proposal = prepare_peer_exclusion(&owner_db, &store, &signer, &target).await;
+
+        let image_dir = tempfile::tempdir().expect("bootstrap snapshot image directory");
+        let snapshot_dir = image_dir.path().to_path_buf();
+        let synced_tables = owner_db.synced_tables().to_vec();
+        let image = owner_db
+            .call(move |connection| {
+                super::super::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create pre-exclusion snapshot");
+        let snapshot_coverage = super::super::store_commit::CommitFrontier::from_refs(
+            owner_db.write_policy(),
+            owner_db
+                .materialized_frontier()
+                .await
+                .expect("read pre-exclusion frontier"),
+        )
+        .expect("shape pre-exclusion frontier");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            image,
+            snapshot_coverage,
+            &signer,
+            Some(&membership),
+            &owner_db,
+        )
+        .await
+        .expect("publish pre-exclusion snapshot");
+
+        let exclusion = activate_peer_exclusion(&owner_db, &store, &signer, &proposal).await;
+        let activation = owner_db
+            .latest_local_store_position()
+            .await
+            .expect("read exclusion activation position")
+            .expect("exclusion activation position exists");
+        let (activation_commit, _) = super::super::store_pull::load_commit_with_author(
+            &store.storage,
+            &store.root,
+            &activation,
+        )
+        .await
+        .expect("load exclusion activation commit");
+        assert!(activation_commit
+            .device_exclusion_outcomes()
+            .contains(&StoreDeviceExclusionOutcomeRef::Excluded(exclusion.clone())));
+        let replay_cut = activation_commit
+            .order
+            .predecessor_cut()
+            .expect("read exclusion activation predecessor");
+        let authorization = super::super::store_pull::load_device_join_authorization(
+            &store.storage,
+            &store.root,
+            &activation_commit.membership_state,
+        )
+        .await
+        .expect("load exclusion bootstrap authority");
+        let plan = super::super::store_pull::prepare_device_join_bootstrap(
+            &store.storage,
+            &store.root,
+            &replay_cut,
+            &activation,
+            &authorization,
+        )
+        .await
+        .expect("prepare post-snapshot exclusion replay");
+
+        let destination = tempfile::tempdir().expect("bootstrap exclusion destination");
+        let database_path = destination.path().join("store.db");
+        let bootstrap = super::super::snapshot::bootstrap_from_snapshot(
+            &store.storage,
+            "bootstrap-author-exclusion-store",
+            store.root.clone(),
+            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            1,
+            &database_path,
+        )
+        .await
+        .expect("verify pre-exclusion snapshot");
+        let joining_db = bootstrap
+            .open_database(
+                "bootstrap-author-exclusion-store",
+                &database_path,
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "post-snapshot-joining-device".to_string(),
+                &crate::sync::test_helpers::test_migrations(),
+            )
+            .await
+            .expect("open pre-exclusion snapshot");
+        joining_db
+            .install_device_join_bootstrap(store.root.clone(), plan)
+            .await
+            .expect("replay exclusion after snapshot");
+        Box::pin(transfer_prepared_write(
+            &peer_db,
+            &joining_db,
+            &candidate_write_id,
+        ))
+        .await;
+
+        let exclusion_json = serde_json::to_string(&exclusion).expect("serialize exclusion ref");
+        let stored = joining_db
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT accepted_cut, activation_head
+                         FROM store_author_exclusion_activations
+                         WHERE exclusion_ref = ?1",
+                        [&exclusion_json],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("replayed exclusion has exact activation evidence");
+        assert!(!stored.0.is_empty());
+        assert!(!stored.1.is_empty());
+        assert_eq!(
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                &joining_db,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
+            .await
+            .expect("consume replayed exclusion evidence"),
+            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!joining_db
+            .merge_candidate_cleanup_pending(&candidate_write_id)
+            .await
+            .expect("replayed exclusion candidate cleanup completes"));
+    }
+
+    async fn finalize_peer_exclusion(
+        owner_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        target: &StoreDeviceRegistrationRef,
+    ) -> StoreDeviceExclusionRef {
+        let proposal = prepare_peer_exclusion(owner_db, store, signer, target).await;
+        activate_peer_exclusion(owner_db, store, signer, &proposal).await
+    }
+
+    async fn prepare_peer_exclusion(
+        owner_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        target: &StoreDeviceRegistrationRef,
+    ) -> StoreDeviceExclusionProposalRef {
+        let proposal = match Box::pin(propose_device_exclusion(
+            owner_db,
             &store.storage,
             None,
-            &signer,
-            &target,
+            signer,
+            target,
         ))
         .await
         .expect("propose peer exclusion")
@@ -1585,7 +2008,7 @@ mod tests {
             .expect("read owner exclusion freeze");
         assert_eq!(freezes.len(), 1);
         assert_eq!(freezes[0].proposal, proposal);
-        assert_eq!(freezes[0].proposal.target, target);
+        assert_eq!(&freezes[0].proposal.target, target);
 
         let frontier = super::super::store_commit::CommitFrontier::from_refs(
             owner_db.write_policy(),
@@ -1596,11 +2019,11 @@ mod tests {
         )
         .expect("shape owner exclusion frontier");
         let acknowledgement = Box::pin(super::super::store_ack::stage_store_ack(
-            &owner_db,
+            owner_db,
             &store.storage,
             frontier,
             "2026-07-18T00:01:00Z".to_string(),
-            &signer,
+            signer,
         ))
         .await
         .expect("stage owner exclusion acknowledgement");
@@ -1612,44 +2035,1769 @@ mod tests {
         assert_eq!(proposal_freezes, freezes);
         let membership = Box::pin(super::super::pull::load_cycle_membership(
             &store.storage,
-            &owner_db,
+            owner_db,
         ))
         .await
         .expect("load owner exclusion membership");
         assert_eq!(
             Box::pin(super::super::store_ack::drain_outbound_store_acks(
-                &owner_db,
+                owner_db,
                 &store.storage,
                 None,
-                &signer,
+                signer,
                 membership.chain.as_ref(),
             ))
             .await
             .expect("publish owner exclusion acknowledgement"),
             1
         );
+        proposal
+    }
 
+    async fn activate_peer_exclusion(
+        owner_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> StoreDeviceExclusionRef {
         let result = Box::pin(finalize_device_exclusion(
-            &owner_db,
+            owner_db,
             &store.storage,
             None,
-            &signer,
-            &proposal,
+            signer,
+            proposal,
         ))
         .await
         .expect("finalize peer exclusion");
-        assert!(matches!(
-            result,
-            StoreDeviceExclusionResult::OutcomeActivated {
-                outcome: StoreDeviceExclusionOutcomeRef::Excluded(_),
-                ..
-            }
-        ));
+        let StoreDeviceExclusionResult::OutcomeActivated {
+            outcome: StoreDeviceExclusionOutcomeRef::Excluded(exclusion),
+            ..
+        } = result
+        else {
+            panic!("unexpected exclusion result: {result:?}")
+        };
         assert!(owner_db
             .store_device_exclusion_freezes()
             .await
             .expect("read released owner exclusion freeze")
             .is_empty());
+        exclusion
+    }
+
+    async fn finalize_peer_exclusion_detached(
+        owner_db: &Database,
+        store: Arc<TestStore>,
+        signer: &UserKeypair,
+        target: &StoreDeviceRegistrationRef,
+    ) {
+        let owner_db = owner_db.clone();
+        let signer = signer.clone();
+        let target = target.clone();
+        tokio::spawn(async move {
+            Box::pin(finalize_peer_exclusion(
+                &owner_db,
+                store.as_ref(),
+                &signer,
+                &target,
+            ))
+            .await
+        })
+        .await
+        .expect("join peer exclusion finalization");
+    }
+
+    #[tokio::test]
+    async fn excluded_author_discards_a_candidate_without_a_head_after_restart_and_delete_failure()
+    {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excluded_author_removes_indexed_shared_blob_ownership_without_deleting_the_blob() {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+            true,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excluded_author_retains_an_exact_late_candidate_head_as_protocol_inert() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::ExactLate,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excluded_author_reconciles_an_exact_head_created_after_absent_proof() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::AfterAbsentProofExactLate,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excluded_author_accepts_an_authenticated_winner_created_after_absent_proof() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_materialized_after_commit_upload_blocks_candidate_head_creation() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::AfterCommitUpload,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_materialized_after_head_readback_blocks_activation_and_retains_the_head() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::AfterHeadReadBack,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mutated_author_exclusion_activation_head_blocks_reload_and_cleanup() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            true,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_nonactivates_a_prepared_merge_abandonment_and_original_candidate() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            true,
+            PreparedAbandonmentHeadPublication::Absent,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_nonactivates_prepared_abandonment_with_exact_original_head() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            true,
+            PreparedAbandonmentHeadPublication::Original,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_nonactivates_prepared_abandonment_with_exact_authority_head() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            true,
+            PreparedAbandonmentHeadPublication::Authority,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exclusion_nonactivates_prepared_abandonment_with_a_third_winner() {
+        Box::pin(run_excluded_author_candidate_cleanup(
+            ExcludedCandidateHeadPublication::Absent,
+            false,
+            true,
+            PreparedAbandonmentHeadPublication::ThirdWinner,
+        ))
+        .await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum ExcludedCandidateHeadPublication {
+        Absent,
+        ExactLate,
+        AfterAbsentProofExactLate,
+        AfterAbsentProofThirdWinner,
+        AfterCommitUpload,
+        AfterHeadReadBack,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PreparedAbandonmentHeadPublication {
+        Absent,
+        Original,
+        Authority,
+        ThirdWinner,
+    }
+
+    enum ExpectedHeldCandidate<'a> {
+        None,
+        ConcurrentExactOrNone(&'a StoreBatchCommitRef),
+    }
+
+    fn indexed_shared_blob(
+        label: &str,
+        candidate: &StoreBatchCommitRef,
+        uploader: &StoreDeviceRegistrationRef,
+        activated: std::collections::BTreeSet<super::super::remote_object::SharedObjectOwner>,
+    ) -> super::super::remote_object::RemoteObjectRecord {
+        let stored_bytes = format!("stored excluded-author blob {label}").into_bytes();
+        let locator = crate::blob::locator::BlobLocator::opaque(
+            "excluded-author-test",
+            label,
+            uploader.clone(),
+            crate::blob::locator::RemoteAudience::Store,
+            crate::BlobScope::Master,
+            crate::KeyFingerprint::from_bytes([17; 8]),
+            1,
+            ObjectHash::digest(format!("plaintext excluded-author blob {label}").as_bytes()),
+        )
+        .expect("construct indexed shared blob locator");
+        let object = super::super::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+                .expect("construct indexed shared blob slot"),
+            u64::try_from(stored_bytes.len()).expect("indexed shared blob size fits u64"),
+            ObjectHash::digest(&stored_bytes),
+        );
+        let locator_bytes = locator.to_bytes();
+        let record = super::super::remote_object::RemoteObjectRecord::SharedLiveSet(
+            super::super::remote_object::SharedObjectRecord {
+                identity: super::super::remote_object::SharedLiveSetObjectRef {
+                    domain: super::super::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+                    semantic_hash: ObjectHash::digest(&locator_bytes),
+                    object: object.clone(),
+                },
+                bytes: super::super::remote_object::RemoteObjectBytes::blob(locator_bytes, object)
+                    .expect("construct indexed shared blob bytes"),
+                state: super::super::remote_object::OwnedObjectState::UploadedVerified {
+                    ownership: super::super::remote_object::SharedObjectOwnership {
+                        pending: std::collections::BTreeSet::from([candidate.clone()]),
+                        activated,
+                        nonactivated: Vec::new(),
+                    },
+                },
+            },
+        );
+        record.validate().expect("validate indexed shared blob");
+        record
+    }
+
+    async fn run_excluded_author_candidate_cleanup(
+        head_publication: ExcludedCandidateHeadPublication,
+        sabotage_activation_head: bool,
+        prepare_abandonment: bool,
+        prepared_head_publication: PreparedAbandonmentHeadPublication,
+    ) {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            head_publication,
+            sabotage_activation_head,
+            prepare_abandonment,
+            prepared_head_publication,
+            false,
+        ))
+        .await;
+    }
+
+    async fn run_excluded_author_candidate_cleanup_case(
+        head_publication: ExcludedCandidateHeadPublication,
+        sabotage_activation_head: bool,
+        prepare_abandonment: bool,
+        prepared_head_publication: PreparedAbandonmentHeadPublication,
+        index_shared_blobs: bool,
+    ) {
+        let signer = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "excluded-author-candidate-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create excluded-author Store"),
+        );
+        Box::pin(store.open_into(&owner_db))
+            .await
+            .expect("open excluded-author Store");
+        let directory = tempfile::tempdir().expect("excluded-author database directory");
+        let path = directory.path().join("excluded-peer.sqlite");
+        let peer_db = open(&path, "excluded-peer-host");
+        Box::pin(install_active_device_fixture(
+            &store,
+            &owner_db,
+            &peer_db,
+            &signer,
+            "2026-07-18T01:00:00Z",
+        ))
+        .await
+        .expect("activate excluded peer");
+        host_exec(
+            &peer_db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('excluded-peer-note', 'pending', NULL, 1, \
+                     '0000000002000-0000-excluded-peer', '2026-07-18')",
+        )
+        .await;
+        let membership = Box::pin(super::super::pull::load_cycle_membership(
+            &store.storage,
+            &peer_db,
+        ))
+        .await
+        .expect("load excluded peer membership");
+        let peer_device_id = local_device_id(&peer_db)
+            .await
+            .expect("excluded peer device id");
+        let (_store_temp, store_dir) = temp_store_dir();
+        assert!(
+            Box::pin(super::super::store_outbound::prepare_pending_store_write(
+                &peer_db,
+                &store.storage,
+                &peer_device_id,
+                "2026-07-18T01:01:00Z",
+                &signer,
+                &store_dir,
+                membership.chain.as_ref(),
+            ))
+            .await
+            .expect("prepare excluded peer candidate")
+        );
+        let candidate = peer_db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load excluded peer candidate")
+            .expect("excluded peer candidate exists");
+        let candidate_ref = candidate.head.value.commit.clone();
+        let candidate_graph_objects =
+            super::super::remote_object::CandidateObjectGraph::from_commit(&candidate.commit.value)
+                .expect("read excluded candidate object graph")
+                .exact_objects()
+                .cloned()
+                .collect::<Vec<_>>();
+        let candidate_head = candidate.head.object.clone();
+        let candidate_head_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let candidate_head_prefix = super::super::store_commit::head_slot_prefix(
+            &candidate
+                .head
+                .value
+                .author_registration
+                .device_id
+                .to_string(),
+            candidate_ref.coord.sequence(),
+        );
+        let candidate_commit_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let candidate_commit_prefix =
+            super::super::store_commit::semantic_prefix_from_exact_object(
+                &candidate_ref.object,
+                ".json",
+            )
+            .expect("derive excluded candidate commit prefix");
+        let write_id = candidate.commit.value.write_id.clone();
+        store
+            .storage
+            .create_protocol_object(&candidate.commit.prepared)
+            .await
+            .expect("upload excluded peer candidate commit");
+        peer_db
+            .mark_candidate_commit_uploaded(candidate_ref.clone())
+            .await
+            .expect("record uploaded excluded peer commit");
+        let (target, target_registration) = peer_db
+            .activated_store_device_registration_records()
+            .await
+            .expect("load excluded peer registration")
+            .into_iter()
+            .find(|(reference, _)| reference.device_id.to_string() == peer_device_id)
+            .expect("exact excluded peer registration");
+        let prepared_abandonment = Box::pin(maybe_prepare_merge_abandonment(
+            &peer_db,
+            store.as_ref(),
+            &peer_device_id,
+            &signer,
+            &write_id,
+            prepare_abandonment,
+        ))
+        .await;
+        finalize_peer_exclusion_detached(&owner_db, store.clone(), &signer, &target).await;
+        if let Some(candidates) = prepared_abandonment {
+            Box::pin(finish_prepared_exclusion_cleanup(
+                &peer_db,
+                store.as_ref(),
+                &store_dir,
+                &peer_device_id,
+                &signer,
+                write_id,
+                &candidates,
+                &candidate_commit_context,
+                prepared_head_publication,
+            ))
+            .await;
+            return;
+        }
+        let publication_pause = match head_publication {
+            ExcludedCandidateHeadPublication::AfterCommitUpload => Some(
+                crate::database::DatabaseTestPoint::StoreWriteCommitUploaded {
+                    write_id: write_id.clone(),
+                },
+            ),
+            ExcludedCandidateHeadPublication::AfterHeadReadBack => {
+                Some(crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+                    write_id: write_id.clone(),
+                })
+            }
+            ExcludedCandidateHeadPublication::Absent
+            | ExcludedCandidateHeadPublication::ExactLate
+            | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
+            | ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => None,
+        };
+        let publish_error = if let Some(point) = publication_pause {
+            let (commit_uploaded, resume) = peer_db.arm_test_pause(point);
+            let drain_db = peer_db.clone();
+            let drain_store = store.clone();
+            let drain = tokio::spawn(async move {
+                super::super::store_outbound::drain_store_writes(&drain_db, &drain_store.storage)
+                    .await
+            });
+            commit_uploaded.notified().await;
+            let expected_held = if matches!(
+                head_publication,
+                ExcludedCandidateHeadPublication::AfterHeadReadBack
+            ) {
+                ExpectedHeldCandidate::ConcurrentExactOrNone(&candidate_ref)
+            } else {
+                ExpectedHeldCandidate::None
+            };
+            pull_peer_exclusion(&peer_db, store.as_ref(), &store_dir, expected_held).await;
+            if matches!(
+                head_publication,
+                ExcludedCandidateHeadPublication::AfterHeadReadBack
+            ) {
+                pull_peer_exclusion(
+                    &peer_db,
+                    store.as_ref(),
+                    &store_dir,
+                    ExpectedHeldCandidate::None,
+                )
+                .await;
+            }
+            resume.notify_one();
+            drain
+                .await
+                .expect("join excluded-author publication")
+                .expect_err("second exclusion check blocks candidate head")
+        } else {
+            pull_peer_exclusion(
+                &peer_db,
+                store.as_ref(),
+                &store_dir,
+                ExpectedHeldCandidate::None,
+            )
+            .await;
+            if matches!(
+                head_publication,
+                ExcludedCandidateHeadPublication::ExactLate
+            ) {
+                store
+                    .storage
+                    .create_protocol_object(&candidate.head.prepared)
+                    .await
+                    .expect("publish exact late excluded-author head");
+                assert_eq!(
+                    store
+                        .storage
+                        .read_protocol_object(
+                            &candidate_head_context,
+                            &candidate_head,
+                            &candidate_head_prefix,
+                        )
+                        .await
+                        .expect("read exact late excluded-author head"),
+                    candidate.head.value.to_bytes(),
+                );
+            }
+            super::super::store_outbound::drain_store_writes(&peer_db, &store.storage)
+                .await
+                .expect_err("excluded peer cannot activate its late candidate")
+        };
+        let local_position = peer_db
+            .latest_local_store_position()
+            .await
+            .expect("load excluded peer position");
+        assert!(matches!(
+            publish_error,
+            super::super::store_outbound::StoreOutboundError::AuthorExcluded { .. }
+        ));
+        assert!(matches!(
+            peer_db
+                .write_status(&write_id)
+                .await
+                .expect("load excluded peer write status"),
+            crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState { reason })
+                if reason.contains("excluded")
+        ));
+        assert!(matches!(
+            peer_db
+                .merge_abandonment_state(&write_id)
+                .await
+                .expect("load excluded peer abandonment state"),
+            crate::database::MergeAbandonmentState::None
+        ));
+        let indexed_shared_blobs = if index_shared_blobs {
+            let snapshot_owner = super::super::remote_object::SharedObjectOwner::Snapshot(
+                super::super::remote_object::SnapshotObjectOwner {
+                    activation: target_registration
+                        .store_snapshot_activation(&target)
+                        .expect("derive shared blob snapshot activation")
+                        .activation_id(),
+                    sequence: 1,
+                },
+            );
+            let records = vec![
+                indexed_shared_blob(
+                    "candidate-only",
+                    &candidate_ref,
+                    &target,
+                    std::collections::BTreeSet::new(),
+                ),
+                indexed_shared_blob(
+                    "snapshot-owned",
+                    &candidate_ref,
+                    &target,
+                    std::collections::BTreeSet::from([snapshot_owner]),
+                ),
+            ];
+            let identities = records
+                .iter()
+                .map(|record| (record.object_id(), record.object().clone()))
+                .collect::<Vec<_>>();
+            let indexed_write_id = write_id.clone();
+            peer_db
+                .call(move |connection| {
+                    let tx = connection
+                        .unchecked_transaction()
+                        .map_err(crate::database::DbError::from)?;
+                    for (index, record) in records.into_iter().enumerate() {
+                        let object_id = record.object_id();
+                        tx.execute(
+                            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                            rusqlite::params![
+                                object_id.to_string(),
+                                serde_json::to_string(&record).map_err(|error| {
+                                    crate::database::DbError::Message(error.to_string())
+                                })?
+                            ],
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                        tx.execute(
+                            "INSERT INTO store_write_blobs
+                             (write_id, audience, locator_hash, remote_object_id, spool_path)
+                             VALUES (?1, 'store', ?2, ?3, NULL)",
+                            rusqlite::params![
+                                indexed_write_id.as_str(),
+                                ObjectHash::digest(
+                                    format!("indexed shared blob {index}").as_bytes()
+                                )
+                                .to_string(),
+                                object_id.to_string(),
+                            ],
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    }
+                    tx.commit().map_err(crate::database::DbError::from)
+                })
+                .await
+                .expect("index shared blobs under excluded candidate");
+            identities
+        } else {
+            Vec::new()
+        };
+        drop(peer_db);
+
+        let reopened = open(&path, "excluded-peer-host");
+        store.home.fail_exact_delete_on_call(1);
+        assert!(
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                &reopened,
+                &store.storage,
+                &peer_device_id,
+                &signer,
+                write_id.clone(),
+            ))
+            .await
+            .is_err()
+        );
+        assert!(reopened
+            .merge_candidate_cleanup_pending(&write_id)
+            .await
+            .expect("excluded peer cleanup remains pending"));
+        if !indexed_shared_blobs.is_empty() {
+            let cleanup_targets = reopened
+                .merge_candidate_cleanup_targets(write_id.clone())
+                .await
+                .expect("load excluded candidate cleanup targets");
+            for (_, object) in &indexed_shared_blobs {
+                assert!(cleanup_targets
+                    .iter()
+                    .all(|target| &target.object != object));
+            }
+            let indexed = indexed_shared_blobs.clone();
+            reopened
+                .call(move |connection| {
+                    for (index, (object_id, _)) in indexed.into_iter().enumerate() {
+                        let state: String = connection
+                            .query_row(
+                                "SELECT state FROM remote_objects WHERE object_id = ?1",
+                                [object_id.to_string()],
+                                |row| row.get(0),
+                            )
+                            .map_err(crate::database::DbError::from)?;
+                        let record: super::super::remote_object::RemoteObjectRecord =
+                            serde_json::from_str(&state).map_err(|error| {
+                                crate::database::DbError::Message(error.to_string())
+                            })?;
+                        let super::super::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
+                            record
+                        else {
+                            return Err(crate::database::DbError::Message(
+                                "indexed blob changed remote-object domain".to_string(),
+                            ));
+                        };
+                        match (index, record.state) {
+                            (
+                                0,
+                                super::super::remote_object::OwnedObjectState::RetirementPending {
+                                    ..
+                                },
+                            ) => {}
+                            (
+                                1,
+                                super::super::remote_object::OwnedObjectState::UploadedVerified {
+                                    ownership,
+                                },
+                            ) if ownership.pending.is_empty() && ownership.activated.len() == 1 => {
+                            }
+                            _ => {
+                                return Err(crate::database::DbError::Message(
+                                    "excluded candidate retained indexed shared blob ownership"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("verify indexed shared blob ownership transition");
+        }
+        publish_after_absent_proof_detached(
+            head_publication,
+            reopened.clone(),
+            store.clone(),
+            signer.clone(),
+            write_id.clone(),
+        )
+        .await;
+        if sabotage_activation_head {
+            let candidate_object_id =
+                super::super::remote_object::remote_object_id(&candidate_ref.object);
+            reopened
+                .call(move |connection| {
+                    let state: String = connection
+                        .query_row(
+                            "SELECT state FROM remote_objects WHERE object_id = ?1",
+                            [candidate_object_id.to_string()],
+                            |row| row.get(0),
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    let mut remote: super::super::remote_object::RemoteObjectRecord =
+                        serde_json::from_str(&state).map_err(|error| {
+                            crate::database::DbError::Message(error.to_string())
+                        })?;
+                    let super::super::remote_object::RemoteObjectRecord::CandidateCommit(
+                        record,
+                    ) = &mut remote
+                    else {
+                        return Err(crate::database::DbError::Message(
+                            "cleanup candidate is not a commit".to_string(),
+                        ));
+                    };
+                    let super::super::remote_object::CandidateCommitState::CleanupPending {
+                        proof:
+                            super::super::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                                activation_head,
+                                ..
+                            },
+                    } = &mut record.state
+                    else {
+                        return Err(crate::database::DbError::Message(
+                            "cleanup candidate has no author-exclusion proof".to_string(),
+                        ));
+                    };
+                    activation_head.head_hash = ObjectHash::digest(
+                        b"different durable author-exclusion activation head",
+                    );
+                    connection
+                        .execute(
+                            "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                            (
+                                candidate_object_id.to_string(),
+                                serde_json::to_string(&remote).map_err(|error| {
+                                    crate::database::DbError::Message(error.to_string())
+                                })?,
+                            ),
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    Ok(())
+                })
+                .await
+                .expect("sabotage durable activation head");
+            assert!(reopened
+                .merge_candidate_cleanup_pending(&write_id)
+                .await
+                .is_err());
+            assert!(
+                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                    &reopened,
+                    &store.storage,
+                    &peer_device_id,
+                    &signer,
+                    write_id,
+                ))
+                .await
+                .is_err()
+            );
+            return;
+        }
+        drop(reopened);
+
+        let retried = open(&path, "excluded-peer-host");
+        assert_eq!(
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                &retried,
+                &store.storage,
+                &peer_device_id,
+                &signer,
+                write_id.clone(),
+            ))
+            .await
+            .expect("resume excluded peer cleanup"),
+            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+        );
+        assert_eq!(
+            retried
+                .latest_local_store_position()
+                .await
+                .expect("reload excluded peer position"),
+            local_position,
+        );
+        match head_publication {
+            ExcludedCandidateHeadPublication::Absent => {
+                assert!(matches!(
+                    store
+                        .storage
+                        .read_protocol_object(
+                            &candidate_head_context,
+                            &candidate_head,
+                            &candidate_head_prefix,
+                        )
+                        .await,
+                    Err(super::super::storage::StorageError::NotFound(_))
+                ));
+                assert!(retried
+                    .protocol_inert_object(candidate_head.clone())
+                    .await
+                    .expect("read absent candidate head state")
+                    .is_none());
+            }
+            ExcludedCandidateHeadPublication::ExactLate
+            | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
+            | ExcludedCandidateHeadPublication::AfterHeadReadBack => {
+                assert_eq!(
+                    store
+                        .storage
+                        .read_protocol_object(
+                            &candidate_head_context,
+                            &candidate_head,
+                            &candidate_head_prefix,
+                        )
+                        .await
+                        .expect("reload retained exact late head"),
+                    candidate.head.value.to_bytes(),
+                );
+                let inert = retried
+                    .protocol_inert_object(candidate_head.clone())
+                    .await
+                    .expect("read exact late candidate head state")
+                    .expect("exact late candidate head is protocol-inert");
+                assert!(matches!(
+                    inert
+                        .candidate_nonactivation_proof(&candidate_ref)
+                        .expect("read exact late candidate proof"),
+                    Some(
+                        super::super::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                    )
+                ));
+                let mut mismatched = inert.clone();
+                let mut mismatched_head: super::super::store_commit::StoreDeviceHead =
+                    serde_json::from_slice(&mismatched.canonical_semantic_bytes)
+                        .expect("parse inert candidate head");
+                mismatched_head.commit.object = candidate_head.clone();
+                let mismatched_bytes = mismatched_head.to_bytes();
+                let head_context = ProtocolObjectContext::signed_plaintext(
+                    store.root.store_root_hash,
+                    ProtocolObjectDomain::StoreHead,
+                );
+                let head_prefix = super::super::store_commit::head_slot_prefix(
+                    &target.device_id.to_string(),
+                    candidate_ref.coord.sequence(),
+                );
+                let mismatched_prepared = store
+                    .storage
+                    .prepare_protocol_object(
+                        &head_context,
+                        candidate_head.slot().clone(),
+                        &head_prefix,
+                        mismatched_bytes.clone(),
+                    )
+                    .expect("prepare mismatched inert head");
+                mismatched.canonical_semantic_bytes = mismatched_bytes.clone();
+                mismatched.identity.semantic_hash = ObjectHash::digest(&mismatched_bytes);
+                mismatched.identity.object = mismatched_prepared.reference().clone();
+                let super::super::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                    reference,
+                } = &mut mismatched.identity.domain
+                else {
+                    panic!("protocol-inert candidate object is not a Store head")
+                };
+                reference.head_hash = mismatched_head.head_hash();
+                reference.object = mismatched_prepared.reference().clone();
+                mismatched
+                    .validate()
+                    .expect("mismatched inert head remains internally valid");
+                assert!(!mismatched
+                    .is_author_exclusion_head_for(&candidate_ref, mismatched_prepared.reference(),)
+                    .expect("check candidate binding on mismatched inert head"));
+            }
+            ExcludedCandidateHeadPublication::AfterCommitUpload => {
+                assert!(matches!(
+                    store
+                        .storage
+                        .read_protocol_object(
+                            &candidate_head_context,
+                            &candidate_head,
+                            &candidate_head_prefix,
+                        )
+                        .await,
+                    Err(super::super::storage::StorageError::NotFound(_))
+                ));
+            }
+            ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
+                assert!(retried
+                    .protocol_inert_object(candidate_head.clone())
+                    .await
+                    .expect("read candidate head state after third winner")
+                    .is_none());
+            }
+        }
+        assert!(matches!(
+            store
+                .storage
+                .read_protocol_object(
+                    &candidate_commit_context,
+                    &candidate_ref.object,
+                    &candidate_commit_prefix,
+                )
+                .await,
+            Err(super::super::storage::StorageError::NotFound(_))
+        ));
+        let store_package = candidate
+            .commit
+            .value
+            .store_package()
+            .expect("excluded candidate carries its Store package");
+        assert_eq!(candidate_graph_objects, vec![store_package.object.clone()]);
+        assert!(matches!(
+            super::super::store_objects::load_store_package(
+                &store.storage,
+                &candidate_ref,
+                &candidate.commit.value,
+            )
+            .await,
+            Err(super::super::store_objects::StoreObjectError::Storage(
+                super::super::storage::StorageError::NotFound(_)
+            ))
+        ));
+        assert!(matches!(
+            retried
+                .merge_abandonment_state(&write_id)
+                .await
+                .expect("reload excluded peer abandonment state"),
+            crate::database::MergeAbandonmentState::None
+        ));
+        assert_eq!(
+            retried
+                .discard_blocked_write(&write_id)
+                .await
+                .expect("discard excluded peer write"),
+            vec![write_id]
+        );
+        if matches!(
+            head_publication,
+            ExcludedCandidateHeadPublication::ExactLate
+                | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
+                | ExcludedCandidateHeadPublication::AfterHeadReadBack
+        ) {
+            assert!(retried
+                .protocol_inert_object(candidate_head)
+                .await
+                .expect("reload exact late candidate head state")
+                .is_some());
+        }
+        if matches!(
+            head_publication,
+            ExcludedCandidateHeadPublication::ExactLate
+                | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
+                | ExcludedCandidateHeadPublication::AfterHeadReadBack
+                | ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner
+        ) {
+            let (_owner_temp, owner_store_dir) = temp_store_dir();
+            Box::pin(pull_peer_exclusion(
+                &owner_db,
+                store.as_ref(),
+                &owner_store_dir,
+                ExpectedHeldCandidate::None,
+            ))
+            .await;
+        }
+    }
+
+    async fn maybe_prepare_merge_abandonment(
+        peer_db: &Database,
+        store: &TestStore,
+        peer_device_id: &str,
+        signer: &UserKeypair,
+        write_id: &WriteId,
+        prepare: bool,
+    ) -> Option<Box<crate::database::PreparedMergeAbandonmentCandidates>> {
+        if !prepare {
+            return None;
+        }
+        peer_db
+            .set_write_status(
+                write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "prepare abandonment before exclusion".to_string(),
+                }),
+            )
+            .await
+            .expect("block candidate before abandonment preparation");
+        assert!(Box::pin(
+            super::super::store_outbound::prepare_merge_candidate_abandonment(
+                peer_db,
+                &store.storage,
+                peer_device_id,
+                signer,
+                write_id.clone(),
+            )
+        )
+        .await
+        .expect("prepare abandonment before exclusion"));
+        peer_db
+            .prepared_merge_abandonment_candidates(write_id.clone())
+            .await
+            .expect("load prepared abandonment candidates")
+            .map(Box::new)
+    }
+
+    async fn publish_prepared_abandonment_head(
+        peer_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
+        publication: PreparedAbandonmentHeadPublication,
+    ) {
+        match publication {
+            PreparedAbandonmentHeadPublication::Absent => {}
+            PreparedAbandonmentHeadPublication::Original => {
+                store
+                    .storage
+                    .create_protocol_object(&candidates.candidate.head.prepared)
+                    .await
+                    .expect("publish exact original candidate head");
+            }
+            PreparedAbandonmentHeadPublication::Authority => {
+                store
+                    .storage
+                    .create_protocol_object(&candidates.authority.commit.prepared)
+                    .await
+                    .expect("publish abandonment authority commit");
+                store
+                    .storage
+                    .create_protocol_object(&candidates.authority.head.prepared)
+                    .await
+                    .expect("publish exact abandonment authority head");
+            }
+            PreparedAbandonmentHeadPublication::ThirdWinner => {
+                Box::pin(publish_third_candidate_winner(
+                    peer_db,
+                    store,
+                    signer,
+                    &candidates.candidate,
+                ))
+                .await;
+            }
+        }
+    }
+
+    async fn publish_third_candidate_winner(
+        peer_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        candidate: &crate::database::BlockedMergeCandidate,
+    ) {
+        let registration = peer_db
+            .activated_store_device_registration(candidate.commit.value.author_registration.clone())
+            .await
+            .expect("load third-winner device registration");
+        let device_signer = registration
+            .device_signer(signer)
+            .expect("derive third-winner device signer");
+        let coord = candidate.head.value.commit.coord.clone();
+        let candidate_family = candidate.commit.value.candidate_family();
+        let package = super::super::audience_package::AudiencePackage::store(
+            store.root.store_root_hash,
+            candidate_family,
+            candidate.commit.value.write_id.clone(),
+            coord.clone(),
+            peer_db.schema_version(),
+            b"third winner package".to_vec(),
+            Vec::new(),
+        )
+        .expect("construct third winner package");
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = coord.clone()
+        else {
+            panic!("prepared abandonment has Serial coordinate");
+        };
+        let package_bytes = package.to_bytes();
+        let package_context = ProtocolObjectContext::store_encrypted(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StorePackage,
+        );
+        let package_prefix = super::super::store_commit::package_semantic_prefix(
+            candidate_family,
+            &stream_id.to_string(),
+            sequence,
+            ObjectHash::digest(&package_bytes),
+        );
+        let package_slot = store
+            .storage
+            .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
+            .await
+            .expect("allocate third winner package slot");
+        let package_prepared = store
+            .storage
+            .prepare_protocol_object(
+                &package_context,
+                package_slot,
+                &package_prefix,
+                package_bytes.clone(),
+            )
+            .expect("prepare third winner package");
+        let third = StoreBatchCommit::signed(
+            store.root.store_root_hash,
+            candidate.commit.value.write_id.clone(),
+            coord.clone(),
+            candidate.commit.value.author_registration.clone(),
+            &registration,
+            candidate.commit.value.order.clone(),
+            candidate.commit.value.membership_state.clone(),
+            candidate.commit.value.device_state.clone(),
+            candidate
+                .commit
+                .value
+                .operations_membership_authority()
+                .expect("load third winner membership authority"),
+            super::super::store_commit::StorePackageInput {
+                candidate_family,
+                schema_version: peer_db.schema_version(),
+                bytes: &package_bytes,
+                object: package_prepared.reference().clone(),
+            },
+            &device_signer,
+        )
+        .expect("sign third ordinary winner");
+        let commit_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let commit_prefix = super::super::store_commit::commit_semantic_prefix(
+            third.candidate_family(),
+            &stream_id.to_string(),
+            sequence,
+            third.commit_hash(),
+        );
+        let commit_slot = store
+            .storage
+            .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
+            .await
+            .expect("allocate third winner commit slot");
+        let third_prepared = store
+            .storage
+            .prepare_protocol_object(
+                &commit_context,
+                commit_slot,
+                &commit_prefix,
+                third.to_bytes(),
+            )
+            .expect("prepare third winner commit");
+        store
+            .storage
+            .create_protocol_object(&third_prepared)
+            .await
+            .expect("publish third winner commit");
+        let third_ref =
+            StoreBatchCommitRef::from_commit(&third, coord, third_prepared.reference().clone())
+                .expect("reference third winner commit");
+        let third_head = StoreDeviceHead::signed(
+            store.root.store_root_hash,
+            candidate.commit.value.author_registration.clone(),
+            third_ref,
+            candidate.head.value.successor.clone(),
+            &device_signer,
+        )
+        .expect("sign third winner head");
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let head_prefix = super::super::store_commit::head_slot_prefix(
+            &candidate
+                .commit
+                .value
+                .author_registration
+                .device_id
+                .to_string(),
+            sequence,
+        );
+        let head_prepared = store
+            .storage
+            .prepare_protocol_object(
+                &head_context,
+                candidate.head.object.slot().clone(),
+                &head_prefix,
+                third_head.to_bytes(),
+            )
+            .expect("prepare third winner head");
+        store
+            .storage
+            .create_protocol_object(&head_prepared)
+            .await
+            .expect("publish third winner head");
+    }
+
+    async fn publish_after_absent_proof_detached(
+        publication: ExcludedCandidateHeadPublication,
+        peer_db: Database,
+        store: Arc<TestStore>,
+        signer: UserKeypair,
+        write_id: WriteId,
+    ) {
+        tokio::spawn(async move {
+            let candidate = peer_db
+                .blocked_merge_candidate(write_id)
+                .await
+                .expect("reload post-proof candidate")
+                .expect("post-proof candidate remains prepared");
+            match publication {
+                ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
+                    store
+                        .storage
+                        .create_protocol_object(&candidate.head.prepared)
+                        .await
+                        .expect("publish candidate head after absent proof");
+                }
+                ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
+                    Box::pin(publish_third_candidate_winner(
+                        &peer_db,
+                        store.as_ref(),
+                        &signer,
+                        &candidate,
+                    ))
+                    .await;
+                }
+                ExcludedCandidateHeadPublication::Absent
+                | ExcludedCandidateHeadPublication::ExactLate
+                | ExcludedCandidateHeadPublication::AfterCommitUpload
+                | ExcludedCandidateHeadPublication::AfterHeadReadBack => {}
+            }
+        })
+        .await
+        .expect("join post-proof candidate-head publication");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_prepared_exclusion_cleanup(
+        peer_db: &Database,
+        store: &TestStore,
+        store_dir: &StoreDir,
+        peer_device_id: &str,
+        signer: &UserKeypair,
+        write_id: WriteId,
+        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
+        candidate_commit_context: &ProtocolObjectContext,
+        publication: PreparedAbandonmentHeadPublication,
+    ) {
+        pull_peer_exclusion(peer_db, store, store_dir, ExpectedHeldCandidate::None).await;
+        Box::pin(publish_prepared_abandonment_head(
+            peer_db,
+            store,
+            signer,
+            candidates,
+            publication,
+        ))
+        .await;
+        assert_eq!(
+            Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                peer_db,
+                &store.storage,
+                peer_device_id,
+                signer,
+                write_id.clone(),
+            ))
+            .await
+            .expect("exclude prepared abandonment candidates"),
+            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+        );
+        for reference in [
+            &candidates.candidate.head.value.commit,
+            &candidates.authority.head.value.commit,
+        ] {
+            let prefix = super::super::store_commit::semantic_prefix_from_exact_object(
+                &reference.object,
+                ".json",
+            )
+            .expect("derive cleaned candidate commit prefix");
+            assert!(matches!(
+                store
+                    .storage
+                    .read_protocol_object(candidate_commit_context, &reference.object, &prefix)
+                    .await,
+                Err(super::super::storage::StorageError::NotFound(_))
+            ));
+        }
+        for (reference, commit) in [
+            (
+                &candidates.candidate.head.value.commit,
+                &candidates.candidate.commit.value,
+            ),
+            (
+                &candidates.authority.head.value.commit,
+                &candidates.authority.commit.value,
+            ),
+        ] {
+            if commit.store_package().is_some() {
+                assert!(matches!(
+                    super::super::store_objects::load_store_package(
+                        &store.storage,
+                        reference,
+                        commit,
+                    )
+                    .await,
+                    Err(super::super::store_objects::StoreObjectError::Storage(
+                        super::super::storage::StorageError::NotFound(_)
+                    ))
+                ));
+            }
+        }
+        assert_eq!(
+            peer_db
+                .discard_blocked_write(&write_id)
+                .await
+                .expect("discard excluded prepared abandonment write"),
+            vec![write_id],
+        );
+    }
+
+    async fn pull_peer_exclusion(
+        peer_db: &Database,
+        store: &TestStore,
+        store_dir: &StoreDir,
+        expected_held: ExpectedHeldCandidate<'_>,
+    ) {
+        let membership = Box::pin(super::super::pull::load_cycle_membership(
+            &store.storage,
+            peer_db,
+        ))
+        .await
+        .expect("reload excluded peer membership");
+        let pull = Box::pin(super::super::store_pull::pull_store_commits(
+            peer_db,
+            peer_db.synced_tables(),
+            &store.storage,
+            store.root.store_root_hash,
+            store_dir,
+            membership.chain.as_ref(),
+        ))
+        .await
+        .expect("pull peer exclusion");
+        let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
+            matches!(
+                pull.held_positions.as_slice(),
+                [super::super::store_pull::HeldStorePosition {
+                    coordinate:
+                        super::super::store_pull::HeldStoreCoordinate::Commit {
+                            commit,
+                            ..
+                        },
+                    reason: super::super::store_pull::HeldStorePositionReason::InactiveDevice {
+                        ..
+                    },
+                }] if commit == candidate
+            )
+        };
+        match expected_held {
+            ExpectedHeldCandidate::None => assert!(
+                pull.held_positions.is_empty(),
+                "held: {:?}",
+                pull.held_positions
+            ),
+            ExpectedHeldCandidate::ConcurrentExactOrNone(candidate) => assert!(
+                pull.held_positions.is_empty() || is_exact_candidate_hold(candidate),
+                "expected no hold or exact concurrent candidate {candidate:?}, held: {:?}",
+                pull.held_positions,
+            ),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AuthorExclusionLocatorTamper {
+        Missing,
+        ExclusionReference,
+        AcceptedCut,
+        ActivationHead,
+    }
+
+    async fn open_published_exclusion_snapshot(
+        store: &TestStore,
+        store_id: &str,
+        membership: &crate::sync::membership::MembershipChain,
+        schema_version: u32,
+        device_id: String,
+    ) -> (tempfile::TempDir, Database) {
+        let directory = tempfile::tempdir().expect("restored exclusion directory");
+        let path = directory.path().join("restored.db");
+        let bootstrap = super::super::snapshot::bootstrap_from_snapshot(
+            &store.storage,
+            store_id,
+            store.root.clone(),
+            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            schema_version,
+            &path,
+        )
+        .await
+        .expect("verify author exclusion snapshot");
+        let database = bootstrap
+            .open_database(
+                store_id,
+                &path,
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                device_id,
+                &crate::sync::test_helpers::test_migrations(),
+            )
+            .await
+            .expect("open author exclusion snapshot");
+        (directory, database)
+    }
+
+    async fn tamper_author_exclusion_locator(
+        database: &Database,
+        exclusion: &StoreDeviceExclusionRef,
+        candidate: &StoreBatchCommitRef,
+        tamper: AuthorExclusionLocatorTamper,
+    ) {
+        let exclusion = exclusion.clone();
+        let candidate = candidate.clone();
+        database
+            .call(move |connection| {
+                let exact = serde_json::to_string(&exclusion).map_err(|error| {
+                    crate::database::DbError::Message(format!(
+                        "serialize exact exclusion reference: {error}"
+                    ))
+                })?;
+                let affected = match tamper {
+                    AuthorExclusionLocatorTamper::Missing => connection.execute(
+                        "DELETE FROM store_author_exclusion_activations
+                         WHERE exclusion_ref = ?1",
+                        [&exact],
+                    ),
+                    AuthorExclusionLocatorTamper::ExclusionReference => {
+                        let mut wrong = exclusion;
+                        wrong.outcome_hash = ObjectHash::digest(b"wrong exclusion reference");
+                        let wrong = serde_json::to_string(&wrong).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "serialize wrong exclusion reference: {error}"
+                            ))
+                        })?;
+                        connection.execute(
+                            "UPDATE store_author_exclusion_activations
+                             SET exclusion_ref = ?1 WHERE exclusion_ref = ?2",
+                            (&wrong, &exact),
+                        )
+                    }
+                    AuthorExclusionLocatorTamper::AcceptedCut => {
+                        let cut: String = connection
+                            .query_row(
+                                "SELECT accepted_cut
+                                 FROM store_author_exclusion_activations
+                                 WHERE exclusion_ref = ?1",
+                                [&exact],
+                                |row| row.get(0),
+                            )
+                            .map_err(crate::database::DbError::from)?;
+                        let mut cut: std::collections::BTreeMap<
+                            crate::sync::causal_grants::AuthorStreamId,
+                            StoreBatchCommitRef,
+                        > = serde_json::from_str(&cut).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "parse exclusion accepted cut: {error}"
+                            ))
+                        })?;
+                        cut.insert(
+                            crate::sync::causal_grants::AuthorStreamId::from_digest(
+                                ObjectHash::digest(b"wrong exclusion accepted-cut stream"),
+                            ),
+                            candidate,
+                        );
+                        let wrong = serde_json::to_string(&cut).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "serialize wrong exclusion accepted cut: {error}"
+                            ))
+                        })?;
+                        connection.execute(
+                            "UPDATE store_author_exclusion_activations
+                             SET accepted_cut = ?1 WHERE exclusion_ref = ?2",
+                            (&wrong, &exact),
+                        )
+                    }
+                    AuthorExclusionLocatorTamper::ActivationHead => {
+                        let head: String = connection
+                            .query_row(
+                                "SELECT activation_head
+                                 FROM store_author_exclusion_activations
+                                 WHERE exclusion_ref = ?1",
+                                [&exact],
+                                |row| row.get(0),
+                            )
+                            .map_err(crate::database::DbError::from)?;
+                        let mut head: crate::sync::store_commit::StoreDeviceHeadRef =
+                            serde_json::from_str(&head).map_err(|error| {
+                                crate::database::DbError::Message(format!(
+                                    "parse exclusion activation head: {error}"
+                                ))
+                            })?;
+                        head.head_hash = ObjectHash::digest(b"wrong exclusion activation head");
+                        let wrong = serde_json::to_string(&head).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "serialize wrong exclusion activation head: {error}"
+                            ))
+                        })?;
+                        connection.execute(
+                            "UPDATE store_author_exclusion_activations
+                             SET activation_head = ?1 WHERE exclusion_ref = ?2",
+                            (&wrong, &exact),
+                        )
+                    }
+                }
+                .map_err(crate::database::DbError::from)?;
+                if affected != 1 {
+                    return Err(crate::database::DbError::Message(format!(
+                        "locator tamper {tamper:?} changed {affected} rows"
+                    )));
+                }
+                Ok(())
+            })
+            .await
+            .expect("tamper author exclusion locator");
+    }
+
+    struct PreparedWriteTransfer {
+        write: (String, String, Vec<u8>, Vec<u8>, String, String, String),
+        partitions: Vec<(String, Option<String>, Vec<u8>)>,
+        packages: Vec<(String, String)>,
+        blobs: Vec<(String, String, String, Option<String>)>,
+        remotes: Vec<(String, String)>,
+    }
+
+    async fn transfer_prepared_write(
+        source: &Database,
+        destination: &Database,
+        write_id: &WriteId,
+    ) {
+        let source_write_id = write_id.clone();
+        let transfer = source
+            .call(move |connection| {
+                let write = connection
+                    .query_row(
+                        "SELECT status, affected_rows, changeset, inverse_changeset,
+                                base, blob_facts, prepared
+                         FROM store_writes WHERE write_id = ?1",
+                        [source_write_id.as_str()],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                            ))
+                        },
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                let partitions = {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT audience, control_coord, changeset
+                             FROM store_write_partitions WHERE write_id = ?1 ORDER BY audience",
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    let rows = statement
+                        .query_map([source_write_id.as_str()], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })
+                        .map_err(crate::database::DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(crate::database::DbError::from)?;
+                    rows
+                };
+                let packages = {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT audience, remote_object_id
+                             FROM store_write_packages WHERE write_id = ?1 ORDER BY audience",
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    let rows = statement
+                        .query_map([source_write_id.as_str()], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })
+                        .map_err(crate::database::DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(crate::database::DbError::from)?;
+                    rows
+                };
+                let blobs = {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT audience, locator_hash, remote_object_id, spool_path
+                             FROM store_write_blobs WHERE write_id = ?1
+                             ORDER BY audience, remote_object_id",
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    let rows = statement
+                        .query_map([source_write_id.as_str()], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .map_err(crate::database::DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(crate::database::DbError::from)?;
+                    rows
+                };
+                let remotes = {
+                    let mut statement = connection
+                        .prepare("SELECT object_id, state FROM remote_objects ORDER BY object_id")
+                        .map_err(crate::database::DbError::from)?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(crate::database::DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(crate::database::DbError::from)?;
+                    rows
+                };
+                Ok(PreparedWriteTransfer {
+                    write,
+                    partitions,
+                    packages,
+                    blobs,
+                    remotes,
+                })
+            })
+            .await
+            .expect("export prepared write");
+        let destination_write_id = write_id.clone();
+        destination
+            .call(move |connection| {
+                let tx = connection
+                    .unchecked_transaction()
+                    .map_err(crate::database::DbError::from)?;
+                for (object_id, state) in transfer.remotes {
+                    let imported = tx
+                        .execute(
+                            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+                             ON CONFLICT(object_id) DO UPDATE SET state = excluded.state
+                             WHERE remote_objects.state = excluded.state",
+                            (object_id, state),
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    if imported != 1 {
+                        return Err(crate::database::DbError::Message(
+                            "prepared write remote object conflicts with restored state"
+                                .to_string(),
+                        ));
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO store_writes
+                     (write_id, status, affected_rows, changeset, inverse_changeset,
+                      base, blob_facts, prepared)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        destination_write_id.as_str(),
+                        transfer.write.0,
+                        transfer.write.1,
+                        transfer.write.2,
+                        transfer.write.3,
+                        transfer.write.4,
+                        transfer.write.5,
+                        transfer.write.6,
+                    ],
+                )
+                .map_err(crate::database::DbError::from)?;
+                for (audience, control, changeset) in transfer.partitions {
+                    tx.execute(
+                        "INSERT INTO store_write_partitions
+                         (write_id, audience, control_coord, changeset) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![
+                            destination_write_id.as_str(),
+                            audience,
+                            control,
+                            changeset
+                        ],
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                }
+                for (audience, object_id) in transfer.packages {
+                    tx.execute(
+                        "INSERT INTO store_write_packages
+                         (write_id, audience, remote_object_id) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![destination_write_id.as_str(), audience, object_id],
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                }
+                for (audience, locator_hash, object_id, spool_path) in transfer.blobs {
+                    tx.execute(
+                        "INSERT INTO store_write_blobs
+                         (write_id, audience, locator_hash, remote_object_id, spool_path)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![
+                            destination_write_id.as_str(),
+                            audience,
+                            locator_hash,
+                            object_id,
+                            spool_path
+                        ],
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                }
+                tx.commit().map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("import prepared write");
+    }
+
+    async fn prepare_transfer_candidate(
+        peer_db: &Database,
+        store: &TestStore,
+        signer: &UserKeypair,
+        label: &str,
+    ) -> (tempfile::TempDir, StoreDir, WriteId) {
+        host_exec(
+            peer_db,
+            &format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('{label}', 'pending', NULL, 1, \
+                         '0000000002000-0000-{label}', '2026-07-18')"
+            ),
+        )
+        .await;
+        let membership = Box::pin(super::super::pull::load_cycle_membership(
+            &store.storage,
+            peer_db,
+        ))
+        .await
+        .expect("load transfer candidate membership");
+        let peer_device_id = local_device_id(peer_db)
+            .await
+            .expect("transfer candidate device id");
+        let (temporary, store_dir) = temp_store_dir();
+        assert!(
+            Box::pin(super::super::store_outbound::prepare_pending_store_write(
+                peer_db,
+                &store.storage,
+                &peer_device_id,
+                "2026-07-18T00:02:00Z",
+                signer,
+                &store_dir,
+                membership.chain.as_ref(),
+            ))
+            .await
+            .expect("prepare transfer candidate")
+        );
+        let candidate = peer_db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load transfer candidate")
+            .expect("transfer candidate exists");
+        let write_id = candidate.commit.value.write_id.clone();
+        peer_db
+            .set_write_status(
+                &write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "exercise restored author-exclusion evidence".to_string(),
+                }),
+            )
+            .await
+            .expect("block transfer candidate");
+        (temporary, store_dir, write_id)
     }
 
     async fn create_exclusion_test_store(
