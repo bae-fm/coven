@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
     self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantConflict,
-    CausalGrantError, CausalGrantStatus, OwnerGrantBarrier,
+    CausalGrantError, CausalGrantStatus, GrantRetirements, GrantState, OwnerGrantBarrier,
 };
 pub use super::causal_grants::{AuthorStreamId, MembershipGrantId};
 use super::storage::ExactObjectRef;
@@ -40,11 +40,18 @@ pub struct SerialMember {
     pub created_at_generation: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct SerialGrantRetirement {
+    pub generation: u64,
+    pub entry_hash: ObjectHash,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SerialMembershipState {
     store_root_hash: ObjectHash,
-    active_grants: BTreeMap<MembershipGrantId, SerialMember>,
+    grants: BTreeMap<MembershipGrantId, GrantState<SerialMember, SerialGrantRetirement>>,
     current_generation: u64,
 }
 
@@ -381,13 +388,15 @@ impl SerialMembershipState {
     ) -> Self {
         Self {
             store_root_hash,
-            active_grants: BTreeMap::from([(
+            grants: BTreeMap::from([(
                 founder_grant,
-                SerialMember {
-                    member_pubkey: founder_pubkey,
-                    role: MemberRole::Owner,
-                    provider_account_email: None,
-                    created_at_generation: 0,
+                GrantState::Active {
+                    record: SerialMember {
+                        member_pubkey: founder_pubkey,
+                        role: MemberRole::Owner,
+                        provider_account_email: None,
+                        created_at_generation: 0,
+                    },
                 },
             )]),
             current_generation: 0,
@@ -418,13 +427,15 @@ impl SerialMembershipState {
         }
         Ok(Self {
             store_root_hash,
-            active_grants: BTreeMap::from([(
+            grants: BTreeMap::from([(
                 owner_grant_id.clone(),
-                SerialMember {
-                    member_pubkey: owner_pubkey.clone(),
-                    role: MemberRole::Owner,
-                    provider_account_email: None,
-                    created_at_generation: 0,
+                GrantState::Active {
+                    record: SerialMember {
+                        member_pubkey: owner_pubkey.clone(),
+                        role: MemberRole::Owner,
+                        provider_account_email: None,
+                        created_at_generation: 0,
+                    },
                 },
             )]),
             current_generation: 0,
@@ -436,13 +447,14 @@ impl SerialMembershipState {
         struct StateFields<'a> {
             domain: &'static str,
             store_root_hash: ObjectHash,
-            active_grants: &'a BTreeMap<MembershipGrantId, SerialMember>,
+            grants:
+                &'a BTreeMap<MembershipGrantId, GrantState<SerialMember, SerialGrantRetirement>>,
         }
         ObjectHash::digest(
             &serde_json::to_vec(&StateFields {
-                domain: "coven.serial-membership-state.v1",
+                domain: "coven.serial-membership-state.v2",
                 store_root_hash: self.store_root_hash,
-                active_grants: &self.active_grants,
+                grants: &self.grants,
             })
             .expect("Serial membership state serialization cannot fail"),
         )
@@ -453,8 +465,8 @@ impl SerialMembershipState {
     }
 
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
-        self.active_grants
-            .values()
+        self.active_grants()
+            .map(|(_, member)| member)
             .map(|member| (member.member_pubkey.clone(), member.role.clone()))
             .collect::<BTreeMap<_, _>>()
             .into_iter()
@@ -462,32 +474,32 @@ impl SerialMembershipState {
     }
 
     pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
-        self.active_grants
-            .values()
+        self.active_grants()
+            .map(|(_, member)| member)
             .find(|member| member.member_pubkey == pubkey)
             .and_then(|member| member.provider_account_email.as_deref())
     }
 
     pub fn can_write(&self, pubkey: &str) -> bool {
-        self.active_grants
-            .values()
+        self.active_grants()
+            .map(|(_, member)| member)
             .any(|member| member.member_pubkey == pubkey && member.role.can_write())
     }
 
     fn contains(&self, pubkey: &str) -> bool {
-        self.active_grants
-            .values()
+        self.active_grants()
+            .map(|(_, member)| member)
             .any(|member| member.member_pubkey == pubkey)
     }
 
     pub fn is_owner(&self, pubkey: &str) -> bool {
-        self.active_grants
-            .values()
+        self.active_grants()
+            .map(|(_, member)| member)
             .any(|member| member.member_pubkey == pubkey && member.role == MemberRole::Owner)
     }
 
     pub fn active_owner_grant(&self, pubkey: &str) -> Option<MembershipGrantId> {
-        self.active_grants.iter().find_map(|(grant_id, member)| {
+        self.active_grants().find_map(|(grant_id, member)| {
             (member.member_pubkey == pubkey && member.role == MemberRole::Owner)
                 .then(|| grant_id.clone())
         })
@@ -498,9 +510,12 @@ impl SerialMembershipState {
         pubkey: &str,
         grant_id: &MembershipGrantId,
     ) -> bool {
-        self.active_grants.get(grant_id).is_some_and(|member| {
-            member.member_pubkey == pubkey && member.role == MemberRole::Owner
-        })
+        self.grants
+            .get(grant_id)
+            .and_then(GrantState::active)
+            .is_some_and(|member| {
+                member.member_pubkey == pubkey && member.role == MemberRole::Owner
+            })
     }
 
     pub fn signed_set_member_with_wrapped_key(
@@ -661,23 +676,29 @@ impl SerialMembershipState {
                     return Err(SerialMembershipError::InvalidWrappedKey);
                 }
                 if *replaces != self.active_grants_for(user_pubkey)
-                    || next.active_grants.contains_key(grant_id)
+                    || next.grants.contains_key(grant_id)
                 {
                     return Err(SerialMembershipError::StaleState {
                         expected,
                         actual: entry.previous_state_hash,
                     });
                 }
+                let retirement = SerialGrantRetirement {
+                    generation,
+                    entry_hash: entry.entry_hash(),
+                };
                 for replaced in replaces {
-                    next.active_grants.remove(replaced);
+                    next.retire_grant(replaced, retirement.clone());
                 }
-                next.active_grants.insert(
+                next.grants.insert(
                     grant_id.clone(),
-                    SerialMember {
-                        member_pubkey: user_pubkey.clone(),
-                        role: role.clone(),
-                        provider_account_email: provider_account_email.clone(),
-                        created_at_generation: generation,
+                    GrantState::Active {
+                        record: SerialMember {
+                            member_pubkey: user_pubkey.clone(),
+                            role: role.clone(),
+                            provider_account_email: provider_account_email.clone(),
+                            created_at_generation: generation,
+                        },
                     },
                 );
             }
@@ -688,12 +709,16 @@ impl SerialMembershipState {
                 if *removes != self.active_grants_for(user_pubkey) {
                     return Err(SerialMembershipError::NotAMember(user_pubkey.clone()));
                 }
+                let retirement = SerialGrantRetirement {
+                    generation,
+                    entry_hash: entry.entry_hash(),
+                };
                 for removed in removes {
-                    next.active_grants.remove(removed);
+                    next.retire_grant(removed, retirement.clone());
                 }
                 if !next
-                    .active_grants
-                    .values()
+                    .active_grants()
+                    .map(|(_, member)| member)
                     .any(|member| member.role == MemberRole::Owner)
                 {
                     return Err(SerialMembershipError::LastOwner);
@@ -705,10 +730,33 @@ impl SerialMembershipState {
     }
 
     fn active_grants_for(&self, pubkey: &str) -> BTreeSet<MembershipGrantId> {
-        self.active_grants
-            .iter()
+        self.active_grants()
             .filter_map(|(grant, member)| (member.member_pubkey == pubkey).then_some(grant.clone()))
             .collect()
+    }
+
+    fn active_grants(&self) -> impl Iterator<Item = (&MembershipGrantId, &SerialMember)> {
+        self.grants
+            .iter()
+            .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
+    }
+
+    fn retire_grant(&mut self, grant: &MembershipGrantId, retirement: SerialGrantRetirement) {
+        let state = self
+            .grants
+            .get_mut(grant)
+            .expect("validated Serial retirement names an existing grant");
+        match state {
+            GrantState::Active { record } => {
+                *state = GrantState::Tombstoned {
+                    record: record.clone(),
+                    retirements: GrantRetirements::new(retirement),
+                };
+            }
+            GrantState::Tombstoned { retirements, .. } => {
+                retirements.insert(retirement);
+            }
+        }
     }
 
     fn next_generation(&self) -> Result<u64, SerialMembershipError> {
@@ -792,6 +840,12 @@ impl SerialMembershipEntry {
             &self.author_pubkey,
             &self.signature,
             &self.canonical_bytes(),
+        )
+    }
+
+    pub fn entry_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self).expect("Serial membership entry serialization cannot fail"),
         )
     }
 }
@@ -948,7 +1002,7 @@ impl CausalAssignment for StoreAssignment {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerStreamBarrier {
     pub observed_streams: Vec<MembershipCoord>,
@@ -1168,10 +1222,21 @@ pub enum MembershipGrantCreationAuthority {
     ConflictResolution(StoreMembershipConflictResolutionRef),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MembershipGrantRetirement {
+    Entry {
+        authority: MembershipCoord,
+        owner_barrier: Option<OwnerStreamBarrier>,
+    },
+    ConflictResolution(StoreMembershipConflictResolutionRef),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedStoreMembership {
-    pub active_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    pub grants:
+        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
     pub provider_admin: super::provider::ProviderAdminResolution,
     pub state_hash: ObjectHash,
 }
@@ -1181,9 +1246,41 @@ pub struct ResolvedStoreMembership {
 pub struct StoreMembershipBranch {
     pub heads: Vec<MembershipHeadRef>,
     pub effective_frontier: Vec<MembershipCoord>,
-    pub active_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    pub grants:
+        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
     pub provider_admin: super::provider::ProviderAdminResolution,
     pub state_hash: ObjectHash,
+}
+
+fn active_membership_grants(
+    grants: &BTreeMap<
+        MembershipGrantId,
+        GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
+    >,
+) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
+    grants
+        .iter()
+        .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
+}
+
+impl ResolvedStoreMembership {
+    pub fn active_grants(
+        &self,
+    ) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
+        active_membership_grants(&self.grants)
+    }
+
+    pub fn active_grant(&self, grant: &MembershipGrantId) -> Option<&MembershipGrantRecord> {
+        self.grants.get(grant).and_then(GrantState::active)
+    }
+}
+
+impl StoreMembershipBranch {
+    pub fn active_grants(
+        &self,
+    ) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
+        active_membership_grants(&self.grants)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1316,7 +1413,7 @@ impl StoreMembershipConflictResolution {
             return false;
         };
         let mut expected_retired = involved_owner_grants.clone();
-        expected_retired.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
+        expected_retired.extend(branch.active_grants().filter_map(|(grant, record)| {
             (record.member_pubkey == self.resolver_pubkey && record.role == MemberRole::Owner)
                 .then_some(grant.clone())
         }));
@@ -1327,7 +1424,7 @@ impl StoreMembershipConflictResolution {
             && self.retired_owner_grants == expected_retired
             && self.replacement_grant
                 == derive_store_resolution_grant(conflict_hash, &self.resolver_pubkey)
-            && branch.active_grants.values().any(|record| {
+            && branch.active_grants().any(|(_, record)| {
                 record.member_pubkey == self.resolver_pubkey && record.role == MemberRole::Owner
             })
             && self.verify_signature()
@@ -1393,17 +1490,123 @@ pub fn resolve_store_membership_conflict(
     let (first_branch, other_branches) = selected_branches
         .split_first()
         .ok_or(MembershipError::InvalidConflictResolution)?;
-    let mut active_grants = first_branch
-        .active_grants
-        .iter()
+    let mut grants = first_branch
+        .active_grants()
         .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
-        .map(|(grant, record)| (grant.clone(), record.clone()))
+        .filter(|(grant, record)| {
+            other_branches.iter().all(|branch| {
+                branch.grants.get(*grant).and_then(GrantState::active) == Some(*record)
+            })
+        })
+        .map(|(grant, record)| {
+            (
+                grant.clone(),
+                GrantState::Active {
+                    record: record.clone(),
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    active_grants.retain(|grant, record| {
-        other_branches
+    for branch in maximal_valid_branches {
+        for (grant, state) in &branch.grants {
+            let GrantState::Tombstoned {
+                record,
+                retirements,
+            } = state
+            else {
+                continue;
+            };
+            match grants.entry(grant.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(state.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != record {
+                        return Err(MembershipError::InvalidConflictResolution);
+                    }
+                    let current = entry.get_mut();
+                    let mut merged = retirements.clone();
+                    if let Some(current_retirements) = current.retirements() {
+                        merged.extend(current_retirements.iter().cloned());
+                    }
+                    *current = GrantState::Tombstoned {
+                        record: record.clone(),
+                        retirements: merged,
+                    };
+                }
+            }
+        }
+    }
+    let mut resolution_retirements = resolutions
+        .iter()
+        .map(|(reference, _)| MembershipGrantRetirement::ConflictResolution(reference.clone()));
+    let mut resolution_retirements = GrantRetirements::new(
+        resolution_retirements
+            .next()
+            .expect("validated conflict has a resolution"),
+    );
+    resolution_retirements.extend(
+        resolutions
             .iter()
-            .all(|branch| branch.active_grants.get(grant) == Some(record))
-    });
+            .skip(1)
+            .map(|(reference, _)| MembershipGrantRetirement::ConflictResolution(reference.clone())),
+    );
+    for branch in maximal_valid_branches {
+        for (grant, record) in branch.active_grants() {
+            if grants.get(grant).and_then(GrantState::active).is_some() {
+                continue;
+            }
+            match grants.entry(grant.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(GrantState::Tombstoned {
+                        record: record.clone(),
+                        retirements: resolution_retirements.clone(),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != record {
+                        return Err(MembershipError::InvalidConflictResolution);
+                    }
+                    let GrantState::Tombstoned { retirements, .. } = entry.get_mut() else {
+                        unreachable!("active conflict grant was handled above")
+                    };
+                    retirements.extend(resolution_retirements.iter().cloned());
+                }
+            }
+        }
+    }
+    for (reference, resolution) in resolutions {
+        for retired in &resolution.retired_owner_grants {
+            let record = selected_branches
+                .iter()
+                .find_map(|branch| branch.grants.get(retired).map(GrantState::record))
+                .ok_or(MembershipError::InvalidConflictResolution)?
+                .clone();
+            let retirement = MembershipGrantRetirement::ConflictResolution(reference.clone());
+            match grants.entry(retired.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(GrantState::Tombstoned {
+                        record,
+                        retirements: GrantRetirements::new(retirement),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != &record {
+                        return Err(MembershipError::InvalidConflictResolution);
+                    }
+                    let mut retirements = match entry.get().retirements() {
+                        Some(retirements) => retirements.clone(),
+                        None => GrantRetirements::new(retirement.clone()),
+                    };
+                    retirements.insert(retirement);
+                    *entry.get_mut() = GrantState::Tombstoned {
+                        record,
+                        retirements,
+                    };
+                }
+            }
+        }
+    }
     for (reference, resolution) in resolutions {
         let record = MembershipGrantRecord {
             member_pubkey: resolution.resolver_pubkey.clone(),
@@ -1413,20 +1616,22 @@ pub fn resolve_store_membership_conflict(
                 reference.clone(),
             ),
         };
-        if active_grants
-            .insert(resolution.replacement_grant.clone(), record.clone())
-            .is_some_and(|current| current != record)
+        if grants
+            .insert(
+                resolution.replacement_grant.clone(),
+                GrantState::Active {
+                    record: record.clone(),
+                },
+            )
+            .is_some_and(|current| current.active() != Some(&record))
         {
             return Err(MembershipError::InvalidConflictResolution);
         }
     }
     let mut members = BTreeSet::new();
-    if !active_grants
-        .values()
-        .any(|record| record.role == MemberRole::Owner)
-        || active_grants
-            .values()
-            .any(|record| !members.insert(record.member_pubkey.clone()))
+    if !active_membership_grants(&grants).any(|(_, record)| record.role == MemberRole::Owner)
+        || active_membership_grants(&grants)
+            .any(|(_, record)| !members.insert(record.member_pubkey.clone()))
     {
         return Err(MembershipError::InvalidConflictResolution);
     }
@@ -1438,24 +1643,16 @@ pub fn resolve_store_membership_conflict(
         )?,
     );
     Ok(ResolvedStoreMembership {
-        state_hash: store_membership_state_hash(&active_grants, &provider_admin),
-        active_grants,
+        state_hash: store_membership_state_hash(&grants, &provider_admin),
+        grants,
         provider_admin,
     })
 }
 
-#[derive(Debug, Clone)]
-struct GrantRecord {
-    pubkey: String,
-    role: MemberRole,
-    provider_account_email: Option<String>,
-    creation_authority: MembershipGrantCreationAuthority,
-}
-
 #[derive(Debug, Clone, Default)]
 struct CausalState {
-    grants: BTreeMap<MembershipGrantId, GrantRecord>,
-    removed: BTreeSet<MembershipGrantId>,
+    grants:
+        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1474,9 +1671,9 @@ pub struct MembershipChain {
 struct MembershipResolutionCheckpoint {
     raw_heads: Vec<MembershipCoord>,
     effective_frontier: Vec<MembershipCoord>,
-    grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    grants:
+        BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
     grant_anchors: BTreeMap<MembershipGrantId, GrantStreamAnchor>,
-    removed: BTreeSet<MembershipGrantId>,
     included: BTreeSet<MembershipCoord>,
     resolutions: Vec<StoreMembershipConflictResolutionRef>,
     provider_admin: super::provider::ProviderAdminState,
@@ -1676,8 +1873,8 @@ impl MembershipChain {
     }
 
     pub(crate) fn membership_stream_id(&self, grant: &MembershipGrantId) -> Option<AuthorStreamId> {
-        let record = self.state.grants.get(grant)?;
-        store_membership_anchor_stream(&record.pubkey, grant, self.membership_anchor(grant)?)
+        let record = self.state.grants.get(grant)?.record();
+        store_membership_anchor_stream(&record.member_pubkey, grant, self.membership_anchor(grant)?)
     }
 
     pub(crate) fn activated_membership_streams(
@@ -1687,12 +1884,13 @@ impl MembershipChain {
             .state
             .grants
             .iter()
-            .filter_map(|(grant, record)| {
+            .filter_map(|(grant, state)| {
+                let record = state.record();
                 let anchor = self.membership_anchor(grant)?.clone();
                 let stream_id = self.membership_stream_id(grant)?;
                 Some((
                     MembershipStreamKey {
-                        author_pubkey: record.pubkey.clone(),
+                        author_pubkey: record.member_pubkey.clone(),
                         author_owner_grant: grant.clone(),
                         stream_id,
                     },
@@ -1815,14 +2013,14 @@ impl MembershipChain {
             .iter()
             .find(|branch| branch.heads == resolver_branch_heads)
             .ok_or(MembershipError::InvalidConflictResolution)?;
-        if !branch.active_grants.values().any(|record| {
+        if !branch.active_grants().any(|(_, record)| {
             record.member_pubkey == resolver_pubkey && record.role == MemberRole::Owner
         }) {
             return Err(MembershipError::SignerIsNotOwner(resolver_pubkey));
         }
         let replacement_grant = derive_store_resolution_grant(conflict_hash, &resolver_pubkey);
         let mut retired_owner_grants = involved_owner_grants.clone();
-        retired_owner_grants.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
+        retired_owner_grants.extend(branch.active_grants().filter_map(|(grant, record)| {
             (record.member_pubkey == resolver_pubkey && record.role == MemberRole::Owner)
                 .then_some(grant.clone())
         }));
@@ -1937,7 +2135,7 @@ impl MembershipChain {
         let MembershipStatus::Resolved(resolved) = self.status() else {
             return false;
         };
-        resolved.active_grants.values().any(|record| {
+        resolved.active_grants().any(|(_, record)| {
             record.member_pubkey == pubkey
                 && record.role.can_write()
                 && &record.creation_authority == authority
@@ -1948,7 +2146,7 @@ impl MembershipChain {
         let MembershipStatus::Resolved(resolved) = self.status() else {
             return None;
         };
-        resolved.active_grants.get(grant_id)
+        resolved.active_grant(grant_id)
     }
 
     pub fn contains_coord(&self, expected: &MembershipCoord) -> bool {
@@ -1957,10 +2155,11 @@ impl MembershipChain {
 
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
         let mut members = BTreeMap::new();
-        for (grant, record) in &self.state.grants {
-            if !self.state.removed.contains(grant) {
-                members.insert(record.pubkey.clone(), record.role.clone());
-            }
+        for state in self.state.grants.values() {
+            let Some(record) = state.active() else {
+                continue;
+            };
+            members.insert(record.member_pubkey.clone(), record.role.clone());
         }
         members.into_iter().collect()
     }
@@ -2296,10 +2495,11 @@ impl MembershipChain {
         if removes.is_empty() {
             return Err(MembershipError::NotAMember(user_pubkey));
         }
-        let retains_owner = self.state.grants.iter().any(|(grant, record)| {
-            !self.state.removed.contains(grant)
-                && !removes.contains(grant)
-                && record.role == MemberRole::Owner
+        let retains_owner = self.state.grants.iter().any(|(grant, state)| {
+            !removes.contains(grant)
+                && state
+                    .active()
+                    .is_some_and(|record| record.role == MemberRole::Owner)
         });
         if !retains_owner {
             return Err(MembershipError::NoActiveOwner);
@@ -2385,8 +2585,10 @@ impl MembershipChain {
             .state
             .grants
             .iter()
-            .filter(|(grant_id, record)| {
-                record.role == MemberRole::Owner && !self.state.removed.contains(*grant_id)
+            .filter(|(_, state)| {
+                state
+                    .active()
+                    .is_some_and(|record| record.role == MemberRole::Owner)
             })
             .map(|(grant_id, _)| grant_id.clone())
             .collect();
@@ -2505,7 +2707,7 @@ impl MembershipChain {
         grants
             .iter()
             .filter_map(|grant| {
-                let record = self.state.grants.get(grant)?;
+                let record = self.state.grants.get(grant)?.active()?;
                 (record.role == MemberRole::Owner).then(|| {
                     let observed_streams = self
                         .effective_frontier()
@@ -2518,12 +2720,15 @@ impl MembershipChain {
             .collect()
     }
 
-    fn active_grants_for(&self, pubkey: &str) -> Vec<(&MembershipGrantId, &GrantRecord)> {
+    fn active_grants_for(&self, pubkey: &str) -> Vec<(&MembershipGrantId, &MembershipGrantRecord)> {
         self.state
             .grants
             .iter()
-            .filter(|(grant, record)| {
-                record.pubkey == pubkey && !self.state.removed.contains(*grant)
+            .filter_map(|(grant, state)| {
+                state
+                    .active()
+                    .filter(|record| record.member_pubkey == pubkey)
+                    .map(|record| (grant, record))
             })
             .collect()
     }
@@ -2757,7 +2962,7 @@ impl MembershipChain {
                         Ok(StoreMembershipBranch {
                             heads: self.branch_head_refs(&branch.raw_heads)?,
                             effective_frontier: branch.effective_frontier,
-                            active_grants: resolved.active_grants,
+                            grants: resolved.grants,
                             provider_admin: resolved.provider_admin,
                             state_hash: resolved.state_hash,
                         })
@@ -2784,25 +2989,14 @@ impl MembershipChain {
             self.state = CausalState {
                 grants: reduced
                     .grants
-                    .into_iter()
-                    .map(|(grant, record)| {
-                        let creation_authority = membership_creation_authority(
-                            &grant,
-                            record.creation,
-                            checkpoint_grants,
-                        );
+                    .iter()
+                    .map(|(grant, state)| {
                         (
-                            grant,
-                            GrantRecord {
-                                pubkey: record.member_pubkey,
-                                role: record.assignment.role,
-                                provider_account_email: record.assignment.provider_account_email,
-                                creation_authority,
-                            },
+                            grant.clone(),
+                            map_store_grant_state(grant, state, checkpoint_grants),
                         )
                     })
                     .collect(),
-                removed: reduced.removed,
             };
             self.included = reduced.included;
         } else {
@@ -2848,49 +3042,12 @@ impl MembershipChain {
             _ => return Err(MembershipError::InvalidConflictResolution),
         };
         let resolved = self.resolved_with(store_root_hash, resolutions)?;
-        let mut grants = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grants.clone());
+        let grants = resolved.grants.clone();
         let mut grant_anchors = self
             .resolution_checkpoint
             .as_ref()
             .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grant_anchors.clone());
         for entry in &self.entries {
-            let (grant, record) = match &entry.change {
-                MembershipChange::Founder {
-                    owner_pubkey,
-                    owner_grant_id,
-                    ..
-                } => (
-                    owner_grant_id.clone(),
-                    MembershipGrantRecord {
-                        member_pubkey: owner_pubkey.clone(),
-                        role: MemberRole::Owner,
-                        provider_account_email: None,
-                        creation_authority: MembershipGrantCreationAuthority::Entry(entry.coord()),
-                    },
-                ),
-                MembershipChange::SetMember {
-                    user_pubkey,
-                    provider_account_email,
-                    role,
-                    grant_id,
-                    ..
-                } => (
-                    grant_id.clone(),
-                    MembershipGrantRecord {
-                        member_pubkey: user_pubkey.clone(),
-                        role: role.clone(),
-                        provider_account_email: provider_account_email.clone(),
-                        creation_authority: MembershipGrantCreationAuthority::Entry(entry.coord()),
-                    },
-                ),
-                MembershipChange::RemoveMember { .. }
-                | MembershipChange::ProviderAdmin
-                | MembershipChange::ResolutionActivation { .. } => continue,
-            };
-            grants.insert(grant, record);
             match &entry.change {
                 MembershipChange::Founder {
                     owner_grant_id,
@@ -2909,18 +3066,12 @@ impl MembershipChain {
                 _ => {}
             }
         }
-        grants.extend(resolved.active_grants.clone());
         for (_, resolution) in resolutions {
             grant_anchors.insert(
                 resolution.replacement_grant.clone(),
                 resolution.replacement_membership.clone(),
             );
         }
-        let removed: BTreeSet<_> = grants
-            .keys()
-            .filter(|grant| !resolved.active_grants.contains_key(*grant))
-            .cloned()
-            .collect();
         let included = membership_history_closure(&self.entries, &effective_frontier);
         let mut resolution_refs = self
             .resolution_checkpoint
@@ -2934,28 +3085,11 @@ impl MembershipChain {
             effective_frontier: effective_frontier.clone(),
             grants: grants.clone(),
             grant_anchors,
-            removed: removed.clone(),
             included: included.clone(),
             resolutions: resolution_refs,
             provider_admin: resolved.provider_admin.combined_state().clone(),
         });
-        self.state = CausalState {
-            grants: grants
-                .iter()
-                .map(|(grant, record)| {
-                    (
-                        grant.clone(),
-                        GrantRecord {
-                            pubkey: record.member_pubkey.clone(),
-                            role: record.role.clone(),
-                            provider_account_email: record.provider_account_email.clone(),
-                            creation_authority: record.creation_authority.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            removed,
-        };
+        self.state = CausalState { grants };
         self.included = included;
         self.status = Some(MembershipStatus::Resolved(resolved));
         Ok(())
@@ -3071,11 +3205,10 @@ fn validate_membership_wrapped_keys(
         };
         let expected_recipients = reduced
             .grants
-            .iter()
-            .filter(|(grant, record)| {
-                !reduced.removed.contains(*grant) && record.member_pubkey != *removed_pubkey
-            })
-            .map(|(_, record)| record.member_pubkey.clone())
+            .values()
+            .filter_map(GrantState::active)
+            .filter(|record| record.member_pubkey != *removed_pubkey)
+            .map(|record| record.member_pubkey.clone())
             .collect::<BTreeSet<_>>();
         let actual_recipients = wrapped_keys
             .iter()
@@ -3138,14 +3271,22 @@ fn reduce_store_membership_from_checkpoint(
     let seeds = checkpoint
         .grants
         .iter()
-        .map(|(grant, record)| {
+        .map(|(grant, state)| {
+            let record = state.record();
+            let record = causal_grants::CausalSeedGrant {
+                member_pubkey: record.member_pubkey.clone(),
+                assignment: StoreAssignment {
+                    role: record.role.clone(),
+                    provider_account_email: record.provider_account_email.clone(),
+                },
+            };
             (
                 grant.clone(),
-                causal_grants::CausalSeedGrant {
-                    member_pubkey: record.member_pubkey.clone(),
-                    assignment: StoreAssignment {
-                        role: record.role.clone(),
-                        provider_account_email: record.provider_account_email.clone(),
+                match state {
+                    GrantState::Active { .. } => GrantState::Active { record },
+                    GrantState::Tombstoned { .. } => GrantState::Tombstoned {
+                        record,
+                        retirements: GrantRetirements::new(()),
                     },
                 },
             )
@@ -3156,7 +3297,6 @@ fn reduce_store_membership_from_checkpoint(
         &checkpoint.raw_heads,
         &checkpoint.effective_frontier,
         &seeds,
-        &checkpoint.removed,
         &checkpoint.included,
     )
     .map_err(map_store_causal_error)
@@ -3190,8 +3330,10 @@ fn validate_provider_admin_controls(
         let expected = reduced
             .grants
             .iter()
-            .filter(|(grant_id, record)| {
-                !reduced.removed.contains(*grant_id) && record.assignment.is_owner()
+            .filter(|(_, state)| {
+                state
+                    .active()
+                    .is_some_and(|record| record.assignment.is_owner())
             })
             .map(|(grant_id, _)| {
                 let observed_streams = entry
@@ -3309,7 +3451,9 @@ fn map_store_grants(
         MembershipGrantId,
         causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
     >,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
+    >,
 ) -> BTreeMap<MembershipGrantId, MembershipGrantRecord> {
     grants
         .into_iter()
@@ -3331,41 +3475,71 @@ fn map_store_grants(
 
 fn resolved_store_membership(
     reduced: &causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
+    >,
     provider_admin: super::provider::ProviderAdminResolution,
 ) -> ResolvedStoreMembership {
-    let active_grants = reduced
+    let grants = reduced
         .grants
         .iter()
-        .filter(|(grant, _)| !reduced.removed.contains(*grant))
-        .map(|(grant, record)| {
+        .map(|(grant, state)| {
             (
                 grant.clone(),
-                MembershipGrantRecord {
-                    member_pubkey: record.member_pubkey.clone(),
-                    role: record.assignment.role.clone(),
-                    provider_account_email: record.assignment.provider_account_email.clone(),
-                    creation_authority: membership_creation_authority(
-                        grant,
-                        record.creation.clone(),
-                        checkpoint,
-                    ),
-                },
+                map_store_grant_state(grant, state, checkpoint),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let state_hash = store_membership_state_hash(&active_grants, &provider_admin);
+    let state_hash = store_membership_state_hash(&grants, &provider_admin);
     ResolvedStoreMembership {
-        active_grants,
+        grants,
         provider_admin,
         state_hash,
     }
 }
 
+fn map_store_grant_state(
+    grant: &MembershipGrantId,
+    state: &GrantState<
+        causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
+        causal_grants::CausalGrantRetirement<MembershipCoord>,
+    >,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
+    >,
+) -> GrantState<MembershipGrantRecord, MembershipGrantRetirement> {
+    let causal_record = state.record();
+    let record = MembershipGrantRecord {
+        member_pubkey: causal_record.member_pubkey.clone(),
+        role: causal_record.assignment.role.clone(),
+        provider_account_email: causal_record.assignment.provider_account_email.clone(),
+        creation_authority: membership_creation_authority(
+            grant,
+            causal_record.creation.clone(),
+            checkpoint,
+        ),
+    };
+    causal_grants::map_grant_state(
+        state,
+        record,
+        checkpoint
+            .and_then(|grants| grants.get(grant))
+            .and_then(GrantState::retirements),
+        |coord, owner_barrier| MembershipGrantRetirement::Entry {
+            authority: coord.clone(),
+            owner_barrier: owner_barrier.map(|barrier| OwnerStreamBarrier {
+                observed_streams: barrier.observed_streams.values().cloned().collect(),
+            }),
+        },
+    )
+}
+
 fn membership_creation_authority(
     grant: &MembershipGrantId,
     creation: causal_grants::CausalGrantCreation<MembershipCoord>,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>>,
+    >,
 ) -> MembershipGrantCreationAuthority {
     match creation {
         causal_grants::CausalGrantCreation::Entry(coord) => {
@@ -3374,25 +3548,32 @@ fn membership_creation_authority(
         causal_grants::CausalGrantCreation::Checkpoint => checkpoint
             .and_then(|grants| grants.get(grant))
             .expect("checkpoint reducer seed has exact domain grant record")
+            .record()
             .creation_authority
             .clone(),
     }
 }
 
 fn store_membership_state_hash(
-    active_grants: &BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    grants: &BTreeMap<
+        MembershipGrantId,
+        GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
+    >,
     provider_admin: &super::provider::ProviderAdminResolution,
 ) -> ObjectHash {
     #[derive(Serialize)]
     struct State<'a> {
         domain: &'static str,
-        active_grants: &'a BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+        grants: &'a BTreeMap<
+            MembershipGrantId,
+            GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
+        >,
         provider_admin: &'a super::provider::ProviderAdminResolution,
     }
     ObjectHash::digest(
         &serde_json::to_vec(&State {
-            domain: "coven.store-membership-state.v1",
-            active_grants,
+            domain: "coven.store-membership-state.v2",
+            grants,
             provider_admin,
         })
         .expect("Store membership state serialization cannot fail"),
@@ -4230,7 +4411,7 @@ mod tests {
         };
         assert_eq!(
             chain.active_grant(&grant_id),
-            resolved.active_grants.get(&grant_id)
+            resolved.active_grant(&grant_id)
         );
         assert!(chain
             .active_grant(&MembershipGrantId(ObjectHash::digest(b"absent grant")))
@@ -4240,12 +4421,143 @@ mod tests {
             .signed_remove_member_in_stream(
                 &owner,
                 stream(1),
-                member_pubkey,
+                member_pubkey.clone(),
                 "remove member".to_string(),
             )
             .unwrap();
+        let retirement_authority = removal.coord();
         chain.add_entry(removal).unwrap();
         assert!(chain.active_grant(&grant_id).is_none());
+        let MembershipStatus::Resolved(resolved) = chain.status() else {
+            panic!("membership must resolve")
+        };
+        assert!(matches!(
+            &resolved.grants[&grant_id],
+            GrantState::Tombstoned { record, retirements }
+                if record.member_pubkey == member_pubkey
+                    && retirements.as_set() == &BTreeSet::from([MembershipGrantRetirement::Entry {
+                        authority: retirement_authority.clone(),
+                        owner_barrier: None,
+                    }])
+        ));
+        let mut altered = resolved.grants.clone();
+        let GrantState::Tombstoned { retirements, .. } = altered
+            .get_mut(&grant_id)
+            .expect("retired Merge grant remains present")
+        else {
+            unreachable!()
+        };
+        retirements.insert(MembershipGrantRetirement::Entry {
+            authority: MembershipCoord {
+                entry_hash: ObjectHash::digest(b"different retirement entry"),
+                ..retirement_authority.clone()
+            },
+            owner_barrier: None,
+        });
+        assert_ne!(
+            resolved.state_hash,
+            store_membership_state_hash(&altered, &resolved.provider_admin)
+        );
+
+        let mut reuse = chain
+            .signed_set_member_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey,
+                None,
+                MemberRole::Member,
+                "reuse retired grant".to_string(),
+            )
+            .unwrap();
+        let MembershipChange::SetMember {
+            grant_id: candidate,
+            ..
+        } = &mut reuse.change
+        else {
+            unreachable!()
+        };
+        *candidate = grant_id.clone();
+        sign_membership_entry(&mut reuse, &owner);
+        assert!(matches!(
+            chain.add_entry(reuse),
+            Err(MembershipError::DuplicateGrant {
+                grant,
+                ..
+            }) if grant == grant_id
+        ));
+    }
+
+    #[test]
+    fn concurrent_effective_removals_union_exact_retirement_entries() {
+        let first_owner = key();
+        let second_owner = key();
+        let member = key();
+        let member_pubkey = keys::public_key_hex(&member);
+        let mut base = founded("concurrent-retirement-evidence", &first_owner);
+        let add_owner = base
+            .signed_set_member_in_stream(
+                &first_owner,
+                stream(1),
+                keys::public_key_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "add second Owner".to_string(),
+            )
+            .unwrap();
+        base.add_entry(add_owner).unwrap();
+        let add_member = base
+            .signed_set_member_in_stream(
+                &first_owner,
+                stream(1),
+                member_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "add member".to_string(),
+            )
+            .unwrap();
+        let member_grant = match &add_member.change {
+            MembershipChange::SetMember { grant_id, .. } => grant_id.clone(),
+            _ => unreachable!(),
+        };
+        base.add_entry(add_member).unwrap();
+
+        let first_removal = base
+            .signed_remove_member_in_stream(
+                &first_owner,
+                stream(1),
+                member_pubkey.clone(),
+                "first removal".to_string(),
+            )
+            .unwrap();
+        let second_removal = base
+            .signed_remove_member_in_stream(
+                &second_owner,
+                stream(2),
+                member_pubkey,
+                "second removal".to_string(),
+            )
+            .unwrap();
+        let expected = GrantRetirements::new(MembershipGrantRetirement::Entry {
+            authority: first_removal.coord(),
+            owner_barrier: None,
+        });
+        let mut expected = expected;
+        expected.insert(MembershipGrantRetirement::Entry {
+            authority: second_removal.coord(),
+            owner_barrier: None,
+        });
+        let mut entries = base.entries().to_vec();
+        entries.extend([first_removal, second_removal]);
+        let chain = MembershipChain::from_entries(entries).unwrap();
+        let MembershipStatus::Resolved(resolved) = chain.status() else {
+            panic!("concurrent non-Owner removals must resolve")
+        };
+
+        assert!(matches!(
+            &resolved.grants[&member_grant],
+            GrantState::Tombstoned { retirements, .. }
+                if retirements.as_set() == expected.as_set()
+        ));
     }
 
     fn three_owner_store_cycle() -> (UserKeypair, UserKeypair, UserKeypair, MembershipChain) {
@@ -4327,14 +4639,13 @@ mod tests {
                 let branch = maximal_valid_branches
                     .iter()
                     .find(|branch| {
-                        branch.active_grants.values().any(|record| {
+                        branch.active_grants().any(|(_, record)| {
                             record.member_pubkey == third_pubkey && record.role == MemberRole::Owner
                         })
                     })
                     .expect("unaffected Owner branch");
                 let old_grant = branch
-                    .active_grants
-                    .iter()
+                    .active_grants()
                     .find_map(|(grant, record)| {
                         (record.member_pubkey == third_pubkey).then_some(grant.clone())
                     })
@@ -4358,10 +4669,19 @@ mod tests {
             .expect("unaffected Owner resolution is valid");
 
         assert!(resolution.1.retired_owner_grants.contains(&old_grant));
-        assert!(!resolved.active_grants.contains_key(&old_grant));
+        assert!(resolved.grants[&old_grant].active().is_none());
         assert!(resolved
-            .active_grants
-            .contains_key(&resolution.1.replacement_grant));
+            .grants
+            .get(&resolution.1.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
+        assert!(matches!(
+            &resolved.grants[&old_grant],
+            GrantState::Tombstoned { retirements, .. }
+                if retirements.contains(&MembershipGrantRetirement::ConflictResolution(
+                    resolution.0.clone()
+                ))
+        ));
     }
 
     #[test]
@@ -4963,7 +5283,7 @@ mod tests {
         let resolver_branch_state = maximal_valid_branches
             .iter()
             .find(|branch| {
-                branch.active_grants.values().any(|record| {
+                branch.active_grants().any(|(_, record)| {
                     record.member_pubkey == first_pubkey && record.role == MemberRole::Owner
                 })
             })
@@ -4973,7 +5293,7 @@ mod tests {
         let second_resolver_branch = maximal_valid_branches
             .iter()
             .find(|branch| {
-                branch.active_grants.values().any(|record| {
+                branch.active_grants().any(|(_, record)| {
                     record.member_pubkey == second_pubkey && record.role == MemberRole::Owner
                 })
             })
@@ -5020,13 +5340,19 @@ mod tests {
             .expect("an exact retry is idempotent");
         assert_eq!(resolved_once, resolved_duplicate);
         assert!(resolved_once
-            .active_grants
-            .contains_key(&resolution.1.replacement_grant));
+            .grants
+            .get(&resolution.1.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
         assert!(resolution
             .1
             .retired_owner_grants
             .iter()
-            .all(|grant| !resolved_once.active_grants.contains_key(grant)));
+            .all(|grant| resolved_once
+                .grants
+                .get(grant)
+                .and_then(GrantState::active)
+                .is_none()));
 
         let resolved_union = conflicted
             .resolved_with(
@@ -5035,11 +5361,15 @@ mod tests {
             )
             .expect("distinct resolvers are unioned");
         assert!(resolved_union
-            .active_grants
-            .contains_key(&resolution.1.replacement_grant));
+            .grants
+            .get(&resolution.1.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
         assert!(resolved_union
-            .active_grants
-            .contains_key(&second_resolution.1.replacement_grant));
+            .grants
+            .get(&second_resolution.1.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
 
         let mut branch_specific = conflicted.conflict().expect("cycle conflict").clone();
         let MembershipConflict::RevocationCycle {
@@ -5051,13 +5381,17 @@ mod tests {
         };
         let branch_only_grant = MembershipGrantId(ObjectHash::digest(b"branch-only grant"));
         let branch_only_creation = maximal_valid_branches[0].effective_frontier[0].clone();
-        maximal_valid_branches[0].active_grants.insert(
+        maximal_valid_branches[0].grants.insert(
             branch_only_grant.clone(),
-            MembershipGrantRecord {
-                member_pubkey: keys::public_key_hex(&key()),
-                role: MemberRole::Member,
-                provider_account_email: None,
-                creation_authority: MembershipGrantCreationAuthority::Entry(branch_only_creation),
+            GrantState::Active {
+                record: MembershipGrantRecord {
+                    member_pubkey: keys::public_key_hex(&key()),
+                    role: MemberRole::Member,
+                    provider_account_email: None,
+                    creation_authority: MembershipGrantCreationAuthority::Entry(
+                        branch_only_creation,
+                    ),
+                },
             },
         );
         let composed = resolve_store_membership_conflict(
@@ -5065,8 +5399,22 @@ mod tests {
             &branch_specific,
             &[resolution.clone(), second_resolution.clone()],
         )
-        .expect("compose only grants agreed by every valid branch");
-        assert!(!composed.active_grants.contains_key(&branch_only_grant));
+        .expect("retire grants not agreed by every valid branch");
+        let branch_only_retirements = composed
+            .grants
+            .get(&branch_only_grant)
+            .and_then(GrantState::retirements)
+            .expect("branch-only grant is retained as retired");
+        assert!(
+            branch_only_retirements.contains(&MembershipGrantRetirement::ConflictResolution(
+                resolution.0.clone()
+            ))
+        );
+        assert!(
+            branch_only_retirements.contains(&MembershipGrantRetirement::ConflictResolution(
+                second_resolution.0.clone()
+            ))
+        );
 
         let mut duplicate_member = branch_specific;
         let MembershipConflict::RevocationCycle {
@@ -5080,15 +5428,17 @@ mod tests {
         let duplicate_creation = resolution.1.conflicting_heads[0].coord.clone();
         for branch in maximal_valid_branches {
             for suffix in [b'a', b'b'] {
-                branch.active_grants.insert(
+                branch.grants.insert(
                     MembershipGrantId(ObjectHash::digest(&[suffix])),
-                    MembershipGrantRecord {
-                        member_pubkey: duplicate_pubkey.clone(),
-                        role: MemberRole::Member,
-                        provider_account_email: None,
-                        creation_authority: MembershipGrantCreationAuthority::Entry(
-                            duplicate_creation.clone(),
-                        ),
+                    GrantState::Active {
+                        record: MembershipGrantRecord {
+                            member_pubkey: duplicate_pubkey.clone(),
+                            role: MemberRole::Member,
+                            provider_account_email: None,
+                            creation_authority: MembershipGrantCreationAuthority::Entry(
+                                duplicate_creation.clone(),
+                            ),
+                        },
                     },
                 );
             }
@@ -5650,6 +6000,86 @@ mod tests {
         let replacement_state = first_state.apply(&replacement).unwrap();
 
         assert_ne!(first_state.state_hash(), replacement_state.state_hash());
+    }
+
+    #[test]
+    fn serial_membership_rejects_reusing_a_retired_grant_id() {
+        let owner = key();
+        let member = key();
+        let member_pubkey = keys::public_key_hex(&member);
+        let root = ObjectHash::digest(b"Serial retired grant identity root");
+        let state = SerialMembershipState::from_founder(
+            root,
+            &test_founder_entry(
+                "serial-retired-grant-store",
+                &owner,
+                "founder",
+                membership_anchor("serial-retired-grant-store"),
+            ),
+        )
+        .unwrap();
+        let addition = state
+            .signed_set_member(
+                &owner,
+                member_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "add member".to_string(),
+            )
+            .unwrap();
+        let retired_grant = match &addition.change {
+            SerialMembershipChange::SetMember { grant_id, .. } => grant_id.clone(),
+            SerialMembershipChange::RemoveMember { .. } => unreachable!(),
+        };
+        let added = state.apply(&addition).unwrap();
+        let removal = added
+            .signed_remove_member(&owner, member_pubkey.clone(), "remove member".to_string())
+            .unwrap();
+        let retired = added.apply(&removal).unwrap();
+        let GrantState::Tombstoned {
+            record,
+            retirements,
+        } = &retired.grants[&retired_grant]
+        else {
+            panic!("removed Serial grant must remain tombstoned")
+        };
+        assert_eq!(record.member_pubkey, member_pubkey);
+        assert_eq!(
+            retirements.as_set(),
+            &BTreeSet::from([SerialGrantRetirement {
+                generation: removal.created_at_generation,
+                entry_hash: removal.entry_hash(),
+            }])
+        );
+        let mut altered_retirement = retired.clone();
+        let GrantState::Tombstoned { retirements, .. } = altered_retirement
+            .grants
+            .get_mut(&retired_grant)
+            .expect("retired grant remains present")
+        else {
+            unreachable!()
+        };
+        retirements.insert(SerialGrantRetirement {
+            generation: removal.created_at_generation,
+            entry_hash: ObjectHash::digest(b"different retirement entry"),
+        });
+        assert_ne!(retired.state_hash(), altered_retirement.state_hash());
+        let mut reuse = retired
+            .signed_set_member(
+                &owner,
+                member_pubkey,
+                None,
+                MemberRole::Member,
+                "reuse retired grant identity".to_string(),
+            )
+            .unwrap();
+        let SerialMembershipChange::SetMember { grant_id, .. } = &mut reuse.change else {
+            unreachable!()
+        };
+        *grant_id = retired_grant;
+        reuse.signature = keys::sign_hex(&owner, &reuse.canonical_bytes()).1;
+
+        assert!(retired.apply(&reuse).is_err());
     }
 
     #[test]

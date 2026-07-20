@@ -3286,9 +3286,8 @@ mod authority_tests {
                 .iter()
                 .find(|branch| {
                     branch
-                        .active_grants
-                        .values()
-                        .any(|grant| grant.member_pubkey == first_pubkey)
+                        .active_grants()
+                        .any(|(_, grant)| grant.member_pubkey == first_pubkey)
                 })
                 .expect("first owner's branch")
                 .heads
@@ -3402,7 +3401,7 @@ mod authority_tests {
             }) => maximal_valid_branches
                 .iter()
                 .find(|branch| {
-                    branch.active_grants.values().any(|record| {
+                    branch.active_grants().any(|(_, record)| {
                         record.member_pubkey == pubkeys[0] && record.role == CircleRole::Owner
                     })
                 })
@@ -3455,7 +3454,7 @@ mod authority_tests {
             }) => maximal_valid_branches
                 .iter()
                 .find(|branch| {
-                    branch.active_grants.values().any(|record| {
+                    branch.active_grants().any(|(_, record)| {
                         record.member_pubkey == pubkeys[2] && record.role == CircleRole::Owner
                     })
                 })

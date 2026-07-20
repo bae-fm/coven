@@ -1821,8 +1821,7 @@ impl CircleTransitionDraft {
                 Some(membership_authority),
             ) => {
                 let (grant_id, record) = roster
-                    .active_grants
-                    .iter()
+                    .active_grants()
                     .find(|(_, record)| {
                         record.member_pubkey == author_pubkey
                             && record.role == super::circle::CircleRole::Owner
@@ -1912,8 +1911,7 @@ impl CircleTransitionDraft {
                 None,
             ) => {
                 let (grant_id, record) = roster
-                    .active_grants
-                    .iter()
+                    .active_grants()
                     .find(|(_, record)| {
                         record.member_pubkey == author_pubkey
                             && record.role == super::circle::CircleRole::Owner

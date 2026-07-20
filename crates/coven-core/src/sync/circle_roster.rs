@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
     self, AuthorStreamId, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry,
-    CausalGrantConflict, CausalGrantError, CausalGrantStatus, OwnerGrantBarrier,
+    CausalGrantConflict, CausalGrantError, CausalGrantStatus, GrantRetirements, GrantState,
+    OwnerGrantBarrier,
 };
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
@@ -80,7 +81,7 @@ pub struct CircleAuthorStreamKey {
     pub author_owner_grant: MembershipGrantId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleOwnerGrantBarrier {
     pub observed_streams: Vec<CircleRosterCoord>,
@@ -490,12 +491,29 @@ pub enum CircleGrantCreationAuthority {
     ConflictResolution(CircleRosterConflictResolutionRef),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleGrantRetirement {
+    Entry {
+        authority: CircleRosterCoord,
+        owner_barrier: Option<CircleOwnerGrantBarrier>,
+    },
+    ConflictResolution(CircleRosterConflictResolutionRef),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SerialCircleGrantRecord {
     pub member_pubkey: String,
     pub role: CircleRole,
     pub created_at_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialCircleGrantRetirement {
+    pub generation: u64,
+    pub control_hash: ObjectHash,
 }
 
 trait CircleGrantView {
@@ -523,20 +541,28 @@ impl CircleGrantView for SerialCircleGrantRecord {
     }
 }
 
-fn roster_members<R: CircleGrantView>(
-    active_grants: &BTreeMap<MembershipGrantId, R>,
+fn active_circle_grants<R: CircleGrantView, T: Ord>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+) -> impl Iterator<Item = (&MembershipGrantId, &R)> {
+    grants
+        .iter()
+        .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
+}
+
+fn roster_members<R: CircleGrantView, T: Ord>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
 ) -> BTreeMap<String, CircleRole> {
-    active_grants
-        .values()
+    active_circle_grants(grants)
+        .map(|(_, record)| record)
         .map(|record| (record.member_pubkey().to_string(), record.role()))
         .collect()
 }
 
-fn roster_owners<R: CircleGrantView>(
-    active_grants: &BTreeMap<MembershipGrantId, R>,
+fn roster_owners<R: CircleGrantView, T: Ord>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
 ) -> Vec<String> {
-    let mut owners = active_grants
-        .values()
+    let mut owners = active_circle_grants(grants)
+        .map(|(_, record)| record)
         .filter(|record| record.role() == CircleRole::Owner)
         .map(|record| record.member_pubkey().to_string())
         .collect::<Vec<_>>();
@@ -544,54 +570,64 @@ fn roster_owners<R: CircleGrantView>(
     owners
 }
 
-fn roster_authorizes_owner_grant<R: CircleGrantView>(
-    active_grants: &BTreeMap<MembershipGrantId, R>,
+fn roster_authorizes_owner_grant<R: CircleGrantView, T: Ord>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
     author_pubkey: &str,
     grant_id: &MembershipGrantId,
 ) -> bool {
-    active_grants.get(grant_id).is_some_and(|record| {
-        record.member_pubkey() == author_pubkey && record.role() == CircleRole::Owner
-    })
+    grants
+        .get(grant_id)
+        .and_then(GrantState::active)
+        .is_some_and(|record| {
+            record.member_pubkey() == author_pubkey && record.role() == CircleRole::Owner
+        })
 }
 
-fn roster_grants_are_valid<R: CircleGrantView>(
-    active_grants: &BTreeMap<MembershipGrantId, R>,
+fn roster_grants_are_valid<R: CircleGrantView, T: Ord>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
 ) -> bool {
-    active_grants
-        .values()
+    active_circle_grants(grants)
+        .map(|(_, record)| record)
         .any(|record| record.role() == CircleRole::Owner)
-        && roster_members(active_grants).len() == active_grants.len()
+        && roster_members(grants).len() == active_circle_grants(grants).count()
 }
 
 fn circle_roster_state_hash(
-    active_grants: &BTreeMap<MembershipGrantId, CircleGrantRecord>,
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> ObjectHash {
     #[derive(Serialize)]
     struct State<'a> {
         domain: &'static str,
-        active_grants: &'a BTreeMap<MembershipGrantId, CircleGrantRecord>,
+        grants:
+            &'a BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     }
     ObjectHash::digest(
         &serde_json::to_vec(&State {
-            domain: "coven.circle-roster-state.v1",
-            active_grants,
+            domain: "coven.circle-roster-state.v2",
+            grants,
         })
         .expect("circle roster state serialization cannot fail"),
     )
 }
 
 fn serial_circle_roster_state_hash(
-    active_grants: &BTreeMap<MembershipGrantId, SerialCircleGrantRecord>,
+    grants: &BTreeMap<
+        MembershipGrantId,
+        GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
+    >,
 ) -> ObjectHash {
     #[derive(Serialize)]
     struct State<'a> {
         domain: &'static str,
-        active_grants: &'a BTreeMap<MembershipGrantId, SerialCircleGrantRecord>,
+        grants: &'a BTreeMap<
+            MembershipGrantId,
+            GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
+        >,
     }
     ObjectHash::digest(
         &serde_json::to_vec(&State {
-            domain: "coven.serial-circle-roster-state.v1",
-            active_grants,
+            domain: "coven.serial-circle-roster-state.v2",
+            grants,
         })
         .expect("Serial circle roster state serialization cannot fail"),
     )
@@ -600,7 +636,7 @@ fn serial_circle_roster_state_hash(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedCircleRoster {
-    pub active_grants: BTreeMap<MembershipGrantId, CircleGrantRecord>,
+    pub grants: BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     pub state_hash: ObjectHash,
 }
 
@@ -609,7 +645,7 @@ pub struct ResolvedCircleRoster {
 pub struct CircleRosterBranch {
     pub heads: Vec<CircleRosterHeadRef>,
     pub effective_frontier: Vec<CircleRosterCoord>,
-    pub active_grants: BTreeMap<MembershipGrantId, CircleGrantRecord>,
+    pub grants: BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     pub state_hash: ObjectHash,
 }
 
@@ -741,10 +777,12 @@ impl CircleRosterConflictResolution {
             return false;
         };
         let mut expected_retired = involved_owner_grants.clone();
-        expected_retired.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
-            (record.member_pubkey == self.resolver_pubkey && record.role == CircleRole::Owner)
-                .then_some(grant.clone())
-        }));
+        expected_retired.extend(active_circle_grants(&branch.grants).filter_map(
+            |(grant, record)| {
+                (record.member_pubkey == self.resolver_pubkey && record.role == CircleRole::Owner)
+                    .then_some(grant.clone())
+            },
+        ));
         self.version == STORE_PROTOCOL_VERSION
             && self.store_root_hash == store_root_hash
             && self.circle_id == circle_id
@@ -753,7 +791,7 @@ impl CircleRosterConflictResolution {
             && self.retired_owner_grants == expected_retired
             && self.replacement_grant
                 == derive_circle_resolution_grant(conflict_hash, &self.resolver_pubkey)
-            && branch.active_grants.values().any(|record| {
+            && active_circle_grants(&branch.grants).any(|(_, record)| {
                 record.member_pubkey == self.resolver_pubkey && record.role == CircleRole::Owner
             })
             && self.verify_signature()
@@ -817,17 +855,121 @@ pub fn resolve_circle_roster_conflict(
     let (first_branch, other_branches) = selected_branches
         .split_first()
         .ok_or(CircleRosterError::InvalidConflictResolution)?;
-    let mut active_grants = first_branch
-        .active_grants
-        .iter()
+    let mut grants = active_circle_grants(&first_branch.grants)
         .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
-        .map(|(grant, record)| (grant.clone(), record.clone()))
+        .filter(|(grant, record)| {
+            other_branches.iter().all(|branch| {
+                branch.grants.get(*grant).and_then(GrantState::active) == Some(*record)
+            })
+        })
+        .map(|(grant, record)| {
+            (
+                grant.clone(),
+                GrantState::Active {
+                    record: record.clone(),
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    active_grants.retain(|grant, record| {
-        other_branches
-            .iter()
-            .all(|branch| branch.active_grants.get(grant) == Some(record))
-    });
+    for branch in maximal_valid_branches {
+        for (grant, state) in &branch.grants {
+            let GrantState::Tombstoned {
+                record,
+                retirements,
+            } = state
+            else {
+                continue;
+            };
+            match grants.entry(grant.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(state.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != record {
+                        return Err(CircleRosterError::InvalidConflictResolution);
+                    }
+                    let mut merged = retirements.clone();
+                    if let Some(current_retirements) = entry.get().retirements() {
+                        merged.extend(current_retirements.iter().cloned());
+                    }
+                    *entry.get_mut() = GrantState::Tombstoned {
+                        record: record.clone(),
+                        retirements: merged,
+                    };
+                }
+            }
+        }
+    }
+    let mut resolution_retirements = resolutions
+        .iter()
+        .map(|resolution| CircleGrantRetirement::ConflictResolution(resolution.resolution_ref()));
+    let mut resolution_retirements = GrantRetirements::new(
+        resolution_retirements
+            .next()
+            .expect("validated conflict has a resolution"),
+    );
+    resolution_retirements.extend(
+        resolutions.iter().skip(1).map(|resolution| {
+            CircleGrantRetirement::ConflictResolution(resolution.resolution_ref())
+        }),
+    );
+    for branch in maximal_valid_branches {
+        for (grant, record) in branch.active_grants() {
+            if grants.get(grant).and_then(GrantState::active).is_some() {
+                continue;
+            }
+            match grants.entry(grant.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(GrantState::Tombstoned {
+                        record: record.clone(),
+                        retirements: resolution_retirements.clone(),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != record {
+                        return Err(CircleRosterError::InvalidConflictResolution);
+                    }
+                    let GrantState::Tombstoned { retirements, .. } = entry.get_mut() else {
+                        unreachable!("active conflict grant was handled above")
+                    };
+                    retirements.extend(resolution_retirements.iter().cloned());
+                }
+            }
+        }
+    }
+    for resolution in resolutions {
+        let reference = resolution.resolution_ref();
+        for retired in &resolution.retired_owner_grants {
+            let record = selected_branches
+                .iter()
+                .find_map(|branch| branch.grants.get(retired).map(GrantState::record))
+                .ok_or(CircleRosterError::InvalidConflictResolution)?
+                .clone();
+            let retirement = CircleGrantRetirement::ConflictResolution(reference.clone());
+            match grants.entry(retired.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(GrantState::Tombstoned {
+                        record,
+                        retirements: GrantRetirements::new(retirement),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().record() != &record {
+                        return Err(CircleRosterError::InvalidConflictResolution);
+                    }
+                    let mut retirements = match entry.get().retirements() {
+                        Some(retirements) => retirements.clone(),
+                        None => GrantRetirements::new(retirement.clone()),
+                    };
+                    retirements.insert(retirement);
+                    *entry.get_mut() = GrantState::Tombstoned {
+                        record,
+                        retirements,
+                    };
+                }
+            }
+        }
+    }
     for resolution in resolutions {
         let record = CircleGrantRecord {
             member_pubkey: resolution.resolver_pubkey.clone(),
@@ -836,29 +978,34 @@ pub fn resolve_circle_roster_conflict(
                 resolution.resolution_ref(),
             ),
         };
-        if active_grants
-            .insert(resolution.replacement_grant.clone(), record.clone())
-            .is_some_and(|current| current != record)
+        if grants
+            .insert(
+                resolution.replacement_grant.clone(),
+                GrantState::Active {
+                    record: record.clone(),
+                },
+            )
+            .is_some_and(|current| current.active() != Some(&record))
         {
             return Err(CircleRosterError::InvalidConflictResolution);
         }
     }
-    if !roster_grants_are_valid(&active_grants) {
+    if !roster_grants_are_valid(&grants) {
         return Err(CircleRosterError::InvalidConflictResolution);
     }
     Ok(ResolvedCircleRoster {
-        state_hash: circle_roster_state_hash(&active_grants),
-        active_grants,
+        state_hash: circle_roster_state_hash(&grants),
+        grants,
     })
 }
 
 impl ResolvedCircleRoster {
     pub fn members(&self) -> BTreeMap<String, CircleRole> {
-        roster_members(&self.active_grants)
+        roster_members(&self.grants)
     }
 
     pub fn owners(&self) -> Vec<String> {
-        roster_owners(&self.active_grants)
+        roster_owners(&self.grants)
     }
 
     pub fn authorizes_owner_grant(
@@ -868,9 +1015,14 @@ impl ResolvedCircleRoster {
         created_at: &CircleRosterCoord,
     ) -> bool {
         self.authorizes_owner_grant_id(author_pubkey, grant_id)
-            && self.active_grants.get(grant_id).is_some_and(|record| {
-                record.creation_authority == CircleGrantCreationAuthority::Entry(created_at.clone())
-            })
+            && self
+                .grants
+                .get(grant_id)
+                .and_then(GrantState::active)
+                .is_some_and(|record| {
+                    record.creation_authority
+                        == CircleGrantCreationAuthority::Entry(created_at.clone())
+                })
     }
 
     pub fn authorizes_resolution_grant(
@@ -880,10 +1032,14 @@ impl ResolvedCircleRoster {
         resolution: &CircleRosterConflictResolutionRef,
     ) -> bool {
         self.authorizes_owner_grant_id(author_pubkey, grant_id)
-            && self.active_grants.get(grant_id).is_some_and(|record| {
-                record.creation_authority
-                    == CircleGrantCreationAuthority::ConflictResolution(resolution.clone())
-            })
+            && self
+                .grants
+                .get(grant_id)
+                .and_then(GrantState::active)
+                .is_some_and(|record| {
+                    record.creation_authority
+                        == CircleGrantCreationAuthority::ConflictResolution(resolution.clone())
+                })
     }
 
     pub fn authorizes_owner_grant_id(
@@ -891,19 +1047,32 @@ impl ResolvedCircleRoster {
         author_pubkey: &str,
         grant_id: &MembershipGrantId,
     ) -> bool {
-        roster_authorizes_owner_grant(&self.active_grants, author_pubkey, grant_id)
+        roster_authorizes_owner_grant(&self.grants, author_pubkey, grant_id)
     }
 
     pub fn verify(&self) -> bool {
-        self.state_hash == circle_roster_state_hash(&self.active_grants)
-            && roster_grants_are_valid(&self.active_grants)
+        self.state_hash == circle_roster_state_hash(&self.grants)
+            && roster_grants_are_valid(&self.grants)
+    }
+
+    pub fn active_grants(&self) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
+        active_circle_grants(&self.grants)
+    }
+}
+
+impl CircleRosterBranch {
+    pub fn active_grants(&self) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
+        active_circle_grants(&self.grants)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SerialCircleRoster {
-    pub active_grants: BTreeMap<MembershipGrantId, SerialCircleGrantRecord>,
+    pub grants: BTreeMap<
+        MembershipGrantId,
+        GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
+    >,
     pub state_hash: ObjectHash,
 }
 
@@ -913,27 +1082,26 @@ impl SerialCircleRoster {
         grant_id: MembershipGrantId,
         generation: u64,
     ) -> Self {
-        let active_grants = BTreeMap::from([(
+        let grants = BTreeMap::from([(
             grant_id,
-            SerialCircleGrantRecord {
-                member_pubkey: author_pubkey,
-                role: CircleRole::Owner,
-                created_at_generation: generation,
+            GrantState::Active {
+                record: SerialCircleGrantRecord {
+                    member_pubkey: author_pubkey,
+                    role: CircleRole::Owner,
+                    created_at_generation: generation,
+                },
             },
         )]);
-        let state_hash = serial_circle_roster_state_hash(&active_grants);
-        Self {
-            active_grants,
-            state_hash,
-        }
+        let state_hash = serial_circle_roster_state_hash(&grants);
+        Self { grants, state_hash }
     }
 
     pub fn members(&self) -> BTreeMap<String, CircleRole> {
-        roster_members(&self.active_grants)
+        roster_members(&self.grants)
     }
 
     pub fn owners(&self) -> Vec<String> {
-        roster_owners(&self.active_grants)
+        roster_owners(&self.grants)
     }
 
     pub fn authorizes_owner_grant(
@@ -944,8 +1112,9 @@ impl SerialCircleRoster {
     ) -> bool {
         self.authorizes_owner_grant_id(author_pubkey, grant_id)
             && self
-                .active_grants
+                .grants
                 .get(grant_id)
+                .and_then(GrantState::active)
                 .is_some_and(|record| record.created_at_generation == created_at_generation)
     }
 
@@ -954,12 +1123,18 @@ impl SerialCircleRoster {
         author_pubkey: &str,
         grant_id: &MembershipGrantId,
     ) -> bool {
-        roster_authorizes_owner_grant(&self.active_grants, author_pubkey, grant_id)
+        roster_authorizes_owner_grant(&self.grants, author_pubkey, grant_id)
     }
 
     pub fn verify(&self) -> bool {
-        self.state_hash == serial_circle_roster_state_hash(&self.active_grants)
-            && roster_grants_are_valid(&self.active_grants)
+        self.state_hash == serial_circle_roster_state_hash(&self.grants)
+            && roster_grants_are_valid(&self.grants)
+    }
+
+    pub fn active_grants(
+        &self,
+    ) -> impl Iterator<Item = (&MembershipGrantId, &SerialCircleGrantRecord)> {
+        active_circle_grants(&self.grants)
     }
 }
 
@@ -1013,8 +1188,7 @@ pub struct CircleRosterChain {
 struct CircleRosterResolutionCheckpoint {
     raw_heads: Vec<CircleRosterCoord>,
     effective_frontier: Vec<CircleRosterCoord>,
-    grants: BTreeMap<MembershipGrantId, CircleGrantRecord>,
-    removed: BTreeSet<MembershipGrantId>,
+    grants: BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     included: BTreeSet<CircleRosterCoord>,
     resolutions: Vec<CircleRosterConflictResolutionRef>,
 }
@@ -1229,12 +1403,20 @@ impl CircleRosterChain {
                 let seeds = checkpoint
                     .grants
                     .iter()
-                    .map(|(grant, record)| {
+                    .map(|(grant, state)| {
+                        let record = state.record();
+                        let record = causal_grants::CausalSeedGrant {
+                            member_pubkey: record.member_pubkey.clone(),
+                            assignment: record.role,
+                        };
                         (
                             grant.clone(),
-                            causal_grants::CausalSeedGrant {
-                                member_pubkey: record.member_pubkey.clone(),
-                                assignment: record.role,
+                            match state {
+                                GrantState::Active { .. } => GrantState::Active { record },
+                                GrantState::Tombstoned { .. } => GrantState::Tombstoned {
+                                    record,
+                                    retirements: GrantRetirements::new(()),
+                                },
                             },
                         )
                     })
@@ -1244,7 +1426,6 @@ impl CircleRosterChain {
                     &checkpoint.raw_heads,
                     &checkpoint.effective_frontier,
                     &seeds,
-                    &checkpoint.removed,
                     &checkpoint.included,
                 )?
             }
@@ -1332,7 +1513,7 @@ impl CircleRosterChain {
                         Ok(CircleRosterBranch {
                             heads: exact_circle_head_refs(&head_refs, &branch.raw_heads)?,
                             effective_frontier: branch.effective_frontier,
-                            active_grants: resolved.active_grants,
+                            grants: resolved.grants,
                             state_hash: resolved.state_hash,
                         })
                     })
@@ -1415,7 +1596,6 @@ impl CircleRosterChain {
         let mut raw_by_stream = BTreeMap::new();
         let mut effective_by_stream = BTreeMap::new();
         let mut grants = BTreeMap::new();
-        let mut removed = BTreeSet::new();
         let mut included = BTreeSet::new();
         let mut resolutions = BTreeSet::new();
         for chain in chains {
@@ -1430,10 +1610,8 @@ impl CircleRosterChain {
                 )
                 || !causal_grants::merge_checkpoint_evidence(
                     &mut grants,
-                    &mut removed,
                     &mut included,
                     &checkpoint.grants,
-                    &checkpoint.removed,
                     &checkpoint.included,
                 )
             {
@@ -1445,7 +1623,6 @@ impl CircleRosterChain {
             raw_heads: raw_by_stream.into_values().collect(),
             effective_frontier: effective_by_stream.into_values().collect(),
             grants,
-            removed,
             included,
             resolutions: resolutions.into_iter().collect(),
         };
@@ -1474,18 +1651,10 @@ impl CircleRosterChain {
         let grants = reduced
             .grants
             .iter()
-            .map(|(grant, record)| {
+            .map(|(grant, state)| {
                 (
                     grant.clone(),
-                    CircleGrantRecord {
-                        member_pubkey: record.member_pubkey.clone(),
-                        role: record.assignment,
-                        creation_authority: circle_creation_authority(
-                            grant,
-                            record.creation.clone(),
-                            checkpoint_grants,
-                        ),
-                    },
+                    map_circle_grant_state(grant, state, checkpoint_grants),
                 )
             })
             .collect();
@@ -1493,7 +1662,6 @@ impl CircleRosterChain {
             raw_heads: self.author_heads(),
             effective_frontier: self.effective_frontier(),
             grants,
-            removed: reduced.removed.clone(),
             included: reduced.included.clone(),
             resolutions,
         });
@@ -1520,17 +1688,19 @@ impl CircleRosterChain {
             .iter()
             .find(|branch| branch.heads == resolver_branch_heads)
             .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        if !branch.active_grants.values().any(|record| {
+        if !active_circle_grants(&branch.grants).any(|(_, record)| {
             record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner
         }) {
             return Err(CircleRosterError::SignerIsNotOwner(resolver_pubkey));
         }
         let replacement_grant = derive_circle_resolution_grant(conflict_hash, &resolver_pubkey);
         let mut retired_owner_grants = involved_owner_grants.clone();
-        retired_owner_grants.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
-            (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
-                .then_some(grant.clone())
-        }));
+        retired_owner_grants.extend(active_circle_grants(&branch.grants).filter_map(
+            |(grant, record)| {
+                (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
+                    .then_some(grant.clone())
+            },
+        ));
         let mut resolution = CircleRosterConflictResolution {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash: self.entries[0].store_root_hash,
@@ -1608,47 +1778,7 @@ impl CircleRosterChain {
             _ => return Err(CircleRosterError::InvalidConflictResolution),
         };
         let resolved = self.resolved_with(resolutions)?;
-        let mut grants = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grants.clone());
-        for entry in &self.entries {
-            let (grant, record) = match &entry.change {
-                CircleRosterChange::Founder {
-                    member_pubkey,
-                    grant_id,
-                } => (
-                    grant_id.clone(),
-                    CircleGrantRecord {
-                        member_pubkey: member_pubkey.clone(),
-                        role: CircleRole::Owner,
-                        creation_authority: CircleGrantCreationAuthority::Entry(entry.coord()),
-                    },
-                ),
-                CircleRosterChange::SetMember {
-                    member_pubkey,
-                    role,
-                    grant_id,
-                    ..
-                } => (
-                    grant_id.clone(),
-                    CircleGrantRecord {
-                        member_pubkey: member_pubkey.clone(),
-                        role: *role,
-                        creation_authority: CircleGrantCreationAuthority::Entry(entry.coord()),
-                    },
-                ),
-                CircleRosterChange::RemoveMember { .. }
-                | CircleRosterChange::ResolutionActivation { .. } => continue,
-            };
-            grants.insert(grant, record);
-        }
-        grants.extend(resolved.active_grants.clone());
-        let removed: BTreeSet<_> = grants
-            .keys()
-            .filter(|grant| !resolved.active_grants.contains_key(*grant))
-            .cloned()
-            .collect();
+        let grants = resolved.grants.clone();
         let included = circle_history_closure(&self.entries, &effective_frontier);
         let mut resolution_refs = self
             .resolution_checkpoint
@@ -1665,25 +1795,33 @@ impl CircleRosterChain {
             raw_heads,
             effective_frontier: effective_frontier.clone(),
             grants: grants.clone(),
-            removed: removed.clone(),
             included: included.clone(),
             resolutions: resolution_refs,
         };
         self.reduced = Some(causal_grants::ReducedGrants {
             grants: grants
                 .iter()
-                .map(|(grant, record)| {
+                .map(|(grant, state)| {
+                    let concrete = state.record();
+                    let record = causal_grants::GrantRecord {
+                        member_pubkey: concrete.member_pubkey.clone(),
+                        assignment: concrete.role,
+                        creation: causal_grants::CausalGrantCreation::Checkpoint,
+                    };
                     (
                         grant.clone(),
-                        causal_grants::GrantRecord {
-                            member_pubkey: record.member_pubkey.clone(),
-                            assignment: record.role,
-                            creation: causal_grants::CausalGrantCreation::Checkpoint,
+                        match state {
+                            GrantState::Active { .. } => GrantState::Active { record },
+                            GrantState::Tombstoned { .. } => GrantState::Tombstoned {
+                                record,
+                                retirements: GrantRetirements::new(
+                                    causal_grants::CausalGrantRetirement::Checkpoint,
+                                ),
+                            },
                         },
                     )
                 })
                 .collect(),
-            removed,
             included: included.clone(),
         });
         self.status = CircleRosterStatus::Resolved(resolved);
@@ -1733,8 +1871,10 @@ impl CircleRosterChain {
         reduced
             .grants
             .iter()
-            .filter_map(|(grant, record)| {
-                (record.member_pubkey == member_pubkey && !reduced.removed.contains(grant))
+            .filter_map(|(grant, state)| {
+                state
+                    .active()
+                    .is_some_and(|record| record.member_pubkey == member_pubkey)
                     .then_some(grant.clone())
             })
             .collect()
@@ -2050,7 +2190,9 @@ fn exact_circle_head_refs(
 
 fn map_circle_grants(
     grants: BTreeMap<MembershipGrantId, causal_grants::GrantRecord<CircleRosterCoord, CircleRole>>,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, CircleGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
+    >,
 ) -> BTreeMap<MembershipGrantId, CircleGrantRecord> {
     grants
         .into_iter()
@@ -2070,37 +2212,67 @@ fn map_circle_grants(
 
 fn resolved_circle_roster(
     reduced: &causal_grants::ReducedGrants<CircleRosterCoord, CircleRole>,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, CircleGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
+    >,
 ) -> ResolvedCircleRoster {
-    let active_grants = reduced
+    let grants = reduced
         .grants
         .iter()
-        .filter(|(grant, _)| !reduced.removed.contains(*grant))
-        .map(|(grant, record)| {
+        .map(|(grant, state)| {
             (
                 grant.clone(),
-                CircleGrantRecord {
-                    member_pubkey: record.member_pubkey.clone(),
-                    role: record.assignment,
-                    creation_authority: circle_creation_authority(
-                        grant,
-                        record.creation.clone(),
-                        checkpoint,
-                    ),
-                },
+                map_circle_grant_state(grant, state, checkpoint),
             )
         })
         .collect::<BTreeMap<_, _>>();
     ResolvedCircleRoster {
-        state_hash: circle_roster_state_hash(&active_grants),
-        active_grants,
+        state_hash: circle_roster_state_hash(&grants),
+        grants,
     }
+}
+
+fn map_circle_grant_state(
+    grant: &MembershipGrantId,
+    state: &GrantState<
+        causal_grants::GrantRecord<CircleRosterCoord, CircleRole>,
+        causal_grants::CausalGrantRetirement<CircleRosterCoord>,
+    >,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
+    >,
+) -> GrantState<CircleGrantRecord, CircleGrantRetirement> {
+    let causal_record = state.record();
+    let record = CircleGrantRecord {
+        member_pubkey: causal_record.member_pubkey.clone(),
+        role: causal_record.assignment,
+        creation_authority: circle_creation_authority(
+            grant,
+            causal_record.creation.clone(),
+            checkpoint,
+        ),
+    };
+    causal_grants::map_grant_state(
+        state,
+        record,
+        checkpoint
+            .and_then(|grants| grants.get(grant))
+            .and_then(GrantState::retirements),
+        |coord, owner_barrier| CircleGrantRetirement::Entry {
+            authority: coord.clone(),
+            owner_barrier: owner_barrier.map(|barrier| CircleOwnerGrantBarrier {
+                observed_streams: barrier.observed_streams.values().cloned().collect(),
+            }),
+        },
+    )
 }
 
 fn circle_creation_authority(
     grant: &MembershipGrantId,
     creation: causal_grants::CausalGrantCreation<CircleRosterCoord>,
-    checkpoint: Option<&BTreeMap<MembershipGrantId, CircleGrantRecord>>,
+    checkpoint: Option<
+        &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
+    >,
 ) -> CircleGrantCreationAuthority {
     match creation {
         causal_grants::CausalGrantCreation::Entry(coord) => {
@@ -2109,6 +2281,7 @@ fn circle_creation_authority(
         causal_grants::CausalGrantCreation::Checkpoint => checkpoint
             .and_then(|grants| grants.get(grant))
             .expect("checkpoint reducer only emits seeded Circle grants")
+            .record()
             .creation_authority
             .clone(),
     }
@@ -2414,7 +2587,7 @@ mod authority_tests {
             }) => maximal_valid_branches
                 .iter()
                 .find(|branch| {
-                    branch.active_grants.values().any(|record| {
+                    branch.active_grants().any(|(_, record)| {
                         record.member_pubkey == first_pubkey && record.role == CircleRole::Owner
                     })
                 })
@@ -2465,7 +2638,7 @@ mod authority_tests {
             }) => maximal_valid_branches
                 .iter()
                 .find(|branch| {
-                    branch.active_grants.values().any(|record| {
+                    branch.active_grants().any(|(_, record)| {
                         record.member_pubkey == first_pubkey && record.role == CircleRole::Owner
                     })
                 })
@@ -2502,14 +2675,13 @@ mod authority_tests {
                 let branch = maximal_valid_branches
                     .iter()
                     .find(|branch| {
-                        branch.active_grants.values().any(|record| {
+                        branch.active_grants().any(|(_, record)| {
                             record.member_pubkey == third_pubkey && record.role == CircleRole::Owner
                         })
                     })
                     .expect("unaffected Owner branch");
                 let old_grant = branch
-                    .active_grants
-                    .iter()
+                    .active_grants()
                     .find_map(|(grant, record)| {
                         (record.member_pubkey == third_pubkey).then_some(grant.clone())
                     })
@@ -2526,10 +2698,19 @@ mod authority_tests {
             .expect("unaffected Owner resolution is valid");
 
         assert!(resolution.retired_owner_grants.contains(&old_grant));
-        assert!(!resolved.active_grants.contains_key(&old_grant));
+        assert!(resolved.grants[&old_grant].active().is_none());
         assert!(resolved
-            .active_grants
-            .contains_key(&resolution.replacement_grant));
+            .grants
+            .get(&resolution.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
+        assert!(matches!(
+            &resolved.grants[&old_grant],
+            GrantState::Tombstoned { retirements, .. }
+                if retirements.contains(&CircleGrantRetirement::ConflictResolution(
+                    resolution.resolution_ref()
+                ))
+        ));
         assert!(resolution.verify_against(
             store_root_hash,
             circle_id,
@@ -2673,6 +2854,11 @@ mod authority_tests {
                 &second_owner,
             )
             .expect("remove first Owner");
+        let retirement_authority = remove_first.coord();
+        let CircleRosterChange::RemoveMember { owner_barriers, .. } = &remove_first.change else {
+            unreachable!()
+        };
+        let owner_barrier = owner_barriers[&first_grant].clone();
         entries.push(remove_first);
         let readd_first = CircleRosterChain::from_entries(entries.clone())
             .expect("load removed-Owner roster")
@@ -2700,6 +2886,30 @@ mod authority_tests {
             &replacement_grant,
             &replacement_created_at,
         ));
+        assert!(matches!(
+            &roster.grants[&first_grant],
+            GrantState::Tombstoned { record, retirements }
+                if record.member_pubkey == first_pubkey
+                    && retirements.as_set() == &BTreeSet::from([CircleGrantRetirement::Entry {
+                        authority: retirement_authority.clone(),
+                        owner_barrier: Some(owner_barrier.clone()),
+                    }])
+        ));
+        let mut altered = roster.grants.clone();
+        let GrantState::Tombstoned { retirements, .. } = altered
+            .get_mut(&first_grant)
+            .expect("retired Circle grant remains present")
+        else {
+            unreachable!()
+        };
+        retirements.insert(CircleGrantRetirement::Entry {
+            authority: CircleRosterCoord {
+                entry_hash: ObjectHash::digest(b"different Circle retirement entry"),
+                ..retirement_authority
+            },
+            owner_barrier: Some(owner_barrier),
+        });
+        assert_ne!(roster.state_hash, circle_roster_state_hash(&altered));
     }
 
     #[test]
@@ -2799,7 +3009,7 @@ mod authority_tests {
         let branch_state = maximal_valid_branches
             .iter()
             .find(|branch| {
-                branch.active_grants.values().any(|record| {
+                branch.active_grants().any(|(_, record)| {
                     record.member_pubkey == first_pubkey && record.role == CircleRole::Owner
                 })
             })
@@ -2809,7 +3019,7 @@ mod authority_tests {
         let second_branch = maximal_valid_branches
             .iter()
             .find(|branch| {
-                branch.active_grants.values().any(|record| {
+                branch.active_grants().any(|(_, record)| {
                     record.member_pubkey == second_pubkey && record.role == CircleRole::Owner
                 })
             })
@@ -2837,22 +3047,32 @@ mod authority_tests {
             .expect("an exact retry is idempotent");
         assert_eq!(resolved_once, resolved_duplicate);
         assert!(resolved_once
-            .active_grants
-            .contains_key(&resolution.replacement_grant));
+            .grants
+            .get(&resolution.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
         assert!(resolution
             .retired_owner_grants
             .iter()
-            .all(|grant| !resolved_once.active_grants.contains_key(grant)));
+            .all(|grant| resolved_once
+                .grants
+                .get(grant)
+                .and_then(GrantState::active)
+                .is_none()));
 
         let resolved_union = conflicted
             .resolved_with(&[resolution.clone(), second_resolution.clone()])
             .expect("distinct resolvers are unioned");
         assert!(resolved_union
-            .active_grants
-            .contains_key(&resolution.replacement_grant));
+            .grants
+            .get(&resolution.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
         assert!(resolved_union
-            .active_grants
-            .contains_key(&second_resolution.replacement_grant));
+            .grants
+            .get(&second_resolution.replacement_grant)
+            .and_then(GrantState::active)
+            .is_some());
 
         let mut branch_specific = conflict.clone();
         let CircleRosterConflict::RevocationCycle {
@@ -2864,12 +3084,14 @@ mod authority_tests {
         };
         let branch_only_grant = grant(b"Circle branch-only grant");
         let branch_only_creation = maximal_valid_branches[0].effective_frontier[0].clone();
-        maximal_valid_branches[0].active_grants.insert(
+        maximal_valid_branches[0].grants.insert(
             branch_only_grant.clone(),
-            CircleGrantRecord {
-                member_pubkey: keys::public_key_hex(&UserKeypair::generate()),
-                role: CircleRole::Member,
-                creation_authority: CircleGrantCreationAuthority::Entry(branch_only_creation),
+            GrantState::Active {
+                record: CircleGrantRecord {
+                    member_pubkey: keys::public_key_hex(&UserKeypair::generate()),
+                    role: CircleRole::Member,
+                    creation_authority: CircleGrantCreationAuthority::Entry(branch_only_creation),
+                },
             },
         );
         let composed = resolve_circle_roster_conflict(
@@ -2878,8 +3100,22 @@ mod authority_tests {
             &branch_specific,
             &[resolution.clone(), second_resolution.clone()],
         )
-        .expect("compose only grants agreed by every valid branch");
-        assert!(!composed.active_grants.contains_key(&branch_only_grant));
+        .expect("retire grants not agreed by every valid branch");
+        let branch_only_retirements = composed
+            .grants
+            .get(&branch_only_grant)
+            .and_then(GrantState::retirements)
+            .expect("branch-only grant is retained as retired");
+        assert!(
+            branch_only_retirements.contains(&CircleGrantRetirement::ConflictResolution(
+                resolution.resolution_ref()
+            ))
+        );
+        assert!(
+            branch_only_retirements.contains(&CircleGrantRetirement::ConflictResolution(
+                second_resolution.resolution_ref()
+            ))
+        );
 
         let mut duplicate_member = branch_specific;
         let CircleRosterConflict::RevocationCycle {
@@ -2893,14 +3129,16 @@ mod authority_tests {
         let duplicate_creation = resolution.conflicting_heads[0].coord.clone();
         for branch in maximal_valid_branches {
             for suffix in [b'a', b'b'] {
-                branch.active_grants.insert(
+                branch.grants.insert(
                     grant(&[suffix]),
-                    CircleGrantRecord {
-                        member_pubkey: duplicate_pubkey.clone(),
-                        role: CircleRole::Member,
-                        creation_authority: CircleGrantCreationAuthority::Entry(
-                            duplicate_creation.clone(),
-                        ),
+                    GrantState::Active {
+                        record: CircleGrantRecord {
+                            member_pubkey: duplicate_pubkey.clone(),
+                            role: CircleRole::Member,
+                            creation_authority: CircleGrantCreationAuthority::Entry(
+                                duplicate_creation.clone(),
+                            ),
+                        },
                     },
                 );
             }

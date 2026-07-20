@@ -19,30 +19,185 @@ pub(crate) fn canonical_ready_checkpoint<'a, K: Clone + Ord + 'a>(
         .map(|(checkpoint, _)| checkpoint.clone())
 }
 
-pub(crate) fn merge_checkpoint_evidence<K, V, C>(
-    merged_grants: &mut BTreeMap<K, V>,
-    merged_removed: &mut BTreeSet<K>,
+pub(crate) fn merge_checkpoint_evidence<K, V, T, C>(
+    merged_grants: &mut BTreeMap<K, GrantState<V, T>>,
     merged_included: &mut BTreeSet<C>,
-    grants: &BTreeMap<K, V>,
-    removed: &BTreeSet<K>,
+    grants: &BTreeMap<K, GrantState<V, T>>,
     included: &BTreeSet<C>,
 ) -> bool
 where
     K: Clone + Ord,
     V: Clone + Eq,
+    T: Clone + Ord,
     C: Clone + Ord,
 {
-    for (grant, record) in grants {
-        if merged_grants
-            .insert(grant.clone(), record.clone())
-            .is_some_and(|existing| existing != *record)
-        {
-            return false;
+    for (grant, state) in grants {
+        match merged_grants.entry(grant.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(state.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if !entry.get_mut().merge(state) {
+                    return false;
+                }
+            }
         }
     }
-    merged_removed.extend(removed.iter().cloned());
     merged_included.extend(included.iter().cloned());
     true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct GrantRetirements<T: Ord>(BTreeSet<T>);
+
+impl<T: Ord> GrantRetirements<T> {
+    pub fn new(retirement: T) -> Self {
+        Self(BTreeSet::from([retirement]))
+    }
+
+    pub fn insert(&mut self, retirement: T) -> bool {
+        self.0.insert(retirement)
+    }
+
+    pub fn extend(&mut self, retirements: impl IntoIterator<Item = T>) {
+        self.0.extend(retirements);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.0.iter()
+    }
+
+    pub fn contains(&self, retirement: &T) -> bool {
+        self.0.contains(retirement)
+    }
+
+    pub fn as_set(&self) -> &BTreeSet<T> {
+        &self.0
+    }
+}
+
+impl<'de, T> Deserialize<'de> for GrantRetirements<T>
+where
+    T: Deserialize<'de> + Ord,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let retirements = BTreeSet::deserialize(deserializer)?;
+        if retirements.is_empty() {
+            return Err(serde::de::Error::custom(
+                "grant retirement set cannot be empty",
+            ));
+        }
+        Ok(Self(retirements))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GrantState<R, T: Ord> {
+    Active {
+        record: R,
+    },
+    Tombstoned {
+        record: R,
+        retirements: GrantRetirements<T>,
+    },
+}
+
+impl<R, T: Ord> GrantState<R, T> {
+    pub fn record(&self) -> &R {
+        match self {
+            Self::Active { record } | Self::Tombstoned { record, .. } => record,
+        }
+    }
+
+    pub fn active(&self) -> Option<&R> {
+        match self {
+            Self::Active { record } => Some(record),
+            Self::Tombstoned { .. } => None,
+        }
+    }
+
+    pub fn retirements(&self) -> Option<&GrantRetirements<T>> {
+        match self {
+            Self::Active { .. } => None,
+            Self::Tombstoned { retirements, .. } => Some(retirements),
+        }
+    }
+}
+
+impl<R: Clone + Eq, T: Clone + Ord> GrantState<R, T> {
+    fn merge(&mut self, other: &Self) -> bool {
+        if self.record() != other.record() {
+            return false;
+        }
+        let retirements = match (&*self, other) {
+            (Self::Active { .. }, Self::Active { .. }) => return true,
+            (Self::Tombstoned { retirements, .. }, Self::Active { .. }) => retirements.clone(),
+            (Self::Active { .. }, Self::Tombstoned { retirements, .. }) => retirements.clone(),
+            (
+                Self::Tombstoned {
+                    retirements: current,
+                    ..
+                },
+                Self::Tombstoned { retirements, .. },
+            ) => {
+                let mut merged = current.clone();
+                merged.extend(retirements.iter().cloned());
+                merged
+            }
+        };
+        *self = Self::Tombstoned {
+            record: self.record().clone(),
+            retirements,
+        };
+        true
+    }
+}
+
+pub(crate) fn map_grant_state<C, A, R, T>(
+    state: &GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>,
+    record: R,
+    checkpoint_retirements: Option<&GrantRetirements<T>>,
+    map_entry: impl Fn(&C, Option<&OwnerGrantBarrier<C>>) -> T,
+) -> GrantState<R, T>
+where
+    C: CausalCoordinate,
+    A: CausalAssignment,
+    T: Clone + Ord,
+{
+    let GrantState::Tombstoned { retirements, .. } = state else {
+        return GrantState::Active { record };
+    };
+    let mut mapped: Option<GrantRetirements<T>> = None;
+    let mut add = |retirement| match &mut mapped {
+        Some(mapped) => {
+            mapped.insert(retirement);
+        }
+        None => mapped = Some(GrantRetirements::new(retirement)),
+    };
+    for retirement in retirements.iter() {
+        match retirement {
+            CausalGrantRetirement::Entry {
+                coord,
+                owner_barrier,
+            } => add(map_entry(coord, owner_barrier.as_ref())),
+            CausalGrantRetirement::Checkpoint => {
+                let checkpoint_retirements = checkpoint_retirements
+                    .expect("checkpoint tombstone requires exact retirement evidence");
+                for retirement in checkpoint_retirements.iter().cloned() {
+                    add(retirement);
+                }
+            }
+        }
+    }
+    GrantState::Tombstoned {
+        record,
+        retirements: mapped.expect("causal tombstone has retirement evidence"),
+    }
 }
 
 pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
@@ -177,7 +332,7 @@ pub(crate) trait CausalAssignment: Clone + Debug + Eq {
     fn is_owner(&self) -> bool;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct OwnerGrantBarrier<C: CausalCoordinate> {
     pub observed_streams: BTreeMap<C::StreamKey, C>,
 }
@@ -262,6 +417,15 @@ pub(crate) enum CausalGrantCreation<C: CausalCoordinate> {
     Checkpoint,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CausalGrantRetirement<C: CausalCoordinate> {
+    Entry {
+        coord: C,
+        owner_barrier: Option<OwnerGrantBarrier<C>>,
+    },
+    Checkpoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CausalSeedGrant<A: CausalAssignment> {
     pub member_pubkey: String,
@@ -270,8 +434,8 @@ pub(crate) struct CausalSeedGrant<A: CausalAssignment> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReducedGrants<C: CausalCoordinate, A: CausalAssignment> {
-    pub grants: BTreeMap<MembershipGrantId, GrantRecord<C, A>>,
-    pub removed: BTreeSet<MembershipGrantId>,
+    pub grants:
+        BTreeMap<MembershipGrantId, GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>>,
     pub included: BTreeSet<C>,
 }
 
@@ -308,9 +472,7 @@ pub(crate) enum CausalGrantStatus<C: CausalCoordinate, A: CausalAssignment> {
 
 impl<C: CausalCoordinate, A: CausalAssignment> ReducedGrants<C, A> {
     pub(crate) fn active_grant(&self, grant: &MembershipGrantId) -> Option<&GrantRecord<C, A>> {
-        (!self.removed.contains(grant))
-            .then(|| self.grants.get(grant))
-            .flatten()
+        self.grants.get(grant).and_then(GrantState::active)
     }
 
     pub(crate) fn includes_coord(&self, coord: &C) -> bool {
@@ -381,45 +543,42 @@ pub(crate) enum CausalGrantError<C: CausalCoordinate> {
 
 #[derive(Debug, Clone)]
 struct CausalState<C: CausalCoordinate, A: CausalAssignment> {
-    grants: BTreeMap<MembershipGrantId, GrantRecord<C, A>>,
-    removed: BTreeSet<MembershipGrantId>,
+    grants: BTreeMap<MembershipGrantId, GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>>,
 }
 
 impl<C: CausalCoordinate, A: CausalAssignment> Default for CausalState<C, A> {
     fn default() -> Self {
         Self {
             grants: BTreeMap::new(),
-            removed: BTreeSet::new(),
         }
     }
 }
 
 impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
     fn merge(&mut self, other: &Self, index: usize) -> Result<(), CausalGrantError<C>> {
-        for (grant, record) in &other.grants {
-            if self
-                .grants
-                .get(grant)
-                .is_some_and(|current| current != record)
-            {
-                return Err(CausalGrantError::DuplicateGrant {
-                    index,
-                    grant: grant.clone(),
-                });
+        for (grant, state) in &other.grants {
+            match self.grants.entry(grant.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(state.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if !entry.get_mut().merge(state) {
+                        return Err(CausalGrantError::DuplicateGrant {
+                            index,
+                            grant: grant.clone(),
+                        });
+                    }
+                }
             }
-            self.grants
-                .entry(grant.clone())
-                .or_insert_with(|| record.clone());
         }
-        self.removed.extend(other.removed.iter().cloned());
         Ok(())
     }
 
     fn active_owner(&self, grant: &MembershipGrantId, pubkey: &str) -> bool {
-        !self.removed.contains(grant)
-            && self.grants.get(grant).is_some_and(|record| {
-                record.member_pubkey == pubkey && record.assignment.is_owner()
-            })
+        self.grants
+            .get(grant)
+            .and_then(GrantState::active)
+            .is_some_and(|record| record.member_pubkey == pubkey && record.assignment.is_owner())
     }
 
     fn apply(
@@ -440,16 +599,32 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
                 assignment,
                 grant_id,
                 replaces,
-                ..
+                owner_barriers,
             } => {
-                self.remove(index, member_pubkey, replaces, false, validate_exact_grants)?;
+                self.remove(
+                    index,
+                    coord,
+                    member_pubkey,
+                    replaces,
+                    owner_barriers,
+                    false,
+                    validate_exact_grants,
+                )?;
                 self.insert(index, coord, member_pubkey, grant_id, assignment.clone())?;
             }
             CausalChange::RemoveMember {
                 member_pubkey,
                 removes,
-                ..
-            } => self.remove(index, member_pubkey, removes, true, validate_exact_grants)?,
+                owner_barriers,
+            } => self.remove(
+                index,
+                coord,
+                member_pubkey,
+                removes,
+                owner_barriers,
+                true,
+                validate_exact_grants,
+            )?,
             CausalChange::Control | CausalChange::ResolutionActivation => {}
         }
         Ok(())
@@ -471,10 +646,12 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
         }
         self.grants.insert(
             grant.clone(),
-            GrantRecord {
-                member_pubkey: member_pubkey.to_string(),
-                assignment,
-                creation: CausalGrantCreation::Entry(coord.clone()),
+            GrantState::Active {
+                record: GrantRecord {
+                    member_pubkey: member_pubkey.to_string(),
+                    assignment,
+                    creation: CausalGrantCreation::Entry(coord.clone()),
+                },
             },
         );
         Ok(())
@@ -483,8 +660,10 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
     fn remove(
         &mut self,
         index: usize,
+        coord: &C,
         member_pubkey: &str,
         grants: &BTreeSet<MembershipGrantId>,
+        owner_barriers: &BTreeMap<MembershipGrantId, OwnerGrantBarrier<C>>,
         require_nonempty: bool,
         validate_exact_grants: bool,
     ) -> Result<(), CausalGrantError<C>> {
@@ -494,8 +673,10 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
         let active = self
             .grants
             .iter()
-            .filter_map(|(grant, record)| {
-                (record.member_pubkey == member_pubkey && !self.removed.contains(grant))
+            .filter_map(|(grant, state)| {
+                state
+                    .active()
+                    .is_some_and(|record| record.member_pubkey == member_pubkey)
                     .then_some(grant.clone())
             })
             .collect::<BTreeSet<_>>();
@@ -506,17 +687,34 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
             });
         }
         for grant in grants {
-            if self
-                .grants
-                .get(grant)
-                .is_none_or(|record| record.member_pubkey != member_pubkey)
-            {
+            let state =
+                self.grants
+                    .get_mut(grant)
+                    .ok_or_else(|| CausalGrantError::GrantOwnerMismatch {
+                        index,
+                        grant: grant.clone(),
+                    })?;
+            if state.record().member_pubkey != member_pubkey {
                 return Err(CausalGrantError::GrantOwnerMismatch {
                     index,
                     grant: grant.clone(),
                 });
             }
-            self.removed.insert(grant.clone());
+            let retirement = CausalGrantRetirement::Entry {
+                coord: coord.clone(),
+                owner_barrier: owner_barriers.get(grant).cloned(),
+            };
+            match state {
+                GrantState::Active { record } => {
+                    *state = GrantState::Tombstoned {
+                        record: record.clone(),
+                        retirements: GrantRetirements::new(retirement),
+                    };
+                }
+                GrantState::Tombstoned { retirements, .. } => {
+                    retirements.insert(retirement);
+                }
+            }
         }
         Ok(())
     }
@@ -525,23 +723,14 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
 pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
     entries: &[CausalEntry<C, A>],
 ) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
-    reduce_internal(
-        entries,
-        &[],
-        &[],
-        &BTreeMap::new(),
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-        true,
-    )
+    reduce_internal(entries, &[], &[], &BTreeMap::new(), &BTreeSet::new(), true)
 }
 
 pub(crate) fn reduce_from_checkpoint<C: CausalCoordinate, A: CausalAssignment>(
     entries: &[CausalEntry<C, A>],
     raw_checkpoint_heads: &[C],
     effective_checkpoint_frontier: &[C],
-    seed_grants: &BTreeMap<MembershipGrantId, CausalSeedGrant<A>>,
-    seed_removed: &BTreeSet<MembershipGrantId>,
+    seed_grants: &BTreeMap<MembershipGrantId, GrantState<CausalSeedGrant<A>, ()>>,
     seed_included: &BTreeSet<C>,
 ) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
     reduce_internal(
@@ -549,7 +738,6 @@ pub(crate) fn reduce_from_checkpoint<C: CausalCoordinate, A: CausalAssignment>(
         raw_checkpoint_heads,
         effective_checkpoint_frontier,
         seed_grants,
-        seed_removed,
         seed_included,
         false,
     )
@@ -559,8 +747,7 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
     entries: &[CausalEntry<C, A>],
     raw_checkpoint_heads: &[C],
     effective_checkpoint_frontier: &[C],
-    seed_grants: &BTreeMap<MembershipGrantId, CausalSeedGrant<A>>,
-    seed_removed: &BTreeSet<MembershipGrantId>,
+    seed_grants: &BTreeMap<MembershipGrantId, GrantState<CausalSeedGrant<A>, ()>>,
     seed_included: &BTreeSet<C>,
     require_founder: bool,
 ) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
@@ -698,18 +885,25 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
     let seed_state = CausalState {
         grants: seed_grants
             .iter()
-            .map(|(grant, record)| {
+            .map(|(grant, state)| {
+                let record = state.record();
+                let record = GrantRecord {
+                    member_pubkey: record.member_pubkey.clone(),
+                    assignment: record.assignment.clone(),
+                    creation: CausalGrantCreation::Checkpoint,
+                };
                 (
                     grant.clone(),
-                    GrantRecord {
-                        member_pubkey: record.member_pubkey.clone(),
-                        assignment: record.assignment.clone(),
-                        creation: CausalGrantCreation::Checkpoint,
+                    match state {
+                        GrantState::Active { .. } => GrantState::Active { record },
+                        GrantState::Tombstoned { .. } => GrantState::Tombstoned {
+                            record,
+                            retirements: GrantRetirements::new(CausalGrantRetirement::Checkpoint),
+                        },
                     },
                 )
             })
             .collect(),
-        removed: seed_removed.clone(),
     };
     for head in effective_checkpoint_frontier {
         states.insert(head.clone(), seed_state.clone());
@@ -765,7 +959,7 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
                 if raw
                     .grants
                     .get(grant)
-                    .is_some_and(|record| record.assignment.is_owner())
+                    .is_some_and(|state| state.record().assignment.is_owner())
                 {
                     all_sources.insert(index);
                 }
@@ -814,13 +1008,14 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
     let effective = effective_state(entries, &causal_order, &included, &seed_state)?;
 
     let mut active_by_member = BTreeMap::<String, Vec<MembershipGrantId>>::new();
-    for (grant, record) in &effective.grants {
-        if !effective.removed.contains(grant) {
-            active_by_member
-                .entry(record.member_pubkey.clone())
-                .or_default()
-                .push(grant.clone());
-        }
+    for (grant, state) in &effective.grants {
+        let Some(record) = state.active() else {
+            continue;
+        };
+        active_by_member
+            .entry(record.member_pubkey.clone())
+            .or_default()
+            .push(grant.clone());
     }
     if let Some((member_pubkey, grants)) = active_by_member
         .into_iter()
@@ -828,13 +1023,24 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
     {
         let conflicting_grants = grants
             .iter()
-            .map(|grant| (grant.clone(), effective.grants[grant].clone()))
+            .map(|grant| {
+                (
+                    grant.clone(),
+                    effective.grants[grant]
+                        .active()
+                        .expect("conflicting grant is active")
+                        .clone(),
+                )
+            })
             .collect();
         let uncontested_grants = effective
             .grants
             .iter()
-            .filter(|(grant, _)| !effective.removed.contains(*grant) && !grants.contains(grant))
-            .map(|(grant, record)| (grant.clone(), record.clone()))
+            .filter_map(|(grant, state)| {
+                (!grants.contains(grant))
+                    .then(|| state.active().map(|record| (grant.clone(), record.clone())))
+                    .flatten()
+            })
             .collect();
         let seed_included = seed_included.iter().cloned().collect::<Vec<_>>();
         let reduced = reduced_from_state(entries, effective, included, &seed_included);
@@ -899,7 +1105,6 @@ fn reduced_from_state<C: CausalCoordinate, A: CausalAssignment>(
 ) -> ReducedGrants<C, A> {
     ReducedGrants {
         grants: state.grants,
-        removed: state.removed,
         included: checkpoint_heads
             .iter()
             .cloned()
@@ -1048,7 +1253,7 @@ fn revocation_cycle_conflict<C: CausalCoordinate, A: CausalAssignment>(
         .filter(|grant| {
             raw.grants
                 .get(*grant)
-                .is_some_and(|record| record.assignment.is_owner())
+                .is_some_and(|state| state.record().assignment.is_owner())
         })
         .cloned()
         .collect();
@@ -1201,16 +1406,19 @@ fn has_concurrent_assignments<C: CausalCoordinate, A: CausalAssignment>(
     state: &CausalState<C, A>,
 ) -> bool {
     let mut members = BTreeSet::new();
-    state.grants.iter().any(|(grant, record)| {
-        !state.removed.contains(grant) && !members.insert(record.member_pubkey.clone())
+    state.grants.values().any(|state| {
+        state
+            .active()
+            .is_some_and(|record| !members.insert(record.member_pubkey.clone()))
     })
 }
 
 fn has_owner<C: CausalCoordinate, A: CausalAssignment>(state: &CausalState<C, A>) -> bool {
-    state
-        .grants
-        .iter()
-        .any(|(grant, record)| !state.removed.contains(grant) && record.assignment.is_owner())
+    state.grants.values().any(|state| {
+        state
+            .active()
+            .is_some_and(|record| record.assignment.is_owner())
+    })
 }
 
 fn cap_sources<C: CausalCoordinate, A: CausalAssignment>(
@@ -1228,7 +1436,7 @@ fn cap_sources<C: CausalCoordinate, A: CausalAssignment>(
             if raw
                 .grants
                 .get(grant)
-                .is_some_and(|record| record.assignment.is_owner())
+                .is_some_and(|state| state.record().assignment.is_owner())
             {
                 sources.entry(grant.clone()).or_default().push((
                     *index,
@@ -1298,6 +1506,7 @@ fn validate_barriers<C: CausalCoordinate, A: CausalAssignment>(
             || !state
                 .grants
                 .get(grant)
+                .and_then(GrantState::active)
                 .is_some_and(|record| record.assignment.is_owner())
         {
             return Err(CausalGrantError::InvalidOwnerRevocationBarrier {
@@ -1310,6 +1519,7 @@ fn validate_barriers<C: CausalCoordinate, A: CausalAssignment>(
         if !state
             .grants
             .get(grant)
+            .and_then(GrantState::active)
             .is_some_and(|record| record.assignment.is_owner())
         {
             continue;
@@ -1422,34 +1632,80 @@ mod tests {
     #[test]
     fn full_checkpoint_merge_preserves_a_removal_seen_by_only_one_branch() {
         let grant = MembershipGrantId(ObjectHash::digest(b"removed checkpoint grant"));
-        let grants = BTreeMap::from([(grant.clone(), "member")]);
-        let removed = BTreeSet::from([grant.clone()]);
+        let retired = BTreeMap::from([(
+            grant.clone(),
+            GrantState::Tombstoned {
+                record: "member",
+                retirements: GrantRetirements::new("first retirement"),
+            },
+        )]);
+        let active = BTreeMap::from([(grant.clone(), GrantState::Active { record: "member" })]);
         let mut merged_grants = BTreeMap::new();
-        let mut merged_removed = BTreeSet::new();
         let mut merged_included = BTreeSet::new();
 
         assert!(merge_checkpoint_evidence(
             &mut merged_grants,
-            &mut merged_removed,
             &mut merged_included,
-            &grants,
-            &removed,
+            &retired,
             &BTreeSet::from([1]),
         ));
         assert!(merge_checkpoint_evidence(
             &mut merged_grants,
-            &mut merged_removed,
             &mut merged_included,
-            &grants,
-            &BTreeSet::new(),
+            &active,
             &BTreeSet::from([2]),
         ));
 
-        assert_eq!(merged_grants, grants);
-        assert_eq!(merged_removed, removed);
+        assert_eq!(merged_grants, retired);
         assert_eq!(merged_included, BTreeSet::from([1, 2]));
-        assert!(!merged_grants
-            .keys()
-            .any(|candidate| !merged_removed.contains(candidate)));
+    }
+
+    #[test]
+    fn tombstoned_grant_rejects_an_empty_retirement_set() {
+        let encoded = serde_json::json!({
+            "tombstoned": {
+                "record": "member",
+                "retirements": [],
+            }
+        });
+
+        assert!(serde_json::from_value::<GrantState<String, String>>(encoded).is_err());
+    }
+
+    #[test]
+    fn checkpoint_merge_unions_concurrent_retirement_evidence() {
+        let grant = MembershipGrantId(ObjectHash::digest(b"concurrently retired grant"));
+        let branch = |retirement| {
+            BTreeMap::from([(
+                grant.clone(),
+                GrantState::Tombstoned {
+                    record: "member",
+                    retirements: GrantRetirements::new(retirement),
+                },
+            )])
+        };
+        let mut merged = BTreeMap::new();
+        let mut included = BTreeSet::new();
+
+        assert!(merge_checkpoint_evidence(
+            &mut merged,
+            &mut included,
+            &branch("first retirement"),
+            &BTreeSet::from([1]),
+        ));
+        assert!(merge_checkpoint_evidence(
+            &mut merged,
+            &mut included,
+            &branch("second retirement"),
+            &BTreeSet::from([2]),
+        ));
+
+        let GrantState::Tombstoned { retirements, .. } = &merged[&grant] else {
+            panic!("retirement must dominate an active branch")
+        };
+        assert_eq!(
+            retirements.as_set(),
+            &BTreeSet::from(["first retirement", "second retirement"])
+        );
     }
 }

@@ -8,6 +8,7 @@ mod blob_content_hash_tests;
 pub mod backoff;
 pub(crate) mod blocking;
 pub(crate) mod causal_grants;
+pub use causal_grants::{GrantRetirements, GrantState};
 pub mod circle;
 pub(crate) mod circle_activation;
 pub mod circle_control;
