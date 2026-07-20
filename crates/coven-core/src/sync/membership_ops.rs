@@ -405,7 +405,7 @@ pub async fn invite_member_with_coordination(
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerialInvitePlan {
-    prepared: super::store_outbound::PreparedSerialControl,
+    prepared: super::store_outbound::PreparedStoreOperationCommit,
     invitee_pubkey: String,
     invitee_email: Option<String>,
     role: MemberRole,
@@ -421,16 +421,15 @@ enum SerialInviteProgress {
     AccessGranted {
         join_info: crate::storage::cloud::CloudHomeJoinInfo,
     },
+    CandidateNonactivating {
+        join_info: crate::storage::cloud::CloudHomeJoinInfo,
+    },
 }
 
-async fn rollback_serial_invite(
-    storage: &dyn SyncStorage,
+async fn restore_serial_invite_provider_access(
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     plan: &SerialInvitePlan,
 ) -> Result<(), MembershipOpsError> {
-    storage
-        .delete_protocol_object(&plan.wrapped_key.reference.object)
-        .await?;
     if !plan.invitee_was_member {
         let outcome = cloud_home
             .set_access(CloudAccessState::Absent {
@@ -448,6 +447,66 @@ async fn rollback_serial_invite(
         }
     }
     Ok(())
+}
+
+async fn finish_nonactivating_serial_invite(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    plan: &SerialInvitePlan,
+    intent_hash: super::store_commit::ObjectHash,
+) -> Result<(), MembershipOpsError> {
+    restore_serial_invite_provider_access(cloud_home, plan).await?;
+    super::store_objects::delete_exact_object(storage, &plan.prepared.reference.object).await?;
+    db.mark_candidate_cleanup_absent(plan.prepared.reference.object.clone())
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    db.complete_nonactivating_serial_membership_mutation(
+        intent_hash,
+        plan.prepared.reference.clone(),
+        vec![plan.wrapped_key.reference.object.clone()],
+    )
+    .await
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))
+}
+
+pub(crate) async fn publish_serial_membership_wraps(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    candidate: &super::store_outbound::PreparedStoreOperationCommit,
+    wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
+) -> Result<(), MembershipOpsError> {
+    let remote_objects = candidate.membership_control_remote_objects(wraps)?;
+    for prepared in wraps {
+        prepared.validate()?;
+        storage.create_protocol_object(&prepared.object).await?;
+        super::wrapped_store_key::load_wrapped_store_key(
+            storage,
+            root.store_root_hash,
+            &prepared.reference,
+        )
+        .await?;
+        let expected = remote_objects
+            .iter()
+            .find(|remote| remote.object() == &prepared.reference.object)
+            .cloned()
+            .ok_or_else(|| {
+                MembershipOpsError::Database(
+                    "Serial membership wrap is absent from its durable ownership graph".to_string(),
+                )
+            })?;
+        db.mark_reusable_retained_authority_uploaded(expected)
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    }
+    super::store_pull::validate_serial_control_wrapped_keys(
+        storage,
+        root,
+        candidate.commit.control(),
+    )
+    .await
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -552,13 +611,22 @@ async fn invite_serial_member(
                         error.to_string(),
                     ))
                 })?;
-            let prepared = super::store_outbound::prepare_serial_control(
+            let operation = super::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                coordination,
+                Some(coordination),
                 device_id,
-                StoreControl::SerialMembership { entry },
                 user_keypair,
+                None,
+            )
+            .await?;
+            let prepared = super::store_outbound::prepare_store_operation_candidate(
+                db,
+                storage,
+                operation,
+                super::store_outbound::StoreOperationBatch::Control(
+                    StoreControl::SerialMembership { entry },
+                ),
             )
             .await?;
             let plan = SerialInvitePlan {
@@ -584,13 +652,26 @@ async fn invite_serial_member(
                     "serialize Serial invitation progress: {error}"
                 )))
             })?;
+            let remote_objects = plan
+                .prepared
+                .membership_control_remote_objects(std::slice::from_ref(&plan.wrapped_key))?;
             let intent_hash = db
-                .stage_membership_mutation(plan_bytes, progress_bytes)
+                .stage_serial_membership_mutation(plan_bytes, progress_bytes, remote_objects)
                 .await
                 .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
             (plan, progress, intent_hash)
         }
     };
+    if matches!(
+        &progress,
+        SerialInviteProgress::CandidateNonactivating { .. }
+    ) {
+        finish_nonactivating_serial_invite(db, storage, cloud_home, &plan, intent_hash).await?;
+        return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+            "Serial invitation candidate did not activate".to_string(),
+        )
+        .into());
+    }
     let outcome = cloud_home
         .set_access(plan.desired_access.clone())
         .await
@@ -627,35 +708,101 @@ async fn invite_serial_member(
                 }
                 join_info.clone()
             }
+            SerialInviteProgress::CandidateNonactivating { .. } => {
+                unreachable!("nonactivating invitation returned before access grant")
+            }
         };
-    if let Err(error) = storage
-        .create_protocol_object(&plan.wrapped_key.object)
-        .await
-    {
-        if error.definitely_uncommitted() {
-            rollback_serial_invite(storage, cloud_home, &plan).await?;
-            db.complete_membership_mutation(intent_hash)
+    publish_serial_membership_wraps(
+        db,
+        storage,
+        &root_ref,
+        &plan.prepared,
+        std::slice::from_ref(&plan.wrapped_key),
+    )
+    .await?;
+    let mut plan = plan;
+    let mut intent_hash = intent_hash;
+    loop {
+        match super::store_outbound::publish_prepared_store_operation(
+            db,
+            storage,
+            Some(coordination),
+            Box::new(plan.prepared.clone()),
+        )
+        .await?
+        {
+            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => break,
+            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+                candidate,
+            ) => {
+                plan.prepared = *candidate;
+                let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize reprepared Serial invitation: {error}"
+                    )))
+                })?;
+                intent_hash = db
+                    .replace_serial_membership_candidate(intent_hash, plan_bytes)
+                    .await
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                candidate,
+                nonactivation,
+            } => {
+                if *candidate != plan.prepared {
+                    return Err(MembershipOpsError::Database(
+                        "nonactivation returned a different Serial invitation candidate"
+                            .to_string(),
+                    ));
+                }
+                progress = SerialInviteProgress::CandidateNonactivating {
+                    join_info: join_info.clone(),
+                };
+                let progress_bytes = serde_json::to_vec(&progress).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize nonactivating Serial invitation: {error}"
+                    )))
+                })?;
+                db.begin_serial_membership_candidate_nonactivation(
+                    intent_hash,
+                    plan.prepared.reference.clone(),
+                    vec![plan.wrapped_key.reference.object.clone()],
+                    progress_bytes,
+                    *nonactivation,
+                )
                 .await
-                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
+                .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+                finish_nonactivating_serial_invite(db, storage, cloud_home, &plan, intent_hash)
+                    .await?;
+                return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+                    "Serial invitation candidate did not activate".to_string(),
+                )
+                .into());
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(reference) => {
+                return Err(
+                    super::store_outbound::StoreOutboundError::InvalidOutbound(format!(
+                        "Serial invitation candidate {} did not activate",
+                        reference.commit_hash
+                    ))
+                    .into(),
+                );
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Reprepared => {
+                return Err(MembershipOpsError::Database(
+                    "Serial invitation returned acknowledgement-only reprepare state".to_string(),
+                ));
+            }
         }
-        return Err(error.into());
     }
-    match super::store_outbound::activate_serial_control(db, storage, coordination, &plan.prepared)
-        .await
-    {
-        Ok(()) => {}
-        Err(error) if error.definitely_uncommitted() => {
-            rollback_serial_invite(storage, cloud_home, &plan).await?;
-            db.complete_membership_mutation(intent_hash)
-                .await
-                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
-            return Err(error.into());
-        }
-        Err(error) => return Err(error.into()),
-    }
-    db.complete_membership_mutation(intent_hash)
-        .await
-        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    db.complete_activated_serial_membership_mutation(
+        intent_hash,
+        plan.prepared.reference.clone(),
+        vec![plan.wrapped_key.reference.object.clone()],
+    )
+    .await
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
     let root_hash = root_ref.store_root_hash;
     if root_hash != plan.prepared.commit.store_root_hash {
         return Err(MembershipOpsError::Database(
@@ -674,37 +821,33 @@ async fn invite_serial_member(
         wrapped_key: plan.wrapped_key.reference.clone(),
         store_root: root_ref,
         membership_floor: crate::join_code::MembershipFloor::Serial(Some(
-            plan.prepared.commit_ref.clone(),
+            plan.prepared.reference.clone(),
         )),
     })
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerialReplacementWrap {
-    prepared: super::wrapped_store_key::PreparedWrappedStoreKey,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SerialRemovalPlan {
-    prepared: super::store_outbound::PreparedSerialControl,
+    prepared: super::store_outbound::PreparedStoreOperationCommit,
     revokee_pubkey: String,
     revokee_email: Option<String>,
-    wraps: Vec<SerialReplacementWrap>,
+    wraps: Vec<super::wrapped_store_key::PreparedWrappedStoreKey>,
     keyring_payload: Vec<u8>,
 }
 
-async fn rollback_serial_removal(
-    storage: &dyn SyncStorage,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum SerialRemovalProgress {
+    Pending,
+    AccessRevoked,
+    CandidateNonactivating,
+}
+
+async fn restore_serial_removal_provider_access(
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     plan: &SerialRemovalPlan,
 ) -> Result<(), MembershipOpsError> {
-    for wrap in &plan.wraps {
-        storage
-            .delete_protocol_object(&wrap.prepared.reference.object)
-            .await?;
-    }
     let outcome = cloud_home
         .set_access(CloudAccessState::Present {
             member_pubkey: plan.revokee_pubkey.clone(),
@@ -720,6 +863,30 @@ async fn rollback_serial_removal(
         ));
     }
     Ok(())
+}
+
+async fn finish_nonactivating_serial_removal(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    plan: &SerialRemovalPlan,
+    intent_hash: super::store_commit::ObjectHash,
+) -> Result<(), MembershipOpsError> {
+    restore_serial_removal_provider_access(cloud_home, plan).await?;
+    super::store_objects::delete_exact_object(storage, &plan.prepared.reference.object).await?;
+    db.mark_candidate_cleanup_absent(plan.prepared.reference.object.clone())
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    db.complete_nonactivating_serial_membership_mutation(
+        intent_hash,
+        plan.prepared.reference.clone(),
+        plan.wraps
+            .iter()
+            .map(|wrap| wrap.reference.object.clone())
+            .collect(),
+    )
+    .await
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -738,7 +905,7 @@ async fn remove_serial_member(
 ) -> Result<EncryptionService, MembershipOpsError> {
     let root_ref = required_store_root_ref(db).await?;
     let _mutation = db.lock_membership_mutation().await;
-    let (plan, intent_hash) = match db
+    let (plan, mut progress, intent_hash) = match db
         .outbound_membership_mutation()
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
@@ -750,12 +917,18 @@ async fn remove_serial_member(
                         "parse Serial removal plan: {error}"
                     )))
                 })?;
+            let progress: SerialRemovalProgress = serde_json::from_slice(&row.progress_bytes)
+                .map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "parse Serial removal progress: {error}"
+                    )))
+                })?;
             if plan.revokee_pubkey != public_key_hex {
                 return Err(MembershipOpsError::Invite(InviteError::PendingMutation(
                     "the pending Serial removal names another member".to_string(),
                 )));
             }
-            (plan, row.intent_hash)
+            (plan, progress, row.intent_hash)
         }
         None => {
             let authorization =
@@ -820,8 +993,8 @@ async fn remove_serial_member(
             })?;
             let mut wraps = Vec::new();
             for (recipient, _) in membership_after.current_members() {
-                wraps.push(SerialReplacementWrap {
-                    prepared: super::wrapped_store_key::prepare_wrapped_store_key(
+                wraps.push(
+                    super::wrapped_store_key::prepare_wrapped_store_key(
                         storage,
                         root_ref.store_root_hash,
                         &recipient,
@@ -833,24 +1006,30 @@ async fn remove_serial_member(
                         )?,
                     )
                     .await?,
-                });
+                );
             }
-            wraps.sort_by(|left, right| left.prepared.reference.cmp(&right.prepared.reference));
-            let wrapped_keys = wraps
-                .iter()
-                .map(|wrap| wrap.prepared.reference.clone())
-                .collect();
-            let prepared = super::store_outbound::prepare_serial_control(
+            wraps.sort_by(|left, right| left.reference.cmp(&right.reference));
+            let wrapped_keys = wraps.iter().map(|wrap| wrap.reference.clone()).collect();
+            let operation = super::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                coordination,
+                Some(coordination),
                 device_id,
-                StoreControl::SerialMembershipAndKeyRotation {
-                    entry,
-                    generation,
-                    wrapped_keys,
-                },
                 user_keypair,
+                None,
+            )
+            .await?;
+            let prepared = super::store_outbound::prepare_store_operation_candidate(
+                db,
+                storage,
+                operation,
+                super::store_outbound::StoreOperationBatch::Control(
+                    StoreControl::SerialMembershipAndKeyRotation {
+                        entry,
+                        generation,
+                        wrapped_keys,
+                    },
+                ),
             )
             .await?;
             let keyring_payload = new_keyring.to_keyring_payload().map_err(|error| {
@@ -870,18 +1049,29 @@ async fn remove_serial_member(
                     "serialize Serial removal plan: {error}"
                 )))
             })?;
-            let progress = serde_json::to_vec(&SerialInviteProgress::Pending).map_err(|error| {
+            let progress = SerialRemovalProgress::Pending;
+            let progress_bytes = serde_json::to_vec(&progress).map_err(|error| {
                 MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
                     "serialize Serial removal progress: {error}"
                 )))
             })?;
+            let remote_objects = plan
+                .prepared
+                .membership_control_remote_objects(&plan.wraps)?;
             let intent_hash = db
-                .stage_membership_mutation(plan_bytes, progress)
+                .stage_serial_membership_mutation(plan_bytes, progress_bytes, remote_objects)
                 .await
                 .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-            (plan, intent_hash)
+            (plan, progress, intent_hash)
         }
     };
+    if matches!(&progress, SerialRemovalProgress::CandidateNonactivating) {
+        finish_nonactivating_serial_removal(db, storage, cloud_home, &plan, intent_hash).await?;
+        return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+            "Serial removal candidate did not activate".to_string(),
+        )
+        .into());
+    }
     let outcome = cloud_home
         .set_access(CloudAccessState::Absent {
             member_pubkey: plan.revokee_pubkey.clone(),
@@ -896,34 +1086,106 @@ async fn remove_serial_member(
             ),
         ));
     }
-    for wrap in &plan.wraps {
-        let result = storage.create_protocol_object(&wrap.prepared.object).await;
-        if let Err(error) = result {
-            if error.definitely_uncommitted() {
-                rollback_serial_removal(storage, cloud_home, &plan).await?;
-                db.complete_membership_mutation(intent_hash)
-                    .await
-                    .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
-            }
-            return Err(error.into());
-        }
-    }
-    match super::store_outbound::activate_serial_control(db, storage, coordination, &plan.prepared)
-        .await
-    {
-        Ok(()) => {}
-        Err(error) if error.definitely_uncommitted() => {
-            rollback_serial_removal(storage, cloud_home, &plan).await?;
-            db.complete_membership_mutation(intent_hash)
-                .await
-                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
-            return Err(error.into());
-        }
-        Err(error) => return Err(error.into()),
-    }
-    db.complete_membership_mutation(intent_hash)
+    if matches!(&progress, SerialRemovalProgress::Pending) {
+        progress = SerialRemovalProgress::AccessRevoked;
+        db.update_membership_mutation_progress(
+            intent_hash,
+            serde_json::to_vec(&progress).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "serialize revoked Serial removal access: {error}"
+                )))
+            })?,
+        )
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    }
+    publish_serial_membership_wraps(db, storage, &root_ref, &plan.prepared, &plan.wraps).await?;
+    let mut plan = plan;
+    let mut intent_hash = intent_hash;
+    loop {
+        match super::store_outbound::publish_prepared_store_operation(
+            db,
+            storage,
+            Some(coordination),
+            Box::new(plan.prepared.clone()),
+        )
+        .await?
+        {
+            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => break,
+            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+                candidate,
+            ) => {
+                plan.prepared = *candidate;
+                let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize reprepared Serial removal: {error}"
+                    )))
+                })?;
+                intent_hash = db
+                    .replace_serial_membership_candidate(intent_hash, plan_bytes)
+                    .await
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                candidate,
+                nonactivation,
+            } => {
+                if *candidate != plan.prepared {
+                    return Err(MembershipOpsError::Database(
+                        "nonactivation returned a different Serial removal candidate".to_string(),
+                    ));
+                }
+                progress = SerialRemovalProgress::CandidateNonactivating;
+                let progress_bytes = serde_json::to_vec(&progress).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize nonactivating Serial removal: {error}"
+                    )))
+                })?;
+                db.begin_serial_membership_candidate_nonactivation(
+                    intent_hash,
+                    plan.prepared.reference.clone(),
+                    plan.wraps
+                        .iter()
+                        .map(|wrap| wrap.reference.object.clone())
+                        .collect(),
+                    progress_bytes,
+                    *nonactivation,
+                )
+                .await
+                .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+                finish_nonactivating_serial_removal(db, storage, cloud_home, &plan, intent_hash)
+                    .await?;
+                return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+                    "Serial removal candidate did not activate".to_string(),
+                )
+                .into());
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(reference) => {
+                return Err(
+                    super::store_outbound::StoreOutboundError::InvalidOutbound(format!(
+                        "Serial removal candidate {} did not activate",
+                        reference.commit_hash
+                    ))
+                    .into(),
+                );
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Reprepared => {
+                return Err(MembershipOpsError::Database(
+                    "Serial removal returned acknowledgement-only reprepare state".to_string(),
+                ));
+            }
+        }
+    }
+    db.complete_activated_serial_membership_mutation(
+        intent_hash,
+        plan.prepared.reference.clone(),
+        plan.wraps
+            .iter()
+            .map(|wrap| wrap.reference.object.clone())
+            .collect(),
+    )
+    .await
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
     EncryptionService::from_keyring_payload(plan.keyring_payload).map_err(|error| {
         MembershipOpsError::Invite(InviteError::Crypto(format!(
             "parse Serial rotated keyring: {error}"

@@ -3352,33 +3352,42 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         )
         .await
         .unwrap();
+        let successor_pubkey = pubkey_hex(&successor);
+        let successor_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+            &storage,
+            root.store_root_hash,
+            &successor_pubkey,
+            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                &root.store_root_id.to_string(),
+                &successor_pubkey,
+                1,
+                b"cycle Serial successor wrap".to_vec(),
+                &founder,
+            ),
+        )
+        .await
+        .unwrap();
         let add_successor = authorization
             .membership
-            .signed_set_member(
+            .signed_set_member_with_wrapped_key(
                 &founder,
-                pubkey_hex(&successor),
+                successor_pubkey,
                 None,
                 MemberRole::Owner,
+                successor_wrap.reference.clone(),
                 "0000000000002-0000-founder".to_string(),
             )
             .unwrap();
-        let prepared = crate::sync::store_outbound::prepare_serial_control(
+        crate::sync::store_outbound::activate_test_serial_control_candidate(
             &remote,
             &storage,
             coordination,
             &remote_device_id,
+            &founder,
             StoreControl::SerialMembership {
                 entry: add_successor,
             },
-            &founder,
-        )
-        .await
-        .unwrap();
-        crate::sync::store_outbound::activate_serial_control(
-            &remote,
-            &storage,
-            coordination,
-            &prepared,
+            vec![successor_wrap],
         )
         .await
         .unwrap();
@@ -3389,33 +3398,42 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         )
         .await
         .unwrap();
+        let founder_pubkey = pubkey_hex(&founder);
+        let founder_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+            &storage,
+            root.store_root_hash,
+            &founder_pubkey,
+            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                &root.store_root_id.to_string(),
+                &founder_pubkey,
+                1,
+                b"cycle Serial founder role wrap".to_vec(),
+                &founder,
+            ),
+        )
+        .await
+        .unwrap();
         let demote_founder = authorization
             .membership
-            .signed_set_member(
+            .signed_set_member_with_wrapped_key(
                 &founder,
-                pubkey_hex(&founder),
+                founder_pubkey,
                 None,
                 MemberRole::Follower,
+                founder_wrap.reference.clone(),
                 "0000000000003-0000-founder".to_string(),
             )
             .unwrap();
-        let prepared = crate::sync::store_outbound::prepare_serial_control(
+        crate::sync::store_outbound::activate_test_serial_control_candidate(
             &remote,
             &storage,
             coordination,
             &remote_device_id,
+            &founder,
             StoreControl::SerialMembership {
                 entry: demote_founder,
             },
-            &founder,
-        )
-        .await
-        .unwrap();
-        crate::sync::store_outbound::activate_serial_control(
-            &remote,
-            &storage,
-            coordination,
-            &prepared,
+            vec![founder_wrap],
         )
         .await
         .unwrap();

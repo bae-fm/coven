@@ -1273,10 +1273,6 @@ impl StorageError {
         }
     }
 
-    pub(crate) fn definitely_uncommitted(&self) -> bool {
-        !self.is_transport()
-    }
-
     pub fn cleanup_causes(&self) -> Option<(&StorageError, &StorageError)> {
         match self {
             Self::CleanupFailed { operation, cleanup } => Some((operation, cleanup)),

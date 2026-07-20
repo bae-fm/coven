@@ -95,6 +95,23 @@ impl RemoteObjectRecord {
         )
     }
 
+    pub(crate) fn candidate_activated_membership_control_wrapped_store_key(
+        reference: super::wrapped_store_key::WrappedStoreKeyRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
     pub(crate) fn candidate_activated_device_exclusion_proposal(
         reference: super::store_commit::StoreDeviceExclusionProposalRef,
         canonical_signed_bytes: Vec<u8>,
@@ -2430,6 +2447,9 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
     },
+    MembershipControlWrappedStoreKey {
+        reference: super::wrapped_store_key::WrappedStoreKeyRef,
+    },
     DeviceExclusionProposal {
         reference: super::store_commit::StoreDeviceExclusionProposalRef,
     },
@@ -2494,6 +2514,17 @@ fn validate_retained_authority_identity(
                 || acknowledgement.ack_hash() != reference.ack_hash
                 || reference.object != identity.object
             {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { reference } => {
+            let wrapped: super::wrapped_store_key::WrappedStoreKey =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .validate_value(&wrapped, canonical_semantic_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
@@ -3574,6 +3605,60 @@ mod tests {
         assert!(matches!(
             record.validate(),
             Err(RemoteObjectRecordError::InvalidDomain(_))
+        ));
+    }
+
+    #[test]
+    fn serial_membership_wrap_is_candidate_activated_retained_authority() {
+        let owner_key = crate::keys::UserKeypair::generate();
+        let recipient_key = crate::keys::UserKeypair::generate();
+        let owner_pubkey = hex::encode(owner_key.public_key());
+        let recipient_pubkey = hex::encode(recipient_key.public_key());
+        let wrapped = super::super::wrapped_store_key::WrappedStoreKey::signed(
+            "remote-object-test-store",
+            &recipient_pubkey,
+            1,
+            vec![7; 32],
+            &owner_key,
+        );
+        let canonical = serde_json::to_vec(&wrapped).expect("serialize wrapped Store key");
+        let wrap_hash = ObjectHash::digest(&canonical);
+        let object = ExactObjectRef::new(
+            ObjectSlot::logical(format!(
+                "keys/{owner_pubkey}/{recipient_pubkey}/1/{wrap_hash}.json"
+            ))
+            .expect("valid wrapped-key slot"),
+            canonical.len() as u64,
+            ObjectHash::digest(&canonical),
+        );
+        let reference = super::super::wrapped_store_key::WrappedStoreKeyRef {
+            owner_pubkey,
+            recipient_pubkey,
+            generation: 1,
+            wrap_hash,
+            object,
+        };
+        let candidate = test_commit_ref("membership-wrap-owner", 1);
+
+        let record = RemoteObjectRecord::candidate_activated_membership_control_wrapped_store_key(
+            reference,
+            canonical.clone(),
+            canonical,
+            candidate.clone(),
+        )
+        .expect("close wrapped-key ownership");
+
+        assert!(record.validate().is_ok());
+        assert!(matches!(
+            record,
+            RemoteObjectRecord::RetainedAuthority(RetainedAuthorityRecord {
+                identity: RetainedAuthorityObjectRef {
+                    domain: RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { .. },
+                    ..
+                },
+                state: RetainedAuthorityObjectState::Prepared { ownership },
+                ..
+            }) if ownership.pending == BTreeSet::from([candidate])
         ));
     }
 }

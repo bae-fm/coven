@@ -2479,6 +2479,30 @@ mod tests {
             .expect("local Store device is active")
     }
 
+    async fn prepare_serial_test_wrap(
+        storage: &CloudSyncStorage,
+        root: &crate::sync::store_commit::StoreRootRef,
+        owner: &UserKeypair,
+        recipient_pubkey: &str,
+        generation: u64,
+        sealed: &[u8],
+    ) -> super::super::wrapped_store_key::PreparedWrappedStoreKey {
+        super::super::wrapped_store_key::prepare_wrapped_store_key(
+            storage,
+            root.store_root_hash,
+            recipient_pubkey,
+            super::super::wrapped_store_key::WrappedStoreKey::signed(
+                &root.store_root_id.to_string(),
+                recipient_pubkey,
+                generation,
+                sealed.to_vec(),
+                owner,
+            ),
+        )
+        .await
+        .expect("prepare authenticated Serial test wrap")
+    }
+
     async fn create_test_store_in_its_own_task(
         db: &Database,
         name: &str,
@@ -4816,7 +4840,7 @@ mod tests {
         let successor = UserKeypair::generate();
         let storage = serial_storage(&home, &founder, "circle-serial-authority-race");
         let db = open_serial_test_db();
-        let (storage, _root) = create_exact_serial_store_in_its_own_task(
+        let (storage, root) = create_exact_serial_store_in_its_own_task(
             &db,
             storage,
             "circle-serial-authority-race",
@@ -4830,33 +4854,37 @@ mod tests {
             super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
                 .await
                 .expect("founder authorization");
+        let successor_pubkey = keys::public_key_hex(&successor);
+        let successor_wrap = prepare_serial_test_wrap(
+            &storage,
+            &root,
+            &founder,
+            &successor_pubkey,
+            1,
+            b"circle Serial successor wrap",
+        )
+        .await;
         let add_successor = authorization
             .membership
-            .signed_set_member(
+            .signed_set_member_with_wrapped_key(
                 &founder,
-                keys::public_key_hex(&successor),
+                successor_pubkey.clone(),
                 None,
                 MemberRole::Owner,
+                successor_wrap.reference.clone(),
                 "0000000000001-0000-founder".to_string(),
             )
             .expect("add successor owner");
-        let prepared = super::super::store_outbound::prepare_serial_control(
+        super::super::store_outbound::activate_test_serial_control_candidate(
             &db,
             &storage,
             coordination,
             &device_id,
+            &founder,
             StoreControl::SerialMembership {
                 entry: add_successor,
             },
-            &founder,
-        )
-        .await
-        .expect("prepare successor addition");
-        super::super::store_outbound::activate_serial_control(
-            &db,
-            &storage,
-            coordination,
-            &prepared,
+            vec![successor_wrap],
         )
         .await
         .expect("activate successor addition");
@@ -4878,30 +4906,27 @@ mod tests {
                 "0000000000002-0000-founder".to_string(),
             )
             .expect("remove founder");
-        let prepared = super::super::store_outbound::prepare_serial_control(
+        let removal_wrap = prepare_serial_test_wrap(
+            &storage,
+            &root,
+            &founder,
+            &successor_pubkey,
+            2,
+            b"circle Serial founder removal wrap",
+        )
+        .await;
+        super::super::store_outbound::activate_test_serial_control_candidate(
             &db,
             &storage,
             coordination,
             &device_id,
+            &founder,
             StoreControl::SerialMembershipAndKeyRotation {
                 entry: remove_founder,
                 generation: 2,
-                wrapped_keys: vec![super::super::membership::test_wrapped_key_ref(
-                    &keys::public_key_hex(&founder),
-                    &keys::public_key_hex(&successor),
-                    2,
-                    b"circle Serial founder removal wrap",
-                )],
+                wrapped_keys: vec![removal_wrap.reference.clone()],
             },
-            &founder,
-        )
-        .await
-        .expect("prepare founder removal");
-        super::super::store_outbound::activate_serial_control(
-            &db,
-            &storage,
-            coordination,
-            &prepared,
+            vec![removal_wrap],
         )
         .await
         .expect("activate founder removal");
@@ -4965,31 +4990,35 @@ mod tests {
             super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
                 .await
                 .expect("founder authorization");
+        let successor_pubkey = keys::public_key_hex(&successor);
+        let wrap = prepare_serial_test_wrap(
+            &storage,
+            &root,
+            &founder,
+            &successor_pubkey,
+            1,
+            b"circle Serial head-bytes wrap",
+        )
+        .await;
         let entry = authorization
             .membership
-            .signed_set_member(
+            .signed_set_member_with_wrapped_key(
                 &founder,
-                keys::public_key_hex(&successor),
+                successor_pubkey,
                 None,
                 MemberRole::Member,
+                wrap.reference.clone(),
                 "0000000000001-0000-founder".to_string(),
             )
             .expect("sign membership entry");
-        let prepared = super::super::store_outbound::prepare_serial_control(
+        super::super::store_outbound::activate_test_serial_control_candidate(
             &db,
             &storage,
             coordination,
             &device_id,
-            StoreControl::SerialMembership { entry },
             &founder,
-        )
-        .await
-        .expect("prepare serial control");
-        super::super::store_outbound::activate_serial_control(
-            &db,
-            &storage,
-            coordination,
-            &prepared,
+            StoreControl::SerialMembership { entry },
+            vec![wrap],
         )
         .await
         .expect("activate serial control");

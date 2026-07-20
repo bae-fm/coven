@@ -11810,6 +11810,69 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn stage_serial_membership_mutation(
+        &self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<RemoteObjectRecord>,
+    ) -> Result<ObjectHash, DbError> {
+        self.call(move |conn| {
+            let intent_hash = ObjectHash::digest(&plan_bytes);
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing = tx
+                .query_row(
+                    "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
+                     WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((existing_hash, existing_plan)) = existing {
+                if existing_hash != intent_hash.to_string() || existing_plan != plan_bytes {
+                    return Err(DbError::Message(
+                        "a different membership mutation is already pending".to_string(),
+                    ));
+                }
+                for remote in &remote_objects {
+                    let stored = load_remote_object_on(&tx, remote.object_id())?;
+                    if stored != *remote {
+                        return Err(DbError::Message(
+                            "persisted Serial membership ownership differs from its durable plan"
+                                .to_string(),
+                        ));
+                    }
+                }
+                tx.commit().map_err(DbError::from)?;
+                return Ok(intent_hash);
+            }
+            if remote_objects.is_empty() {
+                return Err(DbError::Message(
+                    "Serial membership mutation has no remote ownership graph".to_string(),
+                ));
+            }
+            let mut object_ids = BTreeSet::new();
+            for remote in &remote_objects {
+                if !object_ids.insert(remote.object_id()) {
+                    return Err(DbError::Message(
+                        "Serial membership mutation repeats a remote object".to_string(),
+                    ));
+                }
+                persist_exact_remote_object_on(&tx, remote, "Serial membership candidate object")?;
+            }
+            tx.execute(
+                "INSERT INTO outbound_membership_mutation \
+                 (singleton, intent_hash, plan_bytes, progress_bytes) \
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(intent_hash)
+        })
+        .await
+    }
+
     pub(crate) async fn update_membership_mutation_progress(
         &self,
         intent_hash: ObjectHash,
@@ -11829,6 +11892,228 @@ impl Database {
                 ));
             }
             Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn replace_serial_membership_candidate(
+        &self,
+        intent_hash: ObjectHash,
+        plan_bytes: Vec<u8>,
+    ) -> Result<ObjectHash, DbError> {
+        self.call(move |conn| {
+            let replacement_hash = ObjectHash::digest(&plan_bytes);
+            let updated = conn
+                .execute(
+                    "UPDATE outbound_membership_mutation \
+                     SET intent_hash = ?1, plan_bytes = ?2 \
+                     WHERE singleton = 1 AND intent_hash = ?3",
+                    rusqlite::params![
+                        replacement_hash.to_string(),
+                        plan_bytes,
+                        intent_hash.to_string()
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "Serial membership mutation changed before candidate receipt adoption"
+                        .to_string(),
+                ));
+            }
+            Ok(replacement_hash)
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_serial_membership_candidate_nonactivation(
+        &self,
+        intent_hash: ObjectHash,
+        candidate: StoreBatchCommitRef,
+        wrapped_keys: Vec<ExactObjectRef>,
+        progress_bytes: Vec<u8>,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
+    ) -> Result<CandidateCleanupObject, DbError> {
+        if nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != candidate
+        {
+            return Err(DbError::Message(
+                "verified nonactivation names another Serial membership candidate".to_string(),
+            ));
+        }
+        let nonactivation = nonactivation.into_durable();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM outbound_membership_mutation
+                         WHERE singleton = 1 AND intent_hash = ?1
+                     )",
+                    [intent_hash.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !exists {
+                return Err(DbError::Message(
+                    "Serial membership mutation changed before nonactivation".to_string(),
+                ));
+            }
+            let mut unique = BTreeSet::new();
+            for object in &wrapped_keys {
+                let object_id = remote_object_id(object);
+                if !unique.insert(object_id) {
+                    return Err(DbError::Message(
+                        "Serial membership nonactivation repeats a wrapped key".to_string(),
+                    ));
+                }
+                if begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation.clone())?
+                    .is_some()
+                {
+                    return Err(DbError::Message(
+                        "losing Serial membership wrap became a deletion target".to_string(),
+                    ));
+                }
+            }
+            let commit_target = begin_remote_candidate_nonactivation_on(
+                &tx,
+                remote_object_id(&candidate.object),
+                nonactivation,
+            )?
+            .ok_or_else(|| {
+                DbError::Message(
+                    "losing Serial membership commit has no exact deletion target".to_string(),
+                )
+            })?;
+            if commit_target != candidate.object {
+                return Err(DbError::Message(
+                    "Serial membership cleanup target differs from its candidate commit"
+                        .to_string(),
+                ));
+            }
+            let updated = tx
+                .execute(
+                    "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                     WHERE singleton = 1 AND intent_hash = ?2",
+                    rusqlite::params![progress_bytes, intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "Serial membership mutation changed during nonactivation".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Ok(CandidateCleanupObject {
+                object: commit_target,
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_nonactivating_serial_membership_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        candidate: StoreBatchCommitRef,
+        wrapped_keys: Vec<ExactObjectRef>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let commit_id = remote_object_id(&candidate.object);
+            let commit = load_remote_object_on(&tx, commit_id)?;
+            if !commit
+                .candidate_cleanup_complete(&candidate)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                return Err(DbError::Message(
+                    "losing Serial membership commit cleanup is incomplete".to_string(),
+                ));
+            }
+            for object in wrapped_keys {
+                let object_id = remote_object_id(&object);
+                let inert = load_protocol_inert_object_on(&tx, object_id)?;
+                if inert.object_id() != object_id {
+                    return Err(DbError::Message(
+                        "protocol-inert Serial membership wrap changed exact identity".to_string(),
+                    ));
+                }
+            }
+            if tx
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [commit_id.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "losing Serial membership commit disappeared during removal".to_string(),
+                ));
+            }
+            if tx
+                .execute(
+                    "DELETE FROM outbound_membership_mutation \
+                     WHERE singleton = 1 AND intent_hash = ?1",
+                    [intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "Serial membership mutation changed during completion".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_activated_serial_membership_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        candidate: StoreBatchCommitRef,
+        wrapped_keys: Vec<ExactObjectRef>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let mut objects = vec![candidate.object.clone()];
+            objects.extend(wrapped_keys);
+            let mut unique = BTreeSet::new();
+            for object in objects {
+                let object_id = remote_object_id(&object);
+                if !unique.insert(object_id) {
+                    return Err(DbError::Message(
+                        "activated Serial membership graph repeats an exact object".to_string(),
+                    ));
+                }
+                let remote = load_remote_object_on(&tx, object_id)?;
+                let activated = remote.clone().into_activated(&candidate).map_err(|error| {
+                    DbError::Message(format!(
+                        "validate activated Serial membership object {object_id}: {error}"
+                    ))
+                })?;
+                if activated != remote {
+                    return Err(DbError::Message(format!(
+                        "Serial membership object {object_id} still has pending candidate ownership"
+                    )));
+                }
+            }
+            if tx
+                .execute(
+                    "DELETE FROM outbound_membership_mutation \
+                     WHERE singleton = 1 AND intent_hash = ?1",
+                    [intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "Serial membership mutation changed during activated completion".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -18126,30 +18411,6 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn materialize_serial_control_commit(
-        &self,
-        commit: StoreBatchCommit,
-        commit_ref: StoreBatchCommitRef,
-        authorization_after: SerialAuthorizationState,
-    ) -> Result<(), DbError> {
-        if commit.control().is_none() || commit.store_package().is_some() {
-            return Err(DbError::Message(
-                "Serial control materialization requires a control-only Store batch".to_string(),
-            ));
-        }
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::record_materialized_serial_commit_on(
-                &tx,
-                &commit,
-                &commit_ref,
-                &authorization_after,
-            )?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
     pub(crate) async fn install_serial_authorization_at_position(
         &self,
         expected: StoreBatchCommitRef,
@@ -19085,10 +19346,25 @@ impl Database {
         self.call(move |conn| {
             let object_id = remote_object_id(&commit.object);
             let current = load_remote_object_on(conn, object_id)?;
-            if !matches!(
+            if matches!(
                 &current,
-                RemoteObjectRecord::CandidateCommit(record) if record.identity == commit
+                RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        &record.identity.domain,
+                        crate::sync::remote_object::RetainedAuthorityObjectDomain::Commit {
+                            reference
+                        } if reference == &commit
+                    ) && matches!(
+                        &record.state,
+                        crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                            ownership
+                        } if ownership.activated.contains(&commit)
+                    )
             ) {
+                return Ok(());
+            }
+            if !matches!(&current, RemoteObjectRecord::CandidateCommit(record) if record.identity == commit)
+            {
                 return Err(DbError::Message(format!(
                     "remote object {object_id} is not the exact candidate commit"
                 )));

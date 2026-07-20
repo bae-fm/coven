@@ -239,26 +239,6 @@ pub(crate) async fn exact_next_announcement_slot(
     ))
 }
 
-impl StoreOutboundError {
-    pub(crate) fn definitely_uncommitted(&self) -> bool {
-        match self {
-            Self::Database(_) | Self::Coordination(_) | Self::CandidateCleanup(_) => false,
-            Self::BlobStorage { source, .. } => source.definitely_uncommitted(),
-            Self::Object(_) => true,
-            Self::MissingState { .. }
-            | Self::InvalidState { .. }
-            | Self::InvalidOutbound(_)
-            | Self::Preparation(_)
-            | Self::LocalUserBlob { .. }
-            | Self::MissingBlob { .. }
-            | Self::MissingSerialCoordination
-            | Self::SerialControlConflict { .. }
-            | Self::SequenceExhausted { .. }
-            | Self::AuthorExcluded { .. } => true,
-        }
-    }
-}
-
 async fn reject_excluded_merge_candidate(
     db: &Database,
     candidate: &StoreBatchCommitRef,
@@ -2376,17 +2356,6 @@ enum SerialHeadObservation {
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PreparedSerialControl {
-    pub base_head: VersionedObject,
-    pub commit: StoreBatchCommit,
-    pub commit_prepared: PreparedExactObject,
-    pub commit_ref: StoreBatchCommitRef,
-    pub head: StoreSerialHead,
-    pub authorization_after: SerialAuthorizationState,
-}
-
 pub(crate) struct SerialAuthorizationSnapshot {
     pub base: Option<StoreBatchCommitRef>,
     pub base_head: VersionedObject,
@@ -2432,136 +2401,6 @@ pub(crate) async fn current_serial_authorization_snapshot(
             })?,
         authorization,
     })
-}
-
-pub(crate) async fn prepare_serial_control(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    device_id: &str,
-    control: StoreControl,
-    keypair: &UserKeypair,
-) -> Result<PreparedSerialControl, StoreOutboundError> {
-    let snapshot = current_serial_authorization_snapshot(db, storage, coordination).await?;
-    let base = snapshot.base;
-    let base_head = snapshot.base_head;
-    let (root, registration_ref, registration, device_signer) =
-        load_local_store_authority(db, device_id, keypair).await?;
-    let store_root_hash = root.store_root_hash;
-    let seq = next_store_sequence(base.as_ref())?;
-    let coord = StoreCommitCoord::Serial { sequence: seq };
-    let order = StoreCommitOrder::Serial {
-        seq,
-        predecessor: match &base {
-            Some(reference) => StoreSerialPredecessor::Commit(reference.clone()),
-            None => StoreSerialPredecessor::Genesis {
-                root: root.clone(),
-                founder_registration: registration_ref.clone(),
-            },
-        },
-    };
-    let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-    let serial_position = match &order {
-        StoreCommitOrder::Serial { predecessor, .. } => predecessor.clone(),
-        StoreCommitOrder::MergeConcurrent { .. } => unreachable!(),
-    };
-    let membership_state = super::circle_control::StoreMembershipStateRef::serial(
-        serial_position,
-        resolved_devices.recovery,
-        &snapshot.authorization,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let context =
-        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
-    let commit = StoreBatchCommit::signed_with_control(
-        store_root_hash,
-        db.new_write_id(),
-        coord.clone(),
-        registration_ref.clone(),
-        &registration,
-        order,
-        membership_state,
-        device_state,
-        StoreOperationMembershipAuthority::Serial,
-        Some(control),
-        None,
-        &device_signer,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let prefix = commit_semantic_prefix(
-        commit.candidate_family(),
-        SERIAL_STREAM_ID,
-        seq,
-        commit.commit_hash(),
-    );
-    let slot = storage
-        .allocate_protocol_slot(&context, &prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let commit_prepared = storage
-        .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
-        .map_err(StoreObjectError::from)?;
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let root_value = super::store_objects::load_store_protocol_root(storage, &root)
-        .await?
-        .value;
-    super::store_pull::validate_serial_provider_admin_control(
-        storage,
-        &root,
-        &root_value,
-        commit.control(),
-    )
-    .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let authorization_after = snapshot
-        .authorization
-        .authorize_and_apply(&commit_ref, &commit, &registration)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let head = StoreSerialHead::signed(
-        store_root_hash,
-        StoreSerialHeadState::Commit {
-            author_registration: registration_ref,
-            commit: commit_ref.clone(),
-        },
-        &device_signer,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    Ok(PreparedSerialControl {
-        base_head,
-        commit,
-        commit_prepared,
-        commit_ref,
-        head,
-        authorization_after,
-    })
-}
-
-pub(crate) async fn activate_serial_control(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    prepared: &PreparedSerialControl,
-) -> Result<(), StoreOutboundError> {
-    activate_serial_commit_head(
-        db,
-        storage,
-        coordination,
-        &prepared.base_head,
-        &prepared.commit,
-        &prepared.commit_prepared,
-        &prepared.commit_ref,
-        &prepared.head,
-    )
-    .await?;
-    db.materialize_serial_control_commit(
-        prepared.commit.clone(),
-        prepared.commit_ref.clone(),
-        prepared.authorization_after.clone(),
-    )
-    .await?;
-    Ok(())
 }
 
 pub(crate) async fn activate_serial_commit_head(
@@ -2665,9 +2504,6 @@ pub(crate) async fn activate_serial_commit_head(
     let after = observe_serial_head(db, coordination).await?;
     if after.bytes() == Some(head_bytes.as_slice()) {
         return Ok(());
-    }
-    if let Err(Some(error)) = activation {
-        return Err(error);
     }
     let StoreCommitOrder::Serial {
         predecessor: expected,
@@ -3512,6 +3348,7 @@ async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreOutboun
 }
 
 pub(crate) enum StoreOperationBatch {
+    Control(StoreControl),
     Acknowledgement(super::store_commit::StoreAckRef),
     ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
     Attempt(DeviceJoinAttemptRef),
@@ -3912,6 +3749,46 @@ impl PreparedStoreOperationCommit {
         self.retained_authority_remote_objects(vec![authority])
     }
 
+    pub(crate) fn membership_control_remote_objects(
+        &self,
+        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        let expected = self
+            .commit
+            .control()
+            .map(StoreControl::introduced_wrapped_keys)
+            .unwrap_or_default();
+        if expected.len() != wraps.len()
+            || expected
+                .iter()
+                .zip(wraps)
+                .any(|(reference, prepared)| **reference != prepared.reference)
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "prepared membership wraps differ from the signed Store control".to_string(),
+            ));
+        }
+        let authorities = wraps
+            .iter()
+            .map(|prepared| {
+                let value = prepared.validate().map_err(StoreObjectError::from)?;
+                let canonical = serde_json::to_vec(&value).map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "serialize prepared membership wrap: {error}"
+                    ))
+                })?;
+                super::remote_object::RemoteObjectRecord::candidate_activated_membership_control_wrapped_store_key(
+                    prepared.reference.clone(),
+                    canonical,
+                    prepared.object.stored_bytes().to_vec(),
+                    self.reference.clone(),
+                )
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.retained_authority_remote_objects(authorities)
+    }
+
     pub(crate) fn retained_authority_remote_objects(
         &self,
         authorities: Vec<super::remote_object::RemoteObjectRecord>,
@@ -4071,6 +3948,20 @@ pub(crate) async fn prepare_store_operation_candidate(
         _ => None,
     };
     let commit = match batch {
+        StoreOperationBatch::Control(control) => StoreBatchCommit::signed_with_control(
+            store_root_hash,
+            db.new_write_id(),
+            plan.coord.clone(),
+            plan.registration_ref.clone(),
+            &plan.registration,
+            plan.order.clone(),
+            plan.membership_state.clone(),
+            plan.device_state.clone(),
+            plan.membership_authority.clone(),
+            Some(control),
+            None,
+            &plan.device_signer,
+        ),
         StoreOperationBatch::Acknowledgement(acknowledgement) => {
             StoreBatchCommit::signed_operations(
                 store_root_hash,
@@ -4345,6 +4236,13 @@ pub(crate) async fn publish_prepared_store_operation(
     prepared: Box<PreparedStoreOperationCommit>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = required_store_root(db).await?;
+    super::store_pull::validate_serial_control_wrapped_keys(
+        storage,
+        &root,
+        prepared.commit.control(),
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let device_operations = super::store_pull::load_local_commit_device_operations(
         db,
         storage,
@@ -4829,6 +4727,13 @@ fn retained_store_operation_objects(
         .into_iter()
         .chain(
             commit
+                .control()
+                .into_iter()
+                .flat_map(StoreControl::introduced_wrapped_keys)
+                .map(|reference| reference.object.clone()),
+        )
+        .chain(
+            commit
                 .device_exclusion_proposals()
                 .iter()
                 .map(|reference| reference.object.clone()),
@@ -4909,6 +4814,55 @@ pub(crate) async fn activate_store_operation_commit(
             ))
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn activate_test_serial_control_candidate(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    signer: &UserKeypair,
+    control: StoreControl,
+    wraps: Vec<super::wrapped_store_key::PreparedWrappedStoreKey>,
+) -> Result<PreparedStoreOperationCommit, StoreOutboundError> {
+    let plan =
+        prepare_store_operation_commit(db, storage, Some(coordination), device_id, signer, None)
+            .await?;
+    let candidate =
+        prepare_store_operation_candidate(db, storage, plan, StoreOperationBatch::Control(control))
+            .await?;
+    let remotes = candidate.membership_control_remote_objects(&wraps)?;
+    let plan_bytes = serde_json::to_vec(&candidate).map_err(|error| {
+        StoreOutboundError::InvalidOutbound(format!(
+            "serialize test Serial control candidate: {error}"
+        ))
+    })?;
+    let intent_hash = db
+        .stage_serial_membership_mutation(plan_bytes, b"test_serial_control".to_vec(), remotes)
+        .await?;
+    let root = required_store_root(db).await?;
+    super::membership_ops::publish_serial_membership_wraps(db, storage, &root, &candidate, &wraps)
+        .await
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    match publish_prepared_store_operation(
+        db,
+        storage,
+        Some(coordination),
+        Box::new(candidate.clone()),
+    )
+    .await?
+    {
+        StoreOperationPublicationOutcome::Activated(reference)
+            if reference == candidate.reference => {}
+        outcome => {
+            return Err(StoreOutboundError::InvalidOutbound(format!(
+                "test Serial control candidate did not activate: {outcome:?}"
+            )))
+        }
+    }
+    db.complete_membership_mutation(intent_hash).await?;
+    Ok(candidate)
 }
 
 #[cfg(test)]
@@ -5325,31 +5279,68 @@ mod tests {
         .await
         .expect("load competing Serial authorization");
         let member = UserKeypair::generate();
+        let root = db
+            .local_store_root_ref()
+            .await
+            .expect("read competing Store root")
+            .expect("competing Store root exists");
+        let member_pubkey = crate::keys::public_key_hex(&member);
+        let wrapped = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+            storage,
+            root.store_root_hash,
+            &member_pubkey,
+            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                &root.store_root_id.to_string(),
+                &member_pubkey,
+                authorization.key_generation,
+                b"competing Serial membership wrap".to_vec(),
+                signer,
+            ),
+        )
+        .await
+        .expect("prepare competing membership wrap");
         let entry = authorization
             .membership
-            .signed_set_member(
+            .signed_set_member_with_wrapped_key(
                 signer,
-                crate::keys::public_key_hex(&member),
+                member_pubkey,
                 None,
                 crate::sync::membership::MemberRole::Member,
+                wrapped.reference.clone(),
                 marker.to_string(),
             )
             .expect("sign competing membership control");
-        let prepared = prepare_serial_control(
+        let plan = prepare_store_operation_commit(
             db,
             storage,
-            storage.serial_coordination().expect("Serial coordination"),
+            Some(storage.serial_coordination().expect("Serial coordination")),
             &local_device_id(db).await,
-            StoreControl::SerialMembership { entry },
             signer,
+            None,
+        )
+        .await
+        .expect("prepare competing Serial operation");
+        let prepared = prepare_store_operation_candidate(
+            db,
+            storage,
+            plan,
+            StoreOperationBatch::Control(StoreControl::SerialMembership { entry }),
         )
         .await
         .expect("prepare exact competing Serial control");
         storage
-            .create_protocol_object(&prepared.commit_prepared)
+            .create_protocol_object(&wrapped.object)
+            .await
+            .expect("publish exact competing membership wrap");
+        storage
+            .create_protocol_object(&prepared.prepared)
             .await
             .expect("publish exact competing Serial commit");
-        prepared.head
+        prepared
+            .serial_publication_for_test()
+            .expect("competing candidate is Serial")
+            .1
+            .clone()
     }
 
     fn serial_commit_ref(head: &StoreSerialHead) -> Option<&StoreBatchCommitRef> {
@@ -6048,6 +6039,188 @@ mod tests {
                 crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn losing_serial_membership_wrap_becomes_protocol_inert_and_only_commit_is_deleted() {
+        let (home, storage, db, keypair, root, _pending) =
+            serial_fixture("serial-membership-wrap-loss").await;
+        let coordination = storage.serial_coordination().expect("Serial coordination");
+        let authorization = current_serial_authorization(&db, &storage, coordination)
+            .await
+            .expect("load Serial membership predecessor");
+        let member = UserKeypair::generate();
+        let member_pubkey = crate::keys::public_key_hex(&member);
+        let wrapped = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+            &storage,
+            root.store_root_hash,
+            &member_pubkey,
+            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                &root.store_root_id.to_string(),
+                &member_pubkey,
+                authorization.key_generation,
+                b"losing Serial membership wrap".to_vec(),
+                &keypair,
+            ),
+        )
+        .await
+        .expect("prepare losing membership wrap");
+        let entry = authorization
+            .membership
+            .signed_set_member_with_wrapped_key(
+                &keypair,
+                member_pubkey,
+                None,
+                crate::sync::membership::MemberRole::Member,
+                wrapped.reference.clone(),
+                "losing-membership-control".to_string(),
+            )
+            .expect("sign losing membership control");
+        let plan = prepare_store_operation_commit(
+            &db,
+            &storage,
+            Some(coordination),
+            &local_device_id(&db).await,
+            &keypair,
+            None,
+        )
+        .await
+        .expect("prepare losing membership operation");
+        let candidate = prepare_store_operation_candidate(
+            &db,
+            &storage,
+            plan,
+            StoreOperationBatch::Control(StoreControl::SerialMembership { entry }),
+        )
+        .await
+        .expect("prepare losing membership candidate");
+        let remotes = candidate
+            .membership_control_remote_objects(std::slice::from_ref(&wrapped))
+            .expect("close losing membership ownership");
+        let intent_hash = db
+            .stage_serial_membership_mutation(
+                serde_json::to_vec(&candidate).expect("serialize losing candidate"),
+                b"candidate_pending".to_vec(),
+                remotes,
+            )
+            .await
+            .expect("atomically stage losing membership ownership");
+        crate::sync::membership_ops::publish_serial_membership_wraps(
+            &db,
+            &storage,
+            &root,
+            &candidate,
+            std::slice::from_ref(&wrapped),
+        )
+        .await
+        .expect("publish authenticated losing membership wrap");
+        let competing = competing_head(&db, &storage, &keypair, "membership-wrap-winner").await;
+        home.replace_after_next_head_mutation(competing.to_bytes());
+
+        let StoreOperationPublicationOutcome::NonactivatedCandidate {
+            candidate: returned,
+            nonactivation,
+        } = publish_prepared_store_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            Box::new(candidate.clone()),
+        )
+        .await
+        .expect("verify losing membership candidate")
+        else {
+            panic!("competing Serial head must nonactivate the membership candidate")
+        };
+        assert_eq!(*returned, candidate);
+        let cleanup = db
+            .begin_serial_membership_candidate_nonactivation(
+                intent_hash,
+                candidate.reference.clone(),
+                vec![wrapped.reference.object.clone()],
+                b"candidate_nonactivating".to_vec(),
+                *nonactivation,
+            )
+            .await
+            .expect("terminalize losing membership candidate");
+        assert_eq!(cleanup.object, candidate.reference.object);
+        assert!(db
+            .protocol_inert_object(wrapped.reference.object.clone())
+            .await
+            .expect("read protocol-inert membership wrap")
+            .is_some());
+        crate::sync::store_objects::delete_exact_object(&storage, &cleanup.object)
+            .await
+            .expect("delete only the losing membership commit");
+        db.mark_candidate_cleanup_absent(cleanup.object)
+            .await
+            .expect("record exact losing commit absence");
+        db.complete_nonactivating_serial_membership_mutation(
+            intent_hash,
+            candidate.reference.clone(),
+            vec![wrapped.reference.object.clone()],
+        )
+        .await
+        .expect("complete losing membership ownership");
+        crate::sync::wrapped_store_key::load_wrapped_store_key(
+            &storage,
+            root.store_root_hash,
+            &wrapped.reference,
+        )
+        .await
+        .expect("protocol-inert wrap remains present but has no authority");
+    }
+
+    #[tokio::test]
+    async fn serial_control_rejects_an_exact_wrap_signed_for_another_store() {
+        let (_home, storage, db, keypair, root, _pending) =
+            serial_fixture("serial-membership-wrong-store-wrap").await;
+        let authorization = current_serial_authorization(
+            &db,
+            &storage,
+            storage.serial_coordination().expect("Serial coordination"),
+        )
+        .await
+        .expect("load Serial membership predecessor");
+        let member = UserKeypair::generate();
+        let member_pubkey = crate::keys::public_key_hex(&member);
+        let wrapped = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+            &storage,
+            root.store_root_hash,
+            &member_pubkey,
+            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                "another-store",
+                &member_pubkey,
+                authorization.key_generation,
+                b"wrong Store binding".to_vec(),
+                &keypair,
+            ),
+        )
+        .await
+        .expect("prepare exact wrong-Store wrap");
+        storage
+            .create_protocol_object(&wrapped.object)
+            .await
+            .expect("publish exact wrong-Store wrap");
+        let entry = authorization
+            .membership
+            .signed_set_member_with_wrapped_key(
+                &keypair,
+                member_pubkey,
+                None,
+                crate::sync::membership::MemberRole::Member,
+                wrapped.reference,
+                "wrong-store-membership-control".to_string(),
+            )
+            .expect("sign control naming wrong-Store wrap");
+        let control = StoreControl::SerialMembership { entry };
+
+        crate::sync::store_pull::validate_serial_control_wrapped_keys(
+            &storage,
+            &root,
+            Some(&control),
+        )
+        .await
+        .expect_err("exact membership wrap must authenticate its Store binding");
     }
 
     #[tokio::test]

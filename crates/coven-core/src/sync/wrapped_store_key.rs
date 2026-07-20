@@ -192,7 +192,11 @@ impl WrappedStoreKeyRef {
         Ok(())
     }
 
-    fn validate_value(&self, value: &WrappedStoreKey, bytes: &[u8]) -> Result<(), StorageError> {
+    pub(crate) fn validate_value(
+        &self,
+        value: &WrappedStoreKey,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
         self.validate_identity()?;
         if value.author_pubkey != self.owner_pubkey
             || value.generation != self.generation

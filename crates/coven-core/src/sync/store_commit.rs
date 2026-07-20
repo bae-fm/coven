@@ -1177,6 +1177,23 @@ impl StoreControl {
             Self::ProviderAdmin { .. } => None,
         }
     }
+
+    pub(crate) fn introduced_wrapped_keys(
+        &self,
+    ) -> Vec<&super::wrapped_store_key::WrappedStoreKeyRef> {
+        match self {
+            Self::SerialMembership { entry } => match &entry.change {
+                super::membership::SerialMembershipChange::SetMember { wrapped_key, .. } => {
+                    vec![wrapped_key]
+                }
+                super::membership::SerialMembershipChange::RemoveMember { .. } => Vec::new(),
+            },
+            Self::SerialMembershipAndKeyRotation { wrapped_keys, .. } => {
+                wrapped_keys.iter().collect()
+            }
+            Self::ProviderAdmin { .. } => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
