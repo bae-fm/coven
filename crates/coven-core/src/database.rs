@@ -2861,17 +2861,19 @@ fn begin_merge_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
-    winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
+    nonactivation: &crate::sync::remote_object::CandidateNonactivation,
     include_indexed_objects: bool,
 ) -> Result<(), DbError> {
-    let nonactivation = crate::sync::remote_object::CandidateNonactivation {
-        candidate: crate::sync::store_commit::StoreBatchCommitDeletionTarget {
-            coord: candidate.reference.coord.clone(),
-            object: candidate.reference.object.clone(),
-            canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
-        },
-        proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { winner_head },
-    };
+    if nonactivation
+        .reference()
+        .map_err(|error| DbError::Message(error.to_string()))?
+        != candidate.reference
+        || nonactivation.candidate().canonical_signed_bytes != candidate.canonical_signed_bytes
+    {
+        return Err(DbError::Message(
+            "verified Merge nonactivation names another prepared candidate".to_string(),
+        ));
+    }
     let mut object_ids = if include_indexed_objects {
         let mut statement = conn
             .prepare(
@@ -2901,7 +2903,7 @@ fn begin_merge_candidate_nonactivation_on(
     }
     let commit_object_id = remote_object_id(&candidate.reference.object);
     let _cleanup_target =
-        begin_remote_candidate_nonactivation_on(conn, commit_object_id, nonactivation)?;
+        begin_remote_candidate_nonactivation_on(conn, commit_object_id, nonactivation.clone())?;
     Ok(())
 }
 
@@ -7057,7 +7059,17 @@ impl Database {
     pub(crate) async fn complete_prepared_store_write(
         &self,
         accepted: StoreBatchCommitRef,
+        nonactivations: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<(), DbError> {
+        let nonactivations = nonactivations
+            .into_iter()
+            .map(|verified| {
+                verified
+                    .candidate_reference()
+                    .map(|reference| (reference, verified.into_durable()))
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let statuses = self.state.write_statuses.clone();
         let gates = self.state.gates.clone();
         let synced_tables = self.state.synced_tables.clone();
@@ -7144,15 +7156,17 @@ impl Database {
                         })?;
                     update_remote_object_on(&tx, object_id, &remote)?;
                 }
-                let winner_head = crate::sync::store_commit::StoreDeviceHeadRef {
-                    head_hash: authority.head.head_hash(),
-                    object: authority.head_prepared.reference().clone(),
-                };
+                let nonactivation = nonactivations.get(&candidate.reference).ok_or_else(|| {
+                    DbError::Message(
+                        "accepted Merge abandonment has no verified candidate nonactivation"
+                            .to_string(),
+                    )
+                })?;
                 begin_merge_candidate_nonactivation_on(
                     &tx,
                     &WriteId::from_generated(stored_write_id.clone()),
                     &candidate,
-                    winner_head.clone(),
+                    nonactivation,
                     true,
                 )?;
                 Self::record_materialized_commit_on(&tx, &authority.commit, &accepted)?;
@@ -7188,7 +7202,7 @@ impl Database {
                 let blocked = WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
                     reason: format!(
                         "candidate abandonment {} is accepted; exact cleanup is pending",
-                        winner_head.head_hash
+                        authority.head.head_hash()
                     ),
                 });
                 let write_id = authority.commit.write_id.clone();
@@ -7348,9 +7362,47 @@ impl Database {
     pub(crate) async fn mark_merge_candidate_conflict(
         &self,
         write_id: WriteId,
-        winner_commit: StoreBatchCommitRef,
-        winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
+        nonactivations: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<(), DbError> {
+        let first = nonactivations.first().ok_or_else(|| {
+            DbError::Message("Merge candidate conflict has no verified candidates".to_string())
+        })?;
+        let winner_commit = first
+            .merge_winner_commit()
+            .cloned()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let winner_head = match first.proof() {
+            crate::sync::remote_object::CandidateNonactivationProof::MergeWinner {
+                winner_head,
+            } => winner_head.clone(),
+            crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
+                ..
+            } => {
+                return Err(DbError::Message(
+                    "Merge candidate conflict carries Serial evidence".to_string(),
+                ));
+            }
+        };
+        let winner_proof = first.proof().clone();
+        let nonactivations = nonactivations
+            .into_iter()
+            .map(|verified| {
+                if verified
+                    .merge_winner_commit()
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    != &winner_commit
+                    || verified.proof() != &winner_proof
+                {
+                    return Err(DbError::Message(
+                        "Merge candidate conflict observations name different winners".to_string(),
+                    ));
+                }
+                verified
+                    .candidate_reference()
+                    .map(|reference| (reference, verified.into_durable()))
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let statuses = self.state.write_statuses.clone();
         let notified_write_id = write_id.clone();
         self.call(move |conn| {
@@ -7390,19 +7442,33 @@ impl Database {
                 ));
             }
             if matches!(&prepared, PreparedStoreWriteState::MergeAbandonment { .. }) {
+                let publication_nonactivation =
+                    nonactivations.get(&publication.reference).ok_or_else(|| {
+                        DbError::Message(
+                            "Merge abandonment authority has no verified nonactivation".to_string(),
+                        )
+                    })?;
                 begin_merge_candidate_nonactivation_on(
                     &tx,
                     &write_id,
                     &publication,
-                    winner_head.clone(),
+                    publication_nonactivation,
                     false,
                 )?;
                 if winner_commit != prepared_candidate.reference {
+                    let candidate_nonactivation = nonactivations
+                        .get(&prepared_candidate.reference)
+                        .ok_or_else(|| {
+                            DbError::Message(
+                                "Merge abandonment candidate has no verified nonactivation"
+                                    .to_string(),
+                            )
+                        })?;
                     begin_merge_candidate_nonactivation_on(
                         &tx,
                         &write_id,
                         &prepared_candidate,
-                        winner_head.clone(),
+                        candidate_nonactivation,
                         true,
                     )?;
                 }
@@ -7433,11 +7499,18 @@ impl Database {
                     ));
                 }
             } else {
+                let candidate_nonactivation = nonactivations
+                    .get(&prepared_candidate.reference)
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "Merge candidate has no verified nonactivation".to_string(),
+                        )
+                    })?;
                 begin_merge_candidate_nonactivation_on(
                     &tx,
                     &write_id,
                     &prepared_candidate,
-                    winner_head.clone(),
+                    candidate_nonactivation,
                     true,
                 )?;
             }
@@ -7781,6 +7854,7 @@ impl Database {
         branch_id: &PendingBranchId,
         plan: crate::sync::store_pull::SerialResolutionPlan,
     ) -> Result<Vec<WriteId>, DbError> {
+        let (head, _head_object, commits) = plan.into_parts();
         let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
             tx,
             synced_tables,
@@ -7886,7 +7960,7 @@ impl Database {
                 .map_err(|error| DbError::Message(format!("reverse Serial branch: {error}")))?;
         }
         let mut predecessor = branch_base;
-        for resolution in plan.commits {
+        for resolution in commits {
             let expected_seq = match predecessor.as_ref() {
                 Some(reference) => reference.coord.sequence().checked_add(1).ok_or_else(|| {
                     DbError::Message("Serial resolution sequence overflow".to_string())
@@ -7915,7 +7989,7 @@ impl Database {
             )?;
             predecessor = Some(resolution.commit_ref);
         }
-        let head_commit = match plan.head.state {
+        let head_commit = match head.state {
             StoreSerialHeadState::Commit { commit, .. } => Some(commit),
             StoreSerialHeadState::Genesis { .. } => None,
         };
@@ -8425,8 +8499,12 @@ impl Database {
     pub(crate) async fn begin_outbound_store_ack_nonactivation(
         &self,
         expected: StoreAckRef,
-        proof: crate::sync::remote_object::CandidateNonactivationProof,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
+        let verified_candidate = nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let nonactivation = nonactivation.into_durable();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
@@ -8446,7 +8524,13 @@ impl Database {
                     ));
                 }
             };
-            let head = match (&proof, candidate.merge_head_ref()) {
+            if candidate.reference != verified_candidate {
+                return Err(DbError::Message(
+                    "verified nonactivation names another Store acknowledgement candidate"
+                        .to_string(),
+                ));
+            }
+            let head = match (nonactivation.proof(), candidate.merge_head_ref()) {
                 (
                     crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. },
                     Some(head),
@@ -8464,28 +8548,25 @@ impl Database {
                     ));
                 }
             };
-            let target = crate::sync::store_commit::StoreBatchCommitDeletionTarget {
-                coord: candidate.reference.coord.clone(),
-                object: candidate.reference.object.clone(),
-                canonical_signed_bytes: candidate.commit.to_bytes(),
-            };
-            let nonactivation = crate::sync::remote_object::CandidateNonactivation {
-                candidate: target,
-                proof,
-            };
+            if nonactivation.candidate().canonical_signed_bytes != candidate.commit.to_bytes() {
+                return Err(DbError::Message(
+                    "verified nonactivation bytes differ from the Store acknowledgement candidate"
+                        .to_string(),
+                ));
+            }
             if already_nonactivating {
                 let commit_id = remote_object_id(&candidate.reference.object);
                 let commit_remote = load_remote_object_on(&tx, commit_id)?;
                 let proof_matches = commit_remote
                     .candidate_nonactivation_proof(&candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
-                    == Some(&nonactivation.proof);
+                    == Some(nonactivation.proof());
                 let inert = load_protocol_inert_object_on(&tx, remote_object_id(&expected.object))?;
                 if !proof_matches
                     || inert
                         .candidate_nonactivation_proof(&candidate.reference)
                         .map_err(|error| DbError::Message(error.to_string()))?
-                        != Some(&nonactivation.proof)
+                        != Some(nonactivation.proof())
                 {
                     return Err(DbError::Message(
                         "nonactivating Store acknowledgement carries different durable proof"
@@ -8497,7 +8578,7 @@ impl Database {
                     if head_remote
                         .candidate_nonactivation_proof(&candidate.reference)
                         .map_err(|error| DbError::Message(error.to_string()))?
-                        != Some(&nonactivation.proof)
+                        != Some(nonactivation.proof())
                     {
                         return Err(DbError::Message(
                             "nonactivating Store acknowledgement head carries different durable proof"
@@ -9264,7 +9345,7 @@ impl Database {
         &self,
         expected: DurableStoreReclaimOperation,
         replacement: crate::sync::store_outbound::PreparedStoreOperationCommit,
-        proof: crate::sync::remote_object::CandidateNonactivationProof,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let object = expected.object().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim operation has no replaceable object".to_string())
@@ -9272,6 +9353,17 @@ impl Database {
         let losing_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim operation has no losing candidate".to_string())
         })?;
+        if nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != losing_candidate.reference
+        {
+            return Err(DbError::Message(
+                "verified nonactivation names another Store reclaim candidate".to_string(),
+            ));
+        }
+        let nonactivation = nonactivation.into_durable();
+        let proof = nonactivation.proof().clone();
         let loss = crate::sync::store_reclaim_journal::StoreReclaimCandidateLoss {
             candidate: Box::new(losing_candidate.clone()),
             proof: proof.clone(),
@@ -9302,12 +9394,11 @@ impl Database {
             }
         };
         next.validate().map_err(store_reclaim_journal_error)?;
-        let nonactivation = crate::sync::remote_object::CandidateNonactivation::for_candidate(
-            &losing_candidate.reference,
-            &losing_candidate.commit,
-            proof,
-        )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        if nonactivation.candidate().canonical_signed_bytes != losing_candidate.commit.to_bytes() {
+            return Err(DbError::Message(
+                "verified nonactivation bytes differ from the Store reclaim candidate".to_string(),
+            ));
+        }
         let replacement_remotes = object
             .remote_objects(&replacement)
             .map_err(store_reclaim_journal_error)?;
@@ -9704,14 +9795,30 @@ impl Database {
     pub(crate) async fn begin_outbound_store_device_exclusion_nonactivation(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        proof: crate::sync::remote_object::CandidateNonactivationProof,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let (next, nonactivation) = expected
-            .begin_nonactivation(proof)
-            .map_err(store_device_exclusion_journal_error)?;
         let candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store-device exclusion has no losing candidate".to_string())
         })?;
+        if nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != candidate.reference
+        {
+            return Err(DbError::Message(
+                "verified nonactivation names another Store-device exclusion candidate".to_string(),
+            ));
+        }
+        let nonactivation = nonactivation.into_durable();
+        let (next, nonactivation) = expected
+            .begin_nonactivation(nonactivation)
+            .map_err(store_device_exclusion_journal_error)?;
+        if nonactivation.candidate().canonical_signed_bytes != candidate.commit.to_bytes() {
+            return Err(DbError::Message(
+                "verified nonactivation bytes differ from the Store-device exclusion candidate"
+                    .to_string(),
+            ));
+        }
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
@@ -9759,11 +9866,31 @@ impl Database {
         &self,
         expected: DurableStoreDeviceExclusionOperation,
         replacement: crate::sync::store_outbound::PreparedStoreOperationCommit,
-        proof: crate::sync::remote_object::CandidateNonactivationProof,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let expected_candidate = expected.candidate().cloned().ok_or_else(|| {
+            DbError::Message("Store-device exclusion has no losing candidate".to_string())
+        })?;
+        if nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != expected_candidate.reference
+        {
+            return Err(DbError::Message(
+                "verified nonactivation names another Store-device exclusion candidate".to_string(),
+            ));
+        }
+        let nonactivation = nonactivation.into_durable();
         let (next, nonactivation) = expected
-            .begin_replacement(replacement, proof)
+            .begin_replacement(replacement, nonactivation)
             .map_err(store_device_exclusion_journal_error)?;
+        if nonactivation.candidate().canonical_signed_bytes != expected_candidate.commit.to_bytes()
+        {
+            return Err(DbError::Message(
+                "verified nonactivation bytes differ from the Store-device exclusion candidate"
+                    .to_string(),
+            ));
+        }
         let DurableStoreDeviceExclusionOperation::ReplacingCandidate {
             candidate, losing, ..
         } = &next
@@ -16393,19 +16520,20 @@ impl Database {
         plan: &crate::sync::store_pull::SerialResolutionPlan,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         let accepted_refs = plan
-            .commits
+            .commits()
             .iter()
             .map(|commit| commit.commit_ref.clone())
             .collect::<Vec<_>>();
         let accepted_commits = plan
-            .commits
+            .commits()
             .iter()
             .map(|commit| commit.commit.clone())
             .collect::<Vec<_>>();
-        let head = plan.head.clone();
-        let head_bytes = plan.head_object.bytes.clone();
-        let observed_version_hash =
-            ObjectHash::digest(plan.head_object.version.cloud().as_provider().as_bytes());
+        let head = plan.head().clone();
+        let head_bytes = plan.head_object().bytes.clone();
+        let verified_suffix = plan
+            .verified_suffix()
+            .map_err(|error| DbError::Message(error.to_string()))?;
         self.call(move |conn| {
             if head.to_bytes() != head_bytes {
                 return Err(DbError::Message(
@@ -16538,24 +16666,37 @@ impl Database {
                     "accepted Serial suffix begins with the losing candidate".to_string(),
                 ));
             }
-            let suffix = crate::sync::remote_object::SerialAcceptedSuffix {
-                predecessor: branch_base,
-                commits: accepted_refs,
-                canonical_signed_head_bytes: head_bytes,
-                observed_version_hash,
-            };
+            if verified_suffix.durable().predecessor != branch_base
+                || verified_suffix.durable().commits != accepted_refs
+                || verified_suffix.durable().canonical_signed_head_bytes != head_bytes
+            {
+                return Err(DbError::Message(
+                    "verified Serial suffix differs from the cleanup branch".to_string(),
+                ));
+            }
+            let root = required_store_root_authority_on(conn)?;
+            let verified_losing = losing_targets
+                .iter()
+                .zip(prepared.iter())
+                .map(|(target, (_, commit, _, _))| {
+                    let author = load_activated_registration_on(
+                        conn,
+                        &root,
+                        &commit.author_registration,
+                    )?;
+                    Ok((target.clone(), author))
+                })
+                .collect::<Result<Vec<_>, DbError>>()?;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut exclusive_cleanup = Vec::new();
             let mut commit_cleanup = Vec::new();
             for (index, (write_id, commit, reference, _)) in prepared.iter().enumerate() {
-                let proof = crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
-                    accepted_suffix: suffix.clone(),
-                    losing_prefix: losing_targets[..=index].to_vec(),
-                };
-                let nonactivation = crate::sync::remote_object::CandidateNonactivation {
-                    candidate: losing_targets[index].clone(),
-                    proof,
-                };
+                let nonactivation = crate::sync::remote_object::VerifiedCandidateNonactivation::serial(
+                    &verified_suffix,
+                    verified_losing[..=index].to_vec(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?
+                .into_durable();
                 let mut object_statement = tx
                     .prepare(
                         "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
@@ -16622,7 +16763,7 @@ impl Database {
                 DbError::Message("Serial candidate abandonment is not prepared".to_string())
             })?;
         let accepted_refs = plan
-            .commits
+            .commits()
             .iter()
             .map(|commit| commit.commit_ref.clone())
             .collect::<Vec<_>>();
@@ -16642,10 +16783,10 @@ impl Database {
         if accepted_refs.first() == Some(&authority_ref) {
             return Ok(None);
         }
-        let head_bytes = plan.head_object.bytes.clone();
-        if plan.head.to_bytes() != head_bytes
+        let head_bytes = plan.head_object().bytes.clone();
+        if plan.head().to_bytes() != head_bytes
             || !matches!(
-                &plan.head.state,
+                &plan.head().state,
                 StoreSerialHeadState::Commit { commit, .. }
                     if Some(commit) == accepted_refs.last()
             )
@@ -16655,7 +16796,7 @@ impl Database {
             ));
         }
         let mut predecessor = prepared.base.clone();
-        for commit in &plan.commits {
+        for commit in plan.commits() {
             commit
                 .commit_ref
                 .verify_commit(&commit.commit)
@@ -16672,14 +16813,17 @@ impl Database {
             object: authority_ref.object.clone(),
             canonical_signed_bytes: prepared.authority.bytes.clone(),
         };
-        let suffix = crate::sync::remote_object::SerialAcceptedSuffix {
-            predecessor: prepared.base,
-            commits: accepted_refs,
-            canonical_signed_head_bytes: head_bytes,
-            observed_version_hash: ObjectHash::digest(
-                plan.head_object.version.cloud().as_provider().as_bytes(),
-            ),
-        };
+        let verified_suffix = plan
+            .verified_suffix()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if verified_suffix.durable().predecessor != prepared.base
+            || verified_suffix.durable().commits != accepted_refs
+            || verified_suffix.durable().canonical_signed_head_bytes != head_bytes
+        {
+            return Err(DbError::Message(
+                "verified Serial suffix differs from the abandonment branch".to_string(),
+            ));
+        }
         let expected_state = prepared.durable_state;
         self.call(move |conn| {
             let state_matches: bool = conn
@@ -16693,23 +16837,24 @@ impl Database {
                 .map_err(DbError::from)?;
             if !state_matches {
                 return Err(DbError::Message(
-                    "Serial abandonment durable state changed before authority cleanup"
-                        .to_string(),
+                    "Serial abandonment durable state changed before authority cleanup".to_string(),
                 ));
             }
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let object_id = remote_object_id(&authority_ref.object);
-            let target = begin_remote_candidate_nonactivation_on(
+            let root = required_store_root_authority_on(&tx)?;
+            let author = load_activated_registration_on(
                 &tx,
-                object_id,
-                crate::sync::remote_object::CandidateNonactivation {
-                    candidate: authority_target.clone(),
-                    proof: crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
-                        accepted_suffix: suffix,
-                        losing_prefix: vec![authority_target],
-                    },
-                },
+                &root,
+                &prepared.authority.value.author_registration,
             )?;
+            let nonactivation = crate::sync::remote_object::VerifiedCandidateNonactivation::serial(
+                &verified_suffix,
+                vec![(authority_target, author)],
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .into_durable();
+            let target = begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation)?;
             tx.commit().map_err(DbError::from)?;
             Ok(target.map(|object| CandidateCleanupObject { object }))
         })
@@ -16741,7 +16886,7 @@ impl Database {
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let authority_accepted = plan
-            .commits
+            .commits()
             .first()
             .is_some_and(|commit| commit.commit_ref == authority_ref);
         let expected_state = prepared.durable_state;

@@ -549,7 +549,7 @@ fn validate_replacement(
         .reference
         .verify_commit(&losing.candidate.commit)
         .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
-    super::remote_object::CandidateNonactivation::for_candidate(
+    super::remote_object::CandidateNonactivation::validate_durable_shape(
         &losing.candidate.reference,
         &losing.candidate.commit,
         losing.proof.clone(),

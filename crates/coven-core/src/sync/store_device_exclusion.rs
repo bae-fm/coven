@@ -345,19 +345,23 @@ impl DurableStoreDeviceExclusionOperation {
 
     pub(crate) fn begin_nonactivation(
         &self,
-        proof: CandidateNonactivationProof,
+        nonactivation: CandidateNonactivation,
     ) -> Result<(Self, CandidateNonactivation), StoreDeviceExclusionJournalError> {
         let Self::CandidatePrepared { object, candidate } = self else {
             return Err(StoreDeviceExclusionJournalError::Invalid(
                 "only a prepared exclusion candidate can become nonactivating".to_string(),
             ));
         };
-        let nonactivation = CandidateNonactivation::for_candidate(
-            &candidate.reference,
-            &candidate.commit,
-            proof.clone(),
-        )
-        .map_err(StoreDeviceExclusionJournalError::RemoteObject)?;
+        if nonactivation
+            .reference()
+            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?
+            != candidate.reference
+        {
+            return Err(StoreDeviceExclusionJournalError::Invalid(
+                "exclusion nonactivation names another candidate".to_string(),
+            ));
+        }
+        let proof = nonactivation.proof().clone();
         let operation = Self::CandidateNonactivating {
             object: object.clone(),
             candidate: candidate.clone(),
@@ -370,7 +374,7 @@ impl DurableStoreDeviceExclusionOperation {
     pub(crate) fn begin_replacement(
         &self,
         replacement: PreparedStoreOperationCommit,
-        proof: CandidateNonactivationProof,
+        nonactivation: CandidateNonactivation,
     ) -> Result<(Self, CandidateNonactivation), StoreDeviceExclusionJournalError> {
         let Self::CandidatePrepared { object, candidate } = self else {
             return Err(StoreDeviceExclusionJournalError::Invalid(
@@ -382,12 +386,16 @@ impl DurableStoreDeviceExclusionOperation {
                 "an exclusion proposal cannot move to another predecessor".to_string(),
             ));
         }
-        let nonactivation = CandidateNonactivation::for_candidate(
-            &candidate.reference,
-            &candidate.commit,
-            proof.clone(),
-        )
-        .map_err(StoreDeviceExclusionJournalError::RemoteObject)?;
+        if nonactivation
+            .reference()
+            .map_err(StoreDeviceExclusionJournalError::RemoteObject)?
+            != candidate.reference
+        {
+            return Err(StoreDeviceExclusionJournalError::Invalid(
+                "replacement exclusion nonactivation names another candidate".to_string(),
+            ));
+        }
+        let proof = nonactivation.proof().clone();
         let operation = Self::ReplacingCandidate {
             object: object.clone(),
             candidate: replacement,
@@ -441,7 +449,7 @@ impl DurableStoreDeviceExclusionOperation {
             ..
         }) = self
         {
-            CandidateNonactivation::for_candidate(
+            CandidateNonactivation::validate_durable_shape(
                 &candidate.reference,
                 &candidate.commit,
                 proof.clone(),
@@ -463,7 +471,7 @@ impl DurableStoreDeviceExclusionOperation {
                     "replacement exclusion candidate changes its exact outcome".to_string(),
                 ));
             }
-            CandidateNonactivation::for_candidate(
+            CandidateNonactivation::validate_durable_shape(
                 &losing.candidate.reference,
                 &losing.candidate.commit,
                 losing.proof.clone(),
@@ -962,7 +970,7 @@ fn drive_device_exclusion<'a>(
 enum DeviceExclusionPublicationProgress {
     Completed(StoreDeviceExclusionResult),
     Continue,
-    ReplacementRequired(CandidateNonactivationProof),
+    ReplacementRequired(super::remote_object::VerifiedCandidateNonactivation),
 }
 
 async fn publish_device_exclusion_candidate(
@@ -999,7 +1007,10 @@ async fn publish_device_exclusion_candidate(
             .await?;
             Ok(DeviceExclusionPublicationProgress::Continue)
         }
-        StoreOperationPublicationOutcome::NonactivatedCandidate { candidate, proof } => {
+        StoreOperationPublicationOutcome::NonactivatedCandidate {
+            candidate,
+            nonactivation,
+        } => {
             if operation.candidate() != Some(candidate.as_ref()) {
                 return Err(StoreDeviceExclusionError::InvalidState(
                     "publication conflict names another exclusion candidate".to_string(),
@@ -1010,12 +1021,12 @@ async fn publish_device_exclusion_candidate(
                 DurableStoreDeviceExclusionObject::Outcome { .. }
             ) {
                 return Ok(DeviceExclusionPublicationProgress::ReplacementRequired(
-                    proof.as_ref().clone(),
+                    nonactivation.as_ref().clone(),
                 ));
             } else {
                 **operation = Box::pin(db.begin_outbound_store_device_exclusion_nonactivation(
                     operation.as_ref().clone(),
-                    proof.as_ref().clone(),
+                    nonactivation.as_ref().clone(),
                 ))
                 .await?;
             }
@@ -1036,7 +1047,7 @@ async fn replace_device_exclusion_candidate(
     coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
-    proof: CandidateNonactivationProof,
+    nonactivation: super::remote_object::VerifiedCandidateNonactivation,
 ) -> Result<(), StoreDeviceExclusionError> {
     let replacement = Box::pin(prepare_replacement_candidate(
         db,
@@ -1049,7 +1060,7 @@ async fn replace_device_exclusion_candidate(
     **operation = Box::pin(db.begin_outbound_store_device_exclusion_replacement(
         operation.as_ref().clone(),
         replacement,
-        proof,
+        nonactivation,
     ))
     .await?;
     Ok(())

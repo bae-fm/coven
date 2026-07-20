@@ -309,6 +309,32 @@ impl StoreBatchCommitDeletionTarget {
         expected_store_root_hash: ObjectHash,
         author: &StoreDeviceRegistration,
     ) -> Result<StoreBatchCommit, StoreProtocolError> {
+        let commit = self.verify_exact_candidate(expected_store_root_hash, author)?;
+        if matches!(
+            &commit.body,
+            StoreCommitBody::SerialRecoveryActivation { .. }
+                | StoreCommitBody::AbandonCandidates { .. }
+        ) {
+            return Err(StoreProtocolError::Malformed(
+                "retained authority cannot be a candidate cleanup target".to_string(),
+            ));
+        }
+        Ok(commit)
+    }
+
+    pub(crate) fn verify_nonactivation_candidate(
+        &self,
+        expected_store_root_hash: ObjectHash,
+        author: &StoreDeviceRegistration,
+    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+        self.verify_exact_candidate(expected_store_root_hash, author)
+    }
+
+    fn verify_exact_candidate(
+        &self,
+        expected_store_root_hash: ObjectHash,
+        author: &StoreDeviceRegistration,
+    ) -> Result<StoreBatchCommit, StoreProtocolError> {
         self.object
             .verify(&self.canonical_signed_bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
@@ -317,15 +343,6 @@ impl StoreBatchCommitDeletionTarget {
         if commit.to_bytes() != self.canonical_signed_bytes {
             return Err(StoreProtocolError::Malformed(
                 "candidate commit bytes are not canonical".to_string(),
-            ));
-        }
-        if matches!(
-            &commit.body,
-            StoreCommitBody::SerialRecoveryActivation { .. }
-                | StoreCommitBody::AbandonCandidates { .. }
-        ) {
-            return Err(StoreProtocolError::Malformed(
-                "retained authority cannot be a candidate cleanup target".to_string(),
             ));
         }
         commit.verify_at(expected_store_root_hash, &self.coord, author)?;

@@ -1515,16 +1515,39 @@ pub(crate) use super::store_commit::StoreBatchCommitDeletionTarget;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CandidateNonactivation {
-    pub(crate) candidate: StoreBatchCommitDeletionTarget,
-    pub(crate) proof: CandidateNonactivationProof,
+    candidate: StoreBatchCommitDeletionTarget,
+    proof: CandidateNonactivationProof,
 }
 
 impl CandidateNonactivation {
-    pub(crate) fn for_candidate(
+    pub(crate) fn candidate(&self) -> &StoreBatchCommitDeletionTarget {
+        &self.candidate
+    }
+
+    pub(crate) fn proof(&self) -> &CandidateNonactivationProof {
+        &self.proof
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unverified_for_test(
+        candidate: StoreBatchCommitDeletionTarget,
+        proof: CandidateNonactivationProof,
+    ) -> Self {
+        Self { candidate, proof }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn proof_mut_for_test(&mut self) -> &mut CandidateNonactivationProof {
+        &mut self.proof
+    }
+
+    /// Checks the shape of a receipt already admitted through
+    /// `VerifiedCandidateNonactivation`; it does not recreate the live observation.
+    pub(crate) fn validate_durable_shape(
         candidate: &StoreBatchCommitRef,
         commit: &super::store_commit::StoreBatchCommit,
         proof: CandidateNonactivationProof,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<(), RemoteObjectRecordError> {
         let value = Self {
             candidate: StoreBatchCommitDeletionTarget {
                 coord: candidate.coord.clone(),
@@ -1533,8 +1556,7 @@ impl CandidateNonactivation {
             },
             proof,
         };
-        value.validate()?;
-        Ok(value)
+        value.validate()
     }
 
     fn validate(&self) -> Result<(), RemoteObjectRecordError> {
@@ -1567,6 +1589,163 @@ impl CandidateNonactivation {
             self.candidate.object.clone(),
         )
         .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedCandidateNonactivation {
+    evidence: Box<VerifiedCandidateNonactivationEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VerifiedCandidateNonactivationEvidence {
+    Merge {
+        durable: CandidateNonactivation,
+        winner_commit: StoreBatchCommitRef,
+    },
+    Serial {
+        durable: CandidateNonactivation,
+    },
+}
+
+impl VerifiedCandidateNonactivation {
+    pub(crate) fn merge(
+        observation: &super::store_outbound::VerifiedMergeWinner,
+        candidate: StoreBatchCommitDeletionTarget,
+        author: &super::store_commit::StoreDeviceRegistration,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let commit = candidate
+            .verify_nonactivation_candidate(observation.store_root_hash(), author)
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let expected = observation.expected();
+        let expected_commit = observation.expected_commit();
+        let winner = observation.winner();
+        let winner_prepared = observation.winner_prepared();
+        let winner_commit = observation.winner_commit();
+        if expected.store_root_hash != observation.store_root_hash()
+            || commit.store_root_hash != observation.store_root_hash()
+            || expected.author_registration != commit.author_registration
+            || expected.commit.coord != reference.coord
+            || expected_commit.author_registration != commit.author_registration
+            || expected_commit.order.predecessor() != commit.order.predecessor()
+            || winner.store_root_hash != observation.store_root_hash()
+            || winner.author_registration != expected.author_registration
+            || winner.commit.coord != expected.commit.coord
+            || winner.successor.activation != expected.successor.activation
+            || winner.successor.predecessor != expected.successor.predecessor
+            || winner_prepared.reference().slot() != observation.expected_slot()
+            || winner.commit == reference
+            || winner.commit.commit_hash != winner_commit.commit_hash()
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "Merge winner observation is not bound to the losing candidate's exact activation point"
+                    .to_string(),
+            ));
+        }
+        winner
+            .commit
+            .verify_commit(winner_commit)
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let value = Self {
+            evidence: Box::new(VerifiedCandidateNonactivationEvidence::Merge {
+                durable: CandidateNonactivation {
+                    candidate,
+                    proof: CandidateNonactivationProof::MergeWinner {
+                        winner_head: super::store_commit::StoreDeviceHeadRef {
+                            head_hash: winner.head_hash(),
+                            object: winner_prepared.reference().clone(),
+                        },
+                    },
+                },
+                winner_commit: winner.commit.clone(),
+            }),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn serial(
+        observation: &super::store_pull::VerifiedSerialAcceptedSuffix,
+        losing: Vec<(
+            StoreBatchCommitDeletionTarget,
+            super::store_commit::StoreDeviceRegistration,
+        )>,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        if losing.is_empty() {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "losing Serial prefix is empty".to_string(),
+            ));
+        }
+        let mut verified = Vec::with_capacity(losing.len());
+        for (target, author) in losing {
+            let commit = target
+                .verify_nonactivation_candidate(observation.store_root_hash(), &author)
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+            verified.push((target, commit));
+        }
+        let candidate = verified
+            .last()
+            .expect("checked nonempty Serial prefix")
+            .0
+            .clone();
+        let value = Self {
+            evidence: Box::new(VerifiedCandidateNonactivationEvidence::Serial {
+                durable: CandidateNonactivation {
+                    candidate,
+                    proof: CandidateNonactivationProof::SerialImmediateSuccessor {
+                        accepted_suffix: observation.durable().clone(),
+                        losing_prefix: verified.into_iter().map(|(target, _)| target).collect(),
+                    },
+                },
+            }),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn candidate_reference(
+        &self,
+    ) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
+        self.durable().reference()
+    }
+
+    pub(crate) fn proof(&self) -> &CandidateNonactivationProof {
+        &self.durable().proof
+    }
+
+    pub(crate) fn merge_winner_commit(
+        &self,
+    ) -> Result<&StoreBatchCommitRef, RemoteObjectRecordError> {
+        match self.evidence.as_ref() {
+            VerifiedCandidateNonactivationEvidence::Merge { winner_commit, .. } => {
+                Ok(winner_commit)
+            }
+            VerifiedCandidateNonactivationEvidence::Serial { .. } => {
+                Err(RemoteObjectRecordError::InvalidProof(
+                    "Serial candidate nonactivation has no Merge winner".to_string(),
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn into_durable(self) -> CandidateNonactivation {
+        match *self.evidence {
+            VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
+            | VerifiedCandidateNonactivationEvidence::Serial { durable } => durable,
+        }
+    }
+
+    fn durable(&self) -> &CandidateNonactivation {
+        match self.evidence.as_ref() {
+            VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
+            | VerifiedCandidateNonactivationEvidence::Serial { durable } => durable,
+        }
     }
 }
 

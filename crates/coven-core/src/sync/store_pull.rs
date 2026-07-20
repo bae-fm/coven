@@ -2047,9 +2047,40 @@ pub struct SerialResolutionCommit {
 
 #[doc(hidden)]
 pub struct SerialResolutionPlan {
-    pub(crate) head: StoreSerialHead,
-    pub(crate) head_object: super::storage::VersionedObject,
-    pub(crate) commits: Vec<SerialResolutionCommit>,
+    head: StoreSerialHead,
+    head_object: super::storage::VersionedObject,
+    commits: Vec<SerialResolutionCommit>,
+    verified_suffix: Option<VerifiedSerialAcceptedSuffix>,
+}
+
+impl SerialResolutionPlan {
+    pub(crate) fn head(&self) -> &StoreSerialHead {
+        &self.head
+    }
+
+    pub(crate) fn head_object(&self) -> &super::storage::VersionedObject {
+        &self.head_object
+    }
+
+    pub(crate) fn commits(&self) -> &[SerialResolutionCommit] {
+        &self.commits
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        StoreSerialHead,
+        super::storage::VersionedObject,
+        Vec<SerialResolutionCommit>,
+    ) {
+        (self.head, self.head_object, self.commits)
+    }
+
+    pub(crate) fn verified_suffix(&self) -> Result<VerifiedSerialAcceptedSuffix, StorePullError> {
+        self.verified_suffix.clone().ok_or_else(|| {
+            StorePullError::Serial("Serial resolution has no accepted successor suffix".to_string())
+        })
+    }
 }
 
 enum ApplyOutcome {
@@ -3530,7 +3561,27 @@ async fn load_authorized_serial_chain(
 
 pub(crate) enum SerialSuccessorObservation {
     Unchanged(super::storage::VersionedObject),
-    Advanced(super::remote_object::SerialAcceptedSuffix),
+    Advanced(VerifiedSerialAcceptedSuffix),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedSerialAcceptedSuffix {
+    store_root_hash: ObjectHash,
+    durable: super::remote_object::SerialAcceptedSuffix,
+}
+
+impl VerifiedSerialAcceptedSuffix {
+    pub(crate) fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
+    }
+
+    pub(crate) fn durable(&self) -> &super::remote_object::SerialAcceptedSuffix {
+        &self.durable
+    }
+
+    pub(crate) fn commits(&self) -> &[StoreBatchCommitRef] {
+        &self.durable.commits
+    }
 }
 
 pub(crate) async fn observe_serial_successors_after(
@@ -3597,21 +3648,24 @@ pub(crate) async fn observe_serial_successors_after(
         return Ok(SerialSuccessorObservation::Unchanged(verified_head.object));
     }
     Ok(SerialSuccessorObservation::Advanced(
-        super::remote_object::SerialAcceptedSuffix {
-            predecessor: match predecessor {
-                super::store_commit::StoreSerialPredecessor::Genesis { .. } => None,
-                super::store_commit::StoreSerialPredecessor::Commit(base) => Some(base.clone()),
+        VerifiedSerialAcceptedSuffix {
+            store_root_hash: root.store_root_hash,
+            durable: super::remote_object::SerialAcceptedSuffix {
+                predecessor: match predecessor {
+                    super::store_commit::StoreSerialPredecessor::Genesis { .. } => None,
+                    super::store_commit::StoreSerialPredecessor::Commit(base) => Some(base.clone()),
+                },
+                commits,
+                canonical_signed_head_bytes: verified_head.object.bytes,
+                observed_version_hash: super::store_commit::ObjectHash::digest(
+                    verified_head
+                        .object
+                        .version
+                        .cloud()
+                        .as_provider()
+                        .as_bytes(),
+                ),
             },
-            commits,
-            canonical_signed_head_bytes: verified_head.object.bytes,
-            observed_version_hash: super::store_commit::ObjectHash::digest(
-                verified_head
-                    .object
-                    .version
-                    .cloud()
-                    .as_provider()
-                    .as_bytes(),
-            ),
         },
     ))
 }
@@ -4024,10 +4078,31 @@ pub async fn prepare_serial_resolution(
             authorization_after: authorized.authorization_after,
         });
     }
+    let accepted_refs = commits
+        .iter()
+        .map(|commit| commit.commit_ref.clone())
+        .collect::<Vec<_>>();
+    let verified_suffix = (!accepted_refs.is_empty()).then(|| VerifiedSerialAcceptedSuffix {
+        store_root_hash: root.store_root_hash,
+        durable: super::remote_object::SerialAcceptedSuffix {
+            predecessor: branch_base,
+            commits: accepted_refs,
+            canonical_signed_head_bytes: verified_head.object.bytes.clone(),
+            observed_version_hash: ObjectHash::digest(
+                verified_head
+                    .object
+                    .version
+                    .cloud()
+                    .as_provider()
+                    .as_bytes(),
+            ),
+        },
+    });
     Ok(SerialResolutionPlan {
         head,
         head_object: verified_head.object,
         commits,
+        verified_suffix,
     })
 }
 

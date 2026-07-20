@@ -1818,6 +1818,76 @@ async fn finish_merge_abandonment(
 
 /// Publish the exact prepared object graph in sequence order. Every remote object
 /// is verified at its reserved slot before the exact head activates the commit.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedMergeWinner {
+    store_root_hash: ObjectHash,
+    expected_slot: crate::storage::cloud::ObjectSlot,
+    expected: StoreDeviceHead,
+    expected_commit: Box<StoreBatchCommit>,
+    winner: StoreDeviceHead,
+    winner_prepared: PreparedExactObject,
+    winner_commit: Box<StoreBatchCommit>,
+}
+
+impl VerifiedMergeWinner {
+    pub(crate) fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
+    }
+
+    pub(crate) fn expected(&self) -> &StoreDeviceHead {
+        &self.expected
+    }
+
+    pub(crate) fn expected_commit(&self) -> &StoreBatchCommit {
+        &self.expected_commit
+    }
+
+    pub(crate) fn expected_slot(&self) -> &crate::storage::cloud::ObjectSlot {
+        &self.expected_slot
+    }
+
+    pub(crate) fn winner(&self) -> &StoreDeviceHead {
+        &self.winner
+    }
+
+    pub(crate) fn winner_prepared(&self) -> &PreparedExactObject {
+        &self.winner_prepared
+    }
+
+    pub(crate) fn winner_commit(&self) -> &StoreBatchCommit {
+        &self.winner_commit
+    }
+
+    fn into_head(self) -> (StoreDeviceHead, PreparedExactObject) {
+        (self.winner, self.winner_prepared)
+    }
+}
+
+fn verify_merge_candidate_nonactivations(
+    observation: &VerifiedMergeWinner,
+    targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
+    author: &StoreDeviceRegistration,
+) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
+    let mut nonactivations = Vec::new();
+    for target in targets {
+        if target.coord == observation.winner().commit.coord
+            && target.object == observation.winner().commit.object
+            && target.canonical_signed_bytes == observation.winner_commit().to_bytes()
+        {
+            continue;
+        }
+        nonactivations.push(
+            super::remote_object::VerifiedCandidateNonactivation::merge(
+                observation,
+                target,
+                author,
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        );
+    }
+    Ok(nonactivations)
+}
+
 async fn read_occupied_merge_head(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -1825,7 +1895,7 @@ async fn read_occupied_merge_head(
     expected: &StoreDeviceHead,
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
-) -> Result<(StoreDeviceHead, PreparedExactObject), StoreOutboundError> {
+) -> Result<VerifiedMergeWinner, StoreOutboundError> {
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let (winner_bytes, winner_prepared) = storage
@@ -1847,15 +1917,22 @@ async fn read_occupied_merge_head(
     let registration = db
         .activated_store_device_registration(expected.author_registration.clone())
         .await?;
-    if unverified.commit != expected.commit {
-        super::store_objects::load_commit_ref(
-            storage,
-            store_root_hash,
-            &unverified.commit,
-            &registration,
-        )
-        .await?;
-    }
+    let expected_commit = super::store_objects::load_commit_ref(
+        storage,
+        store_root_hash,
+        &expected.commit,
+        &registration,
+    )
+    .await?
+    .value;
+    let winner_commit = super::store_objects::load_commit_ref(
+        storage,
+        store_root_hash,
+        &unverified.commit,
+        &registration,
+    )
+    .await?
+    .value;
     let winner = StoreDeviceHead::parse_at(
         &winner_bytes,
         store_root_hash,
@@ -1865,7 +1942,15 @@ async fn read_occupied_merge_head(
     .map_err(|error| {
         StoreOutboundError::InvalidOutbound(format!("verify occupied Merge head: {error}"))
     })?;
-    Ok((winner, winner_prepared))
+    Ok(VerifiedMergeWinner {
+        store_root_hash,
+        expected_slot: slot.clone(),
+        expected: expected.clone(),
+        expected_commit: Box::new(expected_commit),
+        winner,
+        winner_prepared,
+        winner_commit: Box::new(winner_commit),
+    })
 }
 
 pub async fn drain_store_writes(
@@ -1936,10 +2021,6 @@ pub(crate) async fn drain_store_writes_with_coordination(
             }
             db.mark_candidate_commit_uploaded(head.commit.clone())
                 .await?;
-            let head_context = ProtocolObjectContext::signed_plaintext(
-                store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            );
             let head_prefix = head_slot_prefix(
                 &head.author_registration.device_id.to_string(),
                 commit.seq(),
@@ -1948,7 +2029,7 @@ pub(crate) async fn drain_store_writes_with_coordination(
                 if !matches!(error, StorageError::SlotCollision(_)) {
                     return Err(StoreObjectError::from(error).into());
                 }
-                let (winner, winner_prepared) = read_occupied_merge_head(
+                let observation = read_occupied_merge_head(
                     db,
                     storage,
                     store_root_hash,
@@ -1957,40 +2038,80 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     &head_prefix,
                 )
                 .await?;
-                if winner.commit == head.commit {
+                if observation.winner().commit == head.commit {
+                    let registration = db
+                        .activated_store_device_registration(head.author_registration.clone())
+                        .await?;
+                    let nonactivations = verify_merge_candidate_nonactivations(
+                        &observation,
+                        commit
+                            .abandoned_candidates()
+                            .iter()
+                            .map(|manifest| manifest.candidate.clone()),
+                        &registration,
+                    )?;
+                    let (winner, winner_prepared) = observation.into_head();
                     db.adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
                         .await?;
-                    db.complete_prepared_store_write(head.commit.clone())
+                    db.complete_prepared_store_write(head.commit.clone(), nonactivations)
                         .await?;
                     return Ok::<bool, StoreOutboundError>(true);
                 }
-                let winner_ref = StoreDeviceHeadRef {
-                    head_hash: winner.head_hash(),
-                    object: winner_prepared.reference().clone(),
-                };
-                db.mark_merge_candidate_conflict(
-                    write_id.clone(),
-                    winner.commit.clone(),
-                    winner_ref,
-                )
-                .await?;
+                let registration = db
+                    .activated_store_device_registration(head.author_registration.clone())
+                    .await?;
+                let nonactivations = verify_merge_candidate_nonactivations(
+                    &observation,
+                    std::iter::once(StoreBatchCommitDeletionTarget {
+                        coord: head.commit.coord.clone(),
+                        object: head.commit.object.clone(),
+                        canonical_signed_bytes: commit.to_bytes(),
+                    })
+                    .chain(
+                        commit
+                            .abandoned_candidates()
+                            .iter()
+                            .map(|manifest| manifest.candidate.clone()),
+                    ),
+                    &registration,
+                )?;
+                db.mark_merge_candidate_conflict(write_id.clone(), nonactivations)
+                    .await?;
                 return Ok::<bool, StoreOutboundError>(false);
             }
-            let opened_head = storage
-                .read_protocol_object(&head_context, &batch.head.object, &head_prefix)
-                .await
-                .map_err(StoreObjectError::from)?;
-            if opened_head != batch.head.bytes {
+            let observation = read_occupied_merge_head(
+                db,
+                storage,
+                store_root_hash,
+                head,
+                batch.head.object.slot(),
+                &head_prefix,
+            )
+            .await?;
+            if observation.winner() != head
+                || observation.winner_prepared().reference() != &batch.head.object
+            {
                 return Err(StoreOutboundError::InvalidOutbound(
                     "prepared head exact readback differs from its signed bytes".to_string(),
                 ));
             }
+            let registration = db
+                .activated_store_device_registration(head.author_registration.clone())
+                .await?;
+            let nonactivations = verify_merge_candidate_nonactivations(
+                &observation,
+                commit
+                    .abandoned_candidates()
+                    .iter()
+                    .map(|manifest| manifest.candidate.clone()),
+                &registration,
+            )?;
             db.mark_store_head_uploaded(StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
                 object: batch.head.object.clone(),
             })
             .await?;
-            db.complete_prepared_store_write(head.commit.clone())
+            db.complete_prepared_store_write(head.commit.clone(), nonactivations)
                 .await?;
             Ok::<bool, StoreOutboundError>(true)
         }
@@ -3639,7 +3760,7 @@ pub(crate) enum StoreOperationPublicationOutcome {
     RepreparedCandidate(Box<PreparedStoreOperationCommit>),
     NonactivatedCandidate {
         candidate: Box<PreparedStoreOperationCommit>,
-        proof: Box<super::remote_object::CandidateNonactivationProof>,
+        nonactivation: Box<super::remote_object::VerifiedCandidateNonactivation>,
     },
 }
 
@@ -4165,7 +4286,7 @@ async fn resolve_serial_store_operation_conflict(
             ))
         }
         super::store_pull::SerialSuccessorObservation::Advanced(suffix) => {
-            if suffix.commits.first() == Some(&reference) {
+            if suffix.commits().first() == Some(&reference) {
                 Box::pin(record_activated_serial_store_operation(
                     db,
                     activation,
@@ -4176,22 +4297,28 @@ async fn resolve_serial_store_operation_conflict(
                 .await?;
                 return Ok(StoreOperationPublicationOutcome::Activated(reference));
             }
-            let proof =
-                super::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
-                    accepted_suffix: suffix,
-                    losing_prefix: vec![StoreBatchCommitDeletionTarget {
+            let author = db
+                .activated_store_device_registration(commit.author_registration.clone())
+                .await?;
+            let nonactivation = super::remote_object::VerifiedCandidateNonactivation::serial(
+                &suffix,
+                vec![(
+                    StoreBatchCommitDeletionTarget {
                         coord: reference.coord.clone(),
                         object: reference.object.clone(),
                         canonical_signed_bytes: commit.to_bytes(),
-                    }],
-                };
+                    },
+                    author,
+                )],
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let Some(acknowledgement) = commit.acknowledgement().cloned() else {
                 return Ok(StoreOperationPublicationOutcome::NonactivatedCandidate {
                     candidate: activation.candidate,
-                    proof: Box::new(proof),
+                    nonactivation: Box::new(nonactivation),
                 });
             };
-            db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), proof)
+            db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), nonactivation)
                 .await?;
             finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
             Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
@@ -4339,7 +4466,7 @@ async fn resolve_merge_store_operation_head_collision(
     prepared_head: PreparedExactObject,
     head_prefix: String,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    let (winner, winner_prepared) = read_occupied_merge_head(
+    let observation = read_occupied_merge_head(
         db,
         storage,
         commit.store_root_hash,
@@ -4348,7 +4475,8 @@ async fn resolve_merge_store_operation_head_collision(
         &head_prefix,
     )
     .await?;
-    if winner.commit == reference {
+    if observation.winner().commit == reference {
+        let (winner, winner_prepared) = observation.into_head();
         if let Some(acknowledgement) = commit.acknowledgement().cloned() {
             db.adopt_outbound_store_ack_merge_head(acknowledgement, winner, winner_prepared)
                 .await?;
@@ -4361,20 +4489,26 @@ async fn resolve_merge_store_operation_head_collision(
             activation.candidate,
         ));
     }
-    let winner_ref = StoreDeviceHeadRef {
-        head_hash: winner.head_hash(),
-        object: winner_prepared.reference().clone(),
-    };
-    let proof = super::remote_object::CandidateNonactivationProof::MergeWinner {
-        winner_head: winner_ref,
-    };
+    let registration = db
+        .activated_store_device_registration(commit.author_registration.clone())
+        .await?;
+    let nonactivation = super::remote_object::VerifiedCandidateNonactivation::merge(
+        &observation,
+        StoreBatchCommitDeletionTarget {
+            coord: reference.coord.clone(),
+            object: reference.object.clone(),
+            canonical_signed_bytes: commit.to_bytes(),
+        },
+        &registration,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let Some(acknowledgement) = commit.acknowledgement().cloned() else {
         return Ok(StoreOperationPublicationOutcome::NonactivatedCandidate {
             candidate: activation.candidate,
-            proof: Box::new(proof),
+            nonactivation: Box::new(nonactivation),
         });
     };
-    db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), proof)
+    db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), nonactivation)
         .await?;
     finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
     Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
@@ -6136,6 +6270,391 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
+        let fixture = prepared_write_fixture().await;
+        let batch = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared Merge write")
+            .expect("prepared Merge write exists");
+        fixture
+            .storage
+            .create_protocol_object(&batch.commit.prepared)
+            .await
+            .expect("publish exact losing Merge commit");
+        publish_competing_merge_head(&fixture).await;
+        let head_prefix = head_slot_prefix(&fixture.device_id, batch.commit.value.seq());
+        let observation = read_occupied_merge_head(
+            &fixture.db,
+            &fixture.storage,
+            fixture.root.store_root_hash,
+            &batch.head.value,
+            batch.head.object.slot(),
+            &head_prefix,
+        )
+        .await
+        .expect("verify occupied Merge winner");
+        let author = fixture
+            .db
+            .activated_store_device_registration(batch.commit.value.author_registration.clone())
+            .await
+            .expect("load candidate author");
+        let candidate = StoreBatchCommitDeletionTarget {
+            coord: batch.head.value.commit.coord.clone(),
+            object: batch.head.value.commit.object.clone(),
+            canonical_signed_bytes: batch.commit.value.to_bytes(),
+        };
+        super::super::remote_object::VerifiedCandidateNonactivation::merge(
+            &observation,
+            candidate.clone(),
+            &author,
+        )
+        .expect("exact losing candidate is verified");
+
+        let mut wrong_head_commit = observation.clone();
+        wrong_head_commit.winner.commit = batch.head.value.commit.clone();
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &wrong_head_commit,
+                candidate.clone(),
+                &author,
+            )
+            .is_err()
+        );
+
+        let winner_target = StoreBatchCommitDeletionTarget {
+            coord: observation.winner.commit.coord.clone(),
+            object: observation.winner.commit.object.clone(),
+            canonical_signed_bytes: observation.winner_commit.to_bytes(),
+        };
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                winner_target,
+                &author,
+            )
+            .is_err()
+        );
+
+        let mut wrong_slot = observation.clone();
+        wrong_slot.expected_slot = crate::storage::cloud::ObjectSlot::logical(
+            "store-v1/heads/wrong-slot.json".to_string(),
+        )
+        .expect("valid wrong slot");
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &wrong_slot,
+                candidate.clone(),
+                &author,
+            )
+            .is_err()
+        );
+        let mut wrong_competition_point = candidate.clone();
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = wrong_competition_point.coord
+        else {
+            unreachable!("Merge fixture candidate")
+        };
+        wrong_competition_point.coord = StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence: sequence
+                .checked_add(1)
+                .expect("test sequence has a successor"),
+        };
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                wrong_competition_point,
+                &author,
+            )
+            .is_err()
+        );
+
+        let exact_target = |commit: StoreBatchCommit| {
+            let bytes = commit.to_bytes();
+            StoreBatchCommitDeletionTarget {
+                coord: candidate.coord.clone(),
+                object: crate::sync::storage::ExactObjectRef::new(
+                    candidate.object.slot().clone(),
+                    bytes.len() as u64,
+                    ObjectHash::digest(&bytes),
+                ),
+                canonical_signed_bytes: bytes,
+            }
+        };
+        let mut wrong_root = batch.commit.value.clone();
+        wrong_root.store_root_hash = ObjectHash::digest(b"wrong Store root");
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                exact_target(wrong_root),
+                &author,
+            )
+            .is_err()
+        );
+        let mut wrong_predecessor = batch.commit.value.clone();
+        let StoreCommitOrder::MergeConcurrent { predecessor, .. } = &mut wrong_predecessor.order
+        else {
+            unreachable!("Merge fixture commit")
+        };
+        *predecessor = match predecessor.take() {
+            Some(_) => None,
+            None => Some(observation.winner.commit.clone()),
+        };
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                exact_target(wrong_predecessor),
+                &author,
+            )
+            .is_err()
+        );
+        let mut wrong_author = batch.commit.value.clone();
+        wrong_author.author_registration = observation.winner.author_registration.clone();
+        wrong_author.author_registration.registration_hash =
+            ObjectHash::digest(b"wrong author registration");
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                exact_target(wrong_author),
+                &author,
+            )
+            .is_err()
+        );
+        let mut unsigned = batch.commit.value.clone();
+        unsigned.signature = "00".to_string();
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                exact_target(unsigned),
+                &author,
+            )
+            .is_err()
+        );
+        let mut noncanonical = candidate;
+        noncanonical.canonical_signed_bytes.push(b' ');
+        noncanonical.object = crate::sync::storage::ExactObjectRef::new(
+            noncanonical.object.slot().clone(),
+            noncanonical.canonical_signed_bytes.len() as u64,
+            ObjectHash::digest(&noncanonical.canonical_signed_bytes),
+        );
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::merge(
+                &observation,
+                noncanonical,
+                &author,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn serial_nonactivation_requires_a_different_verified_immediate_successor() {
+        let (_home, storage, db, keypair, root, _pending) =
+            serial_fixture("serial-verified-nonactivation").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare losing Serial branch"));
+        let branch = db
+            .prepared_serial_store_branch()
+            .await
+            .expect("load losing Serial branch")
+            .expect("losing Serial branch exists");
+        let losing = branch
+            .writes
+            .first()
+            .expect("losing branch has a candidate");
+        let StoreCommitOrder::Serial { predecessor, .. } = &losing.commit.value.order else {
+            unreachable!("Serial fixture candidate")
+        };
+        let winner = competing_head(&db, &storage, &keypair, "verified-nonactivation").await;
+        let coordination = storage.serial_coordination().expect("Serial coordination");
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read Serial base head");
+        let accepted_head = coordination
+            .replace_head(serial_head_key(), &current.version, &winner.to_bytes())
+            .await
+            .expect("activate competing Serial successor");
+        let super::super::store_pull::SerialSuccessorObservation::Advanced(suffix) =
+            super::super::store_pull::observe_serial_successors_after(
+                &storage,
+                coordination,
+                &root,
+                predecessor,
+            )
+            .await
+            .expect("observe verified Serial successor")
+        else {
+            panic!("competing Serial successor did not advance the head")
+        };
+        assert_eq!(
+            suffix.durable().observed_version_hash,
+            ObjectHash::digest(accepted_head.version.cloud().as_provider().as_bytes()),
+        );
+        let author = db
+            .activated_store_device_registration(losing.commit.value.author_registration.clone())
+            .await
+            .expect("load losing Serial author");
+        let target = StoreBatchCommitDeletionTarget {
+            coord: StoreCommitCoord::Serial {
+                sequence: losing.commit.value.seq(),
+            },
+            object: losing.commit.object.clone(),
+            canonical_signed_bytes: losing.commit.bytes.clone(),
+        };
+        super::super::remote_object::VerifiedCandidateNonactivation::serial(
+            &suffix,
+            vec![(target.clone(), author.clone())],
+        )
+        .expect("verified competing successor discards the losing candidate");
+
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::serial(
+                &suffix,
+                vec![(target.clone(), author.clone()), (target.clone(), author)],
+            )
+            .is_err()
+        );
+
+        let accepted_ref = suffix
+            .commits()
+            .first()
+            .expect("accepted suffix has an immediate successor");
+        let StoreSerialHeadState::Commit {
+            author_registration: accepted_author_ref,
+            ..
+        } = &winner.state
+        else {
+            unreachable!("competing Serial head activates a commit")
+        };
+        let accepted_author = db
+            .activated_store_device_registration(accepted_author_ref.clone())
+            .await
+            .expect("load accepted Serial author");
+        let accepted_commit = super::super::store_objects::load_commit_ref(
+            &storage,
+            root.store_root_hash,
+            accepted_ref,
+            &accepted_author,
+        )
+        .await
+        .expect("load accepted Serial commit")
+        .value;
+        let accepted_target = StoreBatchCommitDeletionTarget {
+            coord: accepted_ref.coord.clone(),
+            object: accepted_ref.object.clone(),
+            canonical_signed_bytes: accepted_commit.to_bytes(),
+        };
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::serial(
+                &suffix,
+                vec![(accepted_target, accepted_author.clone())],
+            )
+            .is_err()
+        );
+
+        let mut noncanonical = target;
+        noncanonical.canonical_signed_bytes.push(b' ');
+        noncanonical.object = crate::sync::storage::ExactObjectRef::new(
+            noncanonical.object.slot().clone(),
+            noncanonical.canonical_signed_bytes.len() as u64,
+            ObjectHash::digest(&noncanonical.canonical_signed_bytes),
+        );
+        let losing_author = db
+            .activated_store_device_registration(losing.commit.value.author_registration.clone())
+            .await
+            .expect("reload losing Serial author");
+        assert!(
+            super::super::remote_object::VerifiedCandidateNonactivation::serial(
+                &suffix,
+                vec![(noncanonical, losing_author)],
+            )
+            .is_err()
+        );
+
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read accepted Serial head");
+        let mut invalid_head = winner.clone();
+        invalid_head.signature = "00".to_string();
+        coordination
+            .replace_head(
+                serial_head_key(),
+                &current.version,
+                &invalid_head.to_bytes(),
+            )
+            .await
+            .expect("install invalid signed Serial head bytes");
+        assert!(super::super::store_pull::observe_serial_successors_after(
+            &storage,
+            coordination,
+            &root,
+            predecessor,
+        )
+        .await
+        .is_err());
+
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read invalid Serial head receipt");
+        let mut missing_commit = accepted_ref.clone();
+        missing_commit.commit_hash = ObjectHash::digest(b"missing accepted Serial commit");
+        missing_commit.object = crate::sync::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/commits/missing-accepted-serial.json".to_string(),
+            )
+            .expect("valid missing Serial commit slot"),
+            1,
+            ObjectHash::digest(b"missing"),
+        );
+        let device_signer = accepted_author
+            .device_signer(&keypair)
+            .expect("derive accepted Serial head signer");
+        let broken_chain_head = StoreSerialHead::signed(
+            root.store_root_hash,
+            StoreSerialHeadState::Commit {
+                author_registration: accepted_author_ref.clone(),
+                commit: missing_commit,
+            },
+            &device_signer,
+        )
+        .expect("sign Serial head with an absent exact chain tip");
+        coordination
+            .replace_head(
+                serial_head_key(),
+                &current.version,
+                &broken_chain_head.to_bytes(),
+            )
+            .await
+            .expect("install Serial head with an absent chain tip");
+        assert!(super::super::store_pull::observe_serial_successors_after(
+            &storage,
+            coordination,
+            &root,
+            predecessor,
+        )
+        .await
+        .is_err());
+    }
+
     async fn publish_alternate_head_for_prepared_commit(
         fixture: &PreparedWriteFixture,
     ) -> StoreDeviceHeadRef {
@@ -6432,15 +6951,13 @@ mod tests {
                     &record.state,
                     super::super::remote_object::CandidateObjectState::CleanupPending {
                         former_candidates
-                    } if matches!(
-                        former_candidates.as_slice(),
-                        [super::super::remote_object::CandidateNonactivation {
-                            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                    } if former_candidates.len() == 1
+                        && matches!(
+                            former_candidates[0].proof(),
+                            super::super::remote_object::CandidateNonactivationProof::MergeWinner {
                                 winner_head
-                            },
-                            ..
-                        }] if winner_head == &winner
-                    )
+                            } if winner_head == &winner
+                        )
                 )
         ));
         let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;
@@ -6464,15 +6981,13 @@ mod tests {
                     &record.state,
                     super::super::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
                         former_candidates
-                    } if matches!(
-                        former_candidates.as_slice(),
-                        [super::super::remote_object::CandidateNonactivation {
-                            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                    } if former_candidates.len() == 1
+                        && matches!(
+                            former_candidates[0].proof(),
+                            super::super::remote_object::CandidateNonactivationProof::MergeWinner {
                                 winner_head
-                            },
-                            ..
-                        }] if winner_head == &winner
-                    )
+                            } if winner_head == &winner
+                        )
                 )
         ));
         let discard_error = fixture

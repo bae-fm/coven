@@ -1073,19 +1073,20 @@ mod tests {
             winner_bytes.len() as u64,
             super::super::store_commit::ObjectHash::digest(winner_bytes),
         );
-        let nonactivation = super::super::remote_object::CandidateNonactivation {
-            candidate: super::super::store_commit::StoreBatchCommitDeletionTarget {
-                coord: candidate.reference.coord.clone(),
-                object: candidate.reference.object.clone(),
-                canonical_signed_bytes: candidate.commit.to_bytes(),
-            },
-            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
-                winner_head: super::super::store_commit::StoreDeviceHeadRef {
-                    head_hash: super::super::store_commit::ObjectHash::digest(winner_bytes),
-                    object: winner_object,
+        let nonactivation =
+            super::super::remote_object::CandidateNonactivation::unverified_for_test(
+                super::super::store_commit::StoreBatchCommitDeletionTarget {
+                    coord: candidate.reference.coord.clone(),
+                    object: candidate.reference.object.clone(),
+                    canonical_signed_bytes: candidate.commit.to_bytes(),
                 },
-            },
-        };
+                super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                    winner_head: super::super::store_commit::StoreDeviceHeadRef {
+                        head_hash: super::super::store_commit::ObjectHash::digest(winner_bytes),
+                        object: winner_object,
+                    },
+                },
+            );
 
         assert!(acknowledgement
             .begin_candidate_nonactivation(nonactivation)
@@ -1244,7 +1245,7 @@ mod tests {
             };
             let super::super::remote_object::CandidateNonactivationProof::MergeWinner {
                 winner_head,
-            } = &mut nonactivation.proof
+            } = nonactivation.proof_mut_for_test()
             else {
                 return Err(crate::DbError::Message(
                     "test head has a non-Merge loss proof".to_string(),

@@ -982,7 +982,7 @@ async fn drive_reclaim_candidate(
                     Box::pin(db.replace_store_reclaim_candidate(operation, *replacement)).await?;
             }
             super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
-                proof,
+                nonactivation,
                 ..
             } => {
                 let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
@@ -1019,7 +1019,7 @@ async fn drive_reclaim_candidate(
                 operation = Box::pin(db.begin_store_reclaim_candidate_replacement(
                     operation,
                     replacement,
-                    *proof,
+                    *nonactivation,
                 ))
                 .await?;
                 Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;
