@@ -1168,6 +1168,7 @@ pub(crate) struct PreparedStoreWrite {
 pub(crate) struct PreparedStoreWritePartitions {
     pub store: Option<gate::AudiencePartition>,
     pub circles: Vec<gate::AudiencePartition>,
+    pub local: Option<gate::AudiencePartition>,
 }
 
 #[derive(Clone, Copy)]
@@ -1180,7 +1181,10 @@ enum StoreWriteRouting<'a> {
 impl PreparedStoreWritePartitions {
     #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &gate::AudiencePartition> {
-        self.store.iter().chain(self.circles.iter())
+        self.store
+            .iter()
+            .chain(self.circles.iter())
+            .chain(self.local.iter())
     }
 }
 
@@ -3012,12 +3016,18 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
     packages: &'a [AudiencePackage],
+    registrations: RetainedStoreDeviceRegistrationActivations,
 }
 
 impl<'a> VerifiedMergeMaterialization<'a> {
     pub(crate) fn verify(
+        root: &crate::sync::store_commit::StoreRootRef,
         commit: &'a StoreBatchCommit,
         commit_ref: &'a StoreBatchCommitRef,
+        registrations: &[(
+            StoreDeviceRegistration,
+            crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        )],
         device_operations: &'a VerifiedStoreDeviceOperations,
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,
@@ -3027,7 +3037,8 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         commit_ref
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        if commit.policy() != WritePolicy::MergeConcurrent
+        if commit.store_root_hash != root.store_root_hash
+            || commit.policy() != WritePolicy::MergeConcurrent
             || commit_ref.coord.policy() != WritePolicy::MergeConcurrent
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()
@@ -3042,6 +3053,9 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 "verified Merge materialization differs from its exact Store commit".to_string(),
             ));
         }
+        let registrations =
+            RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
+                .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(Self {
             commit,
             commit_ref,
@@ -3050,6 +3064,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             activation_head,
             activation_head_object,
             packages,
+            registrations,
         })
     }
 }
@@ -5838,7 +5853,7 @@ impl Database {
                 "SELECT audience, control_coord, changeset
                  FROM store_write_partitions
                  WHERE write_id = ?1
-                 ORDER BY CASE audience WHEN 'store' THEN 0 ELSE 1 END,
+                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
                           audience, control_coord",
             )
             .map_err(DbError::from)?;
@@ -5853,6 +5868,7 @@ impl Database {
             .map_err(DbError::from)?;
         let mut store = None;
         let mut circles = Vec::new();
+        let mut local = None;
         for row in rows {
             let (audience, control, changeset) = row.map_err(DbError::from)?;
             if audience == "store" {
@@ -5879,6 +5895,16 @@ impl Database {
                         "pending write {write_id} Local partition carries a Circle control"
                     )));
                 }
+                if local.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} carries more than one Local partition"
+                    )));
+                }
+                local = Some(gate::AudiencePartition {
+                    audience: crate::sync::circle::Audience::Local,
+                    control: None,
+                    changeset,
+                });
                 continue;
             }
             let circle_id = audience
@@ -5935,7 +5961,11 @@ impl Database {
                 "pending write {write_id} has no durable audience partitions"
             )));
         }
-        Ok(PreparedStoreWritePartitions { store, circles })
+        Ok(PreparedStoreWritePartitions {
+            store,
+            circles,
+            local,
+        })
     }
 
     pub(crate) async fn reserve_serial_store_branch(
@@ -7964,8 +7994,10 @@ impl Database {
                 )?;
                 Self::record_materialized_merge_commit_on(
                     &tx,
+                    &root,
                     &authority.commit,
                     &accepted,
+                    &[],
                     &authority.head,
                     authority.head_prepared.reference(),
                     &[],
@@ -8069,6 +8101,7 @@ impl Database {
             let head_object_id = remote_object_id(head.prepared.reference());
             Self::activate_prepared_write_on(
                 &tx,
+                &root,
                 &gates,
                 &synced_tables,
                 &write_id,
@@ -8504,6 +8537,7 @@ impl Database {
                 let write_id = commit_value.write_id.clone();
                 Self::activate_prepared_write_on(
                     &tx,
+                    &root,
                     &gates,
                     &synced_tables,
                     &write_id,
@@ -12405,15 +12439,15 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::record_activated_store_device_registrations_on(
-                &tx,
-                &commit,
-                &[(registration, authority)],
-            )?;
+            let root = required_store_root_authority_on(&tx)?;
+            let registrations = vec![(registration, authority)];
+            Self::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
             Self::record_materialized_merge_commit_on(
                 &tx,
+                &root,
                 &commit,
                 &commit_ref,
+                &registrations,
                 &activation_head,
                 &activation_head_object,
                 &[],
@@ -12955,6 +12989,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let root = required_store_root_authority_on(&tx)?;
             let (payload, published): (Vec<u8>, i64) = tx
                 .query_row(
                     "SELECT payload, published FROM local_store_device_retirement WHERE singleton = 1",
@@ -12979,8 +13014,10 @@ impl Database {
                 LocalRetirementMaterialization::MergeConcurrent { head, head_object } => {
                     Self::record_materialized_merge_commit_on(
                         &tx,
+                        &root,
                         &commit,
                         &commit_ref,
+                        &[],
                         &head,
                         &head_object,
                         &[],
@@ -14403,8 +14440,10 @@ impl Database {
                         )
                     })?;
                     let materialization = VerifiedMergeMaterialization::verify(
+                        &root,
                         &commit,
                         &operation.commit_ref,
+                        &[],
                         &device_operations,
                         &verified,
                         head,
@@ -15412,37 +15451,6 @@ impl Database {
         Ok(ordered)
     }
 
-    fn retained_registration_activations_on(
-        conn: &Connection,
-        root: &crate::sync::store_commit::StoreRootRef,
-        commit: &StoreBatchCommit,
-    ) -> Result<RetainedStoreDeviceRegistrationActivations, DbError> {
-        let mut registrations = Vec::with_capacity(commit.device_registrations().len());
-        for activated in commit.device_registrations() {
-            let registration = load_activated_registration_on(conn, root, &activated.registration)?;
-            let authority: String = conn
-                .query_row(
-                    "SELECT activation_authority
-                     FROM store_device_registration_activations
-                     WHERE device_id = ?1 AND registration_hash = ?2",
-                    (
-                        activated.registration.device_id.to_string(),
-                        activated.registration.registration_hash.to_string(),
-                    ),
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let authority = serde_json::from_str(&authority).map_err(|error| {
-                DbError::Message(format!(
-                    "retained Store registration activation authority: {error}"
-                ))
-            })?;
-            registrations.push((registration, authority));
-        }
-        RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, &registrations)
-            .map_err(|error| DbError::Message(error.to_string()))
-    }
-
     fn validate_retained_merge_materialization_input_on(
         conn: &Connection,
         commit_ref: &StoreBatchCommitRef,
@@ -15465,12 +15473,41 @@ impl Database {
         let root = required_store_root_authority_on(conn)?;
         let unverified: StoreBatchCommit = serde_json::from_slice(input.commit.stored_bytes())
             .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
-        let author = load_activated_registration_on(conn, &root, &unverified.author_registration)?;
+        let registrations = input
+            .activation
+            .registrations
+            .verify_for(&root, &unverified)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let introduced_registration = |reference: &StoreDeviceRegistrationRef| {
+            let mut matches = unverified
+                .device_registrations()
+                .iter()
+                .zip(&registrations)
+                .filter(|(activated, _)| &activated.registration == reference)
+                .map(|(_, (registration, _))| registration);
+            let registration = matches.next();
+            if matches.next().is_some() {
+                return Err(DbError::Message(
+                    "retained Merge input introduces one registration more than once".to_string(),
+                ));
+            }
+            Ok(registration)
+        };
+        let introduced_author = introduced_registration(&unverified.author_registration)?;
+        let stored_author;
+        let author = match introduced_author {
+            Some(author) => author,
+            None => {
+                stored_author =
+                    load_activated_registration_on(conn, &root, &unverified.author_registration)?;
+                &stored_author
+            }
+        };
         let commit = StoreBatchCommit::parse_at(
             input.commit.stored_bytes(),
             root.store_root_hash,
             &commit_ref.coord,
-            &author,
+            author,
         )
         .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
         if commit.to_bytes() != input.commit.stored_bytes() {
@@ -15495,7 +15532,7 @@ impl Database {
         let head = StoreDeviceHead::parse_at(
             input.activation_head.stored_bytes(),
             root.store_root_hash,
-            &author,
+            author,
             commit_ref,
         )
         .map_err(|error| DbError::Message(format!("retained Merge activation head: {error}")))?;
@@ -15513,23 +15550,21 @@ impl Database {
         }
         input
             .activation
-            .registrations
-            .verify_for(&root, &commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        input
-            .activation
             .device_operations
             .verify_for(&root, &commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        let local_identity = local_activated_registration_ref_on(conn)?
-            .map(|reference| load_activated_registration_on(conn, &root, &reference))
-            .transpose()?
-            .map(|registration| registration.author_pubkey);
+        let local_identity = match local_activated_registration_ref_on(conn)? {
+            Some(reference) => Some(match introduced_registration(&reference)? {
+                Some(registration) => registration.author_pubkey.clone(),
+                None => load_activated_registration_on(conn, &root, &reference)?.author_pubkey,
+            }),
+            None => None,
+        };
         VerifiedCircleActivations::parse_retained(
             &input.activation.circle_activations,
             &commit,
             commit_ref,
-            &author,
+            author,
             local_identity.as_deref(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -15540,7 +15575,6 @@ impl Database {
         conn: &Connection,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<RetainedMergeMaterializationKey, DbError> {
-        let root = required_store_root_authority_on(conn)?;
         let packages = Self::canonical_retained_merge_packages(
             materialization.commit,
             materialization.commit_ref,
@@ -15559,11 +15593,7 @@ impl Database {
             .map_err(|error| DbError::Message(error.to_string()))?,
             packages,
             activation: RetainedCommitActivationInput {
-                registrations: Self::retained_registration_activations_on(
-                    conn,
-                    &root,
-                    materialization.commit,
-                )?,
+                registrations: materialization.registrations.clone(),
                 device_operations: materialization.device_operations.to_retained(),
                 circle_activations: materialization
                     .circle_activations
@@ -15688,8 +15718,13 @@ impl Database {
 
     pub(crate) fn record_materialized_merge_commit_on(
         conn: &rusqlite::Transaction<'_>,
+        root: &crate::sync::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
+        registrations: &[(
+            StoreDeviceRegistration,
+            crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        )],
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
         packages: &[AudiencePackage],
@@ -15699,8 +15734,10 @@ impl Database {
         let circle_activations = VerifiedCircleActivations::none(commit, commit_ref)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let materialization = VerifiedMergeMaterialization::verify(
+            root,
             commit,
             commit_ref,
+            registrations,
             &device_operations,
             &circle_activations,
             activation_head,
@@ -16820,8 +16857,10 @@ impl Database {
                         },
                     ) => {
                         let materialization = VerifiedMergeMaterialization::verify(
+                            &root,
                             &prepared.commit,
                             &prepared.reference,
+                            &prepared.registrations,
                             &prepared.device_operations,
                             &circle_activations,
                             head,
@@ -17175,6 +17214,7 @@ impl Database {
 
     fn activate_prepared_write_on(
         conn: &rusqlite::Transaction<'_>,
+        root: &crate::sync::store_commit::StoreRootRef,
         gates: &Gates,
         synced_tables: &[SyncedTable],
         write_id: &WriteId,
@@ -17297,8 +17337,10 @@ impl Database {
             PreparedWriteMaterialization::MergeConcurrent { head, head_object } => {
                 Self::record_materialized_merge_commit_on(
                     conn,
+                    root,
                     commit,
                     commit_ref,
+                    &[],
                     head,
                     head_object,
                     &retained_packages,
@@ -25943,7 +25985,7 @@ mod tests {
                 conn.prepare(
                     "SELECT audience, control_coord, changeset
                      FROM store_write_partitions
-                     ORDER BY CASE audience WHEN 'store' THEN 0 ELSE 1 END,
+                     ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
                               audience, control_coord",
                 )
                 .and_then(|mut statement| {
@@ -25984,20 +26026,13 @@ mod tests {
         actual: &PreparedStoreWritePartitions,
         expected: &[(String, Option<String>, Vec<u8>)],
     ) {
-        let expected = expected
-            .iter()
-            .filter(|(audience, _, _)| audience != "local")
-            .cloned()
-            .collect::<Vec<_>>();
         let actual = actual
             .iter()
             .map(|partition| {
                 let audience = match partition.audience {
                     crate::sync::circle::Audience::Store => "store".to_string(),
                     crate::sync::circle::Audience::Circle(circle) => circle.to_string(),
-                    crate::sync::circle::Audience::Local => {
-                        panic!("Local audience entered Store preparation")
-                    }
+                    crate::sync::circle::Audience::Local => "local".to_string(),
                 };
                 (
                     audience,
@@ -26039,6 +26074,39 @@ mod tests {
         assert_eq!(branch.writes.len(), 1);
 
         assert_prepared_partitions(&branch.writes[0].partitions, &expected);
+    }
+
+    #[tokio::test]
+    async fn preparation_rejects_a_local_partition_with_circle_control() {
+        let (_temp, reopened, _expected) = capture_scoped_write_then_reopen(
+            WritePolicy::MergeConcurrent,
+            "controlled-local-restart",
+        )
+        .await;
+        reopened
+            .call(|conn| {
+                conn.pragma_update(None, "ignore_check_constraints", true)
+                    .map_err(DbError::from)?;
+                conn.execute(
+                    "UPDATE store_write_partitions
+                     SET control_coord = '{}'
+                     WHERE audience = 'local'",
+                    [],
+                )
+                .map_err(DbError::from)?;
+                conn.pragma_update(None, "ignore_check_constraints", false)
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("plant controlled Local partition");
+
+        let error = match reopened.prepare_store_write().await {
+            Err(error) => error,
+            Ok(_) => panic!("controlled Local partition must fail preparation"),
+        };
+        assert!(error
+            .to_string()
+            .contains("Local partition carries a Circle control"));
     }
 
     async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {

@@ -4353,6 +4353,7 @@ pub(crate) async fn publish_prepared_store_operation(
             Box::pin(publish_prepared_merge_store_operation(
                 db,
                 storage,
+                root,
                 activation,
                 head,
                 prepared_head,
@@ -4557,6 +4558,7 @@ async fn resolve_serial_store_operation_conflict(
 async fn publish_prepared_merge_store_operation(
     db: &Database,
     storage: &dyn SyncStorage,
+    root: StoreRootRef,
     activation: PreparedStoreOperationActivation,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
@@ -4652,7 +4654,12 @@ async fn publish_prepared_merge_store_operation(
         None
     };
     let recorded_ref = reference.clone();
-    let registration_activation = activation.candidate.registration_activation;
+    let registrations = activation
+        .candidate
+        .registration_activation
+        .into_iter()
+        .map(|activation| (activation.registration, activation.authority))
+        .collect::<Vec<_>>();
     let device_operations = activation.device_operations;
     let circle_activations = VerifiedCircleActivations::none(&commit, &recorded_ref)
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
@@ -4663,16 +4670,14 @@ async fn publish_prepared_merge_store_operation(
         if let Some(object_ids) = operation_object_ids {
             Database::activate_store_operation_remote_objects_on(&tx, &recorded_ref, &object_ids)?;
         }
-        if let Some(activation) = registration_activation {
-            Database::record_activated_store_device_registrations_on(
-                &tx,
-                &commit,
-                &[(activation.registration, activation.authority)],
-            )?;
+        if !registrations.is_empty() {
+            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
         }
         let materialization = VerifiedMergeMaterialization::verify(
+            &root,
             &commit,
             &recorded_ref,
+            &registrations,
             &device_operations,
             &circle_activations,
             &head,

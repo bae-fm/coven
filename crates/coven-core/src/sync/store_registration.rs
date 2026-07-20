@@ -2697,6 +2697,131 @@ mod tests {
         (store, db)
     }
 
+    async fn recovered_merge_author() -> (
+        TestStore,
+        Database,
+        StoreDeviceRegistrationRef,
+        StoreBatchCommitRef,
+    ) {
+        let (store, db) = initialized().await;
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load exact membership")
+            .chain
+            .expect("resolved founder membership");
+        let authority = founder_recovery_authority(&store);
+        let registration =
+            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
+                .await
+                .expect("recover MergeConcurrent Owner device");
+        for reference in db
+            .materialized_frontier()
+            .await
+            .expect("load materialized Store frontier")
+            .into_values()
+        {
+            let (commit, _) = super::super::store_pull::load_commit_with_author(
+                &store.storage,
+                &store.root,
+                &reference,
+            )
+            .await
+            .expect("load materialized recovery commit");
+            if commit.author_registration == registration {
+                return (store, db, registration, reference);
+            }
+        }
+        panic!("recovery commit is materialized")
+    }
+
+    #[derive(Clone, Copy)]
+    enum RetainedRegistrationTamper {
+        CanonicalRegistration,
+        ActivationAuthority,
+    }
+
+    async fn tamper_retained_recovery_registration(
+        db: &Database,
+        reference: &StoreBatchCommitRef,
+        tamper: RetainedRegistrationTamper,
+    ) {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &reference.coord
+        else {
+            panic!("recovery commit uses MergeConcurrent ordering")
+        };
+        let stream_id = stream_id.to_string();
+        let sequence = i64::try_from(*sequence).expect("recovery sequence fits SQLite");
+        db.call(move |conn| {
+            let (commit_ref, canonical_input): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT commit_ref, canonical_input
+                     FROM retained_merge_materializations
+                     WHERE device_id = ?1 AND seq = ?2",
+                    (&stream_id, sequence),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(crate::database::DbError::from)?;
+            let mut input: serde_json::Value = serde_json::from_slice(&canonical_input)
+                .expect("parse retained recovery materialization");
+            let registration = input
+                .get_mut("activation")
+                .and_then(|value| value.get_mut("registrations"))
+                .and_then(|value| value.get_mut("registrations"))
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|values| values.first_mut())
+                .expect("retained recovery registration");
+            match tamper {
+                RetainedRegistrationTamper::CanonicalRegistration => registration
+                    .get_mut("canonical_registration")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .expect("canonical recovery registration bytes")
+                    .push(serde_json::Value::from(b' ')),
+                RetainedRegistrationTamper::ActivationAuthority => {
+                    let recovery = registration
+                        .get_mut("authority")
+                        .and_then(|value| value.get_mut("recovery"))
+                        .and_then(serde_json::Value::as_object_mut)
+                        .expect("retained recovery authority");
+                    recovery.insert(
+                        "recovery_id".to_string(),
+                        serde_json::Value::String("0".repeat(64)),
+                    );
+                }
+            }
+            let canonical_input = serde_json::to_vec(&input)
+                .expect("serialize tampered retained recovery materialization");
+            let input_hash = ObjectHash::digest(&canonical_input).to_string();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
+                (&stream_id, sequence),
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "UPDATE retained_merge_materializations
+                 SET input_hash = ?3, canonical_input = ?4
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![&stream_id, sequence, &input_hash, &canonical_input],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "INSERT INTO materialized_commits
+                 (device_id, seq, commit_ref, retained_commit_ref, retained_input_hash)
+                 VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![&stream_id, sequence, &commit_ref, &input_hash],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("install tampered retained recovery registration");
+    }
+
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
@@ -2755,57 +2880,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_materialization_surfaces_a_corrupt_activated_registration() {
-        let (store, db) = initialized().await;
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
-            .await
-            .expect("load exact membership")
-            .chain
-            .expect("resolved founder membership");
-        let authority = founder_recovery_authority(&store);
-        let registration =
-            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
-                .await
-                .expect("recover MergeConcurrent Owner device");
-        let mut recovered_commit = None;
-        for reference in db
-            .materialized_frontier()
-            .await
-            .expect("load materialized Store frontier")
-            .into_values()
-        {
-            let (commit, author) = super::super::store_pull::load_commit_with_author(
-                &store.storage,
-                &store.root,
-                &reference,
-            )
-            .await
-            .expect("load materialized recovery commit");
-            if commit.author_registration == registration {
-                let (_, head_ref) = super::super::store_outbound::exact_next_announcement_slot(
-                    &store.storage,
-                    &store.root,
-                    &registration,
-                    &author,
-                    Some(&reference),
-                )
-                .await
-                .expect("load recovery activation slot");
-                let head_ref = head_ref.expect("recovery activation head exists");
-                let head = super::super::store_objects::load_head_ref(
-                    &store.storage,
-                    store.root.store_root_hash,
-                    &head_ref,
-                    &author,
-                    &reference,
-                )
-                .await
-                .expect("load recovery activation head");
-                recovered_commit = Some((commit, reference, head));
-                break;
-            }
-        }
-        let (commit, reference, head) = recovered_commit.expect("recovery commit is materialized");
+    async fn recovery_materialization_reopens_its_retained_introduced_author() {
+        let (_store, db, registration, reference) = recovered_merge_author().await;
         let device_id = registration.device_id.to_string();
         let registration_hash = registration.registration_hash.to_string();
         db.call(move |conn| {
@@ -2821,26 +2897,44 @@ mod tests {
         .await
         .expect("corrupt activated recovery registration fixture");
 
-        let error = db
-            .call(move |conn| {
-                let tx = conn
-                    .unchecked_transaction()
-                    .map_err(crate::database::DbError::from)?;
-                crate::database::Database::record_materialized_merge_commit_on(
-                    &tx,
-                    &commit,
-                    &reference,
-                    &head.value,
-                    &head.object,
-                    &[],
-                )
-            })
+        let frontier = db
+            .materialized_frontier()
             .await
-            .expect_err("recovery materialization must surface corrupt registration bytes");
-        assert!(
-            error.to_string().contains("activated Store registration"),
-            "{error}"
-        );
+            .expect("retained recovery author does not depend on mutable registration rows");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
+            panic!("recovery commit uses MergeConcurrent ordering")
+        };
+        assert_eq!(frontier.get(&stream_id.to_string()), Some(&reference));
+    }
+
+    #[tokio::test]
+    async fn recovery_materialization_rejects_tampered_retained_registration_bytes() {
+        let (_store, db, _registration, reference) = recovered_merge_author().await;
+        tamper_retained_recovery_registration(
+            &db,
+            &reference,
+            RetainedRegistrationTamper::CanonicalRegistration,
+        )
+        .await;
+
+        db.materialized_frontier()
+            .await
+            .expect_err("tampered retained recovery registration bytes must fail");
+    }
+
+    #[tokio::test]
+    async fn recovery_materialization_rejects_tampered_retained_registration_authority() {
+        let (_store, db, _registration, reference) = recovered_merge_author().await;
+        tamper_retained_recovery_registration(
+            &db,
+            &reference,
+            RetainedRegistrationTamper::ActivationAuthority,
+        )
+        .await;
+
+        db.materialized_frontier()
+            .await
+            .expect_err("tampered retained recovery registration authority must fail");
     }
 
     #[tokio::test]

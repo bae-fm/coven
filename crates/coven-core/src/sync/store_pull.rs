@@ -3883,6 +3883,7 @@ pub(crate) async fn materialize_device_join_activation(
             ));
         }
     };
+    let root = root.clone();
     let commit_ref = reference.clone();
     let expected_ref = reference.clone();
     db.call(move |connection| {
@@ -3909,8 +3910,10 @@ pub(crate) async fn materialize_device_join_activation(
             Materialization::MergeConcurrent { head, object } => {
                 Database::record_materialized_merge_commit_on(
                     &tx,
+                    &root,
                     &commit,
                     &commit_ref,
+                    &registrations,
                     &head,
                     &object,
                     &[],
@@ -5887,6 +5890,7 @@ async fn apply_candidate(
     }
     let outcome = commit_candidate(
         db,
+        root,
         merge_candidate,
         packages,
         device_operations,
@@ -5983,6 +5987,7 @@ async fn prepare_merge_candidate_package(
 
 async fn commit_candidate(
     db: &Database,
+    root: &StoreRootRef,
     merge_candidate: &MergeCandidate,
     packages: Vec<PreparedMergeCandidatePackage>,
     device_operations: VerifiedStoreDeviceOperations,
@@ -5994,6 +5999,7 @@ async fn commit_candidate(
     let activation_head = merge_candidate.activation_head.clone();
     let activation_head_object = merge_candidate.activation_head_object.clone();
     let registrations = candidate.registrations.clone();
+    let root = root.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
     let gates = db.gates();
@@ -6136,8 +6142,10 @@ async fn commit_candidate(
                 }
             }
             let materialization = VerifiedMergeMaterialization::verify(
+                &root,
                 &commit,
                 &commit_ref,
+                &registrations,
                 &device_operations,
                 &verified_circle_activations,
                 &activation_head,
