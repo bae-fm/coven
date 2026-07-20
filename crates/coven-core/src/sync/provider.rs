@@ -1107,6 +1107,57 @@ pub enum ProviderAccessWithdrawal {
     },
 }
 
+impl ProviderAccessWithdrawal {
+    fn validate(&self) -> Result<(), ProviderProbeError> {
+        let valid = match self {
+            Self::Direct {
+                verified_absent, ..
+            } => *verified_absent,
+            Self::S3CredentialRotation {
+                retired_generation,
+                active_generation,
+                retired_credential_verified_rejected,
+            } => {
+                *retired_generation > 0
+                    && retired_generation.checked_add(1) == Some(*active_generation)
+                    && *retired_credential_verified_rejected
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            invalid("provider access withdrawal does not prove the stored authority is unusable")
+        }
+    }
+
+    pub(crate) fn verify_for_locator(
+        &self,
+        locator: &ProviderAccessLocator,
+    ) -> Result<(), ProviderProbeError> {
+        self.validate()?;
+        let matches = match (self, locator) {
+            (
+                Self::Direct {
+                    locator: withdrawn, ..
+                },
+                expected,
+            ) => withdrawn == expected,
+            (
+                Self::S3CredentialRotation {
+                    retired_generation, ..
+                },
+                ProviderAccessLocator::S3SharedCredentialGeneration { generation, .. },
+            ) => retired_generation == generation,
+            _ => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            invalid("provider access withdrawal differs from the stored authority locator")
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreMemberProviderAccessWithdrawalReceipt {
@@ -1142,7 +1193,7 @@ impl StoreMemberProviderAccessWithdrawalReceipt {
         {
             return invalid("provider access withdrawal signer is not the administrator device");
         }
-        validate_withdrawal(&withdrawal)?;
+        withdrawal.validate()?;
         let mut receipt = Self {
             grant,
             withdrawal,
@@ -1185,7 +1236,7 @@ impl StoreMemberProviderAccessWithdrawalReceipt {
         self.administrator
             .verify_registration(administrator)
             .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
-        validate_withdrawal(&self.withdrawal)?;
+        self.withdrawal.validate()?;
         if !crate::keys::verify_signature_hex(
             &administrator.device_signing_pubkey,
             &self.signature,
@@ -1225,28 +1276,6 @@ impl StoreMemberProviderAccessWithdrawalReceiptRef {
             return invalid("provider access withdrawal reference differs from its signed receipt");
         }
         Ok(())
-    }
-}
-
-fn validate_withdrawal(withdrawal: &ProviderAccessWithdrawal) -> Result<(), ProviderProbeError> {
-    let valid = match withdrawal {
-        ProviderAccessWithdrawal::Direct {
-            verified_absent, ..
-        } => *verified_absent,
-        ProviderAccessWithdrawal::S3CredentialRotation {
-            retired_generation,
-            active_generation,
-            retired_credential_verified_rejected,
-        } => {
-            *retired_generation > 0
-                && *active_generation == retired_generation.saturating_add(1)
-                && *retired_credential_verified_rejected
-        }
-    };
-    if valid {
-        Ok(())
-    } else {
-        invalid("provider access withdrawal does not prove the stored authority is unusable")
     }
 }
 
@@ -3700,6 +3729,17 @@ mod ordered_owner_barriers {
 mod tests {
     use super::*;
     use crate::sync::store_commit::ObjectHash;
+
+    #[test]
+    fn credential_rotation_generation_exhaustion_is_not_a_successor() {
+        assert!(ProviderAccessWithdrawal::S3CredentialRotation {
+            retired_generation: u64::MAX,
+            active_generation: u64::MAX,
+            retired_credential_verified_rejected: true,
+        }
+        .validate()
+        .is_err());
+    }
 
     #[test]
     fn exact_probe_verifier_rejects_two_created_contenders() {

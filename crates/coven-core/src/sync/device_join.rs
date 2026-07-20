@@ -3725,9 +3725,9 @@ async fn sign_device_join_producer_write_revocation(
     let withdrawal = revocation_executor
         .revoke_write_authority(producer, &authority, locator, &protected_slots)
         .await?;
-    if !withdrawal_matches_locator(&withdrawal, locator) {
-        return Err(DeviceJoinError::CleanupMismatch);
-    }
+    withdrawal
+        .verify_for_locator(locator)
+        .map_err(|_| DeviceJoinError::CleanupMismatch)?;
     DeviceJoinProducerWriteRevocation::signed(
         cancellation.outcome,
         producer,
@@ -5484,33 +5484,6 @@ async fn observe_exact_slot(
             ObjectHash::digest(&bytes),
         ))),
         Err(error) => Err(DeviceJoinError::Provider(error.to_string())),
-    }
-}
-
-fn withdrawal_matches_locator(
-    withdrawal: &ProviderAccessWithdrawal,
-    locator: &crate::sync::provider::ProviderAccessLocator,
-) -> bool {
-    match (withdrawal, locator) {
-        (
-            ProviderAccessWithdrawal::Direct {
-                locator: withdrawn,
-                verified_absent: true,
-            },
-            expected,
-        ) => withdrawn == expected,
-        (
-            ProviderAccessWithdrawal::S3CredentialRotation {
-                retired_generation,
-                active_generation,
-                retired_credential_verified_rejected: true,
-            },
-            crate::sync::provider::ProviderAccessLocator::S3SharedCredentialGeneration {
-                generation,
-                ..
-            },
-        ) => retired_generation == generation && *active_generation == generation.saturating_add(1),
-        _ => false,
     }
 }
 
