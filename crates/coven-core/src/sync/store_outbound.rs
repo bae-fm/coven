@@ -82,12 +82,26 @@ pub enum StoreOutboundError {
     },
     #[error("candidate cleanup: {0}")]
     CandidateCleanup(#[from] super::store_pull::StorePullError),
+    #[error("Store sequence {current} has no representable successor")]
+    SequenceExhausted { current: u64 },
 }
 
 impl From<crate::database::DbError> for StoreOutboundError {
     fn from(error: crate::database::DbError) -> Self {
         Self::Database(error.into_message())
     }
+}
+
+fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
+    current
+        .checked_add(1)
+        .ok_or(StoreOutboundError::SequenceExhausted { current })
+}
+
+fn next_store_sequence(previous: Option<&StoreBatchCommitRef>) -> Result<u64, StoreOutboundError> {
+    previous.map_or(Ok(1), |reference| {
+        successor_store_sequence(reference.coord.sequence())
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +246,8 @@ impl StoreOutboundError {
             | Self::LocalUserBlob { .. }
             | Self::MissingBlob { .. }
             | Self::MissingSerialCoordination
-            | Self::SerialControlConflict { .. } => true,
+            | Self::SerialControlConflict { .. }
+            | Self::SequenceExhausted { .. } => true,
         }
     }
 }
@@ -334,9 +349,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             super::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
         let previous = db.latest_local_store_position().await?;
-        let seq = previous
-            .as_ref()
-            .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+        let seq = next_store_sequence(previous.as_ref())?;
         let coord = StoreCommitCoord::MergeConcurrent {
             stream_id,
             sequence: seq,
@@ -429,7 +442,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             previous.as_ref(),
         )
         .await?;
-        let next_head_prefix = head_slot_prefix(&device_id, seq.saturating_add(1));
+        let next_head_prefix = head_slot_prefix(&device_id, successor_store_sequence(seq)?);
         let next_head_slot = storage
             .allocate_protocol_slot(&head_context, &next_head_prefix, ".json")
             .await
@@ -2081,9 +2094,7 @@ pub(crate) async fn prepare_serial_control(
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
     let store_root_hash = root.store_root_hash;
-    let seq = base
-        .as_ref()
-        .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+    let seq = next_store_sequence(base.as_ref())?;
     let coord = StoreCommitCoord::Serial { sequence: seq };
     let order = StoreCommitOrder::Serial {
         seq,
@@ -2484,9 +2495,7 @@ async fn prepare_serial_store_branch(
             )
             .await
             .map_err(StoreOutboundError::Preparation)?;
-            let seq = predecessor
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+            let seq = next_store_sequence(predecessor.as_ref())?;
             let coord = StoreCommitCoord::Serial { sequence: seq };
             let order = StoreCommitOrder::Serial {
                 seq,
@@ -2914,6 +2923,11 @@ fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
                 reason: error.to_string(),
             })
         }
+        StoreOutboundError::SequenceExhausted { .. } => {
+            Some(crate::WriteBlock::InvalidProtocolState {
+                reason: error.to_string(),
+            })
+        }
         StoreOutboundError::Object(StoreObjectError::Storage(_)) => None,
         StoreOutboundError::MissingBlob { namespace, id } => Some(crate::WriteBlock::MissingBlob {
             namespace: namespace.clone(),
@@ -3316,9 +3330,7 @@ pub(crate) async fn prepare_store_operation_commit(
                 )
                 .and_then(|frontier| frontier.merge_commits().cloned())
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-                let seq = previous
-                    .as_ref()
-                    .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                let seq = next_store_sequence(previous.as_ref())?;
                 let coord = StoreCommitCoord::MergeConcurrent {
                     stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,
@@ -3377,10 +3389,7 @@ pub(crate) async fn prepare_store_operation_commit(
                     coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
                 let snapshot =
                     current_serial_authorization_snapshot(db, storage, coordination).await?;
-                let seq = snapshot
-                    .base
-                    .as_ref()
-                    .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                let seq = next_store_sequence(snapshot.base.as_ref())?;
                 let predecessor = snapshot.base.clone().map_or_else(
                     || StoreSerialPredecessor::Genesis {
                         root: root.clone(),
@@ -3887,7 +3896,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 previous.as_ref(),
             )
             .await?;
-            let next_prefix = head_slot_prefix(&device_id, commit.seq().saturating_add(1));
+            let next_prefix = head_slot_prefix(&device_id, successor_store_sequence(commit.seq())?);
             let next_slot = storage
                 .allocate_protocol_slot(&head_context, &next_prefix, ".json")
                 .await
@@ -4475,6 +4484,14 @@ mod tests {
         create_exact_test_store, host_exec, open_serial_test_db, open_test_db, temp_store_dir,
         test_migrations, test_synced_tables,
     };
+
+    #[test]
+    fn store_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
+        assert!(matches!(
+            successor_store_sequence(u64::MAX),
+            Err(StoreOutboundError::SequenceExhausted { current: u64::MAX })
+        ));
+    }
 
     fn exact_partition_blob(
         physical_id: &str,
