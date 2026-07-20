@@ -21,8 +21,9 @@ use crate::database::{
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 
-use super::membership::{MembershipChain, MembershipGrantCreationAuthority};
+use super::membership::MembershipChain;
 use super::storage::StorageError;
+use super::store_commit::StoreOperationMembershipAuthority;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +66,12 @@ pub(crate) struct LocalBlobDropRequest {
 pub(crate) struct PreparedStorePayload {
     pub local_cleanup: Vec<LocalBlobDropRequest>,
     pub completion: StoreBatchCompletion,
-    pub membership_authority: Option<MembershipGrantCreationAuthority>,
+    pub membership_authority: StoreOperationMembershipAuthority,
+}
+
+pub(crate) enum StorePayloadMembership<'a> {
+    MergeConcurrent(&'a MembershipChain),
+    Serial,
 }
 
 /// Upload the blobs referenced by exact staged package bytes and persist every
@@ -74,7 +80,7 @@ pub(crate) async fn prepare_store_payload(
     blob_facts: &StoreWriteBlobFacts,
     keypair: &UserKeypair,
     store_dir: &StoreDir,
-    membership_chain: Option<&MembershipChain>,
+    membership: StorePayloadMembership<'_>,
 ) -> Result<PreparedStorePayload, SyncCycleError> {
     let mut drops = std::collections::BTreeMap::new();
     for fact in &blob_facts.blobs {
@@ -116,7 +122,7 @@ pub(crate) async fn prepare_store_payload(
     Ok(PreparedStorePayload {
         local_cleanup: drops.into_values().collect(),
         completion: StoreBatchCompletion {},
-        membership_authority: resolve_write_authority(membership_chain, keypair),
+        membership_authority: resolve_write_authority(membership, keypair)?,
     })
 }
 
@@ -165,21 +171,28 @@ pub(crate) fn bind_local_cleanup(
     Ok(StoreBatchLocalCleanup { drops })
 }
 
-/// The storage coordinate of the membership entry that authorizes this device
-/// to write. `None` means a pre-initialization caller supplied no chain or the
-/// current identity has no write grant; an initialized authorized writer has a
-/// coordinate.
-/// Embedded in the outgoing changeset so a puller can resolve a
+/// The exact membership grant authority that authorizes a MergeConcurrent
+/// writer. Embedded in the outgoing changeset so a puller can resolve a
 /// membership-propagation gap. Read off the cycle's once-loaded chain, so it
 /// judges the same membership state as the rest of the cycle rather than
 /// re-listing (the very disagreement that once had a puller skip the write it was
 /// meant to accept).
 fn resolve_write_authority(
-    membership_chain: Option<&MembershipChain>,
+    membership: StorePayloadMembership<'_>,
     keypair: &UserKeypair,
-) -> Option<MembershipGrantCreationAuthority> {
+) -> Result<StoreOperationMembershipAuthority, SyncCycleError> {
     let our_pubkey = hex::encode(keypair.public_key());
-    membership_chain.and_then(|chain| chain.write_grant_authority(&our_pubkey))
+    match membership {
+        StorePayloadMembership::MergeConcurrent(chain) => chain
+            .write_grant_authority(&our_pubkey)
+            .map(|predecessor| StoreOperationMembershipAuthority::MergeConcurrent { predecessor })
+            .ok_or_else(|| {
+                SyncCycleError::Gate(format!(
+                    "MergeConcurrent Store writer {our_pubkey} has no active membership grant"
+                ))
+            }),
+        StorePayloadMembership::Serial => Ok(StoreOperationMembershipAuthority::Serial),
+    }
 }
 
 pub async fn apply_deferred_local_blob_drop(

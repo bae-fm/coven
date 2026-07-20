@@ -1013,19 +1013,35 @@ async fn resign_exact_commit(
     .expect("load exact Store package")
     .expect("exact Store package exists")
     .value;
-    sign_exact_commit_with_package(
+    let predecessor = match &membership_authority {
+        Some(authority) => authority.clone(),
+        None => graph
+            .commit
+            .membership_authority
+            .clone()
+            .expect("published Merge operations commit carries membership authority"),
+    };
+    let mut commit = sign_exact_commit_with_package(
         graph,
         schema_version,
-        membership_authority,
+        crate::sync::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
+            predecessor,
+        },
         &package_bytes,
         package.object.clone(),
-    )
+    );
+    if membership_authority.is_none() {
+        commit.membership_authority = None;
+        commit.signature =
+            crate::keys::sign_hex(&graph.device_signer, &commit.canonical_signed_bytes()).1;
+    }
+    commit
 }
 
 fn sign_exact_commit_with_package(
     graph: &ExactPublishedCommit,
     schema_version: u32,
-    membership_authority: Option<crate::sync::membership::MembershipGrantCreationAuthority>,
+    membership_authority: crate::sync::store_commit::StoreOperationMembershipAuthority,
     package_bytes: &[u8],
     package_object: crate::sync::storage::ExactObjectRef,
 ) -> crate::sync::store_commit::StoreBatchCommit {
@@ -1126,7 +1142,10 @@ async fn replace_store_package_with_malformed_bytes(
     let malformed_commit = sign_exact_commit_with_package(
         &graph,
         SCHEMA_VERSION,
-        graph.commit.membership_authority.clone(),
+        graph
+            .commit
+            .operations_membership_authority()
+            .expect("published test commit carries validated operations"),
         malformed,
         package_object,
     );
@@ -6248,9 +6267,105 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
-/// The signed device registration establishes the stream author. A current
-/// Owner's Store commit remains authorized when it does not repeat the optional
-/// membership coordinate in the commit itself.
+#[tokio::test]
+async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let second_owner = UserKeypair::generate();
+    let observer = UserKeypair::generate();
+    let source = open_test_db();
+    let storage = create_store(&source, owner.clone()).await;
+    storage
+        .device_id("founder")
+        .await
+        .expect("reserve founder Store producer");
+    storage
+        .device_id("devOwner")
+        .await
+        .expect("activate a separate founder-identity Store producer");
+    let mut chain = exact_membership_chain(&storage).await;
+    let add_owner = chain
+        .signed_set_member_in_stream(
+            &owner,
+            membership_author_stream(&chain, &owner),
+            pubkey_hex(&second_owner),
+            None,
+            MemberRole::Owner,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs successor Owner grant");
+    let second_owner_stream = add_owner.stream_id;
+    publish_exact_membership_entry(&storage, &mut chain, add_owner, &owner).await;
+    let establish_second_owner_stream = chain
+        .signed_set_member_in_stream(
+            &second_owner,
+            second_owner_stream,
+            pubkey_hex(&observer),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:30Z".to_string(),
+        )
+        .expect("successor Owner establishes its membership stream");
+    publish_exact_membership_entry(
+        &storage,
+        &mut chain,
+        establish_second_owner_stream,
+        &second_owner,
+    )
+    .await;
+
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'BeforeDemotion', NULL, '0000000002000-0000-owner', '2026-01-01')",
+        ],
+    )
+    .await;
+    let reference = publish_exact_changeset_with_authority(
+        &storage,
+        "devOwner",
+        1,
+        &changeset,
+        Some(membership_coord(&chain, &owner_pk, 1)),
+    )
+    .await;
+
+    let demote_founder = chain
+        .signed_set_member_in_stream(
+            &second_owner,
+            second_owner_stream,
+            owner_pk.clone(),
+            None,
+            MemberRole::Follower,
+            "2026-03-01T00:03:00Z".to_string(),
+        )
+        .expect("successor Owner demotes founder");
+    publish_exact_membership_entry(&storage, &mut chain, demote_founder, &second_owner).await;
+
+    let target = open_test_db();
+    target
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    pull_into(&target, &storage, &temp_store_dir().1).await;
+    let (_, result) = pull_into(&target, &storage, &temp_store_dir().1).await;
+
+    assert!(result.changesets_applied > 0);
+    assert!(unauthorized_positions(&result).is_empty());
+    let stream_id = commit_stream_id(&reference);
+    assert_eq!(
+        target
+            .exact_materialized_ref(&stream_id, reference.coord.sequence())
+            .await
+            .expect("load exact materialized predecessor-authorized commit"),
+        Some(reference),
+        "{result:#?}"
+    );
+}
+
+/// A MergeConcurrent operations commit cannot substitute current membership
+/// for its exact predecessor grant authority.
 #[tokio::test]
 async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     let owner = UserKeypair::generate();
@@ -6279,10 +6394,9 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         .unwrap();
     let (updated, result) = pull_into(&target, &storage, &temp_store_dir().1).await;
 
-    assert_eq!(result.changesets_applied, 1);
-    assert!(unauthorized_positions(&result).is_empty());
-    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get(&stream_id), Some(&reference.coord.sequence()));
+    assert_eq!(result.changesets_applied, 0);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get(&stream_id), None);
 }
 
 /// A signed device head commits to its registration's exact Store stream. A

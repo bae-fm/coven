@@ -1120,7 +1120,9 @@ mod tests {
                 recovery: Vec::new(),
                 state_hash: ObjectHash::digest(b"multi-owner initial device state"),
             },
-            Some(membership_authority.clone()),
+            super::super::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
+                predecessor: membership_authority.clone(),
+            },
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
@@ -1267,7 +1269,13 @@ mod tests {
                 recovery: Vec::new(),
                 state_hash: ObjectHash::digest(b"multi-owner second device state"),
             },
-            control.value.membership_authority().cloned(),
+            super::super::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
+                predecessor: control
+                    .value
+                    .membership_authority()
+                    .cloned()
+                    .expect("MergeConcurrent Circle control carries membership authority"),
+            },
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,

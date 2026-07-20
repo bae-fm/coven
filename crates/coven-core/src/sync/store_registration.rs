@@ -18,8 +18,9 @@ use super::store_commit::{
     StoreCommitCoord, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceSelfRetirement,
-    StoreDeviceSelfRetirementRef, StoreDeviceStateRef, StoreHistoryCut, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    StoreDeviceSelfRetirementRef, StoreDeviceStateRef, StoreHistoryCut,
+    StoreOperationMembershipAuthority, StoreSerialHead, StoreSerialHeadState,
+    StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::StoreObjectError;
 
@@ -1693,7 +1694,17 @@ pub async fn recover_owner_device_merge(
         order,
         membership_state,
         device_state,
-        None,
+        StoreOperationMembershipAuthority::MergeConcurrent {
+            predecessor: membership
+                .active_grant(&authority.owner_grant)
+                .ok_or_else(|| {
+                    StoreRegistrationError::Invalid(
+                        "Owner recovery grant is absent from active membership".to_string(),
+                    )
+                })?
+                .creation_authority
+                .clone(),
+        },
         vec![activation_ref],
         &device_signer,
     )

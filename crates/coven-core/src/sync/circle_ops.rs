@@ -22,9 +22,9 @@ use super::store_commit::{
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects,
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, StreamActivation, StreamAnchorDomain,
-    SuccessorLink, SERIAL_STREAM_ID,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreOperationMembershipAuthority,
+    StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, StreamActivation,
+    StreamAnchorDomain, SuccessorLink, SERIAL_STREAM_ID,
 };
 use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
@@ -223,7 +223,7 @@ fn signed_circle_commit(
     order: StoreCommitOrder,
     membership_state: StoreMembershipStateRef,
     device_state: super::store_commit::StoreDeviceStateRef,
-    membership_authority: Option<super::membership::MembershipGrantCreationAuthority>,
+    membership_authority: StoreOperationMembershipAuthority,
     circle_reference: super::store_commit::CircleControlRef,
     stream_activations: Vec<StreamActivation>,
     device_signer: &UserKeypair,
@@ -1503,7 +1503,9 @@ async fn prepare_circle_operation_request(
                 order,
                 membership_state,
                 device_state,
-                Some(membership_authority),
+                StoreOperationMembershipAuthority::MergeConcurrent {
+                    predecessor: membership_authority,
+                },
                 circle_reference,
                 stream_activations,
                 &device_signer,
@@ -1693,7 +1695,7 @@ async fn prepare_circle_operation_request(
                 order,
                 membership_state,
                 device_state,
-                None,
+                StoreOperationMembershipAuthority::Serial,
                 circle_reference,
                 stream_activations,
                 &device_signer,
@@ -2511,10 +2513,12 @@ mod tests {
             coord.clone(),
             old_commit.author_registration.clone(),
             &author,
-            old_commit.order,
-            old_commit.membership_state,
-            old_commit.device_state,
-            old_commit.membership_authority.clone(),
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .expect("prepared Circle commit carries validated operations"),
             reference,
             stream_activations,
             &device_signer,
@@ -2627,7 +2631,9 @@ mod tests {
             old_commit.order.clone(),
             old_commit.membership_state.clone(),
             old_commit.device_state.clone(),
-            old_commit.membership_authority.clone(),
+            old_commit
+                .operations_membership_authority()
+                .expect("prepared Circle commit carries validated operations"),
             reference,
             old_commit.stream_activations().to_vec(),
             &device_signer,
@@ -3931,14 +3937,16 @@ mod tests {
         let stream_activations = old_commit.stream_activations().to_vec();
         let commit = signed_circle_commit(
             old_commit.store_root_hash,
-            old_commit.write_id,
+            old_commit.write_id.clone(),
             commit_coord.clone(),
             old_commit.author_registration.clone(),
             &author,
-            old_commit.order,
-            old_commit.membership_state,
-            old_commit.device_state,
-            old_commit.membership_authority,
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .expect("prepared Circle commit carries validated operations"),
             circle_reference,
             stream_activations,
             &device_signer,
@@ -4131,14 +4139,16 @@ mod tests {
         let circle_reference = creation.control_ref(objects, control_head_object);
         let commit = signed_circle_commit(
             old_commit.store_root_hash,
-            old_commit.write_id,
+            old_commit.write_id.clone(),
             commit_coord.clone(),
             old_commit.author_registration.clone(),
             &author,
-            old_commit.order,
-            old_commit.membership_state,
-            old_commit.device_state,
-            old_commit.membership_authority,
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .expect("prepared Circle commit carries validated operations"),
             circle_reference,
             stream_activations,
             &device_signer,
@@ -4370,14 +4380,16 @@ mod tests {
         let circle_reference = creation.control_ref(objects, control_head_object);
         let commit = signed_circle_commit(
             store_root_hash,
-            old_commit.write_id,
+            old_commit.write_id.clone(),
             commit_coord.clone(),
             old_commit.author_registration.clone(),
             &author,
-            old_commit.order,
-            old_commit.membership_state,
-            old_commit.device_state,
-            old_commit.membership_authority,
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .expect("prepared Circle commit carries validated operations"),
             circle_reference,
             stream_activations,
             &device_signer,

@@ -13,8 +13,9 @@ use super::store_commit::{
     DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget,
     StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
     StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreHistoryCut, StorePackageInput, StoreRootRef, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    StoreDeviceRegistrationRef, StoreHistoryCut, StoreOperationMembershipAuthority,
+    StorePackageInput, StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor,
+    SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::StoreObjectError;
 
@@ -308,10 +309,20 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         }
     };
     let preparation = async {
-        let payload =
-            super::service::prepare_store_payload(&blob_facts, keypair, store_dir, membership)
-                .await
-                .map_err(StoreOutboundError::Preparation)?;
+        let payload = super::service::prepare_store_payload(
+            &blob_facts,
+            keypair,
+            store_dir,
+            super::service::StorePayloadMembership::MergeConcurrent(membership.ok_or_else(
+                || {
+                    StoreOutboundError::InvalidOutbound(
+                        "Merge Store write has no exact membership state".to_string(),
+                    )
+                },
+            )?),
+        )
+        .await
+        .map_err(StoreOutboundError::Preparation)?;
         let (root, registration_ref, registration, device_signer) =
             load_local_store_authority(db, device_id, keypair).await?;
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
@@ -2106,7 +2117,7 @@ pub(crate) async fn prepare_serial_control(
         order,
         membership_state,
         device_state,
-        None,
+        StoreOperationMembershipAuthority::Serial,
         Some(control),
         None,
         &device_signer,
@@ -2465,10 +2476,14 @@ async fn prepare_serial_store_branch(
                     write.write_id
                 )));
             }
-            let payload =
-                super::service::prepare_store_payload(&write.blob_facts, keypair, store_dir, None)
-                    .await
-                    .map_err(StoreOutboundError::Preparation)?;
+            let payload = super::service::prepare_store_payload(
+                &write.blob_facts,
+                keypair,
+                store_dir,
+                super::service::StorePayloadMembership::Serial,
+            )
+            .await
+            .map_err(StoreOutboundError::Preparation)?;
             let seq = predecessor
                 .as_ref()
                 .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
@@ -3149,6 +3164,7 @@ pub(crate) struct StoreOperationCommitPlan {
     order: StoreCommitOrder,
     membership_state: super::circle_control::StoreMembershipStateRef,
     device_state: super::store_commit::StoreDeviceStateRef,
+    membership_authority: StoreOperationMembershipAuthority,
     owner_grant: Option<super::membership::MembershipGrantId>,
     serial: Option<Box<StoreOperationSerialPlan>>,
 }
@@ -3271,6 +3287,7 @@ pub(crate) async fn serial_successor_plan_for_test(
         },
         membership_state,
         device_state,
+        membership_authority: StoreOperationMembershipAuthority::Serial,
         owner_grant,
         serial: Some(Box::new(StoreOperationSerialPlan {
             base_head,
@@ -3289,107 +3306,120 @@ pub(crate) async fn prepare_store_operation_commit(
 ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
-    let (coord, order, membership_state, device_state, owner_grant, serial) = match db
-        .write_policy()
-    {
-        crate::WritePolicy::MergeConcurrent => {
-            let previous = db.latest_local_store_position().await?;
-            let dependencies = super::store_commit::CommitFrontier::from_refs(
-                crate::WritePolicy::MergeConcurrent,
-                db.materialized_frontier().await?,
-            )
-            .and_then(|frontier| frontier.merge_commits().cloned())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            let seq = previous
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-            let coord = StoreCommitCoord::MergeConcurrent {
-                stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
-                    root.store_root_hash,
-                    &registration_ref,
-                    super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                ),
-                sequence: seq,
-            };
-            let order = StoreCommitOrder::MergeConcurrent {
-                seq,
-                predecessor: previous,
-                dependencies,
-            };
-            let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-            let membership = membership.ok_or_else(|| {
-                StoreOutboundError::InvalidOutbound(
-                    "Merge device join commit has no exact membership state".to_string(),
+    let (coord, order, membership_state, device_state, membership_authority, owner_grant, serial) =
+        match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                let previous = db.latest_local_store_position().await?;
+                let dependencies = super::store_commit::CommitFrontier::from_refs(
+                    crate::WritePolicy::MergeConcurrent,
+                    db.materialized_frontier().await?,
                 )
-            })?;
-            let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
-            else {
-                return Err(StoreOutboundError::InvalidOutbound(
-                    "Merge device join commit requires resolved membership".to_string(),
-                ));
-            };
-            let membership_state =
-                super::circle_control::StoreMembershipStateRef::merge_concurrent(
-                    membership.head_refs().to_vec(),
-                    membership.resolution_refs().to_vec(),
+                .and_then(|frontier| frontier.merge_commits().cloned())
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                let seq = previous
+                    .as_ref()
+                    .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                let coord = StoreCommitCoord::MergeConcurrent {
+                    stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
+                        root.store_root_hash,
+                        &registration_ref,
+                        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    ),
+                    sequence: seq,
+                };
+                let order = StoreCommitOrder::MergeConcurrent {
+                    seq,
+                    predecessor: previous,
+                    dependencies,
+                };
+                let (device_state, resolved_devices) =
+                    db.store_device_state_for_order(&order).await?;
+                let membership = membership.ok_or_else(|| {
+                    StoreOutboundError::InvalidOutbound(
+                        "Merge device join commit has no exact membership state".to_string(),
+                    )
+                })?;
+                let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
+                else {
+                    return Err(StoreOutboundError::InvalidOutbound(
+                        "Merge device join commit requires resolved membership".to_string(),
+                    ));
+                };
+                let membership_state =
+                    super::circle_control::StoreMembershipStateRef::merge_concurrent(
+                        membership.head_refs().to_vec(),
+                        membership.resolution_refs().to_vec(),
+                        resolved_devices.recovery,
+                        resolved.state_hash,
+                    )
+                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                let owner_grant = membership.active_owner_grant(&registration.author_pubkey);
+                let predecessor = membership
+                    .write_grant_authority(&registration.author_pubkey)
+                    .ok_or_else(|| {
+                        StoreOutboundError::InvalidOutbound(format!(
+                            "Merge Store operation author {} has no active write grant",
+                            registration.author_pubkey
+                        ))
+                    })?;
+                (
+                    coord,
+                    order,
+                    membership_state,
+                    device_state,
+                    StoreOperationMembershipAuthority::MergeConcurrent { predecessor },
+                    owner_grant,
+                    None,
+                )
+            }
+            crate::WritePolicy::Serial => {
+                let coordination =
+                    coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
+                let snapshot =
+                    current_serial_authorization_snapshot(db, storage, coordination).await?;
+                let seq = snapshot
+                    .base
+                    .as_ref()
+                    .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                let predecessor = snapshot.base.clone().map_or_else(
+                    || StoreSerialPredecessor::Genesis {
+                        root: root.clone(),
+                        founder_registration: registration_ref.clone(),
+                    },
+                    StoreSerialPredecessor::Commit,
+                );
+                let coord = StoreCommitCoord::Serial { sequence: seq };
+                let order = StoreCommitOrder::Serial {
+                    seq,
+                    predecessor: predecessor.clone(),
+                };
+                let (device_state, resolved_devices) =
+                    db.store_device_state_for_order(&order).await?;
+                let membership_state = super::circle_control::StoreMembershipStateRef::serial(
+                    predecessor,
                     resolved_devices.recovery,
-                    resolved.state_hash,
+                    &snapshot.authorization,
                 )
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            let owner_grant = membership.active_owner_grant(&registration.author_pubkey);
-            (
-                coord,
-                order,
-                membership_state,
-                device_state,
-                owner_grant,
-                None,
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let coordination = coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
-            let snapshot = current_serial_authorization_snapshot(db, storage, coordination).await?;
-            let seq = snapshot
-                .base
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-            let predecessor = snapshot.base.clone().map_or_else(
-                || StoreSerialPredecessor::Genesis {
-                    root: root.clone(),
-                    founder_registration: registration_ref.clone(),
-                },
-                StoreSerialPredecessor::Commit,
-            );
-            let coord = StoreCommitCoord::Serial { sequence: seq };
-            let order = StoreCommitOrder::Serial {
-                seq,
-                predecessor: predecessor.clone(),
-            };
-            let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-            let membership_state = super::circle_control::StoreMembershipStateRef::serial(
-                predecessor,
-                resolved_devices.recovery,
-                &snapshot.authorization,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            let serial = StoreOperationSerialPlan {
-                base_head: snapshot.base_head,
-                authorization: snapshot.authorization,
-            };
-            let owner_grant = serial
-                .authorization
-                .membership
-                .active_owner_grant(&registration.author_pubkey);
-            (
-                coord,
-                order,
-                membership_state,
-                device_state,
-                owner_grant,
-                Some(Box::new(serial)),
-            )
-        }
-    };
+                let serial = StoreOperationSerialPlan {
+                    base_head: snapshot.base_head,
+                    authorization: snapshot.authorization,
+                };
+                let owner_grant = serial
+                    .authorization
+                    .membership
+                    .active_owner_grant(&registration.author_pubkey);
+                (
+                    coord,
+                    order,
+                    membership_state,
+                    device_state,
+                    StoreOperationMembershipAuthority::Serial,
+                    owner_grant,
+                    Some(Box::new(serial)),
+                )
+            }
+        };
     Ok(StoreOperationCommitPlan {
         root,
         registration_ref,
@@ -3399,6 +3429,7 @@ pub(crate) async fn prepare_store_operation_commit(
         order,
         membership_state,
         device_state,
+        membership_authority,
         owner_grant,
         serial,
     })
@@ -3639,7 +3670,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 StoreCommitOperationsInput {
                     acknowledgement: Some(acknowledgement),
                     control: None,
@@ -3669,7 +3700,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 vec![grant],
                 Vec::new(),
                 &plan.device_signer,
@@ -3684,7 +3715,7 @@ pub(crate) async fn prepare_store_operation_candidate(
             plan.order.clone(),
             plan.membership_state.clone(),
             plan.device_state.clone(),
-            None,
+            plan.membership_authority.clone(),
             vec![attempt],
             &plan.device_signer,
         ),
@@ -3698,7 +3729,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 vec![abandonment],
                 &plan.device_signer,
             )
@@ -3715,7 +3746,7 @@ pub(crate) async fn prepare_store_operation_candidate(
             plan.order.clone(),
             plan.membership_state.clone(),
             plan.device_state.clone(),
-            None,
+            plan.membership_authority.clone(),
             vec![outcome],
             registration
                 .into_iter()
@@ -3733,7 +3764,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 vec![receipt],
                 &plan.device_signer,
             )
@@ -3748,7 +3779,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 vec![proposal],
                 Vec::new(),
                 &plan.device_signer,
@@ -3764,7 +3795,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.order.clone(),
                 plan.membership_state.clone(),
                 plan.device_state.clone(),
-                None,
+                plan.membership_authority.clone(),
                 Vec::new(),
                 vec![outcome],
                 &plan.device_signer,
@@ -5992,6 +6023,14 @@ mod tests {
             .create_protocol_object(&package_prepared)
             .await
             .expect("publish competing package");
+        let membership = super::super::pull::load_cycle_membership(&fixture.storage, &fixture.db)
+            .await
+            .expect("load competing commit membership")
+            .chain
+            .expect("Merge test Store has membership");
+        let predecessor = membership
+            .write_grant_authority(&registration.author_pubkey)
+            .expect("Merge test author has an active write grant");
         let winner = StoreBatchCommit::signed(
             fixture.root.store_root_hash,
             candidate.write_id.clone(),
@@ -6001,7 +6040,7 @@ mod tests {
             candidate.order.clone(),
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
-            candidate.membership_authority.clone(),
+            StoreOperationMembershipAuthority::MergeConcurrent { predecessor },
             StorePackageInput {
                 candidate_family: candidate.candidate_family(),
                 schema_version: fixture.db.schema_version(),

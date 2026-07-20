@@ -1298,6 +1298,30 @@ pub struct StoreCommitOperationsInput<'a> {
     pub circle_packages: &'a [CirclePackageInput<'a>],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreOperationMembershipAuthority {
+    MergeConcurrent {
+        predecessor: MembershipGrantCreationAuthority,
+    },
+    Serial,
+}
+
+impl StoreOperationMembershipAuthority {
+    fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+            Self::Serial => WritePolicy::Serial,
+        }
+    }
+
+    fn into_commit_authority(self) -> Option<MembershipGrantCreationAuthority> {
+        match self {
+            Self::MergeConcurrent { predecessor } => Some(predecessor),
+            Self::Serial => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreBatchCommit {
@@ -1354,6 +1378,32 @@ impl StoreBatchCommit {
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn operations_membership_authority(
+        &self,
+    ) -> Result<StoreOperationMembershipAuthority, StoreProtocolError> {
+        if self.operations().is_none() {
+            return Err(StoreProtocolError::Malformed(
+                "Store commit does not carry operations".to_string(),
+            ));
+        }
+        validate_operation_membership_authority(
+            self.order.policy(),
+            self.membership_authority.as_ref(),
+        )?;
+        match self.order.policy() {
+            WritePolicy::MergeConcurrent => {
+                Ok(StoreOperationMembershipAuthority::MergeConcurrent {
+                    predecessor: self
+                        .membership_authority
+                        .clone()
+                        .expect("validated MergeConcurrent operations carry membership authority"),
+                })
+            }
+            WritePolicy::Serial => Ok(StoreOperationMembershipAuthority::Serial),
         }
     }
 
@@ -1611,7 +1661,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         package: StorePackageInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -1655,7 +1705,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         control: Option<StoreControl>,
         package: Option<StorePackageInput<'_>>,
         signer: &UserKeypair,
@@ -1700,7 +1750,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -1872,7 +1922,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         attempts: Vec<DeviceJoinAttemptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -1919,7 +1969,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
         device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
         signer: &UserKeypair,
@@ -1964,7 +2014,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -2011,7 +2061,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -2055,7 +2105,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         proposals: Vec<StoreDeviceExclusionProposalRef>,
         outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
         signer: &UserKeypair,
@@ -2100,7 +2150,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
         provider_access_withdrawals: Vec<
             super::provider::StoreMemberProviderAccessWithdrawalReceiptRef,
@@ -2147,10 +2197,17 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
+        membership_authority: StoreOperationMembershipAuthority,
         input: StoreCommitOperationsInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
+        if membership_authority.policy() != order.policy() {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: order.policy(),
+                actual: membership_authority.policy(),
+            });
+        }
+        let membership_authority = membership_authority.into_commit_authority();
         validate_commit_envelope(
             store_root_hash,
             &coord,
@@ -2432,6 +2489,12 @@ impl StoreBatchCommit {
             &self.author_registration,
             &self.order,
         )?;
+        if matches!(self.body, StoreCommitBody::Operations(_)) {
+            validate_operation_membership_authority(
+                self.order.policy(),
+                self.membership_authority.as_ref(),
+            )?;
+        }
         if let StoreCommitBody::AbandonCandidates { manifests } = &self.body {
             validate_candidate_abandonment(
                 manifests,
@@ -7155,6 +7218,24 @@ fn validate_membership_authority(
     }
 }
 
+fn validate_operation_membership_authority(
+    policy: WritePolicy,
+    authority: Option<&MembershipGrantCreationAuthority>,
+) -> Result<(), StoreProtocolError> {
+    match (policy, authority) {
+        (WritePolicy::MergeConcurrent, Some(authority)) => validate_membership_authority(authority),
+        (WritePolicy::Serial, None) => Ok(()),
+        (WritePolicy::MergeConcurrent, None) => Err(StoreProtocolError::Malformed(
+            "MergeConcurrent operations commit omits its predecessor membership grant authority"
+                .to_string(),
+        )),
+        (WritePolicy::Serial, Some(_)) => Err(StoreProtocolError::Malformed(
+            "Serial operations commit carries a MergeConcurrent membership grant authority"
+                .to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7591,7 +7672,7 @@ mod tests {
             order,
             membership_state,
             device_state,
-            None,
+            StoreOperationMembershipAuthority::Serial,
             StorePackageInput {
                 candidate_family,
                 schema_version: 3,
@@ -7629,6 +7710,49 @@ mod tests {
             commit_ref,
             package,
         }
+    }
+
+    #[test]
+    fn operations_authority_validation_requires_merge_and_forbids_serial_authority() {
+        let fixture = fixture();
+        let authority = MembershipGrantCreationAuthority::Entry(MembershipCoord {
+            author_pubkey: keys::public_key_hex(&fixture.signer),
+            author_owner_grant: fixture.root.descriptor.founder_grant,
+            stream_id: AuthorStreamId::from_bytes([7; 32]),
+            seq: 1,
+            entry_hash: ObjectHash::digest(b"operations authority"),
+        });
+
+        assert!(
+            validate_operation_membership_authority(WritePolicy::MergeConcurrent, None).is_err()
+        );
+        assert!(
+            validate_operation_membership_authority(WritePolicy::Serial, Some(&authority)).is_err()
+        );
+    }
+
+    #[test]
+    fn serial_operations_reject_a_merge_membership_authority_at_parse() {
+        let fixture = fixture();
+        let mut commit = fixture.commit;
+        commit.membership_authority =
+            Some(MembershipGrantCreationAuthority::Entry(MembershipCoord {
+                author_pubkey: keys::public_key_hex(&fixture.signer),
+                author_owner_grant: fixture.root.descriptor.founder_grant,
+                stream_id: AuthorStreamId::from_bytes([7; 32]),
+                seq: 1,
+                entry_hash: ObjectHash::digest(b"Serial commit Merge authority"),
+            }));
+        let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
+        commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
+
+        assert!(StoreBatchCommit::parse_at(
+            &commit.to_bytes(),
+            fixture.root_ref.store_root_hash,
+            &fixture.commit_ref.coord,
+            &fixture.registration,
+        )
+        .is_err());
     }
 
     #[test]
@@ -8220,7 +8344,7 @@ mod tests {
             order,
             fixture.commit.membership_state.clone(),
             fixture.commit.device_state.clone(),
-            None,
+            StoreOperationMembershipAuthority::Serial,
             StorePackageInput {
                 candidate_family: family,
                 schema_version: 3,
@@ -8748,7 +8872,7 @@ mod tests {
             fixture.commit.order,
             fixture.commit.membership_state,
             fixture.commit.device_state,
-            None,
+            StoreOperationMembershipAuthority::Serial,
             Some(StoreControl::SerialMembershipAndKeyRotation {
                 entry: entry.clone(),
                 generation: 2,

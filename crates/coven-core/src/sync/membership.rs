@@ -1912,13 +1912,6 @@ impl MembershipChain {
             .any(|(_, record)| record.role.can_write())
     }
 
-    pub(crate) fn contains_member_now(&self, pubkey: &str) -> bool {
-        if self.conflict().is_some() {
-            return false;
-        }
-        !self.active_grants_for(pubkey).is_empty()
-    }
-
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
         if self.conflict().is_some() {
             return false;
@@ -1941,9 +1934,21 @@ impl MembershipChain {
         authority: &MembershipGrantCreationAuthority,
         pubkey: &str,
     ) -> bool {
-        self.active_grants_for(pubkey)
-            .iter()
-            .any(|(_, record)| record.role.can_write() && &record.creation_authority == authority)
+        let MembershipStatus::Resolved(resolved) = self.status() else {
+            return false;
+        };
+        resolved.active_grants.values().any(|record| {
+            record.member_pubkey == pubkey
+                && record.role.can_write()
+                && &record.creation_authority == authority
+        })
+    }
+
+    pub fn active_grant(&self, grant_id: &MembershipGrantId) -> Option<&MembershipGrantRecord> {
+        let MembershipStatus::Resolved(resolved) = self.status() else {
+            return None;
+        };
+        resolved.active_grants.get(grant_id)
     }
 
     pub fn contains_coord(&self, expected: &MembershipCoord) -> bool {
@@ -4075,7 +4080,7 @@ mod tests {
             add_order,
             add_membership,
             add_devices,
-            None,
+            crate::sync::store_commit::StoreOperationMembershipAuthority::Serial,
             Some(StoreControl::SerialMembership {
                 entry: add_follower,
             }),
@@ -4197,6 +4202,50 @@ mod tests {
             membership_anchor(store_id),
         )])
         .unwrap()
+    }
+
+    #[test]
+    fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
+        let owner = key();
+        let member = key();
+        let member_pubkey = keys::public_key_hex(&member);
+        let mut chain = founded("exact-live-merge-grant", &owner);
+        let addition = chain
+            .signed_set_member_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "add member".to_string(),
+            )
+            .unwrap();
+        let MembershipChange::SetMember { grant_id, .. } = &addition.change else {
+            unreachable!()
+        };
+        let grant_id = grant_id.clone();
+        chain.add_entry(addition).unwrap();
+        let MembershipStatus::Resolved(resolved) = chain.status() else {
+            panic!("membership must resolve")
+        };
+        assert_eq!(
+            chain.active_grant(&grant_id),
+            resolved.active_grants.get(&grant_id)
+        );
+        assert!(chain
+            .active_grant(&MembershipGrantId(ObjectHash::digest(b"absent grant")))
+            .is_none());
+
+        let removal = chain
+            .signed_remove_member_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey,
+                "remove member".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(removal).unwrap();
+        assert!(chain.active_grant(&grant_id).is_none());
     }
 
     fn three_owner_store_cycle() -> (UserKeypair, UserKeypair, UserKeypair, MembershipChain) {

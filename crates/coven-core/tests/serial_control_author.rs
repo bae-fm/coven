@@ -92,7 +92,7 @@ impl SerialFixture {
             },
             membership_state,
             device_state,
-            None,
+            coven_core::sync::store_commit::StoreOperationMembershipAuthority::Serial,
             Some(StoreControl::SerialMembership { entry }),
             None,
             &self.device_signer,

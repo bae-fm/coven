@@ -2234,12 +2234,7 @@ pub async fn pull_store_commits_with_identity(
                 ));
                 continue;
             }
-            let predecessor_membership = if commit.device_join_attempt_decisions().is_empty()
-                && commit.device_join_outcomes().is_empty()
-                && commit.device_join_cleanup_receipts().is_empty()
-                && commit.device_registrations().is_empty()
-                && commit.device_exclusion_proposals().is_empty()
-                && commit.device_exclusion_outcomes().is_empty()
+            let predecessor_membership = if commit.operations().is_none()
                 && commit.reclaim_authorization().is_none()
                 && commit.reclaim_receipt().is_none()
             {
@@ -2287,7 +2282,7 @@ pub async fn pull_store_commits_with_identity(
                     continue;
                 }
             };
-            if !membership_authorizes(membership, &commit, &registration) {
+            if !membership_authorizes(predecessor_membership.as_ref(), &commit, &registration) {
                 held.push(held_commit(
                     &commit_ref,
                     HeldStorePositionReason::Unauthorized,
@@ -3143,7 +3138,6 @@ pub(crate) async fn materialize_device_join_activation(
         || commit.store_package().is_some()
         || commit.reclaim_authorization().is_some()
         || commit.reclaim_receipt().is_some()
-        || commit.membership_authority.is_some()
         || commit.control().is_some()
     {
         return Err(StorePullError::Database(
@@ -4437,13 +4431,16 @@ fn membership_authorizes(
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
 ) -> bool {
-    let Some(chain) = membership else {
+    if commit.operations().is_none() {
         return true;
+    }
+    let Some(chain) = membership else {
+        return false;
     };
-    let Some(authority) = commit.membership_authority.as_ref() else {
-        return chain.contains_member_now(&author.author_pubkey);
-    };
-    chain.authorizes_write_authority(authority, &author.author_pubkey)
+    commit
+        .membership_authority
+        .as_ref()
+        .is_some_and(|authority| chain.authorizes_write_authority(authority, &author.author_pubkey))
 }
 
 fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
