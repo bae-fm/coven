@@ -3771,8 +3771,7 @@ mod tests {
         StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreCommitOrder,
         StoreCreationId, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
         StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef, StoreDeviceStateRef,
-        StoreHistoryCut, StoreRootRef, StoreSerialPredecessor, StreamActivationId,
-        SERIAL_STREAM_ID,
+        StoreHistoryCut, StoreRootRef, StoreSerialPredecessor, StreamActivation, SERIAL_STREAM_ID,
     };
 
     fn key() -> UserKeypair {
@@ -3905,12 +3904,13 @@ mod tests {
         };
         let anchor = membership_anchor(&entry.store_id);
         let successor = SuccessorLink {
-            activation: StreamActivationId::store_membership(
-                &root,
-                &registration_ref,
-                &entry.author_owner_grant,
-                &anchor,
-            ),
+            activation: StreamActivation::grant_authorized(
+                root.store_root_hash,
+                registration_ref.clone(),
+                entry.author_owner_grant.clone(),
+                anchor,
+            )
+            .activation_id(),
             predecessor: None,
             next_slot: slot(format!(
                 "test/{}/membership-heads/{}/next.json",

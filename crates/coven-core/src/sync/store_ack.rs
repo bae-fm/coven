@@ -6,7 +6,7 @@ use super::storage::{
 };
 use super::store_commit::{
     ack_slot_prefix, CommitFrontier, DeviceStreamAnchor, StoreAck, StoreAckExclusionState,
-    StoreHistoryCut, StoreSerialPredecessor, StreamActivationId, SuccessorLink,
+    StoreHistoryCut, StoreSerialPredecessor, SuccessorLink,
 };
 use super::store_objects::StoreObjectError;
 use crate::database::Database;
@@ -143,6 +143,10 @@ pub async fn stage_store_ack(
         )
         .await
         .map_err(StoreObjectError::from)?;
+    let activation = registration
+        .store_acknowledgement_activation(&registration_ref)
+        .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
+        .activation_id();
     let ack = StoreAck::signed(
         root.store_root_hash,
         registration_ref.clone(),
@@ -153,7 +157,7 @@ pub async fn stage_store_ack(
         exclusions,
         last_sync,
         SuccessorLink {
-            activation: StreamActivationId::store_acknowledgements(&root, &registration_ref),
+            activation,
             predecessor,
             next_slot,
         },

@@ -29,6 +29,15 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            stream_activations,
+            "
+    activation_id TEXT PRIMARY KEY CHECK (length(activation_id) = 64),
+    author_stream_id TEXT NOT NULL UNIQUE CHECK (length(author_stream_id) = 64),
+    activation BLOB NOT NULL,
+    activating_commit TEXT NOT NULL CHECK (json_valid(activating_commit))
+"
+        );
+        $visit!(
             snapshot_coverage,
             "
     device_id TEXT PRIMARY KEY,

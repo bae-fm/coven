@@ -62,46 +62,13 @@ pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
     true
 }
 
-const AUTHOR_STREAM_ID_DOMAIN: &[u8] = b"coven.author-stream-id.v1\0";
-
-/// Generated identity of one causal author stream.
+/// Derived identity of one causal author stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthorStreamId([u8; 32]);
 
 impl AuthorStreamId {
-    pub(crate) fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
-        let id = ids.new_id();
-        let mut material = Vec::with_capacity(AUTHOR_STREAM_ID_DOMAIN.len() + id.len());
-        material.extend_from_slice(AUTHOR_STREAM_ID_DOMAIN);
-        material.extend_from_slice(id.as_bytes());
-        Self::from_digest(ObjectHash::digest(&material))
-    }
-
     pub(crate) fn from_digest(digest: ObjectHash) -> Self {
         Self(*digest.as_bytes())
-    }
-
-    pub(crate) fn store_announcements(
-        root: &super::store_commit::StoreRootRef,
-        registration: &super::store_commit::StoreDeviceRegistrationRef,
-    ) -> Self {
-        #[derive(Serialize)]
-        struct Fields<'a> {
-            root: &'a super::store_commit::StoreRootRef,
-            anchor: &'static str,
-            registration: &'a super::store_commit::StoreDeviceRegistrationRef,
-        }
-
-        let mut material = AUTHOR_STREAM_ID_DOMAIN.to_vec();
-        material.extend(
-            serde_json::to_vec(&Fields {
-                root,
-                anchor: "store_announcements",
-                registration,
-            })
-            .expect("Store announcement stream identity serialization cannot fail"),
-        );
-        Self::from_digest(ObjectHash::digest(&material))
     }
 
     #[cfg(test)]

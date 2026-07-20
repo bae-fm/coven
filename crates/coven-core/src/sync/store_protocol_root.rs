@@ -10,7 +10,7 @@ use super::store_commit::{
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
     StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
-    StoreRootRef, StoreSerialPredecessor, StreamActivationId, SuccessorLink,
+    StoreRootRef, StoreSerialPredecessor, SuccessorLink,
 };
 use super::store_objects::StoreObjectError;
 use crate::WritePolicy;
@@ -772,6 +772,10 @@ async fn prepare_founder_graph(
             StoreAckExclusionState::Serial,
         ),
     };
+    let acknowledgement_activation = registration_value
+        .store_acknowledgement_activation(&registration_ref)
+        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
+        .activation_id();
     let initial_ack_value = StoreAck::signed(
         root_hash,
         registration_ref.clone(),
@@ -782,7 +786,7 @@ async fn prepare_founder_graph(
         exclusions,
         founder_timestamp.to_string(),
         SuccessorLink {
-            activation: StreamActivationId::store_acknowledgements(&root_ref, &registration_ref),
+            activation: acknowledgement_activation,
             predecessor: None,
             next_slot: next_ack_slot,
         },
@@ -836,12 +840,13 @@ async fn prepare_founder_graph(
                 None,
                 Vec::new(),
                 SuccessorLink {
-                    activation: StreamActivationId::store_membership(
-                        &root_ref,
-                        &registration_ref,
-                        &founder_grant,
-                        &founder_anchor,
-                    ),
+                    activation: super::store_commit::StreamActivation::grant_authorized(
+                        root_ref.store_root_hash,
+                        registration_ref.clone(),
+                        founder_grant.clone(),
+                        founder_anchor.clone(),
+                    )
+                    .activation_id(),
                     predecessor: None,
                     next_slot: next_head_slot.clone(),
                 },

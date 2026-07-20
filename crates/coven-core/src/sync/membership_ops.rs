@@ -24,7 +24,7 @@ use super::storage::{
     CoordinationStorage, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
-    GrantStreamAnchor, ResolvedStoreDeviceState, StoreControl, StoreRootRef, StreamActivationId,
+    GrantStreamAnchor, ResolvedStoreDeviceState, StoreControl, StoreRootRef,
 };
 use super::store_objects::StoreObjectError;
 use crate::database::Database;
@@ -1270,12 +1270,13 @@ async fn traverse_exact_membership_stream(
         if registration.author_pubkey != author
             || !head.verify(&registration)
             || head.successor.activation
-                != StreamActivationId::store_membership(
-                    root,
-                    &head.author_registration,
-                    grant,
-                    anchor,
+                != super::store_commit::StreamActivation::grant_authorized(
+                    root.store_root_hash,
+                    head.author_registration.clone(),
+                    grant.clone(),
+                    anchor.clone(),
                 )
+                .activation_id()
         {
             return Err(AnchoredChainError::LoadFailed(format!(
                 "membership head {coord:?} is not signed by its activated certified device"

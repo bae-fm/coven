@@ -476,22 +476,6 @@ impl DeviceRegistrationRequest {
     }
 }
 
-trait DeviceStreamFirstSlot {
-    fn first_slot(&self) -> &ObjectSlot;
-}
-
-impl DeviceStreamFirstSlot for crate::sync::store_commit::DeviceStreamAnchor {
-    fn first_slot(&self) -> &ObjectSlot {
-        match self {
-            Self::StoreAnnouncements { first_slot }
-            | Self::StoreAcknowledgements { first_slot }
-            | Self::StoreSnapshots { first_slot }
-            | Self::CircleAcknowledgements { first_slot, .. }
-            | Self::CircleSnapshots { first_slot, .. } => first_slot,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvisionalDeviceBootstrap {

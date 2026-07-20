@@ -12,6 +12,7 @@ use super::apply::{
     apply_changeset_strict_on, resolve_and_apply_changeset_with_schema_on, ValidatedChangeset,
 };
 use super::audience_package::{AudiencePackage, PackageAudience};
+use super::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivationPrefix};
 use super::circle_control::StoreMembershipStateRef;
 use super::conflict::TableSchema;
 use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
@@ -33,8 +34,8 @@ use super::store_commit::{
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, StreamActivationId,
-    VerifiedStoreDeviceExclusionOutcome, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    StoreSerialHeadState, StoreSerialPredecessor, VerifiedStoreDeviceExclusionOutcome,
+    VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
@@ -214,7 +215,6 @@ struct Candidate {
     author: StoreDeviceRegistration,
     package: Option<Vec<u8>>,
     registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    circle_activations: Vec<super::circle_ops::VerifiedCircleReference>,
     device_operations: CandidateDeviceOperations,
 }
 
@@ -304,7 +304,7 @@ struct AuthorizedSerialCommit {
     authorization_after: SerialAuthorizationState,
 }
 
-enum RegistrationLoadError {
+pub(crate) enum RegistrationLoadError {
     Object(StoreObjectError),
     Invalid(String),
 }
@@ -1055,8 +1055,11 @@ async fn verify_merge_device_exclusion_proof(
         })
         .map(|record| (record.registration.clone(), record))
         .collect::<BTreeMap<_, _>>();
-    let target_stream =
-        super::membership::AuthorStreamId::store_announcements(root, &proposal.object.value.target);
+    let target_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        &proposal.object.value.target,
+        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
     let mut certified = BTreeSet::new();
     let mut joined = BTreeMap::new();
     for reference in remaining_device_acks {
@@ -1951,7 +1954,7 @@ async fn predecessor_contains_join_attempt(
     )
 }
 
-async fn predecessor_commit_matching(
+pub(crate) async fn predecessor_commit_matching(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
@@ -2037,7 +2040,7 @@ pub struct SerialResolutionCommit {
         StoreDeviceRegistration,
         super::store_commit::StoreDeviceRegistrationActivation,
     )>,
-    pub(crate) circle_activations: Vec<super::circle_ops::VerifiedCircleReference>,
+    pub(crate) verified_circle_activations: VerifiedCircleActivations,
     pub(crate) device_operations: VerifiedStoreDeviceOperations,
     pub(crate) authorization_after: SerialAuthorizationState,
 }
@@ -2298,27 +2301,6 @@ pub async fn pull_store_commits_with_identity(
                     continue;
                 }
             };
-            let circle_activations = match load_pull_circle_activations(
-                db,
-                storage,
-                &root,
-                &commit_ref,
-                &commit,
-                &registration,
-                identity,
-            )
-            .await
-            {
-                Ok(activations) => activations,
-                Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
-                Err(PullCircleActivationError::Invalid(error)) => {
-                    held.push(held_commit(
-                        &commit_ref,
-                        HeldStorePositionReason::InvalidObject(error),
-                    ));
-                    continue;
-                }
-            };
             let key = (
                 commit_stream_id(&commit_ref.coord),
                 commit_ref.coord.sequence(),
@@ -2348,7 +2330,6 @@ pub async fn pull_store_commits_with_identity(
                     author: registration.clone(),
                     package,
                     registrations,
-                    circle_activations,
                     device_operations,
                 },
             );
@@ -2431,8 +2412,16 @@ pub async fn pull_store_commits_with_identity(
                     let candidate = candidates
                         .remove(&key)
                         .expect("ready candidate remains present");
-                    match apply_candidate(db, storage, &root, store_dir, schema.clone(), &candidate)
-                        .await?
+                    match apply_candidate(
+                        db,
+                        storage,
+                        &root,
+                        store_dir,
+                        schema.clone(),
+                        &candidate,
+                        identity,
+                    )
+                    .await?
                     {
                         ApplyOutcome::Applied(changes) => {
                             let stream_id = commit_stream_id(&candidate.commit_ref.coord);
@@ -2639,8 +2628,15 @@ async fn discover_merge_stream(
             registration.device_id
         )));
     };
-    let stream_id = super::membership::AuthorStreamId::store_announcements(root, registration_ref);
-    let activation = StreamActivationId::store_announcements(root, registration_ref);
+    let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        registration_ref,
+        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
+    let activation = registration
+        .store_announcement_activation(registration_ref)
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+        .activation_id();
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreHead,
@@ -3810,23 +3806,6 @@ async fn pull_serial_store_commits(
         let package =
             load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
                 .await?;
-        let circle_activations = match load_pull_circle_activations(
-            db,
-            storage,
-            root,
-            &authorized.commit_ref,
-            &authorized.commit,
-            &authorized.author,
-            identity,
-        )
-        .await
-        {
-            Ok(activations) => activations,
-            Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
-            Err(PullCircleActivationError::Invalid(error)) => {
-                return Err(StorePullError::Serial(error));
-            }
-        };
         candidates.push((
             Candidate {
                 commit_ref: authorized.commit_ref,
@@ -3834,7 +3813,6 @@ async fn pull_serial_store_commits(
                 author: authorized.author,
                 package,
                 registrations: authorized.registrations,
-                circle_activations,
                 device_operations: CandidateDeviceOperations::Verified(
                     authorized.device_operations,
                 ),
@@ -3861,6 +3839,8 @@ async fn pull_serial_store_commits(
             schema.clone(),
             candidate,
             authorization_after,
+            root,
+            identity,
         )
         .await
         {
@@ -3978,11 +3958,12 @@ pub async fn prepare_serial_resolution(
     };
     let mut commits = Vec::with_capacity(authorized_chain.len() - first);
     let mut prior_circle_accesses = CirclePackageAccesses::new();
+    let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
     for authorized in authorized_chain.into_iter().skip(first) {
         let package =
             load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
                 .await?;
-        let circle_activations = match load_pull_circle_activations(
+        let verified_circle_activations = match load_pull_circle_activations(
             db,
             storage,
             &root,
@@ -3990,6 +3971,7 @@ pub async fn prepare_serial_resolution(
             &authorized.commit,
             &authorized.author,
             Some(identity),
+            &verified_prefix,
         )
         .await
         {
@@ -4005,7 +3987,6 @@ pub async fn prepare_serial_resolution(
             author: authorized.author,
             package,
             registrations: authorized.registrations,
-            circle_activations,
             device_operations: CandidateDeviceOperations::Verified(authorized.device_operations),
         };
         let prepared = prepare_serial_candidate(
@@ -4014,10 +3995,11 @@ pub async fn prepare_serial_resolution(
             store_dir,
             schema.clone(),
             &candidate,
+            verified_circle_activations.circles(),
             &prior_circle_accesses,
         )
         .await?;
-        for (key, access) in circle_package_accesses(&candidate.circle_activations)
+        for (key, access) in circle_package_accesses(verified_circle_activations.circles())
             .map_err(StorePullError::Serial)?
         {
             if prior_circle_accesses.insert(key, access).is_some() {
@@ -4034,13 +4016,16 @@ pub async fn prepare_serial_resolution(
                 ))
             }
         };
+        verified_prefix
+            .extend(verified_circle_activations.stream_activations())
+            .map_err(|error| StorePullError::Serial(error.to_string()))?;
         commits.push(SerialResolutionCommit {
             commit: candidate.commit,
             commit_ref: candidate.commit_ref,
             packages: prepared.packages,
             changesets: prepared.changesets,
             registrations: candidate.registrations,
-            circle_activations: candidate.circle_activations,
+            verified_circle_activations,
             device_operations,
             authorization_after: authorized.authorization_after,
         });
@@ -4102,6 +4087,8 @@ async fn apply_serial_candidate(
     schema: Arc<TableSchema>,
     candidate: &Candidate,
     authorization_after: &SerialAuthorizationState,
+    root: &StoreRootRef,
+    identity: Option<&crate::keys::UserKeypair>,
 ) -> Result<Vec<RowChange>, StorePullError> {
     let device_operations = match &candidate.device_operations {
         CandidateDeviceOperations::Verified(operations) => operations.clone(),
@@ -4111,6 +4098,25 @@ async fn apply_serial_candidate(
             ))
         }
     };
+    let verified_prefix = VerifiedStreamActivationPrefix::empty();
+    let verified_circle_activations = match load_pull_circle_activations(
+        db,
+        storage,
+        root,
+        &candidate.commit_ref,
+        &candidate.commit,
+        &candidate.author,
+        identity,
+        &verified_prefix,
+    )
+    .await
+    {
+        Ok(activations) => activations,
+        Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+        Err(PullCircleActivationError::Invalid(error)) => {
+            return Err(StorePullError::Serial(error));
+        }
+    };
     let no_prior_circle_accesses = CirclePackageAccesses::new();
     let prepared = prepare_serial_candidate(
         db,
@@ -4118,6 +4124,7 @@ async fn apply_serial_candidate(
         store_dir,
         schema.clone(),
         candidate,
+        verified_circle_activations.circles(),
         &no_prior_circle_accesses,
     )
     .await?;
@@ -4127,7 +4134,7 @@ async fn apply_serial_candidate(
         packages: prepared.packages,
         changesets: prepared.changesets,
         registrations: candidate.registrations.clone(),
-        circle_activations: candidate.circle_activations.clone(),
+        verified_circle_activations,
         device_operations,
         authorization_after: authorization_after.clone(),
     };
@@ -4217,7 +4224,7 @@ pub(crate) fn apply_prepared_serial_commit_on(
         conn,
         &resolution.commit,
         &resolution.commit_ref,
-        &resolution.circle_activations,
+        resolution.verified_circle_activations.circles(),
     )
     .map_err(|error| DbError::Message(format!("record Serial Circle controls: {error}")))?;
     for package in &resolution.packages {
@@ -4247,7 +4254,8 @@ pub(crate) fn apply_prepared_serial_commit_on(
         }
     }
     let inactive_circles = resolution
-        .circle_activations
+        .verified_circle_activations
+        .circles()
         .iter()
         .filter_map(|activation| {
             activation
@@ -4300,6 +4308,7 @@ pub(crate) fn apply_prepared_serial_commit_on(
         &resolution.commit_ref,
         &resolution.authorization_after,
         &resolution.device_operations,
+        resolution.verified_circle_activations.stream_activations(),
     )
     .map_err(|error| DbError::Message(format!("record Serial commit position: {error}")))?;
     Ok(changes)
@@ -4352,6 +4361,7 @@ async fn prepare_serial_candidate(
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     candidate: &Candidate,
+    circle_activations: &[super::circle_ops::VerifiedCircleReference],
     prior_circle_accesses: &CirclePackageAccesses,
 ) -> Result<PreparedSerialCandidate, StorePullError> {
     let mut packages = Vec::<(AudiencePackage, BlobSpoolProtection)>::new();
@@ -4365,7 +4375,7 @@ async fn prepare_serial_candidate(
         storage,
         &candidate.commit_ref,
         &candidate.commit,
-        &candidate.circle_activations,
+        circle_activations,
         &candidate.author,
         prior_circle_accesses,
     )
@@ -4437,7 +4447,9 @@ fn membership_authorizes(
 }
 
 fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
-    !commit.circle_controls().is_empty() || !commit.circle_packages().is_empty()
+    !commit.circle_controls().is_empty()
+        || !commit.circle_packages().is_empty()
+        || !commit.stream_activations().is_empty()
 }
 
 enum PullCircleActivationError {
@@ -4453,9 +4465,11 @@ async fn load_pull_circle_activations(
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
     identity: Option<&crate::keys::UserKeypair>,
-) -> Result<Vec<super::circle_ops::VerifiedCircleReference>, PullCircleActivationError> {
+    verified_prefix: &VerifiedStreamActivationPrefix,
+) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
     if !carries_circle_payload(commit) {
-        return Ok(Vec::new());
+        return VerifiedCircleActivations::none(commit, commit_ref)
+            .map_err(|error| PullCircleActivationError::Invalid(error.to_string()));
     }
     let identity = identity.ok_or_else(|| {
         PullCircleActivationError::Invalid(format!(
@@ -4472,8 +4486,18 @@ async fn load_pull_circle_activations(
                 "Store founder is absent while loading circle controls".to_string(),
             )
         })?;
-    super::circle_ops::load_circle_activations(
-        storage, root, commit_ref, commit, author, identity, &founder,
+    Box::pin(
+        super::circle_activation::load_circle_activations_with_prefix(
+            db,
+            storage,
+            root,
+            commit_ref,
+            commit,
+            author,
+            identity,
+            &founder,
+            verified_prefix,
+        ),
     )
     .await
     .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
@@ -4808,8 +4832,11 @@ async fn readiness(
     }
 
     for record in device_state.devices.values() {
-        let target_stream =
-            super::membership::AuthorStreamId::store_announcements(root, &record.registration);
+        let target_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &record.registration,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
         if target_stream.to_string() != stream_id {
             continue;
         }
@@ -4842,8 +4869,11 @@ async fn readiness(
     }
 
     for freeze in exclusion_freezes {
-        let target_stream =
-            super::membership::AuthorStreamId::store_announcements(root, &freeze.proposal.target);
+        let target_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &freeze.proposal.target,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
         if target_stream.to_string() != stream_id {
             continue;
         }
@@ -5009,15 +5039,37 @@ async fn apply_candidate(
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     candidate: &Candidate,
+    identity: Option<&crate::keys::UserKeypair>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let device_operations =
         resolve_candidate_device_operations(db, storage, root, candidate).await?;
+    let verified_prefix = VerifiedStreamActivationPrefix::empty();
+    let verified_circle_activations = match load_pull_circle_activations(
+        db,
+        storage,
+        root,
+        &candidate.commit_ref,
+        &candidate.commit,
+        &candidate.author,
+        identity,
+        &verified_prefix,
+    )
+    .await
+    {
+        Ok(activations) => activations,
+        Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+        Err(PullCircleActivationError::Invalid(error)) => {
+            return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                error,
+            )))
+        }
+    };
     let circle_packages = match load_applicable_circle_packages(
         db,
         storage,
         &candidate.commit_ref,
         &candidate.commit,
-        &candidate.circle_activations,
+        verified_circle_activations.circles(),
         &candidate.author,
     )
     .await
@@ -5079,7 +5131,14 @@ async fn apply_candidate(
             Err(reason) => return Ok(ApplyOutcome::Held(reason)),
         }
     }
-    let outcome = commit_candidate(db, candidate, packages, device_operations).await?;
+    let outcome = commit_candidate(
+        db,
+        candidate,
+        packages,
+        device_operations,
+        verified_circle_activations,
+    )
+    .await?;
     #[cfg(any(test, feature = "test-utils"))]
     if matches!(outcome, ApplyOutcome::Applied(_)) {
         db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
@@ -5173,16 +5232,17 @@ async fn commit_candidate(
     candidate: &Candidate,
     packages: Vec<PreparedMergeCandidatePackage>,
     device_operations: VerifiedStoreDeviceOperations,
+    verified_circle_activations: VerifiedCircleActivations,
 ) -> Result<ApplyOutcome, StorePullError> {
     let commit = candidate.commit.clone();
     let commit_ref = candidate.commit_ref.clone();
     let registrations = candidate.registrations.clone();
-    let circle_activations = candidate.circle_activations.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
     let gates = db.gates();
     let synced_tables = db.synced_tables().to_vec();
-    let inactive_circles = circle_activations
+    let inactive_circles = verified_circle_activations
+        .circles()
         .iter()
         .filter_map(|activation| {
             activation
@@ -5197,6 +5257,7 @@ async fn commit_candidate(
     let outcome = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (circle_activations, stream_activations) = verified_circle_activations.into_parts();
             let mut returned_changes = Vec::new();
             let mut package_reported_fk_violation = false;
             Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
@@ -5319,6 +5380,7 @@ async fn commit_candidate(
                 &commit,
                 &commit_ref,
                 &device_operations,
+                &stream_activations,
             )?;
             tx.commit().map_err(DbError::from)?;
             if let Some(max_applied) = changeset_max.as_ref() {

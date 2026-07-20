@@ -10,7 +10,10 @@ use super::causal_grants::{
 };
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
-use super::store_commit::{ObjectHash, STORE_PROTOCOL_VERSION};
+use super::storage::ExactObjectRef;
+use super::store_commit::{
+    ObjectHash, StoreDeviceRegistration, SuccessorLink, STORE_PROTOCOL_VERSION,
+};
 use crate::keys::{self, UserKeypair};
 
 const ROSTER_DOMAIN: &str = "coven.circle-roster.v1";
@@ -294,17 +297,32 @@ pub struct CircleRosterHead {
     pub author_owner_grant: MembershipGrantId,
     pub seq: u64,
     pub tip_hash: ObjectHash,
+    pub tip: ExactObjectRef,
+    pub successor: SuccessorLink,
     pub resolutions: Vec<CircleRosterConflictResolutionRef>,
     pub signature: String,
 }
 
 impl CircleRosterHead {
-    pub(crate) fn signed(entry: &CircleRosterEntry, signer: &UserKeypair) -> Self {
-        Self::signed_with_resolutions(entry, entry.resolution_dependencies.clone(), signer)
+    pub(crate) fn signed(
+        entry: &CircleRosterEntry,
+        tip: ExactObjectRef,
+        successor: SuccessorLink,
+        signer: &UserKeypair,
+    ) -> Self {
+        Self::signed_with_resolutions(
+            entry,
+            tip,
+            successor,
+            entry.resolution_dependencies.clone(),
+            signer,
+        )
     }
 
     pub(crate) fn signed_with_resolutions(
         entry: &CircleRosterEntry,
+        tip: ExactObjectRef,
+        successor: SuccessorLink,
         resolutions: Vec<CircleRosterConflictResolutionRef>,
         signer: &UserKeypair,
     ) -> Self {
@@ -318,6 +336,8 @@ impl CircleRosterHead {
             author_owner_grant: entry.author_owner_grant.clone(),
             seq: entry.seq,
             tip_hash: entry.entry_hash(),
+            tip,
+            successor,
             resolutions,
             signature: String::new(),
         };
@@ -338,6 +358,8 @@ impl CircleRosterHead {
             author_owner_grant: &'a MembershipGrantId,
             seq: u64,
             tip_hash: ObjectHash,
+            tip: &'a ExactObjectRef,
+            successor: &'a SuccessorLink,
             resolutions: &'a [CircleRosterConflictResolutionRef],
         }
         serde_json::to_vec(&Signed {
@@ -351,6 +373,8 @@ impl CircleRosterHead {
             author_owner_grant: &self.author_owner_grant,
             seq: self.seq,
             tip_hash: self.tip_hash,
+            tip: &self.tip,
+            successor: &self.successor,
             resolutions: &self.resolutions,
         })
         .expect("circle roster head serialization cannot fail")
@@ -362,18 +386,18 @@ impl CircleRosterHead {
         )
     }
 
-    pub fn verify(&self) -> bool {
+    pub fn verify_for_registration(&self, registration: &StoreDeviceRegistration) -> bool {
         self.version == STORE_PROTOCOL_VERSION
             && self.seq > 0
             && !self.device_id.is_empty()
+            && self.device_id == registration.device_id.to_string()
             && self.resolutions.windows(2).all(|pair| pair[0] < pair[1])
             && keys::verify_signature_hex(
-                &self.author_pubkey,
+                &registration.device_signing_pubkey,
                 &self.signature,
                 &self.canonical_bytes(),
             )
     }
-
     pub fn entry_coord(&self) -> CircleRosterCoord {
         CircleRosterCoord {
             author_pubkey: self.author_pubkey.clone(),
@@ -391,14 +415,42 @@ impl CircleRosterHead {
 pub struct CircleRosterHeadRef {
     pub coord: CircleRosterCoord,
     pub head_hash: ObjectHash,
+    pub object: ExactObjectRef,
 }
 
 impl CircleRosterHeadRef {
-    pub(crate) fn from_head(head: &CircleRosterHead) -> Self {
+    pub(crate) fn from_stored_head(head: &CircleRosterHead, object: ExactObjectRef) -> Self {
         Self {
             coord: head.entry_coord(),
             head_hash: head.head_hash(),
+            object,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExactCircleRosterHead {
+    head: CircleRosterHead,
+    reference: CircleRosterHeadRef,
+}
+
+impl ExactCircleRosterHead {
+    pub(crate) fn bind(
+        head: CircleRosterHead,
+        reference: CircleRosterHeadRef,
+    ) -> Result<Self, CircleRosterError> {
+        if CircleRosterHeadRef::from_stored_head(&head, reference.object.clone()) != reference {
+            return Err(CircleRosterError::MissingConflictHeads);
+        }
+        Ok(Self { head, reference })
+    }
+
+    pub(crate) fn head(&self) -> &CircleRosterHead {
+        &self.head
+    }
+
+    pub(crate) fn reference(&self) -> &CircleRosterHeadRef {
+        &self.reference
     }
 }
 
@@ -1015,26 +1067,33 @@ impl CircleRosterChain {
         Self::from_entries_and_head_refs(entries, Vec::new())
     }
 
-    pub fn from_entries_with_heads(
+    pub(crate) fn from_entries_with_heads(
         entries: Vec<CircleRosterEntry>,
-        heads: Vec<CircleRosterHead>,
+        heads: Vec<ExactCircleRosterHead>,
     ) -> Result<Self, CircleRosterError> {
+        let head_refs = Self::validate_exact_heads(&entries, &heads)?;
+        Self::from_entries_and_head_refs(entries, head_refs)
+    }
+
+    pub(crate) fn validate_exact_heads(
+        entries: &[CircleRosterEntry],
+        heads: &[ExactCircleRosterHead],
+    ) -> Result<Vec<CircleRosterHeadRef>, CircleRosterError> {
         let founder = entries.first().ok_or(CircleRosterError::Empty)?;
-        if heads.iter().any(|head| {
-            !head.verify()
-                || head.store_root_hash != founder.store_root_hash
+        if heads.iter().any(|bound| {
+            let head = bound.head();
+            let reference = bound.reference();
+            head.store_root_hash != founder.store_root_hash
                 || head.circle_id != founder.circle_id
+                || head.entry_coord() != reference.coord
                 || entries
                     .iter()
-                    .find(|entry| entry.coord() == head.entry_coord())
+                    .find(|entry| entry.coord() == reference.coord)
                     .is_none_or(|entry| head.resolutions != entry.resolution_dependencies)
         }) {
             return Err(CircleRosterError::MissingConflictHeads);
         }
-        Self::from_entries_and_head_refs(
-            entries,
-            heads.iter().map(CircleRosterHeadRef::from_head).collect(),
-        )
+        Ok(heads.iter().map(|head| head.reference().clone()).collect())
     }
 
     fn from_entries_and_head_refs(
@@ -1329,35 +1388,27 @@ impl CircleRosterChain {
     pub(crate) fn replay_resolved_history_to_heads(
         &self,
         entries: Vec<CircleRosterEntry>,
-        heads: Vec<CircleRosterHead>,
+        heads: Vec<CircleRosterHeadRef>,
     ) -> Result<Self, CircleRosterError> {
         let checkpoint = self
             .resolution_checkpoint
             .clone()
             .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        let founder = entries.first().ok_or(CircleRosterError::Empty)?;
         if heads.iter().any(|head| {
-            !head.verify()
-                || head.store_root_hash != founder.store_root_hash
-                || head.circle_id != founder.circle_id
-                || entries
-                    .iter()
-                    .find(|entry| entry.coord() == head.entry_coord())
-                    .is_none_or(|entry| head.resolutions != entry.resolution_dependencies)
+            entries
+                .iter()
+                .find(|entry| entry.coord() == head.coord)
+                .is_none()
         }) {
             return Err(CircleRosterError::MissingConflictHeads);
         }
-        Self::from_entries_head_refs_and_checkpoint(
-            entries,
-            heads.iter().map(CircleRosterHeadRef::from_head).collect(),
-            Some(checkpoint),
-        )
+        Self::from_entries_head_refs_and_checkpoint(entries, heads, Some(checkpoint))
     }
 
     pub(crate) fn replay_merged_resolved_histories_to_heads(
         chains: &[&CircleRosterChain],
         entries: Vec<CircleRosterEntry>,
-        heads: Vec<CircleRosterHead>,
+        heads: Vec<CircleRosterHeadRef>,
     ) -> Result<Self, CircleRosterError> {
         let mut raw_by_stream = BTreeMap::new();
         let mut effective_by_stream = BTreeMap::new();
@@ -1867,27 +1918,6 @@ impl CircleRosterChain {
         Ok(entry)
     }
 
-    pub fn signed_head_for_stream(
-        &self,
-        signer: &UserKeypair,
-        device_id: &str,
-        stream_id: AuthorStreamId,
-    ) -> Option<CircleRosterHead> {
-        let author_pubkey = keys::public_key_hex(signer);
-        let author_owner_grant = self.active_owner_grant(&author_pubkey)?;
-        let tip = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.author_pubkey == author_pubkey
-                    && entry.device_id == device_id
-                    && entry.stream_id == stream_id
-                    && entry.author_owner_grant == author_owner_grant
-            })
-            .max_by_key(|entry| entry.seq)?;
-        Some(CircleRosterHead::signed(tip, signer))
-    }
-
     fn signed_change(
         &self,
         device_id: &str,
@@ -2143,6 +2173,102 @@ mod authority_tests {
         MembershipGrantId(ObjectHash::digest(label))
     }
 
+    fn exact_object(logical_key: String, bytes: &[u8]) -> super::super::storage::ExactObjectRef {
+        super::super::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(logical_key)
+                .expect("valid test Circle roster slot"),
+            bytes.len() as u64,
+            ObjectHash::digest(bytes),
+        )
+    }
+
+    fn signed_head(entry: &CircleRosterEntry, device_signer: &UserKeypair) -> CircleRosterHeadRef {
+        signed_head_with_resolutions(entry, entry.resolution_dependencies.clone(), device_signer).1
+    }
+
+    fn signed_exact_head(
+        entry: &CircleRosterEntry,
+        device_signer: &UserKeypair,
+    ) -> ExactCircleRosterHead {
+        let (head, reference) = signed_head_with_resolutions(
+            entry,
+            entry.resolution_dependencies.clone(),
+            device_signer,
+        );
+        ExactCircleRosterHead::bind(head, reference).expect("bind test Circle roster head")
+    }
+
+    fn signed_head_with_resolutions(
+        entry: &CircleRosterEntry,
+        resolutions: Vec<CircleRosterConflictResolutionRef>,
+        device_signer: &UserKeypair,
+    ) -> (CircleRosterHead, CircleRosterHeadRef) {
+        let entry_bytes = serde_json::to_vec(entry).expect("serialize test Circle roster entry");
+        let tip = exact_object(
+            format!(
+                "store-v1/test/circle-roster/{}/entry.json",
+                entry.entry_hash()
+            ),
+            &entry_bytes,
+        );
+        let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            "store-v1/test/circle-roster/{}/{}/head.json",
+            entry.stream_id, entry.seq
+        ))
+        .expect("valid test Circle roster-head slot");
+        let registration_bytes = format!("{} registration", entry.device_id);
+        let registration = super::super::store_commit::StoreDeviceRegistrationRef {
+            device_id: ObjectHash::digest(entry.device_id.as_bytes())
+                .to_string()
+                .parse()
+                .expect("valid test Circle device id"),
+            registration_hash: ObjectHash::digest(registration_bytes.as_bytes()),
+            object: exact_object(
+                format!(
+                    "store-v1/test/circle-roster/{}/registration.json",
+                    entry.device_id
+                ),
+                registration_bytes.as_bytes(),
+            ),
+        };
+        let activation = super::super::store_commit::StreamActivation::grant_authorized(
+            entry.store_root_hash,
+            registration,
+            entry.author_owner_grant.clone(),
+            super::super::store_commit::GrantStreamAnchor::CircleRoster {
+                circle_id: entry.circle_id,
+                first_slot: head_slot.clone(),
+            },
+        );
+        let head = CircleRosterHead::signed_with_resolutions(
+            entry,
+            tip,
+            SuccessorLink {
+                activation: activation.activation_id(),
+                predecessor: None,
+                next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                    "store-v1/test/circle-roster/{}/{}/next-head.json",
+                    entry.stream_id,
+                    entry
+                        .seq
+                        .checked_add(1)
+                        .expect("test Circle roster sequence remains representable")
+                ))
+                .expect("valid next test Circle roster-head slot"),
+            },
+            resolutions,
+            device_signer,
+        );
+        let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle roster head");
+        let object = super::super::storage::ExactObjectRef::new(
+            head_slot,
+            head_bytes.len() as u64,
+            ObjectHash::digest(&head_bytes),
+        );
+        let reference = CircleRosterHeadRef::from_stored_head(&head, object);
+        (head, reference)
+    }
+
     fn three_owner_cycle() -> (
         ObjectHash,
         CircleId,
@@ -2150,7 +2276,7 @@ mod authority_tests {
         UserKeypair,
         UserKeypair,
         CircleRosterChain,
-        Vec<CircleRosterHead>,
+        Vec<CircleRosterHeadRef>,
     ) {
         let first = UserKeypair::generate();
         let second = UserKeypair::generate();
@@ -2207,11 +2333,15 @@ mod authority_tests {
             )
             .expect("second branch");
         base.extend([remove_second.clone(), remove_first.clone()]);
-        let heads = vec![
-            CircleRosterHead::signed(&remove_second, &first),
-            CircleRosterHead::signed(&remove_first, &second),
+        let exact_heads = vec![
+            signed_exact_head(&remove_second, &first),
+            signed_exact_head(&remove_first, &second),
         ];
-        let conflict = CircleRosterChain::from_entries_with_heads(base, heads.clone())
+        let heads = exact_heads
+            .iter()
+            .map(|head| head.reference().clone())
+            .collect::<Vec<_>>();
+        let conflict = CircleRosterChain::from_entries_with_heads(base, exact_heads)
             .expect("three-Owner revocation conflict");
         (
             store_root_hash,
@@ -2274,10 +2404,10 @@ mod authority_tests {
         entries.extend([remove_third.clone(), remove_first.clone()]);
         let mut heads = first_heads;
         heads.extend([
-            CircleRosterHead::signed(&remove_third, &first),
-            CircleRosterHead::signed(&remove_first, &third),
+            signed_head(&remove_third, &first),
+            signed_head(&remove_first, &third),
         ]);
-        heads.sort_by_key(CircleRosterHead::entry_coord);
+        heads.sort_by_key(|head| head.coord.clone());
         let mut second_conflict = resumed
             .replay_resolved_history_to_heads(entries, heads)
             .expect("load second conflict from first checkpoint");
@@ -2418,7 +2548,7 @@ mod authority_tests {
         let heads = removals
             .iter()
             .zip(&owners)
-            .map(|(entry, owner)| CircleRosterHead::signed(entry, owner))
+            .map(|(entry, owner)| signed_exact_head(entry, owner))
             .collect();
 
         assert!(matches!(
@@ -2604,8 +2734,8 @@ mod authority_tests {
         let conflicted = CircleRosterChain::from_entries_with_heads(
             base,
             vec![
-                CircleRosterHead::signed(&remove_second, &first_owner),
-                CircleRosterHead::signed(&remove_first, &second_owner),
+                signed_exact_head(&remove_second, &first_owner),
+                signed_exact_head(&remove_first, &second_owner),
             ],
         )
         .expect("well-formed Circle roster conflict");
@@ -2810,7 +2940,8 @@ mod authority_tests {
             resolver_pubkey: owner_pubkey,
             resolution_hash: ObjectHash::digest(b"Circle head-tip resolution"),
         };
-        let head = CircleRosterHead::signed_with_resolutions(&entry, vec![fake], &owner);
+        let (head, reference) = signed_head_with_resolutions(&entry, vec![fake], &owner);
+        let head = ExactCircleRosterHead::bind(head, reference).unwrap();
 
         assert!(matches!(
             CircleRosterChain::from_entries_with_heads(vec![entry], vec![head]),

@@ -81,16 +81,14 @@ fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) 
 async fn local_announcement_stream(
     db: &crate::database::Database,
 ) -> crate::sync::membership::AuthorStreamId {
-    let root = db
-        .local_store_root_ref()
-        .await
-        .expect("read local Store root")
-        .expect("local Store root exists");
-    let (registration, _) = db
+    let (registration_ref, registration) = db
         .local_blob_write_authority()
         .await
         .expect("read active local Store registration");
-    crate::sync::membership::AuthorStreamId::store_announcements(&root, &registration)
+    registration
+        .store_announcement_activation(&registration_ref)
+        .expect("derive local Store announcement activation")
+        .author_stream_id()
 }
 
 #[async_trait]
@@ -659,9 +657,7 @@ async fn publish_exact_membership_entry(
 ) {
     use crate::sync::membership::{AuthorHead, MembershipHeadRef};
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-    use crate::sync::store_commit::{
-        membership_head_slot_prefix, StreamActivationId, SuccessorLink,
-    };
+    use crate::sync::store_commit::{membership_head_slot_prefix, StreamActivation, SuccessorLink};
 
     let coord = entry.coord();
     let (registration_ref, registration, device_signer) =
@@ -695,6 +691,11 @@ async fn publish_exact_membership_entry(
             }
             crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { .. } => {
                 panic!("test membership author has a recovery stream anchor")
+            }
+            crate::sync::store_commit::GrantStreamAnchor::CircleControl { .. }
+            | crate::sync::store_commit::GrantStreamAnchor::CircleRoster { .. }
+            | crate::sync::store_commit::GrantStreamAnchor::CircleMetadata { .. } => {
+                panic!("test membership author has a Circle stream anchor")
             }
         },
     };
@@ -733,12 +734,13 @@ async fn publish_exact_membership_entry(
         predecessor.clone(),
         entry.resolution_dependencies.clone(),
         SuccessorLink {
-            activation: StreamActivationId::store_membership(
-                &storage.root,
-                &registration_ref,
-                &coord.author_owner_grant,
-                &anchor,
-            ),
+            activation: StreamActivation::grant_authorized(
+                storage.root.store_root_hash,
+                registration_ref.clone(),
+                coord.author_owner_grant.clone(),
+                anchor.clone(),
+            )
+            .activation_id(),
             predecessor: predecessor
                 .as_ref()
                 .map(|reference| reference.object.clone()),
@@ -1048,6 +1050,7 @@ fn sign_exact_commit_with_package(
             device_registrations: graph.commit.device_registrations().to_vec(),
             device_exclusion_proposals: graph.commit.device_exclusion_proposals().to_vec(),
             device_exclusion_outcomes: graph.commit.device_exclusion_outcomes().to_vec(),
+            stream_activations: graph.commit.stream_activations().to_vec(),
             circle_controls: graph.commit.circle_controls().to_vec(),
             store_package: Some(crate::sync::store_commit::StorePackageInput {
                 candidate_family: graph.commit.candidate_family(),
@@ -3560,6 +3563,126 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
 }
 
 #[tokio::test]
+async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_successor() {
+    let owner = UserKeypair::generate();
+    let observer = open_scoped_circle_test_db();
+    let storage = TestStore::create(&observer, "circle-activation-order", owner.clone())
+        .await
+        .expect("create Store for Circle activation ordering");
+    storage.home.sort_listings();
+    let first = open_scoped_circle_test_db();
+    let second = open_scoped_circle_test_db();
+    let receiver = open_scoped_circle_test_db();
+    for participant in [&first, &second, &receiver] {
+        install_active_device_fixture(
+            &storage,
+            &observer,
+            participant,
+            &owner,
+            "2026-07-19T00:00:00Z",
+        )
+        .await
+        .expect("install active Circle test device");
+    }
+    for participant in [&first, &second, &receiver] {
+        let (_temp, store_dir) = temp_store_dir();
+        pull_into(participant, &storage, &store_dir).await;
+    }
+    let first_stream = local_announcement_stream(&first).await;
+    let second_stream = local_announcement_stream(&second).await;
+    let (activator, successor) = if first_stream > second_stream {
+        (&first, &second)
+    } else {
+        (&second, &first)
+    };
+    assert!(
+        local_announcement_stream(successor).await < local_announcement_stream(activator).await
+    );
+    let activator_device = activator
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Circle activator device")
+        .expect("Circle activator device exists");
+    let circle_id = crate::sync::circle_ops::create_circle(
+        activator,
+        &storage.storage,
+        None,
+        &activator_device,
+        "0000000001000-0000-owner",
+        "Readers",
+        &owner,
+    )
+    .await
+    .expect("create Circle on the later-sorted stream");
+
+    let (_successor_temp, successor_dir) = temp_store_dir();
+    let successor_membership = storage
+        .open_into(successor)
+        .await
+        .expect("open Store before pulling Circle activation");
+    crate::sync::store_pull::pull_store_commits_with_identity(
+        successor,
+        successor.synced_tables(),
+        &storage.storage,
+        None,
+        storage.root.store_root_hash,
+        &successor_dir,
+        Some(&successor_membership),
+        Some(&owner),
+    )
+    .await
+    .expect("pull Circle activation before authoring successor");
+    let successor_device = successor
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Circle successor device")
+        .expect("Circle successor device exists");
+    crate::sync::circle_ops::rename_circle(
+        successor,
+        &storage.storage,
+        None,
+        &successor_device,
+        "0000000002000-0000-owner",
+        circle_id,
+        "Renamed readers",
+        &owner,
+    )
+    .await
+    .expect("publish Circle successor from the earlier-sorted stream");
+
+    let (_receiver_temp, receiver_dir) = temp_store_dir();
+    let receiver_membership = storage
+        .open_into(&receiver)
+        .await
+        .expect("open Store before ordered Circle pull");
+    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+        &receiver,
+        receiver.synced_tables(),
+        &storage.storage,
+        None,
+        storage.root.store_root_hash,
+        &receiver_dir,
+        Some(&receiver_membership),
+        Some(&owner),
+    )
+    .await
+    .expect("pull Circle activation and successor in one pass");
+
+    assert!(result.held_positions.is_empty(), "{result:?}");
+    assert_eq!(
+        receiver
+            .get_circles(&crate::keys::public_key_hex(&owner))
+            .await
+            .expect("read ordered Circle result")
+            .into_iter()
+            .find(|circle| circle.id == circle_id)
+            .expect("Circle exists after ordered pull")
+            .name,
+        "Renamed readers"
+    );
+}
+
+#[tokio::test]
 async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
     let owner = UserKeypair::generate();
     let databases = tempfile::tempdir().expect("create Serial database directory");
@@ -3610,6 +3733,18 @@ async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
     )
     .await
     .expect("create Serial Circle");
+    crate::sync::circle_ops::rename_circle(
+        &source,
+        &storage.storage,
+        Some(coordination),
+        &device_id,
+        "0000000001500-0000-owner",
+        circle_id,
+        "Renamed readers",
+        &owner,
+    )
+    .await
+    .expect("rename Serial Circle before another device materializes its activation");
     let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
     let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     host_exec(
@@ -3658,6 +3793,17 @@ async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
     .expect("pull Serial Circle-only write");
 
     assert!(result.changesets_applied >= 1);
+    assert_eq!(
+        target
+            .get_circles(&crate::keys::public_key_hex(&owner))
+            .await
+            .expect("read pulled Serial Circles")
+            .into_iter()
+            .find(|circle| circle.id == circle_id)
+            .expect("pulled Serial Circle exists")
+            .name,
+        "Renamed readers"
+    );
     assert!(
         row_exists(
             &target,
@@ -3697,6 +3843,17 @@ async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
         second_circle_id,
     )
     .await;
+    assert_eq!(
+        conflict
+            .get_circles(&crate::keys::public_key_hex(&owner))
+            .await
+            .expect("read resolved Serial Circles")
+            .into_iter()
+            .find(|circle| circle.id == circle_id)
+            .expect("resolved Serial Circle exists")
+            .name,
+        "Renamed readers"
+    );
 }
 
 #[tokio::test]

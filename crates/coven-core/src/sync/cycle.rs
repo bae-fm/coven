@@ -855,8 +855,12 @@ async fn prepare_cycle_before_pull(
                         .map_err(|error| {
                             format!("load local Store snapshot cadence authority: {error}")
                         })?;
-                    super::causal_grants::AuthorStreamId::store_announcements(&root, &registration)
-                        .to_string()
+                    super::store_commit::StreamActivation::device_authorized_stream_id(
+                        root.store_root_hash,
+                        &registration,
+                        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    )
+                    .to_string()
                 }
                 crate::WritePolicy::Serial => super::store_commit::SERIAL_STREAM_ID.to_string(),
             };

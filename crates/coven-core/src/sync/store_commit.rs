@@ -100,6 +100,8 @@ const OWNER_RECOVERY_NODE_DOMAIN: &[u8] = b"coven.owner-recovery-node.v1\0";
 const ACK_DOMAIN: &[u8] = b"coven.store-ack.v1\0";
 const SNAPSHOT_DOMAIN: &[u8] = b"coven.snapshot-meta.v1\0";
 const CANDIDATE_FAMILY_DOMAIN: &[u8] = b"coven.candidate-family.v1\0";
+const STREAM_ACTIVATION_ID_DOMAIN: &[u8] = b"coven.stream-activation-id.v1\0";
+const AUTHOR_STREAM_ID_DOMAIN: &[u8] = b"coven.author-stream-id.v1\0";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectHash([u8; 32]);
@@ -400,64 +402,274 @@ pub struct StoreRootRef {
 pub struct StreamActivationId(ObjectHash);
 
 impl StreamActivationId {
-    pub fn from_hash(hash: ObjectHash) -> Self {
+    pub(crate) fn from_digest(hash: ObjectHash) -> Self {
         Self(hash)
-    }
-
-    pub fn store_announcements(
-        root: &StoreRootRef,
-        registration: &StoreDeviceRegistrationRef,
-    ) -> Self {
-        Self(ObjectHash::digest(
-            &serde_json::to_vec(&(root, registration))
-                .expect("Store announcement activation serialization cannot fail"),
-        ))
-    }
-
-    pub fn store_acknowledgements(
-        root: &StoreRootRef,
-        registration: &StoreDeviceRegistrationRef,
-    ) -> Self {
-        Self(ObjectHash::digest(
-            &serde_json::to_vec(&(root, registration, "acknowledgements"))
-                .expect("Store acknowledgement activation serialization cannot fail"),
-        ))
-    }
-
-    pub fn store_snapshots(root: &StoreRootRef, registration: &StoreDeviceRegistrationRef) -> Self {
-        Self(ObjectHash::digest(
-            &serde_json::to_vec(&(root, registration, "snapshots"))
-                .expect("Store snapshot activation serialization cannot fail"),
-        ))
-    }
-
-    pub fn store_membership(
-        root: &StoreRootRef,
-        registration: &StoreDeviceRegistrationRef,
-        grant: &MembershipGrantId,
-        anchor: &GrantStreamAnchor,
-    ) -> Self {
-        Self(ObjectHash::digest(
-            &serde_json::to_vec(&(root, registration, grant, anchor))
-                .expect("Store membership activation serialization cannot fail"),
-        ))
-    }
-
-    pub(crate) fn circle_stream<T: Serialize>(
-        root: &StoreRootRef,
-        circle_id: CircleId,
-        domain: &'static str,
-        stream: &T,
-    ) -> Self {
-        Self(ObjectHash::digest(
-            &serde_json::to_vec(&(root, circle_id, domain, stream))
-                .expect("Circle stream activation serialization cannot fail"),
-        ))
     }
 
     pub fn as_hash(self) -> ObjectHash {
         self.0
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StreamActivation {
+    GrantAuthorized {
+        store_root_hash: ObjectHash,
+        author_registration: StoreDeviceRegistrationRef,
+        grant_id: MembershipGrantId,
+        anchor: GrantStreamAnchor,
+    },
+    DeviceAuthorized {
+        store_root_hash: ObjectHash,
+        author_registration: StoreDeviceRegistrationRef,
+        anchor: DeviceStreamAnchor,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisteredStreamActivation {
+    activation: StreamActivation,
+    activating_commit: StoreBatchCommitRef,
+}
+
+impl RegisteredStreamActivation {
+    pub(crate) fn from_stored(
+        stored_activation_id: StreamActivationId,
+        stored_author_stream_id: AuthorStreamId,
+        activation: StreamActivation,
+        activating_commit: StoreBatchCommitRef,
+    ) -> Result<Self, StoreProtocolError> {
+        if activation.activation_id() != stored_activation_id {
+            return Err(StoreProtocolError::Malformed(
+                "stored stream activation id differs from its canonical descriptor".to_string(),
+            ));
+        }
+        if activation.author_stream_id() != stored_author_stream_id {
+            return Err(StoreProtocolError::Malformed(
+                "stored author stream id differs from its canonical descriptor".to_string(),
+            ));
+        }
+        Ok(Self {
+            activation,
+            activating_commit,
+        })
+    }
+
+    pub(crate) fn activation(&self) -> &StreamActivation {
+        &self.activation
+    }
+
+    pub(crate) fn activating_commit(&self) -> &StoreBatchCommitRef {
+        &self.activating_commit
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamAnchorDomain {
+    StoreMembership,
+    OwnerRecovery,
+    CircleControl { circle_id: CircleId },
+    CircleRoster { circle_id: CircleId },
+    CircleMetadata { circle_id: CircleId },
+    StoreAnnouncements,
+    StoreAcknowledgements,
+    StoreSnapshots,
+    CircleAcknowledgements { circle_id: CircleId },
+    CircleSnapshots { circle_id: CircleId },
+}
+
+impl GrantStreamAnchor {
+    fn domain(&self) -> StreamAnchorDomain {
+        match self {
+            Self::StoreMembership { .. } => StreamAnchorDomain::StoreMembership,
+            Self::OwnerRecovery { .. } => StreamAnchorDomain::OwnerRecovery,
+            Self::CircleControl { circle_id, .. } => StreamAnchorDomain::CircleControl {
+                circle_id: *circle_id,
+            },
+            Self::CircleRoster { circle_id, .. } => StreamAnchorDomain::CircleRoster {
+                circle_id: *circle_id,
+            },
+            Self::CircleMetadata { circle_id, .. } => StreamAnchorDomain::CircleMetadata {
+                circle_id: *circle_id,
+            },
+        }
+    }
+}
+
+impl DeviceStreamAnchor {
+    fn domain(&self) -> StreamAnchorDomain {
+        match self {
+            Self::StoreAnnouncements { .. } => StreamAnchorDomain::StoreAnnouncements,
+            Self::StoreAcknowledgements { .. } => StreamAnchorDomain::StoreAcknowledgements,
+            Self::StoreSnapshots { .. } => StreamAnchorDomain::StoreSnapshots,
+            Self::CircleAcknowledgements { circle_id, .. } => {
+                StreamAnchorDomain::CircleAcknowledgements {
+                    circle_id: *circle_id,
+                }
+            }
+            Self::CircleSnapshots { circle_id, .. } => StreamAnchorDomain::CircleSnapshots {
+                circle_id: *circle_id,
+            },
+        }
+    }
+}
+
+impl StreamActivation {
+    pub fn grant_authorized(
+        store_root_hash: ObjectHash,
+        author_registration: StoreDeviceRegistrationRef,
+        grant_id: MembershipGrantId,
+        anchor: GrantStreamAnchor,
+    ) -> Self {
+        Self::GrantAuthorized {
+            store_root_hash,
+            author_registration,
+            grant_id,
+            anchor,
+        }
+    }
+
+    pub fn device_authorized(
+        store_root_hash: ObjectHash,
+        author_registration: StoreDeviceRegistrationRef,
+        anchor: DeviceStreamAnchor,
+    ) -> Self {
+        Self::DeviceAuthorized {
+            store_root_hash,
+            author_registration,
+            anchor,
+        }
+    }
+
+    pub fn activation_id(&self) -> StreamActivationId {
+        StreamActivationId(ObjectHash::digest(&domain_json(
+            STREAM_ACTIVATION_ID_DOMAIN,
+            self,
+        )))
+    }
+
+    pub fn author_stream_id(&self) -> AuthorStreamId {
+        match self {
+            Self::GrantAuthorized {
+                store_root_hash,
+                author_registration,
+                grant_id,
+                anchor,
+            } => derive_grant_author_stream_id(
+                *store_root_hash,
+                author_registration,
+                grant_id,
+                anchor.domain(),
+            ),
+            Self::DeviceAuthorized {
+                store_root_hash,
+                author_registration,
+                anchor,
+            } => derive_device_author_stream_id(
+                *store_root_hash,
+                author_registration,
+                anchor.domain(),
+            ),
+        }
+    }
+
+    pub(crate) fn device_authorized_stream_id(
+        store_root_hash: ObjectHash,
+        author_registration: &StoreDeviceRegistrationRef,
+        domain: StreamAnchorDomain,
+    ) -> AuthorStreamId {
+        derive_device_author_stream_id(store_root_hash, author_registration, domain)
+    }
+
+    pub(crate) fn grant_authorized_stream_id(
+        store_root_hash: ObjectHash,
+        author_registration: &StoreDeviceRegistrationRef,
+        grant_id: &MembershipGrantId,
+        domain: StreamAnchorDomain,
+    ) -> AuthorStreamId {
+        derive_grant_author_stream_id(store_root_hash, author_registration, grant_id, domain)
+    }
+
+    pub fn first_slot(&self) -> &ObjectSlot {
+        match self {
+            Self::GrantAuthorized { anchor, .. } => anchor.first_slot(),
+            Self::DeviceAuthorized { anchor, .. } => anchor.first_slot(),
+        }
+    }
+
+    pub fn author_registration(&self) -> &StoreDeviceRegistrationRef {
+        match self {
+            Self::GrantAuthorized {
+                author_registration,
+                ..
+            }
+            | Self::DeviceAuthorized {
+                author_registration,
+                ..
+            } => author_registration,
+        }
+    }
+
+    pub fn store_root_hash(&self) -> ObjectHash {
+        match self {
+            Self::GrantAuthorized {
+                store_root_hash, ..
+            }
+            | Self::DeviceAuthorized {
+                store_root_hash, ..
+            } => *store_root_hash,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct GrantAuthorStreamFields<'a> {
+    store_root_hash: ObjectHash,
+    domain: StreamAnchorDomain,
+    author_registration: &'a StoreDeviceRegistrationRef,
+    grant_id: &'a MembershipGrantId,
+}
+
+#[derive(Serialize)]
+struct DeviceAuthorStreamFields<'a> {
+    store_root_hash: ObjectHash,
+    domain: StreamAnchorDomain,
+    author_registration: &'a StoreDeviceRegistrationRef,
+}
+
+fn derive_grant_author_stream_id(
+    store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
+    grant_id: &MembershipGrantId,
+    domain: StreamAnchorDomain,
+) -> AuthorStreamId {
+    derive_author_stream_id(&GrantAuthorStreamFields {
+        store_root_hash,
+        domain,
+        author_registration,
+        grant_id,
+    })
+}
+
+fn derive_device_author_stream_id(
+    store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
+    domain: StreamAnchorDomain,
+) -> AuthorStreamId {
+    derive_author_stream_id(&DeviceAuthorStreamFields {
+        store_root_hash,
+        domain,
+        author_registration,
+    })
+}
+
+fn derive_author_stream_id(fields: &impl Serialize) -> AuthorStreamId {
+    AuthorStreamId::from_digest(ObjectHash::digest(&domain_json(
+        AUTHOR_STREAM_ID_DOMAIN,
+        fields,
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -469,7 +681,7 @@ pub struct SuccessorLink {
 }
 
 /// Exact materialized cut, shaped by the Store's signed write policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommitFrontier {
     MergeConcurrent(BTreeMap<AuthorStreamId, StoreBatchCommitRef>),
@@ -637,7 +849,7 @@ impl CommitFrontier {
 }
 
 /// Predecessor and dependency order authenticated by one Store commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreCommitOrder {
     MergeConcurrent {
@@ -760,14 +972,6 @@ pub struct CirclePackageRef {
     pub key_fingerprint: KeyFingerprint,
 }
 
-/// Exact stored head plus its reserved successor slot.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleHeadObjectRef {
-    pub object: ExactObjectRef,
-    pub successor: SuccessorLink,
-}
-
 /// Exact recipient-visible access envelope paired with its sealed leaf.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -812,17 +1016,14 @@ pub struct CircleMetadataObjectRef {
 #[serde(deny_unknown_fields)]
 pub struct CircleActivationObjects {
     pub control: ExactObjectRef,
-    pub control_head: Option<CircleHeadObjectRef>,
     #[serde(with = "ordered_map_entries")]
     pub roster_entries: BTreeMap<CircleRosterCoord, ExactObjectRef>,
-    #[serde(with = "ordered_map_entries")]
-    pub roster_heads: BTreeMap<CircleRosterHeadRef, CircleHeadObjectRef>,
+    pub roster_heads: Vec<CircleRosterHeadRef>,
     #[serde(with = "ordered_map_entries")]
     pub roster_resolutions: BTreeMap<CircleRosterConflictResolutionRef, ExactObjectRef>,
     #[serde(with = "ordered_map_entries")]
     pub metadata_entries: BTreeMap<CircleMetadataCoord, CircleMetadataObjectRef>,
-    #[serde(with = "ordered_map_entries")]
-    pub metadata_heads: BTreeMap<CircleMetadataHeadRef, CircleHeadObjectRef>,
+    pub metadata_heads: Vec<CircleMetadataHeadRef>,
     pub access: Vec<CircleAccessObjectRef>,
 }
 
@@ -833,6 +1034,7 @@ pub enum CircleControlRef {
         circle_id: CircleId,
         control: CircleControlCoord,
         head_hash: ObjectHash,
+        head_object: ExactObjectRef,
         objects: CircleActivationObjects,
     },
     Serial {
@@ -858,6 +1060,13 @@ impl CircleControlRef {
     pub fn head_hash(&self) -> Option<ObjectHash> {
         match self {
             Self::MergeConcurrent { head_hash, .. } => Some(*head_hash),
+            Self::Serial { .. } => None,
+        }
+    }
+
+    pub fn head_object(&self) -> Option<&ExactObjectRef> {
+        match self {
+            Self::MergeConcurrent { head_object, .. } => Some(head_object),
             Self::Serial { .. } => None,
         }
     }
@@ -1012,6 +1221,7 @@ pub struct StoreCommitOperations {
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
+    pub stream_activations: Vec<StreamActivation>,
     pub circle_controls: Vec<CircleControlRef>,
     pub store_package: Option<StorePackageRef>,
     pub circle_packages: Vec<CirclePackageRef>,
@@ -1026,6 +1236,22 @@ impl StoreCommitOperations {
         self.acknowledgement.is_some() && self.has_no_other_operations()
     }
 
+    pub(crate) fn is_circle_control_activation_only(&self) -> bool {
+        self.acknowledgement.is_none()
+            && self.control.is_none()
+            && self.device_join_attempt_decisions.is_empty()
+            && self.device_join_outcomes.is_empty()
+            && self.device_join_cleanup_receipts.is_empty()
+            && self.provider_access_grants.is_empty()
+            && self.provider_access_withdrawals.is_empty()
+            && self.device_registrations.is_empty()
+            && self.device_exclusion_proposals.is_empty()
+            && self.device_exclusion_outcomes.is_empty()
+            && self.circle_controls.len() == 1
+            && self.store_package.is_none()
+            && self.circle_packages.is_empty()
+    }
+
     fn has_no_other_operations(&self) -> bool {
         self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
@@ -1036,6 +1262,7 @@ impl StoreCommitOperations {
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
             && self.device_exclusion_outcomes.is_empty()
+            && self.stream_activations.is_empty()
             && self.circle_controls.is_empty()
             && self.store_package.is_none()
             && self.circle_packages.is_empty()
@@ -1075,6 +1302,7 @@ pub struct StoreCommitOperationsInput<'a> {
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
+    pub stream_activations: Vec<StreamActivation>,
     pub circle_controls: Vec<CircleControlRef>,
     pub store_package: Option<StorePackageInput<'a>>,
     pub circle_packages: &'a [CirclePackageInput<'a>],
@@ -1262,6 +1490,11 @@ impl StoreBatchCommit {
         })
     }
 
+    pub fn stream_activations(&self) -> &[StreamActivation] {
+        self.operations()
+            .map_or(&[], |operations| operations.stream_activations.as_slice())
+    }
+
     pub fn device_retirements(&self) -> &[StoreDeviceSelfRetirementRef] {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
@@ -1413,6 +1646,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: Some(package),
                 circle_packages: &[],
@@ -1457,6 +1691,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: package,
                 circle_packages: &[],
@@ -1500,6 +1735,7 @@ impl StoreBatchCommit {
                 device_registrations,
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1674,6 +1910,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1718,6 +1955,7 @@ impl StoreBatchCommit {
                 device_registrations,
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1764,6 +2002,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1807,6 +2046,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1851,6 +2091,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: proposals,
                 device_exclusion_outcomes: outcomes,
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1897,6 +2138,7 @@ impl StoreBatchCommit {
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1941,6 +2183,7 @@ impl StoreBatchCommit {
             device_registrations,
             device_exclusion_proposals,
             device_exclusion_outcomes,
+            stream_activations,
             circle_controls,
             store_package,
             circle_packages,
@@ -1978,6 +2221,12 @@ impl StoreBatchCommit {
         validate_provider_access_refs(&provider_access_grants, &provider_access_withdrawals)?;
         validate_device_registration_refs(&device_registrations)?;
         validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
+        validate_stream_activations(
+            store_root_hash,
+            &author_registration,
+            order.policy(),
+            &stream_activations,
+        )?;
         let mut seen_circles = BTreeSet::new();
         let circle_packages = circle_packages
             .iter()
@@ -2019,6 +2268,7 @@ impl StoreBatchCommit {
             device_registrations,
             device_exclusion_proposals,
             device_exclusion_outcomes,
+            stream_activations,
             circle_controls,
             store_package,
             circle_packages,
@@ -2053,7 +2303,7 @@ impl StoreBatchCommit {
     ) -> Result<Self, StoreProtocolError> {
         let family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-        validate_commit_body(&body, family, &author_registration, &order)?;
+        validate_commit_body(store_root_hash, &body, family, &author_registration, &order)?;
         let candidate_objects = candidate_manifest(family, &body)?;
         let mut commit = Self {
             version: STORE_PROTOCOL_VERSION,
@@ -2185,7 +2435,13 @@ impl StoreBatchCommit {
                 });
             }
         }
-        validate_commit_body(&self.body, family, &self.author_registration, &self.order)?;
+        validate_commit_body(
+            self.store_root_hash,
+            &self.body,
+            family,
+            &self.author_registration,
+            &self.order,
+        )?;
         if let StoreCommitBody::AbandonCandidates { manifests } = &self.body {
             validate_candidate_abandonment(
                 manifests,
@@ -2281,6 +2537,7 @@ fn validate_commit_envelope(
 }
 
 fn validate_commit_body(
+    store_root_hash: ObjectHash,
     body: &StoreCommitBody,
     family: CandidateFamilyId,
     author: &StoreDeviceRegistrationRef,
@@ -2305,6 +2562,12 @@ fn validate_commit_body(
                 &operations.device_exclusion_proposals,
                 &operations.device_exclusion_outcomes,
             )?;
+            validate_stream_activations(
+                store_root_hash,
+                author,
+                order.policy(),
+                &operations.stream_activations,
+            )?;
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
         StoreCommitBody::ReclaimReceipt { .. } => {}
@@ -2325,6 +2588,63 @@ fn validate_commit_body(
                     "candidate abandonment has no candidates".to_string(),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_stream_activations(
+    store_root_hash: ObjectHash,
+    author: &StoreDeviceRegistrationRef,
+    policy: WritePolicy,
+    activations: &[StreamActivation],
+) -> Result<(), StoreProtocolError> {
+    if activations.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StoreProtocolError::Malformed(
+            "stream activations are not strictly sorted and unique".to_string(),
+        ));
+    }
+    let mut activation_ids = BTreeSet::new();
+    let mut stream_ids = BTreeSet::new();
+    let mut first_slots = BTreeSet::new();
+    for activation in activations {
+        if activation.store_root_hash() != store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: store_root_hash,
+                actual: activation.store_root_hash(),
+            });
+        }
+        if activation.author_registration() != author {
+            return Err(StoreProtocolError::Malformed(
+                "stream activation registration differs from its commit author".to_string(),
+            ));
+        }
+        if policy == WritePolicy::Serial {
+            return Err(StoreProtocolError::Malformed(
+                "Serial Store commit contains a stream activation".to_string(),
+            ));
+        }
+        if !matches!(
+            activation,
+            StreamActivation::GrantAuthorized {
+                anchor: GrantStreamAnchor::CircleControl { .. }
+                    | GrantStreamAnchor::CircleRoster { .. }
+                    | GrantStreamAnchor::CircleMetadata { .. },
+                ..
+            }
+        ) {
+            return Err(StoreProtocolError::Malformed(
+                "Store commit contains a root- or registration-authorized stream anchor"
+                    .to_string(),
+            ));
+        }
+        if !activation_ids.insert(activation.activation_id())
+            || !stream_ids.insert(activation.author_stream_id())
+            || !first_slots.insert(activation.first_slot().clone())
+        {
+            return Err(StoreProtocolError::Malformed(
+                "stream activations repeat an activation, author stream, or first slot".to_string(),
+            ));
         }
     }
     Ok(())
@@ -5258,7 +5578,7 @@ impl StoreDeviceRegistrationOrigin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceStreamAnchor {
     StoreAnnouncements {
@@ -5280,17 +5600,49 @@ pub enum DeviceStreamAnchor {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl DeviceStreamAnchor {
+    pub fn first_slot(&self) -> &ObjectSlot {
+        match self {
+            Self::StoreAnnouncements { first_slot }
+            | Self::StoreAcknowledgements { first_slot }
+            | Self::StoreSnapshots { first_slot }
+            | Self::CircleAcknowledgements { first_slot, .. }
+            | Self::CircleSnapshots { first_slot, .. } => first_slot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrantStreamAnchor {
-    StoreMembership { first_slot: ObjectSlot },
-    OwnerRecovery { first_slot: ObjectSlot },
+    StoreMembership {
+        first_slot: ObjectSlot,
+    },
+    OwnerRecovery {
+        first_slot: ObjectSlot,
+    },
+    CircleControl {
+        circle_id: CircleId,
+        first_slot: ObjectSlot,
+    },
+    CircleRoster {
+        circle_id: CircleId,
+        first_slot: ObjectSlot,
+    },
+    CircleMetadata {
+        circle_id: CircleId,
+        first_slot: ObjectSlot,
+    },
 }
 
 impl GrantStreamAnchor {
     pub fn first_slot(&self) -> &ObjectSlot {
         match self {
-            Self::StoreMembership { first_slot } | Self::OwnerRecovery { first_slot } => first_slot,
+            Self::StoreMembership { first_slot }
+            | Self::OwnerRecovery { first_slot }
+            | Self::CircleControl { first_slot, .. }
+            | Self::CircleRoster { first_slot, .. }
+            | Self::CircleMetadata { first_slot, .. } => first_slot,
         }
     }
 }
@@ -5333,6 +5685,46 @@ struct RegistrationSignedFields<'a> {
 }
 
 impl StoreDeviceRegistration {
+    fn device_stream_activation(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+        anchor: &DeviceStreamAnchor,
+    ) -> Result<StreamActivation, StoreProtocolError> {
+        reference.verify_registration(self)?;
+        Ok(StreamActivation::device_authorized(
+            self.store_root.store_root_hash,
+            reference.clone(),
+            anchor.clone(),
+        ))
+    }
+
+    pub fn store_announcement_activation(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<StreamActivation, StoreProtocolError> {
+        let StoreCommitAnchor::MergeConcurrent { announcements } = &self.store_commits else {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: WritePolicy::MergeConcurrent,
+                actual: WritePolicy::Serial,
+            });
+        };
+        self.device_stream_activation(reference, announcements)
+    }
+
+    pub fn store_acknowledgement_activation(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<StreamActivation, StoreProtocolError> {
+        self.device_stream_activation(reference, &self.acknowledgements)
+    }
+
+    pub fn store_snapshot_activation(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<StreamActivation, StoreProtocolError> {
+        self.device_stream_activation(reference, &self.snapshots)
+    }
+
     pub fn signed(
         store_root: StoreRootRef,
         origin: StoreDeviceRegistrationOrigin,
@@ -5647,9 +6039,10 @@ impl StoreAck {
             &ack.device_state,
             &ack.exclusions,
         )?;
-        if ack.successor.activation
-            != StreamActivationId::store_acknowledgements(expected_store_root, &ack.registration)
-        {
+        let activation = author
+            .store_acknowledgement_activation(&ack.registration)?
+            .activation_id();
+        if ack.successor.activation != activation {
             return Err(StoreProtocolError::Malformed(
                 "Store acknowledgement successor uses another stream activation".to_string(),
             ));
@@ -6816,6 +7209,262 @@ mod tests {
         ExactObjectRef::new(slot(key), bytes.len() as u64, ObjectHash::digest(bytes))
     }
 
+    fn circle_activation(
+        fixture: &Fixture,
+        circle_id: CircleId,
+        grant_id: MembershipGrantId,
+        anchor: fn(CircleId, ObjectSlot) -> GrantStreamAnchor,
+        first_slot: ObjectSlot,
+    ) -> StreamActivation {
+        StreamActivation::grant_authorized(
+            fixture.root_ref.store_root_hash,
+            fixture.registration_ref.clone(),
+            grant_id,
+            anchor(circle_id, first_slot),
+        )
+    }
+
+    #[test]
+    fn stream_activation_descriptor_and_locator_derivations_are_identical() {
+        let fixture = fixture();
+        let circle_id = CircleId::from_bytes([4; 16]);
+        let other_circle = CircleId::from_bytes([5; 16]);
+        let grant = MembershipGrantId(ObjectHash::digest(b"Circle activation grant"));
+        let other_grant = MembershipGrantId(ObjectHash::digest(b"other Circle activation grant"));
+        let first_slot = slot("store-v1/circles/stream/first.json".to_string());
+        let activation = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+            first_slot.clone(),
+        );
+        let locator = StreamActivation::grant_authorized_stream_id(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            &grant,
+            StreamAnchorDomain::CircleRoster { circle_id },
+        );
+        assert_eq!(activation.author_stream_id(), locator);
+        let locator_text = locator.to_string();
+        assert_eq!(locator_text.len(), 64);
+        assert!(locator_text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+
+        let other_slot = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+            slot("store-v1/circles/stream/other-first.json".to_string()),
+        );
+        assert_eq!(activation.author_stream_id(), other_slot.author_stream_id());
+        assert_ne!(activation.activation_id(), other_slot.activation_id());
+
+        let other_domain = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
+                circle_id,
+                first_slot,
+            },
+            first_slot.clone(),
+        );
+        let other_circle = circle_activation(
+            &fixture,
+            other_circle,
+            grant,
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+            first_slot.clone(),
+        );
+        let other_grant = circle_activation(
+            &fixture,
+            circle_id,
+            other_grant,
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+            first_slot,
+        );
+        assert_ne!(
+            activation.author_stream_id(),
+            other_domain.author_stream_id()
+        );
+        assert_ne!(
+            activation.author_stream_id(),
+            other_circle.author_stream_id()
+        );
+        assert_ne!(
+            activation.author_stream_id(),
+            other_grant.author_stream_id()
+        );
+    }
+
+    #[test]
+    fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identity_collisions() {
+        let (fixture, other_fixture) = (fixture(), fixture());
+        let circle_id = CircleId::from_bytes([6; 16]);
+        let grant = MembershipGrantId(ObjectHash::digest(b"validation Circle grant"));
+        let control = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleControl {
+                circle_id,
+                first_slot,
+            },
+            slot("store-v1/circles/validation/control.json".to_string()),
+        );
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::Serial,
+            std::slice::from_ref(&control),
+        )
+        .is_err());
+
+        let mut wrong_root = control.clone();
+        let StreamActivation::GrantAuthorized {
+            store_root_hash, ..
+        } = &mut wrong_root
+        else {
+            unreachable!()
+        };
+        *store_root_hash = ObjectHash::digest(b"wrong Store root");
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &[wrong_root],
+        )
+        .is_err());
+
+        let mut wrong_registration = control.clone();
+        let StreamActivation::GrantAuthorized {
+            author_registration,
+            ..
+        } = &mut wrong_registration
+        else {
+            unreachable!()
+        };
+        *author_registration = other_fixture.registration_ref;
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &[wrong_registration],
+        )
+        .is_err());
+
+        let non_circle = StreamActivation::grant_authorized(
+            fixture.root_ref.store_root_hash,
+            fixture.registration_ref.clone(),
+            grant.clone(),
+            GrantStreamAnchor::StoreMembership {
+                first_slot: slot("store-v1/membership/non-circle.json".to_string()),
+            },
+        );
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &[non_circle],
+        )
+        .is_err());
+
+        let roster = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+            slot("store-v1/circles/validation/roster.json".to_string()),
+        );
+        let mut unsorted = vec![control.clone(), roster.clone()];
+        unsorted.sort();
+        unsorted.reverse();
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &unsorted,
+        )
+        .is_err());
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &[control.clone(), control.clone()],
+        )
+        .is_err());
+
+        let same_stream = circle_activation(
+            &fixture,
+            circle_id,
+            grant.clone(),
+            |circle_id, first_slot| GrantStreamAnchor::CircleControl {
+                circle_id,
+                first_slot,
+            },
+            slot("store-v1/circles/validation/control-other.json".to_string()),
+        );
+        let mut duplicate_stream = vec![control.clone(), same_stream];
+        duplicate_stream.sort();
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &duplicate_stream,
+        )
+        .is_err());
+
+        let shared_slot = slot("store-v1/circles/validation/shared.json".to_string());
+        let mut duplicate_slot = vec![
+            circle_activation(
+                &fixture,
+                circle_id,
+                grant.clone(),
+                |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                    circle_id,
+                    first_slot,
+                },
+                shared_slot.clone(),
+            ),
+            circle_activation(
+                &fixture,
+                circle_id,
+                grant,
+                |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
+                    circle_id,
+                    first_slot,
+                },
+                shared_slot,
+            ),
+        ];
+        duplicate_slot.sort();
+        assert!(validate_stream_activations(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            WritePolicy::MergeConcurrent,
+            &duplicate_slot,
+        )
+        .is_err());
+    }
+
     fn fixture() -> Fixture {
         let signer = UserKeypair::generate();
         let founder_grant =
@@ -7302,10 +7951,10 @@ mod tests {
             },
             "2026-07-16T00:00:00Z".to_string(),
             SuccessorLink {
-                activation: StreamActivationId::store_acknowledgements(
-                    &fixture.root_ref,
-                    &registration_ref,
-                ),
+                activation: registration
+                    .store_acknowledgement_activation(&registration_ref)
+                    .expect("derive exact Store acknowledgement activation")
+                    .activation_id(),
                 predecessor: None,
                 next_slot: slot("store-v1/acks/joiner/2.json".to_string()),
             },
@@ -7373,10 +8022,14 @@ mod tests {
             StoreAckExclusionState::Serial,
             "2026-07-16T00:00:00Z".to_string(),
             SuccessorLink {
-                activation: StreamActivationId::store_acknowledgements(
-                    &root_ref,
-                    &registration_ref,
-                ),
+                activation: StreamActivation::device_authorized(
+                    store_root_hash,
+                    registration_ref.clone(),
+                    DeviceStreamAnchor::StoreAcknowledgements {
+                        first_slot: slot("store-v1/acks/founder/1.json".to_string()),
+                    },
+                )
+                .activation_id(),
                 predecessor: None,
                 next_slot: slot("store-v1/acks/founder/2.json".to_string()),
             },
@@ -7421,7 +8074,7 @@ mod tests {
         };
         let ack = StoreAck::signed(
             store_root_hash,
-            registration_ref,
+            registration_ref.clone(),
             1,
             store_cut,
             device_state,
@@ -7429,7 +8082,14 @@ mod tests {
             StoreAckExclusionState::Serial,
             "2026-07-18T00:00:00Z".to_string(),
             SuccessorLink {
-                activation: StreamActivationId::from_hash(ObjectHash::digest(b"ack stream")),
+                activation: StreamActivation::device_authorized(
+                    store_root_hash,
+                    registration_ref,
+                    DeviceStreamAnchor::StoreAcknowledgements {
+                        first_slot: slot("store-v1/acks/founder/1.json".to_string()),
+                    },
+                )
+                .activation_id(),
                 predecessor: None,
                 next_slot: slot("store-v1/acks/founder/2.json".to_string()),
             },
@@ -7935,12 +8595,11 @@ mod tests {
             control,
             objects: CircleActivationObjects {
                 control: exact("circle-control.json".to_string(), b"control"),
-                control_head: None,
                 roster_entries: BTreeMap::new(),
-                roster_heads: BTreeMap::new(),
+                roster_heads: Vec::new(),
                 roster_resolutions: BTreeMap::new(),
                 metadata_entries: BTreeMap::new(),
-                metadata_heads: BTreeMap::new(),
+                metadata_heads: Vec::new(),
                 access: vec![access("drive-file-a"), access("drive-file-b")],
             },
         });

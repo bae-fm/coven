@@ -28,11 +28,12 @@ use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::sync::circle::Audience;
+use crate::sync::circle_activation::VerifiedStreamActivations;
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{
-    AuthorHead, AuthorStreamId, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
-    SerialAuthorizationState, SerialMembershipState,
+    AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef, SerialAuthorizationState,
+    SerialMembershipState,
 };
 use crate::sync::provider::ProviderAdminState;
 use crate::sync::remote_object::{
@@ -254,7 +255,12 @@ fn load_store_device_exclusion_freezes_on(
                 "stored device exclusion freeze carries a Serial target cut".to_string(),
             ));
         };
-        let target_stream = AuthorStreamId::store_announcements(root, &proposal.target);
+        let target_stream =
+            crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                root.store_root_hash,
+                &proposal.target,
+                crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            );
         if target_frontier.len() > 1
             || target_frontier
                 .keys()
@@ -345,7 +351,12 @@ fn apply_store_device_exclusion_freezes_on(
                     "new device exclusion proposal duplicates a stored freeze".to_string(),
                 ));
             }
-            let target_stream = AuthorStreamId::store_announcements(root, &reference.target);
+            let target_stream =
+                crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                    root.store_root_hash,
+                    &reference.target,
+                    crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                );
             let target = Database::latest_position_for_device_on(conn, &target_stream.to_string())?;
             desired.push(StoreDeviceProposalAck {
                 proposal: reference.clone(),
@@ -1784,14 +1795,15 @@ fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
                 || head.object != *head.prepared.reference()
                 || head.object.slot() != &first_slot
                 || parsed_head.successor.activation
-                    != StreamActivationId::store_membership(
-                        &root_ref,
-                        &registration_ref,
-                        &parsed_entry.author_owner_grant,
-                        &crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
+                    != crate::sync::store_commit::StreamActivation::grant_authorized(
+                        root_ref.store_root_hash,
+                        registration_ref.clone(),
+                        parsed_entry.author_owner_grant.clone(),
+                        crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
                             first_slot: first_slot.clone(),
                         },
                     )
+                    .activation_id()
             {
                 return Err(DbError::Message(
                     "founder membership head differs from its exact root graph".to_string(),
@@ -2760,7 +2772,11 @@ fn parse_prepared_merge_candidate_parts_on(
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
     let coord = StoreCommitCoord::MergeConcurrent {
-        stream_id: AuthorStreamId::store_announcements(&root, &unverified.author_registration),
+        stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &unverified.author_registration,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        ),
         sequence: unverified.seq(),
     };
     let value = StoreBatchCommit::parse_at(
@@ -5360,7 +5376,11 @@ impl Database {
             )))?;
             registration_ref.verify_registration(&registration)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            let stream_id = AuthorStreamId::store_announcements(&root, &registration_ref);
+            let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                root.store_root_hash,
+                &registration_ref,
+                crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            );
             let coord = StoreCommitCoord::MergeConcurrent {
                 stream_id,
                 sequence: stage.commit.value.seq(),
@@ -6333,7 +6353,12 @@ impl Database {
                     .map_err(|error| {
                         DbError::Message(format!("prepared write registration: {error}"))
                     })?;
-                    let stream_id = AuthorStreamId::store_announcements(&root, registration_ref);
+                    let stream_id =
+                        crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                            root.store_root_hash,
+                            registration_ref,
+                            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                        );
                     let coord = StoreCommitCoord::MergeConcurrent {
                         stream_id,
                         sequence: unverified_commit.seq(),
@@ -7015,7 +7040,12 @@ impl Database {
             let stream_id = match write_policy {
                 WritePolicy::MergeConcurrent => {
                     let (root, registration, _) = local_store_authority_on(conn)?;
-                    AuthorStreamId::store_announcements(&root, &registration).to_string()
+                    crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                        root.store_root_hash,
+                        &registration,
+                        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    )
+                    .to_string()
                 }
                 WritePolicy::Serial => SERIAL_STREAM_ID.to_string(),
             };
@@ -7184,7 +7214,11 @@ impl Database {
             let registration =
                 load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
             let expected_stream =
-                AuthorStreamId::store_announcements(&root, &unverified.author_registration);
+                crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                    root.store_root_hash,
+                    &unverified.author_registration,
+                    crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                );
             if !matches!(
                 accepted.coord,
                 StoreCommitCoord::MergeConcurrent { stream_id, .. }
@@ -10082,12 +10116,24 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn registered_stream_activation(
+        &self,
+        activation_id: StreamActivationId,
+    ) -> Result<Option<crate::sync::store_commit::RegisteredStreamActivation>, DbError> {
+        self.call(move |conn| {
+            load_registered_stream_activation_on(conn, &activation_id.as_hash().to_string())
+        })
+        .await
+    }
+
     pub(crate) async fn select_causal_author_stream(
         &self,
         key: String,
         reusable: std::collections::BTreeSet<crate::sync::membership::AuthorStreamId>,
     ) -> Result<crate::sync::membership::AuthorStreamId, DbError> {
-        let candidate = crate::sync::membership::AuthorStreamId::generate(self.id_provider());
+        let candidate = crate::sync::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+            self.id_provider().new_id().as_bytes(),
+        ));
         self.call(move |conn| {
             let existing = conn
                 .query_row(
@@ -10301,7 +10347,10 @@ impl Database {
                 .checked_add(1)
                 .ok_or_else(|| DbError::Message("Store snapshot sequence overflow".to_string()))?;
             if meta.successor.activation
-                != StreamActivationId::store_snapshots(&root, &registration_ref)
+                != registration
+                    .store_snapshot_activation(&registration_ref)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .activation_id()
                 || meta.successor.next_slot.logical_key()
                     != format!(
                         "{}.json",
@@ -13078,7 +13127,7 @@ impl Database {
         let current_state = Self::circle_current_state_on(conn, activation.circle_id)?;
         let current_state = match current_state {
             Some(current) => current.advance(next_state).map_err(DbError::Message)?,
-            None if activation.control.value.previous_control_hash().is_none() => next_state,
+            None if activation.control.value.is_founder() => next_state,
             None => {
                 return Err(DbError::Message(format!(
                     "circle {} current state is absent for a successor control",
@@ -13137,9 +13186,8 @@ impl Database {
     pub(crate) async fn activate_circle_operation(
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
-        identity: &crate::keys::UserKeypair,
+        verified: crate::sync::circle_ops::VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        let identity = identity.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             journal
@@ -13184,6 +13232,12 @@ impl Database {
             let root = required_store_root_authority_on(&tx)?;
             let author =
                 load_activated_registration_on(&tx, &root, &unverified_commit.author_registration)?;
+            let (circle_activations, stream_activations) = verified.into_parts();
+            let [activation] = circle_activations.as_slice() else {
+                return Err(DbError::Message(
+                    "local Circle publication must carry one common-verifier result".to_string(),
+                ));
+            };
             let verify_commit = || {
                 let commit = StoreBatchCommit::parse_at(
                     &operation.commit_bytes,
@@ -13221,31 +13275,36 @@ impl Database {
                             .to_string(),
                     ));
                 };
-                let expected_ref = creation.control_ref(control_ref.objects().clone());
+                let expected_ref = creation.control_ref(
+                    control_ref.objects().clone(),
+                    control_ref.head_object().cloned(),
+                );
                 if control_ref != &expected_ref
-                    || commit.store_package().is_some()
-                    || !commit.circle_packages().is_empty()
-                    || commit.control().is_some()
-                    || !commit.device_registrations().is_empty()
+                    || !commit.operations().is_some_and(
+                        crate::sync::store_commit::StoreCommitOperations::is_circle_control_activation_only,
+                    )
                 {
                     return Err(DbError::Message(
                         "circle creation Store commit is not an exact control-only batch"
                             .to_string(),
                     ));
                 }
-                let activation = crate::sync::circle_ops::verify_local_circle_activation(
-                    &journal,
-                    &operation.commit_ref,
-                    &commit,
-                    &author,
-                    &identity,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?;
-                Ok((commit, activation))
+                if activation.reference != *control_ref
+                    || activation.circle_id != creation.circle_id
+                    || activation.control != creation.control
+                    || stream_activations.activating_commit() != &operation.commit_ref
+                    || stream_activations.as_slice() != commit.stream_activations()
+                {
+                    return Err(DbError::Message(
+                        "common-verifier Circle result differs from the durable signed operation"
+                            .to_string(),
+                    ));
+                }
+                Ok(commit)
             };
             let (commit, activation) = match &operation.policy {
                 crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent { head } => {
-                    let (commit, activation) = verify_commit()?;
+                    let commit = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
                         commit.store_root_hash,
@@ -13260,15 +13319,24 @@ impl Database {
                             "circle activation head names a different commit".to_string(),
                         ));
                     }
-                    Self::record_materialized_commit_on(&tx, &commit, &operation.commit_ref)?;
-                    (commit, activation)
+                    let device_operations =
+                        VerifiedStoreDeviceOperations::without_exclusions(&commit)
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                    Self::record_materialized_commit_with_device_operations_on(
+                        &tx,
+                        &commit,
+                        &operation.commit_ref,
+                        &device_operations,
+                        &stream_activations,
+                    )?;
+                    (commit, activation.clone())
                 }
                 crate::sync::circle_ops::CircleOperationPolicy::Serial {
                     head,
                     authorization,
                     ..
                 } => {
-                    let (commit, activation) = verify_commit()?;
+                    let commit = verify_commit()?;
                     let parsed =
                         StoreSerialHead::parse(&head.to_bytes(), commit.store_root_hash, &author)
                             .map_err(|error| {
@@ -13283,13 +13351,18 @@ impl Database {
                             "circle Serial head names a different commit".to_string(),
                         ));
                     }
-                    Self::record_materialized_serial_commit_on(
+                    let device_operations =
+                        VerifiedStoreDeviceOperations::without_exclusions(&commit)
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                    Self::record_materialized_serial_commit_with_device_operations_on(
                         &tx,
                         &commit,
                         &operation.commit_ref,
                         authorization,
+                        &device_operations,
+                        &stream_activations,
                     )?;
-                    (commit, activation)
+                    (commit, activation.clone())
                 }
             };
             Self::record_verified_circle_activations_on(
@@ -14107,11 +14180,14 @@ impl Database {
     ) -> Result<(), DbError> {
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
+        let stream_activations = VerifiedStreamActivations::none(commit, commit_ref)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         Self::record_materialized_commit_with_device_operations_on(
             conn,
             commit,
             commit_ref,
             &device_operations,
+            &stream_activations,
         )
     }
 
@@ -14120,6 +14196,7 @@ impl Database {
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         device_operations: &VerifiedStoreDeviceOperations,
+        stream_activations: &VerifiedStreamActivations,
     ) -> Result<(), DbError> {
         commit_ref
             .verify_commit(commit)
@@ -14151,7 +14228,11 @@ impl Database {
             ));
         }
         let expected_stream =
-            AuthorStreamId::store_announcements(&root, &commit.author_registration);
+            crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                root.store_root_hash,
+                &commit.author_registration,
+                crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            );
         let (stream_id, sequence) = match commit_ref.coord {
             StoreCommitCoord::MergeConcurrent {
                 stream_id,
@@ -14294,9 +14375,21 @@ impl Database {
         conn.execute(
             "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
              VALUES (?1, ?2, ?3)",
-            (&stream_id, seq, commit_ref_json),
+            (&stream_id, seq, &commit_ref_json),
         )
         .map_err(DbError::from)?;
+        if stream_activations.as_slice() != commit.stream_activations() {
+            return Err(DbError::Message(
+                "verified stream activations differ from the materialized Store commit".to_string(),
+            ));
+        }
+        if stream_activations.activating_commit() != commit_ref {
+            return Err(DbError::Message(
+                "verified stream activation commit differs from the materialized Store commit"
+                    .to_string(),
+            ));
+        }
+        record_verified_stream_activations_on(conn, stream_activations, &commit_ref_json)?;
         apply_store_device_exclusion_freezes_on(
             conn,
             &root,
@@ -14373,37 +14466,47 @@ impl Database {
                 existing_controls.push(control);
             }
             drop(statement);
-            match activation.control.value.previous_control_hash() {
-                None if !existing_controls.is_empty() => {
+            if activation.control.value.is_founder() {
+                if !existing_controls.is_empty() {
                     return Err(DbError::Message(format!(
                         "circle {circle_id} already has a founder control"
                     )));
                 }
-                None => {}
-                Some(previous_hash) => {
-                    let previous = existing_controls
-                        .iter()
-                        .find(|control| control.control_hash() == previous_hash)
-                        .ok_or_else(|| {
-                            DbError::Message(format!(
-                                "circle {circle_id} control predecessor {previous_hash} is absent"
-                            ))
-                        })?;
-                    if previous.store_root_hash != activation.control.value.store_root_hash
-                        || previous.circle_id != activation.circle_id
-                        || previous
+            } else {
+                let covered = existing_controls
+                    .iter()
+                    .filter(|control| activation.control.value.causally_covers(control))
+                    .collect::<Vec<_>>();
+                let expected_covered = match &activation.control.value.value {
+                    crate::sync::circle::CircleControlValue::MergeConcurrent { order, .. } => {
+                        order.dependencies.len()
+                            + usize::from(order.previous_control_hash.is_some())
+                    }
+                    crate::sync::circle::CircleControlValue::Serial { .. } => 1,
+                };
+                if covered.len() != expected_covered
+                    || covered.iter().any(|control| {
+                        control
                             .owners()
                             .binary_search(&activation.control.value.author_pubkey)
                             .is_err()
-                        || activation.control.value.ordinal()
-                            != previous.ordinal().checked_add(1).ok_or_else(|| {
-                                DbError::Message("circle control ordinal overflow".to_string())
-                            })?
-                    {
-                        return Err(DbError::Message(format!(
-                            "circle {circle_id} control does not extend its authorized predecessor"
-                        )));
-                    }
+                    })
+                {
+                    return Err(DbError::Message(format!(
+                        "circle {circle_id} control does not cover every authorized predecessor"
+                    )));
+                }
+                if matches!(
+                    &activation.control.value.value,
+                    crate::sync::circle::CircleControlValue::Serial { .. }
+                ) && activation.control.value.ordinal()
+                    != covered[0].ordinal().checked_add(1).ok_or_else(|| {
+                        DbError::Message("circle control ordinal overflow".to_string())
+                    })?
+                {
+                    return Err(DbError::Message(format!(
+                        "circle {circle_id} Serial control does not advance its predecessor generation"
+                    )));
                 }
             }
             let current_state_payload =
@@ -14510,12 +14613,15 @@ impl Database {
     ) -> Result<(), DbError> {
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
+        let stream_activations = VerifiedStreamActivations::none(commit, commit_ref)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         Self::record_materialized_serial_commit_with_device_operations_on(
             conn,
             commit,
             commit_ref,
             authorization,
             &device_operations,
+            &stream_activations,
         )
     }
 
@@ -14525,6 +14631,7 @@ impl Database {
         commit_ref: &StoreBatchCommitRef,
         authorization: &SerialAuthorizationState,
         device_operations: &VerifiedStoreDeviceOperations,
+        stream_activations: &VerifiedStreamActivations,
     ) -> Result<(), DbError> {
         if commit.policy() != WritePolicy::Serial {
             return Err(DbError::Message(
@@ -14536,6 +14643,7 @@ impl Database {
             commit,
             commit_ref,
             device_operations,
+            stream_activations,
         )?;
         let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
             DbError::Message(format!("serialize Serial membership state: {error}"))
@@ -15017,11 +15125,15 @@ impl Database {
                     &prepared.commit,
                     &prepared.registrations,
                 )?;
+                let stream_activations =
+                    VerifiedStreamActivations::none(&prepared.commit, &prepared.reference)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
                 Self::record_materialized_commit_with_device_operations_on(
                     &tx,
                     &prepared.commit,
                     &prepared.reference,
                     &prepared.device_operations,
+                    &stream_activations,
                 )?;
             }
             tx.commit().map_err(DbError::from)
@@ -18017,8 +18129,12 @@ fn validate_snapshot_object_owners_on(
     root: &crate::sync::store_commit::StoreRootRef,
     meta: &SnapshotMeta,
 ) -> Result<(), DbError> {
+    let registration = load_activated_registration_on(conn, root, &meta.author_registration)?;
     let expected = crate::sync::remote_object::SnapshotObjectOwner {
-        activation: StreamActivationId::store_snapshots(root, &meta.author_registration),
+        activation: registration
+            .store_snapshot_activation(&meta.author_registration)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .activation_id(),
         sequence: meta.sequence,
     };
     if meta.successor.activation != expected.activation {
@@ -18501,7 +18617,12 @@ fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError
     };
     let (root, reference, _) = local_store_authority_on(conn)?;
     Ok(Some(
-        AuthorStreamId::store_announcements(&root, &reference).to_string(),
+        crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &reference,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        )
+        .to_string(),
     ))
 }
 
@@ -18584,7 +18705,10 @@ fn verify_next_local_store_ack_on(
         .checked_add(1)
         .ok_or_else(|| DbError::Message("Store acknowledgement sequence overflow".to_string()))?;
     if ack.successor.activation
-        != StreamActivationId::store_acknowledgements(&root, &registration_ref)
+        != registration
+            .store_acknowledgement_activation(&registration_ref)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .activation_id()
         || ack.successor.next_slot.logical_key()
             != format!(
                 "{}.json",
@@ -19007,6 +19131,104 @@ fn record_store_reclaim_activation_on(
         update_store_reclaim_operation_on(conn, &expected, &next)?;
     }
     Ok(())
+}
+
+fn record_verified_stream_activations_on(
+    conn: &Connection,
+    verified: &VerifiedStreamActivations,
+    activating_commit_json: &str,
+) -> Result<(), DbError> {
+    for activation in verified.as_slice() {
+        let activation_id = activation.activation_id().as_hash().to_string();
+        let author_stream_id = activation.author_stream_id().to_string();
+        let activation_bytes = serde_json::to_vec(activation).map_err(|error| {
+            DbError::Message(format!("serialize verified stream activation: {error}"))
+        })?;
+        let existing: Option<(String, Vec<u8>, String)> = conn
+            .query_row(
+                "SELECT author_stream_id, activation, activating_commit
+                 FROM stream_activations
+                 WHERE activation_id = ?1 OR author_stream_id = ?2",
+                (&activation_id, &author_stream_id),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if let Some(existing) = existing {
+            if existing
+                != (
+                    author_stream_id.clone(),
+                    activation_bytes.clone(),
+                    activating_commit_json.to_string(),
+                )
+            {
+                return Err(DbError::Message(format!(
+                    "stream activation {activation_id} conflicts with durable activation authority"
+                )));
+            }
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO stream_activations
+             (activation_id, author_stream_id, activation, activating_commit)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                activation_id,
+                author_stream_id,
+                activation_bytes,
+                activating_commit_json,
+            ],
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
+fn load_registered_stream_activation_on(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<crate::sync::store_commit::RegisteredStreamActivation>, DbError> {
+    let stored = conn
+        .query_row(
+            "SELECT activation_id, author_stream_id, activation, activating_commit
+             FROM stream_activations WHERE activation_id = ?1",
+            [key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some((activation_id, author_stream_id, activation, activating_commit)) = stored else {
+        return Ok(None);
+    };
+    let activation_id = StreamActivationId::from_digest(
+        activation_id
+            .parse()
+            .map_err(|error| DbError::Message(format!("stored stream activation id: {error}")))?,
+    );
+    let author_stream_id = author_stream_id
+        .parse()
+        .map_err(|error| DbError::Message(format!("stored author stream id: {error}")))?;
+    let activation = serde_json::from_slice(&activation).map_err(|error| {
+        DbError::Message(format!("stored stream activation descriptor: {error}"))
+    })?;
+    let activating_commit = serde_json::from_str(&activating_commit).map_err(|error| {
+        DbError::Message(format!("stored stream activation commit ref: {error}"))
+    })?;
+    crate::sync::store_commit::RegisteredStreamActivation::from_stored(
+        activation_id,
+        author_stream_id,
+        activation,
+        activating_commit,
+    )
+    .map(Some)
+    .map_err(|error| DbError::Message(error.to_string()))
 }
 
 fn parse_store_device_exclusion_operation(
@@ -20501,6 +20723,30 @@ mod tests {
         )
     }
 
+    fn snapshot_activation(label: &str) -> StreamActivationId {
+        let registration_bytes = format!("{label} snapshot registration");
+        let registration = crate::sync::store_commit::StoreDeviceRegistrationRef {
+            device_id: format!("{:0>64}", label.len())
+                .parse()
+                .expect("valid snapshot test device id"),
+            registration_hash: ObjectHash::digest(registration_bytes.as_bytes()),
+            object: reclaim_test_object(&format!(
+                "store-v1/test/{label}/snapshot-registration.json"
+            )),
+        };
+        crate::sync::store_commit::StreamActivation::device_authorized(
+            ObjectHash::digest(format!("{label} Store root").as_bytes()),
+            registration,
+            crate::sync::store_commit::DeviceStreamAnchor::StoreSnapshots {
+                first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/snapshots/1.json"
+                ))
+                .expect("valid snapshot activation slot"),
+            },
+        )
+        .activation_id()
+    }
+
     fn notes_migration() -> Migration {
         Migration::sql(
             1,
@@ -20740,9 +20986,7 @@ mod tests {
             b"snapshot owner bytes",
         );
         let expected = crate::sync::remote_object::SnapshotObjectOwner {
-            activation: StreamActivationId::from_hash(ObjectHash::digest(
-                b"verified snapshot activation",
-            )),
+            activation: snapshot_activation("verified"),
             sequence: 7,
         };
         let install = |owner: crate::sync::remote_object::SnapshotObjectOwner| {
@@ -20765,9 +21009,7 @@ mod tests {
             .expect("verified snapshot owner matches");
 
         install(crate::sync::remote_object::SnapshotObjectOwner {
-            activation: StreamActivationId::from_hash(ObjectHash::digest(
-                b"other snapshot activation",
-            )),
+            activation: snapshot_activation("other"),
             sequence: expected.sequence,
         });
         assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());

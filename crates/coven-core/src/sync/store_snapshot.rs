@@ -5,8 +5,7 @@ use super::snapshot::{CreatedSnapshot, SnapshotError};
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
-    ObjectHash, SnapshotImageRef, SnapshotMeta, StoreRootRef, StoreSnapshotRef, StreamActivationId,
-    SuccessorLink,
+    ObjectHash, SnapshotImageRef, SnapshotMeta, StoreRootRef, StoreSnapshotRef, SuccessorLink,
 };
 use crate::keys::UserKeypair;
 
@@ -90,7 +89,10 @@ pub(crate) async fn push_store_snapshot(
     };
 
     let snapshot_owner = super::remote_object::SnapshotObjectOwner {
-        activation: StreamActivationId::store_snapshots(&root, &registration_ref),
+        activation: registration
+            .store_snapshot_activation(&registration_ref)
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?
+            .activation_id(),
         sequence,
     };
     let (image_bytes, snapshot_blobs) = prepare_snapshot_blobs(
@@ -143,6 +145,10 @@ pub(crate) async fn push_store_snapshot(
         )
         .await
         .map_err(SnapshotError::Bucket)?;
+    let activation = registration
+        .store_snapshot_activation(&registration_ref)
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?
+        .activation_id();
     let meta = SnapshotMeta::signed(
         store_root_hash,
         registration_ref.clone(),
@@ -153,7 +159,7 @@ pub(crate) async fn push_store_snapshot(
         schema_version,
         created_at,
         SuccessorLink {
-            activation: StreamActivationId::store_snapshots(&root, &registration_ref),
+            activation,
             predecessor: predecessor.map(|reference| reference.object),
             next_slot,
         },
@@ -541,8 +547,12 @@ pub(crate) fn verify_store_snapshot_bytes(
         .sequence
         .checked_add(1)
         .ok_or_else(|| SnapshotError::Parse("Store snapshot sequence overflow".to_string()))?;
+    let activation = registration
+        .store_snapshot_activation(registration_ref)
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?
+        .activation_id();
     if meta.author_registration != *registration_ref
-        || meta.successor.activation != StreamActivationId::store_snapshots(root, registration_ref)
+        || meta.successor.activation != activation
         || meta.successor.predecessor != expected_predecessor
         || meta.successor.next_slot.logical_key()
             != format!(

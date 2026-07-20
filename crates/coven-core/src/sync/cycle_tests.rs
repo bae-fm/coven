@@ -367,25 +367,23 @@ async fn store_package_exists(
 }
 
 async fn local_store_stream_id(db: &Database) -> String {
-    let root = db
-        .local_store_root_ref()
-        .await
-        .expect("read exact Store root")
-        .expect("exact Store root exists");
     let local_device = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
         .expect("read local Store device")
         .expect("local Store device exists");
-    let registration = db
+    let (registration_ref, registration) = db
         .activated_store_device_registration_records()
         .await
         .expect("read activated Store registrations")
         .into_iter()
         .find(|(_, registration)| registration.device_id.to_string() == local_device)
-        .expect("local Store registration is active")
-        .0;
-    crate::sync::membership::AuthorStreamId::store_announcements(&root, &registration).to_string()
+        .expect("local Store registration is active");
+    registration
+        .store_announcement_activation(&registration_ref)
+        .expect("derive local Store announcement activation")
+        .author_stream_id()
+        .to_string()
 }
 
 async fn local_store_package_exists(db: &Database, storage: &TestStore, sequence: u64) -> bool {
@@ -2815,26 +2813,20 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     assert!(!store_dir
         .outbound_blob_spool_path(stored.locator().locator_hash())
         .exists());
-    let root = db
-        .local_store_root_ref()
-        .await
-        .expect("load exact Store root")
-        .expect("exact Store root exists");
-    let registration_ref = db
+    let (registration_ref, registration) = db
         .activated_store_device_registration_records()
         .await
         .expect("load exact Store registrations")
         .into_iter()
         .find(|(_, registration)| registration.device_id.to_string() == device_id)
-        .expect("local Store registration is activated")
-        .0;
+        .expect("local Store registration is activated");
     let record = crate::sync::remote_object::RemoteObjectRecord::snapshot_activated_blob(
         &stored,
         crate::sync::remote_object::SnapshotObjectOwner {
-            activation: crate::sync::store_commit::StreamActivationId::store_snapshots(
-                &root,
-                &registration_ref,
-            ),
+            activation: registration
+                .store_snapshot_activation(&registration_ref)
+                .expect("derive exact Store snapshot activation")
+                .activation_id(),
             sequence: 1,
         },
     )
@@ -6394,20 +6386,15 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
 
     drop(source);
     tokio::spawn(async move {
-        let owner_root = owner_db
-            .local_store_root_ref()
-            .await
-            .expect("read owner Store root")
-            .expect("owner Store root remains installed");
-        let (owner_registration, _) = owner_db
+        let (owner_registration, registration) = owner_db
             .local_blob_write_authority()
             .await
             .expect("read owner announcement authority");
-        let owner_stream = crate::sync::membership::AuthorStreamId::store_announcements(
-            &owner_root,
-            &owner_registration,
-        )
-        .to_string();
+        let owner_stream = registration
+            .store_announcement_activation(&owner_registration)
+            .expect("derive owner Store announcement activation")
+            .author_stream_id()
+            .to_string();
         let second_sequence = owner_db
             .latest_local_store_position()
             .await

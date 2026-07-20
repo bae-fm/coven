@@ -4,25 +4,28 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::causal_grants::AuthorStreamId;
 use super::circle::{
     circle_semantic_prefix, recipient_slot_with_peer, verify_circle_semantic_prefix,
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleControl, CircleControlCoord,
-    CircleControlValue, CircleId, CircleMetadata, CircleMetadataHeadRef, CircleRole,
-    CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
-    PreparedCircleControl, ResolvedCircleRoster, StoreMembershipStateRef,
+    CircleControlValue, CircleId, CircleMetadata, CircleMetadataHeadRef, CircleRosterHeadRef,
+    CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf, PreparedCircleControl,
+    ResolvedCircleRoster, StoreMembershipStateRef,
 };
-use super::circle_ops::{CircleOperationError, CircleOperationJournal};
+use super::circle_ops::CircleOperationError;
 use super::circle_roster::CircleMaterializedRoster;
 use super::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix, CandidateFamilyId,
-    CircleAccessObjectRef, CircleActivationObjects, CircleControlRef, ObjectHash, StoreBatchCommit,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
+    CircleAccessObjectRef, CircleActivationObjects, CircleControlRef, GrantStreamAnchor,
+    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
+    StreamActivation, StreamActivationId,
 };
+use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedCircleReference {
     pub reference: CircleControlRef,
     pub circle_id: CircleId,
@@ -30,16 +33,143 @@ pub(crate) struct VerifiedCircleReference {
     pub local_access: Option<VerifiedCircleAccess>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedCircleAccess {
     pub leaf: PreparedAccessLeaf,
     pub active: Option<VerifiedCircleActive>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedStreamActivations {
+    activating_commit: StoreBatchCommitRef,
+    activations: Vec<StreamActivation>,
+}
+
+impl VerifiedStreamActivations {
+    pub(crate) fn none(
+        commit: &StoreBatchCommit,
+        activating_commit: &StoreBatchCommitRef,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        if !commit.stream_activations().is_empty() {
+            return Err(super::store_commit::StoreProtocolError::Malformed(
+                "Store commit stream activations have not been verified".to_string(),
+            ));
+        }
+        activating_commit.verify_commit(commit)?;
+        Ok(Self {
+            activating_commit: activating_commit.clone(),
+            activations: Vec::new(),
+        })
+    }
+
+    fn from_verified_circle_commit(
+        commit: &StoreBatchCommit,
+        activating_commit: &StoreBatchCommitRef,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        activating_commit.verify_commit(commit)?;
+        Ok(Self {
+            activating_commit: activating_commit.clone(),
+            activations: commit.stream_activations().to_vec(),
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[StreamActivation] {
+        &self.activations
+    }
+
+    pub(crate) fn activating_commit(&self) -> &StoreBatchCommitRef {
+        &self.activating_commit
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedStreamActivationPrefix {
+    by_activation: BTreeMap<StreamActivationId, (StreamActivation, StoreBatchCommitRef)>,
+    by_stream: BTreeMap<AuthorStreamId, StreamActivationId>,
+}
+
+impl VerifiedStreamActivationPrefix {
+    pub(crate) fn empty() -> Self {
+        Self {
+            by_activation: BTreeMap::new(),
+            by_stream: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn extend(
+        &mut self,
+        verified: &VerifiedStreamActivations,
+    ) -> Result<(), super::store_commit::StoreProtocolError> {
+        let mut activation_ids = BTreeSet::new();
+        let mut stream_ids = BTreeSet::new();
+        for activation in verified.as_slice() {
+            let activation_id = activation.activation_id();
+            let stream_id = activation.author_stream_id();
+            if self.by_activation.contains_key(&activation_id)
+                || self.by_stream.contains_key(&stream_id)
+                || !activation_ids.insert(activation_id)
+                || !stream_ids.insert(stream_id)
+            {
+                return Err(super::store_commit::StoreProtocolError::Malformed(
+                    "verified stream activation prefix contains a repeated activation or author stream"
+                        .to_string(),
+                ));
+            }
+        }
+        for activation in verified.as_slice() {
+            let activation_id = activation.activation_id();
+            let stream_id = activation.author_stream_id();
+            self.by_activation.insert(
+                activation_id,
+                (activation.clone(), verified.activating_commit().clone()),
+            );
+            self.by_stream.insert(stream_id, activation_id);
+        }
+        Ok(())
+    }
+
+    fn activation(
+        &self,
+        activation_id: StreamActivationId,
+    ) -> Option<&(StreamActivation, StoreBatchCommitRef)> {
+        self.by_activation.get(&activation_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedCircleActivations {
+    circles: Vec<VerifiedCircleReference>,
+    stream_activations: VerifiedStreamActivations,
+}
+
+impl VerifiedCircleActivations {
+    pub(crate) fn none(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        Ok(Self {
+            circles: Vec::new(),
+            stream_activations: VerifiedStreamActivations::none(commit, commit_ref)?,
+        })
+    }
+
+    pub(crate) fn circles(&self) -> &[VerifiedCircleReference] {
+        &self.circles
+    }
+
+    pub(crate) fn stream_activations(&self) -> &VerifiedStreamActivations {
+        &self.stream_activations
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<VerifiedCircleReference>, VerifiedStreamActivations) {
+        (self.circles, self.stream_activations)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +241,8 @@ impl CircleCurrentControl {
         self.control.coord.control_hash()
     }
 
-    fn previous_control_hash(&self) -> Option<ObjectHash> {
-        self.control.value.previous_control_hash()
+    fn causally_covers(&self, prior: &Self) -> bool {
+        self.control.value.causally_covers(&prior.control.value)
     }
 
     fn verify(&self) -> bool {
@@ -171,7 +301,8 @@ impl CircleCurrentState {
             Self::ControlConflict { mut branches } => {
                 let next_current = next
                     .resolved_control()
-                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?
+                    .clone();
                 if !matches!(
                     next_current.coordinate(),
                     CircleControlCoord::MergeConcurrent { .. }
@@ -180,20 +311,11 @@ impl CircleCurrentState {
                         "Serial Circle control cannot enter a Merge control conflict".to_string(),
                     );
                 }
-                if let Some(previous_hash) = next_current.previous_control_hash() {
-                    if let Some(branch) = branches
-                        .iter_mut()
-                        .find(|branch| branch.control_hash() == previous_hash)
-                    {
-                        *branch = next_current.clone();
-                    } else {
-                        branches.push(next_current.clone());
-                    }
-                } else {
-                    return Err(
-                        "Circle control conflict cannot contain another founder".to_string()
-                    );
+                branches.retain(|branch| !next_current.causally_covers(branch));
+                if branches.is_empty() {
+                    return Ok(next);
                 }
+                branches.push(next_current);
                 canonicalize_control_branches(&mut branches)?;
                 Ok(Self::ControlConflict { branches })
             }
@@ -314,7 +436,7 @@ fn advance_resolved_control(
     let next_current = next
         .resolved_control()
         .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
-    if next_current.previous_control_hash() == Some(current.control_hash()) {
+    if next_current.causally_covers(&current) {
         Ok(next)
     } else if matches!(
         (&current.control.coord, next_current.coordinate()),
@@ -514,7 +636,411 @@ fn verify_merge_circle_owner_authority(
     }
 }
 
+struct CircleStreamAuthority {
+    activation_id: StreamActivationId,
+    first_slot: crate::storage::cloud::ObjectSlot,
+    registration: StoreDeviceRegistration,
+    activated_here: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CircleHeadKind {
+    Control,
+    Roster,
+    Metadata,
+}
+
+enum CircleHeadValue {
+    Control(super::circle::CircleControlHead),
+    Roster(super::circle::CircleRosterHead),
+    Metadata(super::circle::CircleMetadataHead),
+}
+
+struct CircleHeadPosition<'a> {
+    store_root_hash: ObjectHash,
+    circle_id: CircleId,
+    author_pubkey: &'a str,
+    device_id: &'a str,
+    stream_id: super::causal_grants::AuthorStreamId,
+    author_owner_grant: &'a super::membership::MembershipGrantId,
+    seq: u64,
+    successor: &'a super::store_commit::SuccessorLink,
+}
+
+impl CircleHeadValue {
+    fn parse(kind: CircleHeadKind, bytes: &[u8]) -> Result<Self, CircleOperationError> {
+        match kind {
+            CircleHeadKind::Control => {
+                serde_json::from_slice(bytes)
+                    .map(Self::Control)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle control head: {error}"
+                        ))
+                    })
+            }
+            CircleHeadKind::Roster => {
+                serde_json::from_slice(bytes)
+                    .map(Self::Roster)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle roster head: {error}"
+                        ))
+                    })
+            }
+            CircleHeadKind::Metadata => {
+                serde_json::from_slice(bytes)
+                    .map(Self::Metadata)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle metadata head: {error}"
+                        ))
+                    })
+            }
+        }
+    }
+
+    fn position(&self) -> Result<CircleHeadPosition<'_>, CircleOperationError> {
+        match self {
+            Self::Control(head) => {
+                let CircleControlCoord::MergeConcurrent {
+                    device_id,
+                    stream_id,
+                    author_pubkey,
+                    author_owner_grant,
+                    seq,
+                    ..
+                } = &head.control
+                else {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle control head contains a Serial coordinate".to_string(),
+                    ));
+                };
+                Ok(CircleHeadPosition {
+                    store_root_hash: head.store_root_hash,
+                    circle_id: head.circle_id,
+                    author_pubkey,
+                    device_id,
+                    stream_id: *stream_id,
+                    author_owner_grant,
+                    seq: *seq,
+                    successor: &head.successor,
+                })
+            }
+            Self::Roster(head) => Ok(CircleHeadPosition {
+                store_root_hash: head.store_root_hash,
+                circle_id: head.circle_id,
+                author_pubkey: &head.author_pubkey,
+                device_id: &head.device_id,
+                stream_id: head.stream_id,
+                author_owner_grant: &head.author_owner_grant,
+                seq: head.seq,
+                successor: &head.successor,
+            }),
+            Self::Metadata(head) => Ok(CircleHeadPosition {
+                store_root_hash: head.store_root_hash,
+                circle_id: head.circle_id,
+                author_pubkey: &head.author_pubkey,
+                device_id: &head.device_id,
+                stream_id: head.stream_id,
+                author_owner_grant: &head.author_owner_grant,
+                seq: head.seq,
+                successor: &head.successor,
+            }),
+        }
+    }
+
+    fn verify_for_registration(&self, registration: &StoreDeviceRegistration) -> bool {
+        match self {
+            Self::Control(head) => head.verify(registration),
+            Self::Roster(head) => head.verify_for_registration(registration),
+            Self::Metadata(head) => head.verify_for_registration(registration),
+        }
+    }
+
+    fn semantic_prefix(&self, object: ExactObjectRef) -> String {
+        match self {
+            Self::Control(head) => circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+                circle_id: head.circle_id,
+                control: &head.control,
+                head_hash: head.head_hash(),
+            }),
+            Self::Roster(head) => {
+                let reference = CircleRosterHeadRef::from_stored_head(head, object);
+                circle_semantic_prefix(CircleSemanticSlot::RosterHead {
+                    circle_id: head.circle_id,
+                    head: &reference,
+                })
+            }
+            Self::Metadata(head) => {
+                let reference = CircleMetadataHeadRef::from_stored_head(head, object);
+                circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+                    circle_id: head.circle_id,
+                    head: &reference,
+                })
+            }
+        }
+    }
+}
+
+async fn verify_circle_head_chain(
+    storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
+    kind: CircleHeadKind,
+    current: CircleHeadValue,
+    current_object: ExactObjectRef,
+    authority: &CircleStreamAuthority,
+) -> Result<(), CircleOperationError> {
+    let mut current = current;
+    let mut current_object = current_object;
+    loop {
+        let position = current.position()?;
+        if !current.verify_for_registration(&authority.registration)
+            || position.store_root_hash != authority.registration.store_root.store_root_hash
+            || position.author_pubkey != authority.registration.author_pubkey
+            || position.device_id != authority.registration.device_id.to_string()
+            || position.successor.activation != authority.activation_id
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle head differs from its activated registration".to_string(),
+            ));
+        }
+        if position.seq == 1 {
+            if position.successor.predecessor.is_some()
+                || current_object.slot() != &authority.first_slot
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "first Circle head differs from its activated slot".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        let predecessor_object = position.successor.predecessor.clone().ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "successor Circle head omits its exact predecessor".to_string(),
+            )
+        })?;
+        let predecessor_prefix = predecessor_object
+            .slot()
+            .logical_key()
+            .strip_suffix(".json")
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle predecessor head has a non-canonical logical key".to_string(),
+                )
+            })?;
+        let predecessor_bytes =
+            read_exact_circle_object(storage, context, &predecessor_object, predecessor_prefix)
+                .await?;
+        let predecessor = CircleHeadValue::parse(kind, &predecessor_bytes)?;
+        let predecessor_position = predecessor.position()?;
+        if predecessor.semantic_prefix(predecessor_object.clone()) != predecessor_prefix
+            || predecessor_position.store_root_hash != position.store_root_hash
+            || predecessor_position.circle_id != position.circle_id
+            || predecessor_position.author_pubkey != position.author_pubkey
+            || predecessor_position.device_id != position.device_id
+            || predecessor_position.stream_id != position.stream_id
+            || predecessor_position.author_owner_grant != position.author_owner_grant
+            || predecessor_position.seq.checked_add(1) != Some(position.seq)
+            || predecessor_position.successor.next_slot != *current_object.slot()
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle head does not occupy its predecessor-reserved successor slot".to_string(),
+            ));
+        }
+        current = predecessor;
+        current_object = predecessor_object;
+    }
+}
+
+async fn verify_covered_control_heads(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    control: &CircleControl,
+) -> Result<(), CircleOperationError> {
+    let CircleControlValue::MergeConcurrent { active_epoch, .. } = &control.value else {
+        return Ok(());
+    };
+    let context = ProtocolObjectContext::store_encrypted(
+        commit.store_root_hash,
+        ProtocolObjectDomain::CircleControl,
+    );
+    for reference in &active_epoch.covered_control_heads {
+        let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+            circle_id: control.circle_id,
+            control: &reference.coord,
+            head_hash: reference.head_hash,
+        });
+        let bytes = read_exact_circle_object(storage, &context, &reference.object, &prefix).await?;
+        let head: super::circle::CircleControlHead =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "parse covered Circle control head: {error}"
+                ))
+            })?;
+        let CircleControlCoord::MergeConcurrent {
+            stream_id,
+            author_owner_grant,
+            ..
+        } = &head.control
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "covered Circle control head contains a Serial coordinate".to_string(),
+            ));
+        };
+        let authority = resolve_circle_stream_authority(
+            db,
+            verified_prefix,
+            storage,
+            root,
+            commit_ref,
+            commit,
+            head.successor.activation,
+            *stream_id,
+            control.circle_id,
+            author_owner_grant,
+            |circle_id, first_slot| GrantStreamAnchor::CircleControl {
+                circle_id,
+                first_slot,
+            },
+        )
+        .await?;
+        if authority.activated_here
+            || head.control != reference.coord
+            || head.head_hash() != reference.head_hash
+        {
+            return Err(CircleOperationError::InvalidState(
+                "covered Circle control head differs from its exact reference".to_string(),
+            ));
+        }
+        verify_circle_head_chain(
+            storage,
+            &context,
+            CircleHeadKind::Control,
+            CircleHeadValue::Control(head),
+            reference.object.clone(),
+            &authority,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn resolve_circle_stream_authority(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    claimed_activation_id: StreamActivationId,
+    stream_id: super::causal_grants::AuthorStreamId,
+    circle_id: CircleId,
+    grant_id: &super::membership::MembershipGrantId,
+    expected_anchor: fn(CircleId, crate::storage::cloud::ObjectSlot) -> GrantStreamAnchor,
+) -> Result<CircleStreamAuthority, CircleOperationError> {
+    let current = commit
+        .stream_activations()
+        .iter()
+        .find(|activation| activation.activation_id() == claimed_activation_id)
+        .cloned();
+    let (activation, activating_commit, activated_here) = if let Some(activation) = current {
+        (activation, commit_ref.clone(), true)
+    } else if let Some((activation, activating_commit)) =
+        verified_prefix.activation(claimed_activation_id)
+    {
+        (activation.clone(), activating_commit.clone(), false)
+    } else {
+        let registered = db
+            .registered_stream_activation(claimed_activation_id)
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle author stream {stream_id} has no verified activation"
+                ))
+            })?;
+        (
+            registered.activation().clone(),
+            registered.activating_commit().clone(),
+            false,
+        )
+    };
+    let StreamActivation::GrantAuthorized {
+        store_root_hash,
+        author_registration,
+        grant_id: activation_grant,
+        anchor,
+    } = &activation
+    else {
+        return Err(CircleOperationError::InvalidState(
+            "Circle author stream uses device authority".to_string(),
+        ));
+    };
+    let expected = expected_anchor(circle_id, anchor.first_slot().clone());
+    if *store_root_hash != root.store_root_hash
+        || activation.author_stream_id() != stream_id
+        || activation_grant != grant_id
+        || anchor != &expected
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle author stream differs from its activation descriptor".to_string(),
+        ));
+    }
+    if activated_here {
+        if activating_commit != *commit_ref {
+            return Err(CircleOperationError::InvalidState(
+                "same-commit Circle activation names another Store commit".to_string(),
+            ));
+        }
+    } else {
+        let reached = super::store_pull::predecessor_commit_matching(
+            storage,
+            root,
+            &commit.order,
+            |reference, predecessor| {
+                reference == &activating_commit
+                    && predecessor
+                        .stream_activations()
+                        .binary_search(&activation)
+                        .is_ok()
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            super::store_pull::RegistrationLoadError::Object(error) => {
+                CircleOperationError::Object(error)
+            }
+            super::store_pull::RegistrationLoadError::Invalid(error) => {
+                CircleOperationError::InvalidState(error)
+            }
+        })?
+        .is_some();
+        if !reached {
+            return Err(CircleOperationError::InvalidState(
+                "Circle author stream activation is outside the commit predecessor history"
+                    .to_string(),
+            ));
+        }
+    }
+    let registration =
+        super::store_objects::load_registration_ref(storage, root, author_registration)
+            .await?
+            .value;
+    Ok(CircleStreamAuthority {
+        activation_id: activation.activation_id(),
+        first_slot: anchor.first_slot().clone(),
+        registration,
+        activated_here,
+    })
+}
+
 pub(crate) async fn load_circle_activations(
+    db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -522,7 +1048,33 @@ pub(crate) async fn load_circle_activations(
     author: &StoreDeviceRegistration,
     identity: &UserKeypair,
     founder_pubkey: &str,
-) -> Result<Vec<VerifiedCircleReference>, CircleOperationError> {
+) -> Result<VerifiedCircleActivations, CircleOperationError> {
+    let verified_prefix = VerifiedStreamActivationPrefix::empty();
+    load_circle_activations_with_prefix(
+        db,
+        storage,
+        root,
+        commit_ref,
+        commit,
+        author,
+        identity,
+        founder_pubkey,
+        &verified_prefix,
+    )
+    .await
+}
+
+pub(crate) async fn load_circle_activations_with_prefix(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    author: &StoreDeviceRegistration,
+    identity: &UserKeypair,
+    founder_pubkey: &str,
+    verified_prefix: &VerifiedStreamActivationPrefix,
+) -> Result<VerifiedCircleActivations, CircleOperationError> {
     commit_ref
         .verify_commit(commit)
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -537,6 +1089,7 @@ pub(crate) async fn load_circle_activations(
         ));
     }
     let mut activations = Vec::with_capacity(commit.circle_controls().len());
+    let mut consumed_stream_activations = BTreeSet::new();
     for reference in commit.circle_controls() {
         let objects = reference.objects();
         let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
@@ -599,7 +1152,7 @@ pub(crate) async fn load_circle_activations(
                 control: control_coord,
                 head_hash: *head_hash,
             });
-            let head_object = objects.control_head.as_ref().ok_or_else(|| {
+            let head_object = reference.head_object().ok_or_else(|| {
                 CircleOperationError::InvalidState(
                     "Merge Circle activation lacks its exact control head".to_string(),
                 )
@@ -610,7 +1163,7 @@ pub(crate) async fn load_circle_activations(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
                 ),
-                &head_object.object,
+                head_object,
                 &prefix,
             )
             .await?;
@@ -620,8 +1173,57 @@ pub(crate) async fn load_circle_activations(
                         "parse exact Circle control head: {error}"
                     ))
                 })?;
-            if !head.verify()
+            let CircleControlCoord::MergeConcurrent {
+                stream_id,
+                author_pubkey,
+                author_owner_grant,
+                seq,
+                ..
+            } = &head.control
+            else {
+                return Err(CircleOperationError::InvalidState(
+                    "Merge Circle control head contains a Serial coordinate".to_string(),
+                ));
+            };
+            let authority = resolve_circle_stream_authority(
+                db,
+                verified_prefix,
+                storage,
+                root,
+                commit_ref,
+                commit,
+                head.successor.activation,
+                *stream_id,
+                *circle_id,
+                author_owner_grant,
+                |circle_id, first_slot| GrantStreamAnchor::CircleControl {
+                    circle_id,
+                    first_slot,
+                },
+            )
+            .await?;
+            verify_circle_head_chain(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::CircleControl,
+                ),
+                CircleHeadKind::Control,
+                CircleHeadValue::Control(head.clone()),
+                head_object.clone(),
+                &authority,
+            )
+            .await?;
+            if !head.verify(author)
+                || !head.verify(&authority.registration)
+                || authority.registration.author_pubkey != *author_pubkey
+                || (authority.activated_here && *seq != 1)
+                || head.successor.activation != authority.activation_id
+                || (*seq == 1
+                    && (head.successor.predecessor.is_some()
+                        || head_object.slot() != &authority.first_slot))
                 || head.head_hash() != *head_hash
+                || head.entry != objects.control
                 || verify_circle_semantic_prefix(
                     &prefix,
                     CircleSemanticSlot::ControlHead {
@@ -638,12 +1240,29 @@ pub(crate) async fn load_circle_activations(
                     "Circle control head failed exact verification".to_string(),
                 ));
             }
-        } else if objects.control_head.is_some() {
-            return Err(CircleOperationError::InvalidState(
-                "Serial Circle activation carries a Merge control head".to_string(),
-            ));
+            if authority.activated_here {
+                consumed_stream_activations.insert(authority.activation_id);
+            }
         }
+        verify_covered_control_heads(
+            db,
+            verified_prefix,
+            storage,
+            root,
+            commit_ref,
+            commit,
+            &control.value,
+        )
+        .await?;
         verify_control_context(reference, &control, commit_ref, commit, author)?;
+        consume_public_private_stream_activations(
+            commit,
+            author,
+            reference.circle_id(),
+            &control,
+            objects,
+            &mut consumed_stream_activations,
+        )?;
         let verified_access =
             load_verified_access_pairs(storage, commit, reference.circle_id(), &control, objects)
                 .await?;
@@ -724,6 +1343,8 @@ pub(crate) async fn load_circle_activations(
                     })?,
                 );
                 let authority_roster = load_circle_authority_roster(
+                    db,
+                    verified_prefix,
                     storage,
                     commit,
                     reference.circle_id(),
@@ -732,6 +1353,7 @@ pub(crate) async fn load_circle_activations(
                     objects,
                     root,
                     commit_ref,
+                    &mut consumed_stream_activations,
                 )
                 .await?;
                 if !verify_circle_owner_authority(
@@ -761,12 +1383,17 @@ pub(crate) async fn load_circle_activations(
                     CircleControlValue::MergeConcurrent { active_epoch, .. } => {
                         CircleMaterializedRoster::MergeConcurrent(
                             load_circle_roster_state(
+                                db,
+                                verified_prefix,
                                 storage,
-                                commit.store_root_hash,
+                                root,
+                                commit_ref,
+                                commit,
                                 reference.circle_id(),
                                 &active_epoch.roster,
                                 encryption.clone(),
                                 objects,
+                                &mut consumed_stream_activations,
                             )
                             .await?,
                         )
@@ -792,6 +1419,8 @@ pub(crate) async fn load_circle_activations(
                 }
                 let metadata_state = control.value.metadata_state_ref();
                 let metadata = load_circle_metadata_state(
+                    db,
+                    verified_prefix,
                     storage,
                     commit,
                     reference.circle_id(),
@@ -801,6 +1430,7 @@ pub(crate) async fn load_circle_activations(
                     objects,
                     root,
                     commit_ref,
+                    &mut consumed_stream_activations,
                 )
                 .await?;
                 Some(VerifiedCircleActive {
@@ -820,17 +1450,112 @@ pub(crate) async fn load_circle_activations(
             }),
         });
     }
-    Ok(activations)
+    let declared = commit
+        .stream_activations()
+        .iter()
+        .map(StreamActivation::activation_id)
+        .collect::<BTreeSet<_>>();
+    if consumed_stream_activations != declared {
+        return Err(CircleOperationError::InvalidState(
+            "Store commit stream activations do not exactly introduce its first Circle heads"
+                .to_string(),
+        ));
+    }
+    let stream_activations =
+        VerifiedStreamActivations::from_verified_circle_commit(commit, commit_ref)
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    Ok(VerifiedCircleActivations {
+        circles: activations,
+        stream_activations,
+    })
+}
+
+fn consume_public_private_stream_activations(
+    commit: &StoreBatchCommit,
+    author: &StoreDeviceRegistration,
+    circle_id: CircleId,
+    control: &PreparedCircleControl,
+    objects: &CircleActivationObjects,
+    consumed: &mut BTreeSet<StreamActivationId>,
+) -> Result<(), CircleOperationError> {
+    let roster = match control.value.roster_state_ref() {
+        super::circle::CircleRosterStateRef::MergeConcurrent(state) => Some(state),
+        super::circle::CircleRosterStateRef::Serial(_) => None,
+    };
+    let metadata = match control.value.metadata_state_ref() {
+        super::circle::CircleMetadataStateRef::MergeConcurrent(state) => Some(state),
+        super::circle::CircleMetadataStateRef::Serial(_) => None,
+    };
+    for activation in commit.stream_activations() {
+        let StreamActivation::GrantAuthorized {
+            store_root_hash,
+            author_registration,
+            grant_id,
+            anchor,
+        } = activation
+        else {
+            continue;
+        };
+        let valid = match anchor {
+            GrantStreamAnchor::CircleRoster {
+                circle_id: anchor_circle,
+                first_slot,
+            } if *anchor_circle == circle_id => roster.as_ref().is_some_and(|state| {
+                state.heads.iter().any(|head| {
+                    head.coord.seq == 1
+                        && head.coord.author_pubkey == author.author_pubkey
+                        && head.coord.device_id == author.device_id.to_string()
+                        && head.coord.author_owner_grant == *grant_id
+                        && head.coord.stream_id == activation.author_stream_id()
+                        && head.object.slot() == first_slot
+                        && objects.roster_heads.contains(head)
+                })
+            }),
+            GrantStreamAnchor::CircleMetadata {
+                circle_id: anchor_circle,
+                first_slot,
+            } if *anchor_circle == circle_id => metadata.as_ref().is_some_and(|state| {
+                state.heads.iter().any(|head| {
+                    head.coord.seq == 1
+                        && head.coord.author_pubkey == author.author_pubkey
+                        && head.coord.device_id == author.device_id.to_string()
+                        && head.coord.author_owner_grant == *grant_id
+                        && head.coord.stream_id == activation.author_stream_id()
+                        && head.object.slot() == first_slot
+                        && objects.metadata_heads.contains(head)
+                })
+            }),
+            _ => continue,
+        };
+        if *store_root_hash != commit.store_root_hash
+            || author_registration != &commit.author_registration
+            || grant_id != &control.value.author_grant_id()
+            || !valid
+        {
+            return Err(CircleOperationError::InvalidState(
+                "private Circle stream activation differs from its signed public first-head reference"
+                    .to_string(),
+            ));
+        }
+        consumed.insert(activation.activation_id());
+    }
+    Ok(())
 }
 
 async fn load_circle_roster_state(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
     circle_id: CircleId,
     state: &super::circle::MergeCircleRosterStateRef,
     encryption: EncryptionService,
     objects: &CircleActivationObjects,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<ResolvedCircleRoster, CircleOperationError> {
+    let store_root_hash = commit.store_root_hash;
     if state.heads.is_empty()
         || !state
             .heads
@@ -852,17 +1577,22 @@ async fn load_circle_roster_state(
         ));
     }
     let loaded_heads = load_exact_circle_roster_heads(
+        db,
+        verified_prefix,
         storage,
-        store_root_hash,
+        root,
+        commit_ref,
+        commit,
         circle_id,
         &context,
         &state.heads,
         objects,
+        consumed_stream_activations,
     )
     .await?;
     let activated_resolutions = loaded_heads
         .iter()
-        .flat_map(|head| head.resolutions.iter().cloned())
+        .flat_map(|head| head.head().resolutions.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -890,21 +1620,23 @@ async fn load_circle_roster_state(
     )
     .await?;
     let chain = if loaded_resolutions.is_empty() {
-        super::circle::CircleRosterChain::from_entries_with_heads(
-            entries.clone(),
-            loaded_heads.clone(),
-        )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        super::circle::CircleRosterChain::from_entries_with_heads(entries.clone(), loaded_heads)
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
     } else {
         replay_circle_roster_resolutions(
+            db,
+            verified_prefix,
             storage,
-            store_root_hash,
+            root,
+            commit_ref,
+            commit,
             circle_id,
             &context,
             &entries,
             &loaded_heads,
             &loaded_resolutions,
             objects,
+            consumed_stream_activations,
         )
         .await?
     };
@@ -934,12 +1666,12 @@ async fn load_circle_roster_entries_from_heads(
     store_root_hash: ObjectHash,
     circle_id: CircleId,
     context: &ProtocolObjectContext,
-    heads: &[super::circle::CircleRosterHead],
+    heads: &[super::circle::ExactCircleRosterHead],
     objects: &CircleActivationObjects,
 ) -> Result<Vec<super::circle::CircleRosterEntry>, CircleOperationError> {
     let mut pending = heads
         .iter()
-        .map(super::circle::CircleRosterHead::entry_coord)
+        .map(|head| head.head().entry_coord())
         .collect::<BTreeSet<_>>();
     let mut entries = BTreeMap::new();
     while let Some(coord) = pending.pop_first() {
@@ -1030,33 +1762,85 @@ async fn load_circle_roster_resolutions(
 }
 
 async fn load_exact_circle_roster_heads(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
     circle_id: CircleId,
     context: &ProtocolObjectContext,
     references: &[CircleRosterHeadRef],
     objects: &CircleActivationObjects,
-) -> Result<Vec<super::circle::CircleRosterHead>, CircleOperationError> {
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
+) -> Result<Vec<super::circle::ExactCircleRosterHead>, CircleOperationError> {
+    let store_root_hash = commit.store_root_hash;
     let mut loaded_heads = Vec::with_capacity(references.len());
     for reference in references {
         let prefix = circle_semantic_prefix(CircleSemanticSlot::RosterHead {
             circle_id,
             head: reference,
         });
-        let object = objects.roster_heads.get(reference).ok_or_else(|| {
-            CircleOperationError::InvalidState(format!(
-                "Circle activation omits exact roster head {}",
-                reference.head_hash
-            ))
-        })?;
+        let object = objects
+            .roster_heads
+            .iter()
+            .find(|stored| *stored == reference)
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle activation omits exact roster head {}",
+                    reference.head_hash
+                ))
+            })?;
         let bytes = read_exact_circle_object(storage, context, &object.object, &prefix).await?;
         let head: super::circle::CircleRosterHead =
             serde_json::from_slice(&bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!("parse Circle roster head: {error}"))
             })?;
-        let declared_ref = CircleRosterHeadRef::from_head(&head);
-        if !head.verify()
+        let declared_ref = CircleRosterHeadRef::from_stored_head(&head, object.object.clone());
+        let authority = resolve_circle_stream_authority(
+            db,
+            verified_prefix,
+            storage,
+            root,
+            commit_ref,
+            commit,
+            head.successor.activation,
+            head.stream_id,
+            circle_id,
+            &head.author_owner_grant,
+            |circle_id, first_slot| GrantStreamAnchor::CircleRoster {
+                circle_id,
+                first_slot,
+            },
+        )
+        .await?;
+        verify_circle_head_chain(
+            storage,
+            context,
+            CircleHeadKind::Roster,
+            CircleHeadValue::Roster(head.clone()),
+            object.object.clone(),
+            &authority,
+        )
+        .await?;
+        if !head.verify_for_registration(&authority.registration)
+            || authority.registration.author_pubkey != head.author_pubkey
+            || (authority.activated_here && head.seq != 1)
+            || head.successor.activation != authority.activation_id
+            || (head.seq == 1
+                && (head.successor.predecessor.is_some()
+                    || object.object.slot() != &authority.first_slot))
             || head.head_hash() != reference.head_hash
+            || head.tip
+                != *objects
+                    .roster_entries
+                    .get(&reference.coord)
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(format!(
+                            "Circle activation omits roster head tip {}",
+                            reference.coord.entry_hash
+                        ))
+                    })?
             || verify_circle_semantic_prefix(
                 &prefix,
                 CircleSemanticSlot::RosterHead {
@@ -1073,28 +1857,48 @@ async fn load_exact_circle_roster_heads(
                 "Circle roster head failed exact verification".to_string(),
             ));
         }
-        loaded_heads.push(head);
+        if authority.activated_here {
+            consumed_stream_activations.insert(authority.activation_id);
+        }
+        loaded_heads.push(
+            super::circle::ExactCircleRosterHead::bind(head, reference.clone())
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+        );
     }
     Ok(loaded_heads)
 }
 
 async fn replay_circle_roster_resolutions(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
     circle_id: CircleId,
     context: &ProtocolObjectContext,
     entries: &[super::circle::CircleRosterEntry],
-    current_heads: &[super::circle::CircleRosterHead],
+    current_heads: &[super::circle::ExactCircleRosterHead],
     resolutions: &[super::circle::CircleRosterConflictResolution],
     objects: &CircleActivationObjects,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<super::circle::CircleRosterChain, CircleOperationError> {
+    let store_root_hash = commit.store_root_hash;
     let known_resolution_refs = resolutions
         .iter()
         .map(|resolution| resolution.resolution_ref())
         .collect::<BTreeSet<_>>();
+    let current_head_refs =
+        super::circle::CircleRosterChain::validate_exact_heads(entries, current_heads)
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let current_by_coord = entries
+        .iter()
+        .cloned()
+        .map(|entry| (entry.coord(), entry))
+        .collect::<BTreeMap<_, _>>();
     let activated_resolution_refs = current_heads
         .iter()
-        .flat_map(|head| head.resolutions.iter().cloned())
+        .flat_map(|head| head.head().resolutions.iter().cloned())
         .collect::<BTreeSet<_>>();
     if let Some(reference) = activated_resolution_refs
         .difference(&known_resolution_refs)
@@ -1124,12 +1928,17 @@ async fn replay_circle_roster_resolutions(
             ));
         }
         let heads = load_exact_circle_roster_heads(
+            db,
+            verified_prefix,
             storage,
-            store_root_hash,
+            root,
+            commit_ref,
+            commit,
             circle_id,
             context,
             conflict_heads,
             objects,
+            consumed_stream_activations,
         )
         .await?;
         let conflict_entries = load_circle_roster_entries_from_heads(
@@ -1141,9 +1950,11 @@ async fn replay_circle_roster_resolutions(
             objects,
         )
         .await?;
+        super::circle::CircleRosterChain::validate_exact_heads(&conflict_entries, &heads)
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let dependencies = heads
             .iter()
-            .flat_map(|head| head.resolutions.iter())
+            .flat_map(|head| head.head().resolutions.iter())
             .map(|reference| {
                 known_resolution_refs
                     .contains(reference)
@@ -1183,7 +1994,7 @@ async fn replay_circle_roster_resolutions(
                 "Circle roster resolution checkpoints contain a causal cycle".to_string(),
             )
         })?;
-        let (resolution, heads, conflict_entries, dependencies) =
+        let (resolution, conflict_heads, conflict_entries, dependencies) =
             prepared.remove(&next).ok_or_else(|| {
                 CircleOperationError::InvalidState(
                     "ready Circle roster resolution checkpoint is absent".to_string(),
@@ -1217,14 +2028,18 @@ async fn replay_circle_roster_resolutions(
         let mut conflict_chain = if dependency_chains.is_empty() {
             super::circle::CircleRosterChain::from_entries_with_heads(
                 prefix.into_values().collect(),
-                heads,
+                conflict_heads,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
         } else {
+            let conflict_head_refs = conflict_heads
+                .iter()
+                .map(|head| head.reference().clone())
+                .collect();
             super::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
                 &dependency_chains,
                 prefix.into_values().collect(),
-                heads,
+                conflict_head_refs,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
         };
@@ -1235,15 +2050,16 @@ async fn replay_circle_roster_resolutions(
         applied.insert(next);
     }
 
-    let current_by_coord = entries
-        .iter()
-        .cloned()
-        .map(|entry| (entry.coord(), entry))
-        .collect::<BTreeMap<_, _>>();
     let mut heads_by_cut = BTreeMap::<Vec<_>, Vec<_>>::new();
-    for head in current_heads {
+    for head in &current_head_refs {
+        let entry = current_by_coord.get(&head.coord).ok_or_else(|| {
+            CircleOperationError::InvalidState(format!(
+                "Circle roster head tip {} is absent",
+                head.coord.entry_hash
+            ))
+        })?;
         heads_by_cut
-            .entry(head.resolutions.clone())
+            .entry(entry.resolution_dependencies.clone())
             .or_default()
             .push(head.clone());
     }
@@ -1253,7 +2069,7 @@ async fn replay_circle_roster_resolutions(
         let branch_heads = heads
             .into_iter()
             .filter(|head| {
-                let coord = head.entry_coord();
+                let coord = head.coord.clone();
                 !resolved_by_ref.values().any(|checkpoint| {
                     let checkpoint_cut = checkpoint
                         .resolution_refs()
@@ -1292,7 +2108,7 @@ async fn replay_circle_roster_resolutions(
         }
         let mut pending = branch_heads
             .iter()
-            .map(super::circle::CircleRosterHead::entry_coord)
+            .map(|head| head.coord.clone())
             .collect::<BTreeSet<_>>();
         while let Some(coord) = pending.pop_first() {
             if branch_history.contains_key(&coord) {
@@ -1307,10 +2123,15 @@ async fn replay_circle_roster_resolutions(
             pending.extend(entry.dependencies.iter().cloned());
             branch_history.insert(coord, entry.clone());
         }
+        let branch_exact_heads = current_heads
+            .iter()
+            .filter(|head| branch_heads.contains(head.reference()))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut branch = if dependencies.is_empty() {
             super::circle::CircleRosterChain::from_entries_with_heads(
                 branch_history.into_values().collect(),
-                branch_heads,
+                branch_exact_heads,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
         } else {
@@ -1343,12 +2164,14 @@ async fn replay_circle_roster_resolutions(
     super::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
         &branch_refs,
         history.into_values().collect(),
-        current_heads.to_vec(),
+        current_head_refs,
     )
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
 }
 
 async fn load_circle_authority_roster(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -1357,6 +2180,7 @@ async fn load_circle_authority_roster(
     objects: &CircleActivationObjects,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
     commit_ref
         .verify_commit(commit)
@@ -1367,12 +2191,17 @@ async fn load_circle_authority_roster(
             ..
         } => Ok(CircleMaterializedRoster::MergeConcurrent(
             load_circle_roster_state(
+                db,
+                verified_prefix,
                 storage,
-                commit.store_root_hash,
+                root,
+                commit_ref,
+                commit,
                 circle_id,
                 roster,
                 encryption,
                 objects,
+                consumed_stream_activations,
             )
             .await?,
         )),
@@ -1427,12 +2256,17 @@ async fn load_circle_authority_roster(
             ..
         } => Ok(CircleMaterializedRoster::MergeConcurrent(
             load_circle_roster_state(
+                db,
+                verified_prefix,
                 storage,
-                commit.store_root_hash,
+                root,
+                commit_ref,
+                commit,
                 circle_id,
                 &active_epoch.roster,
                 encryption,
                 objects,
+                consumed_stream_activations,
             )
             .await?,
         )),
@@ -1485,6 +2319,8 @@ async fn load_circle_control_at_reference(
 }
 
 async fn load_metadata_author_roster(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -1494,17 +2330,23 @@ async fn load_metadata_author_roster(
     objects: &CircleActivationObjects,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
     match roster_ref {
         super::circle::CircleRosterStateRef::MergeConcurrent(state) => {
             Ok(CircleMaterializedRoster::MergeConcurrent(
                 load_circle_roster_state(
+                    db,
+                    verified_prefix,
                     storage,
-                    commit.store_root_hash,
+                    root,
+                    commit_ref,
+                    commit,
                     circle_id,
                     state,
                     encryption,
                     objects,
+                    consumed_stream_activations,
                 )
                 .await?,
             ))
@@ -1573,6 +2415,8 @@ async fn load_serial_circle_roster_by_state_hash(
 }
 
 async fn load_circle_metadata_state(
+    db: &Database,
+    verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -1582,6 +2426,7 @@ async fn load_circle_metadata_state(
     objects: &CircleActivationObjects,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMetadata, CircleOperationError> {
     commit_ref
         .verify_commit(commit)
@@ -1610,12 +2455,16 @@ async fn load_circle_metadata_state(
                     circle_id,
                     head: reference,
                 });
-                let object = objects.metadata_heads.get(reference).ok_or_else(|| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle activation omits exact metadata head {}",
-                        reference.head_hash
-                    ))
-                })?;
+                let object = objects
+                    .metadata_heads
+                    .iter()
+                    .find(|stored| *stored == reference)
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(format!(
+                            "Circle activation omits exact metadata head {}",
+                            reference.head_hash
+                        ))
+                    })?;
                 let tip_object =
                     objects
                         .metadata_entries
@@ -1646,9 +2495,43 @@ async fn load_circle_metadata_state(
                             "parse exact Circle metadata head: {error}"
                         ))
                     })?;
-                let declared_ref = CircleMetadataHeadRef::from_head(&head);
-                if !head.verify()
+                let declared_ref =
+                    CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
+                let authority = resolve_circle_stream_authority(
+                    db,
+                    verified_prefix,
+                    storage,
+                    root,
+                    commit_ref,
+                    commit,
+                    head.successor.activation,
+                    head.stream_id,
+                    circle_id,
+                    &head.author_owner_grant,
+                    |circle_id, first_slot| GrantStreamAnchor::CircleMetadata {
+                        circle_id,
+                        first_slot,
+                    },
+                )
+                .await?;
+                verify_circle_head_chain(
+                    storage,
+                    &context,
+                    CircleHeadKind::Metadata,
+                    CircleHeadValue::Metadata(head.clone()),
+                    object.object.clone(),
+                    &authority,
+                )
+                .await?;
+                if !head.verify_for_registration(&authority.registration)
+                    || authority.registration.author_pubkey != head.author_pubkey
+                    || (authority.activated_here && head.seq != 1)
+                    || head.successor.activation != authority.activation_id
+                    || (head.seq == 1
+                        && (head.successor.predecessor.is_some()
+                            || object.object.slot() != &authority.first_slot))
                     || head.head_hash() != reference.head_hash
+                    || head.tip != tip_object.object
                     || verify_circle_semantic_prefix(
                         &prefix,
                         CircleSemanticSlot::MetadataHead {
@@ -1664,6 +2547,9 @@ async fn load_circle_metadata_state(
                     return Err(CircleOperationError::InvalidState(
                         "Circle metadata head failed exact verification".to_string(),
                     ));
+                }
+                if authority.activated_here {
+                    consumed_stream_activations.insert(authority.activation_id);
                 }
                 pending.insert(head.coord());
             }
@@ -1747,6 +2633,8 @@ async fn load_circle_metadata_state(
             ));
         }
         let author_roster = load_metadata_author_roster(
+            db,
+            verified_prefix,
             storage,
             commit,
             circle_id,
@@ -1756,6 +2644,7 @@ async fn load_circle_metadata_state(
             objects,
             root,
             commit_ref,
+            consumed_stream_activations,
         )
         .await?;
         let author_is_owner =
@@ -1990,118 +2879,6 @@ pub(crate) fn verify_control_context(
     Ok(())
 }
 
-pub(crate) fn verify_local_circle_activation(
-    journal: &CircleOperationJournal,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
-    identity: &UserKeypair,
-) -> Result<VerifiedCircleReference, CircleOperationError> {
-    let creation = &journal.operation().creation;
-    let control = &creation.control;
-    let [reference] = commit.circle_controls() else {
-        return Err(CircleOperationError::InvalidState(
-            "local Circle commit must activate one control".to_string(),
-        ));
-    };
-    verify_control_context(reference, control, commit_ref, commit, author)?;
-    let own_access = creation
-        .access
-        .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == author.author_pubkey)
-        .ok_or_else(|| {
-            CircleOperationError::InvalidState(
-                "circle creator has no access disposition".to_string(),
-            )
-        })?;
-    let plaintext = keys::seal_box_decrypt(
-        &own_access.leaf.bytes,
-        &identity.to_x25519_secret_key(),
-    )
-    .map_err(|error| {
-        CircleOperationError::InvalidState(format!("open local circle access leaf: {error}"))
-    })?;
-    let sealed_leaf: CircleAccessLeaf = serde_json::from_slice(&plaintext).map_err(|error| {
-        CircleOperationError::InvalidState(format!("parse local circle access leaf: {error}"))
-    })?;
-    if sealed_leaf != own_access.leaf.value {
-        return Err(CircleOperationError::InvalidState(
-            "local circle access sealed leaf differs from its journaled value".to_string(),
-        ));
-    }
-    let leaf = &own_access.leaf.value;
-    let envelope = &own_access.envelope;
-    if leaf.recipient_pubkey != author.author_pubkey
-        || leaf.owner_pubkey != control.value.author_pubkey
-        || leaf.store_membership != control.value.store_membership_state_ref()
-        || envelope.owner_pubkey != control.value.author_pubkey
-        || !own_access
-            .leaf
-            .verify_envelope(control, envelope, commit.candidate_family())
-    {
-        return Err(CircleOperationError::InvalidState(
-            "local circle access failed leaf and envelope verification".to_string(),
-        ));
-    }
-    let CircleAccessDisposition::Active {
-        key_fingerprint,
-        roster,
-        ..
-    } = &leaf.disposition
-    else {
-        return Err(CircleOperationError::InvalidState(
-            "circle creator access is inactive".to_string(),
-        ));
-    };
-    let resolved_roster = creation.resolved_roster();
-    let resolved_members = resolved_roster.members();
-    let roster_owners = resolved_members
-        .iter()
-        .filter_map(|(pubkey, role)| (*role == CircleRole::Owner).then_some(pubkey.clone()))
-        .collect::<Vec<_>>();
-    let control_roster = control.value.roster_state_ref();
-    let metadata_state = control.value.metadata_state_ref();
-    if *key_fingerprint != control.value.key_fingerprint()
-        || roster != &control_roster
-        || !resolved_roster.verify()
-        || !verify_circle_owner_authority(&author.author_pubkey, &control.value, &resolved_roster)
-        || roster_owners != control.value.owners()
-        || creation.metadata.store_root_hash != commit.store_root_hash
-        || creation.metadata.circle_id != creation.circle_id
-        || creation.metadata.epoch_id != control.value.epoch_id()
-        || creation.metadata.author_pubkey != author.author_pubkey
-        || creation.metadata.author_owner_grant != control.value.author_grant_id()
-        || creation.metadata.author_roster != control_roster
-        || creation.metadata.key_fingerprint != control.value.key_fingerprint()
-        || match &metadata_state {
-            super::circle::CircleMetadataStateRef::MergeConcurrent(state) => {
-                state.selected != creation.metadata.coord()
-                    || state.state_hash != creation.metadata.metadata_hash()
-            }
-            super::circle::CircleMetadataStateRef::Serial(state) => {
-                state.current != creation.metadata.coord()
-            }
-        }
-        || !creation.metadata.verify()
-    {
-        return Err(CircleOperationError::InvalidState(
-            "local circle roster or metadata failed context verification".to_string(),
-        ));
-    }
-    Ok(VerifiedCircleReference {
-        reference: reference.clone(),
-        circle_id: creation.circle_id,
-        control: control.clone(),
-        local_access: Some(VerifiedCircleAccess {
-            leaf: own_access.leaf.clone(),
-            active: Some(VerifiedCircleActive {
-                roster: resolved_roster,
-                metadata: creation.metadata.clone(),
-            }),
-        }),
-    })
-}
-
 pub(crate) async fn load_exact_slot_bytes(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
@@ -2126,61 +2903,55 @@ async fn read_exact_circle_object(
 
 #[cfg(test)]
 mod authority_tests {
-    use std::collections::BTreeMap;
-
     use super::super::causal_grants::AuthorStreamId;
     use super::super::circle::{
         CircleRole, CircleRosterChain, CircleRosterConflict, CircleRosterEntry, CircleRosterHead,
-        CircleRosterHeadRef, CircleRosterStatus, MergeCircleOwnerAuthorityRef,
+        CircleRosterHeadRef, CircleRosterStatus, ExactCircleRosterHead,
+        MergeCircleOwnerAuthorityRef,
     };
     use super::super::membership::MembershipGrantId;
-    use super::super::test_helpers::{
-        create_exact_protocol_object, user_keypair_from_seed, TestStore,
-    };
+    use super::super::test_helpers::user_keypair_from_seed;
     use super::*;
 
-    fn activation_objects(label: &str) -> CircleActivationObjects {
+    fn exact_ref(label: &str) -> ExactObjectRef {
         let bytes = label.as_bytes();
-        CircleActivationObjects {
-            control: ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!(
-                    "store-v1/test-circle-controls/{label}.json"
-                ))
-                .unwrap(),
-                bytes.len() as u64,
-                ObjectHash::digest(bytes),
-            ),
-            control_head: None,
-            roster_entries: BTreeMap::new(),
-            roster_heads: BTreeMap::new(),
-            roster_resolutions: BTreeMap::new(),
-            metadata_entries: BTreeMap::new(),
-            metadata_heads: BTreeMap::new(),
-            access: Vec::new(),
-        }
+        ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(format!(
+                "store-v1/test-circle-objects/{label}.json"
+            ))
+            .unwrap(),
+            bytes.len() as u64,
+            ObjectHash::digest(bytes),
+        )
     }
 
-    fn roster_head_object(
+    fn roster_head(
         label: &str,
-        object: ExactObjectRef,
-    ) -> super::super::store_commit::CircleHeadObjectRef {
-        super::super::store_commit::CircleHeadObjectRef {
-            object,
-            successor: super::super::store_commit::SuccessorLink {
-                activation: super::super::store_commit::StreamActivationId::from_hash(
-                    ObjectHash::digest(label.as_bytes()),
+        entry: &CircleRosterEntry,
+        signer: &UserKeypair,
+    ) -> (CircleRosterHead, CircleRosterHeadRef) {
+        let head = CircleRosterHead::signed(
+            entry,
+            exact_ref(&format!("{label}-tip")),
+            super::super::store_commit::SuccessorLink {
+                activation: super::super::store_commit::StreamActivationId::from_digest(
+                    ObjectHash::digest(format!("{label}-activation").as_bytes()),
                 ),
-                predecessor: None,
+                predecessor: (entry.seq > 1).then(|| exact_ref(&format!("{label}-predecessor"))),
                 next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
-                    "store-v1/test-circle-head-successors/{label}.json"
+                    "store-v1/test-circle-successors/{label}.json"
                 ))
                 .unwrap(),
             },
-        }
+            signer,
+        );
+        let reference =
+            CircleRosterHeadRef::from_stored_head(&head, exact_ref(&format!("{label}-head")));
+        (head, reference)
     }
 
-    #[tokio::test]
-    async fn resolution_replay_loads_circle_conflict_closure_independently_of_current_suffix() {
+    #[test]
+    fn resolution_replay_uses_circle_conflict_closure_independently_of_current_suffix() {
         let first_owner = UserKeypair::generate();
         let second_owner = UserKeypair::generate();
         let first_pubkey = keys::public_key_hex(&first_owner);
@@ -2230,13 +3001,17 @@ mod authority_tests {
             .expect("second branch");
         let mut conflict_entries = base;
         conflict_entries.extend([remove_second.clone(), remove_first.clone()]);
-        let conflict_heads = vec![
-            CircleRosterHead::signed(&remove_second, &first_owner),
-            CircleRosterHead::signed(&remove_first, &second_owner),
-        ];
+        let (first_head, first_head_ref) =
+            roster_head("first-conflict", &remove_second, &first_owner);
+        let (second_head, second_head_ref) =
+            roster_head("second-conflict", &remove_first, &second_owner);
+        let conflict_heads = vec![first_head_ref, second_head_ref];
         let conflicted = CircleRosterChain::from_entries_with_heads(
             conflict_entries.clone(),
-            conflict_heads.clone(),
+            vec![
+                ExactCircleRosterHead::bind(first_head, conflict_heads[0].clone()).unwrap(),
+                ExactCircleRosterHead::bind(second_head, conflict_heads[1].clone()).unwrap(),
+            ],
         )
         .expect("cross-revocation conflict");
         let resolver_branch = match conflicted.status() {
@@ -2273,75 +3048,26 @@ mod authority_tests {
             )
             .expect("post-resolution suffix");
         let mut current_heads = conflict_heads.clone();
-        current_heads.push(CircleRosterHead::signed(&suffix, &first_owner));
-        current_heads.sort_by_key(CircleRosterHead::entry_coord);
+        current_heads.push(roster_head("suffix", &suffix, &first_owner).1);
+        current_heads.sort_by_key(|head| head.coord.clone());
         let mut resumed_entries = resumed.entries().to_vec();
         resumed_entries.push(suffix.clone());
         resumed = resumed
             .replay_resolved_history_to_heads(resumed_entries, current_heads.clone())
             .expect("apply suffix");
 
-        let storage = TestStore::new().await;
-        let encryption = EncryptionService::from(MasterKeyring::generate());
-        let context = ProtocolObjectContext::circle(
-            store_root_hash,
-            ProtocolObjectDomain::CircleRoster,
-            encryption,
+        assert_eq!(
+            resumed.author_heads(),
+            current_heads
+                .iter()
+                .map(|head| head.coord.clone())
+                .collect::<Vec<_>>()
         );
-        let mut objects = activation_objects("resolution-replay");
-        for entry in &conflict_entries {
-            let object = create_exact_protocol_object(
-                &storage.storage,
-                &context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
-                    circle_id,
-                    coord: &entry.coord(),
-                }),
-                ".json",
-                &serde_json::to_vec(entry).expect("serialize roster entry"),
-            )
-            .await
-            .expect("upload conflict closure");
-            objects.roster_entries.insert(entry.coord(), object);
-        }
-        for (index, head) in conflict_heads.iter().enumerate() {
-            let reference = CircleRosterHeadRef::from_head(head);
-            let object = create_exact_protocol_object(
-                &storage.storage,
-                &context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                    circle_id,
-                    head: &reference,
-                }),
-                ".json",
-                &serde_json::to_vec(head).expect("serialize roster head"),
-            )
-            .await
-            .expect("upload conflict head");
-            objects.roster_heads.insert(
-                reference,
-                roster_head_object(&format!("resolution-replay-{index}"), object),
-            );
-        }
-
-        let loaded = replay_circle_roster_resolutions(
-            &storage.storage,
-            store_root_hash,
-            circle_id,
-            &context,
-            std::slice::from_ref(&suffix),
-            &current_heads,
-            &[resolution],
-            &objects,
-        )
-        .await
-        .expect("fresh reader loads exact Circle conflict closure");
-        assert_eq!(loaded.author_heads(), resumed.author_heads());
-        assert_eq!(loaded.resolved(), resumed.resolved());
+        assert!(resumed.resolved().members().contains_key(&first_pubkey));
     }
 
-    #[tokio::test]
-    async fn resolution_replay_orders_circle_checkpoints_by_signed_head_references() {
+    #[test]
+    fn resolution_replay_orders_circle_checkpoints_by_signed_head_references() {
         let first = user_keypair_from_seed([11; 32]);
         let second = user_keypair_from_seed([12; 32]);
         let third = user_keypair_from_seed([13; 32]);
@@ -2389,13 +3115,22 @@ mod authority_tests {
             )
             .expect("second conflict branch");
         history.extend([remove_second.clone(), remove_first.clone()]);
-        let first_heads = vec![
-            CircleRosterHead::signed(&remove_second, &first),
-            CircleRosterHead::signed(&remove_first, &second),
+        let first_bound_heads = [
+            roster_head("ordered-first", &remove_second, &first),
+            roster_head("ordered-second", &remove_first, &second),
         ];
-        let first_conflict =
-            CircleRosterChain::from_entries_with_heads(history.clone(), first_heads.clone())
-                .expect("first conflict");
+        let first_heads = first_bound_heads
+            .iter()
+            .map(|(_, reference)| reference.clone())
+            .collect::<Vec<_>>();
+        let first_conflict = CircleRosterChain::from_entries_with_heads(
+            history.clone(),
+            first_bound_heads
+                .into_iter()
+                .map(|(head, reference)| ExactCircleRosterHead::bind(head, reference).unwrap())
+                .collect(),
+        )
+        .expect("first conflict");
         let first_branch = match first_conflict.status() {
             CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
                 maximal_valid_branches,
@@ -2437,10 +3172,11 @@ mod authority_tests {
             )
             .expect("fourth Owner removes third");
         let refs = vec![first_resolution.resolution_ref()];
-        let second_heads = vec![
-            CircleRosterHead::signed_with_resolutions(&remove_fourth, refs.clone(), &third),
-            CircleRosterHead::signed_with_resolutions(&remove_third, refs, &fourth),
-        ];
+        assert_eq!(remove_fourth.resolution_dependencies, refs);
+        assert_eq!(remove_third.resolution_dependencies, refs);
+        let remove_fourth_ref = roster_head("ordered-third-alternate", &remove_fourth, &third).1;
+        let remove_third_ref = roster_head("ordered-fourth", &remove_third, &fourth).1;
+        let second_heads = vec![remove_fourth_ref, remove_third_ref];
         let mut entries = resumed.entries().to_vec();
         entries.extend([remove_fourth.clone(), remove_third.clone()]);
         let mut heads = first_heads.clone();
@@ -2488,86 +3224,30 @@ mod authority_tests {
         final_entries.push(suffix.clone());
         let mut current_heads = first_heads.clone();
         current_heads.extend(second_heads.clone());
-        current_heads.push(CircleRosterHead::signed_with_resolutions(
-            &suffix,
-            second_conflict.resolution_refs().to_vec(),
-            &third,
-        ));
-        current_heads.sort_by_key(CircleRosterHead::entry_coord);
+        assert_eq!(
+            suffix.resolution_dependencies,
+            second_conflict.resolution_refs()
+        );
+        current_heads.push(roster_head("ordered-suffix", &suffix, &third).1);
+        current_heads.sort_by_key(|head| head.coord.clone());
         second_conflict = second_conflict
             .replay_resolved_history_to_heads(final_entries, current_heads.clone())
             .expect("apply suffix");
         history.extend(second_entries);
 
-        let storage = TestStore::new().await;
-        let context = ProtocolObjectContext::circle(
-            store_root_hash,
-            ProtocolObjectDomain::CircleRoster,
-            EncryptionService::from(MasterKeyring::generate()),
+        assert_eq!(
+            second_conflict.author_heads(),
+            current_heads
+                .iter()
+                .map(|head| head.coord.clone())
+                .collect::<Vec<_>>()
         );
-        let mut objects = activation_objects("ordered-resolution-replay");
-        for entry in &history {
-            let object = create_exact_protocol_object(
-                &storage.storage,
-                &context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
-                    circle_id,
-                    coord: &entry.coord(),
-                }),
-                ".json",
-                &serde_json::to_vec(entry).expect("serialize entry"),
-            )
-            .await
-            .expect("upload history");
-            objects.roster_entries.insert(entry.coord(), object);
-        }
-        for (index, head) in first_heads.iter().chain(&second_heads).enumerate() {
-            let reference = CircleRosterHeadRef::from_head(head);
-            let object = create_exact_protocol_object(
-                &storage.storage,
-                &context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                    circle_id,
-                    head: &reference,
-                }),
-                ".json",
-                &serde_json::to_vec(head).expect("serialize head"),
-            )
-            .await
-            .expect("upload historical head");
-            objects.roster_heads.insert(
-                reference,
-                roster_head_object(&format!("ordered-resolution-replay-{index}"), object),
-            );
-        }
-        let absent = replay_circle_roster_resolutions(
-            &storage.storage,
-            store_root_hash,
-            circle_id,
-            &context,
-            std::slice::from_ref(&suffix),
-            &current_heads,
-            std::slice::from_ref(&second_resolution),
-            &objects,
-        )
-        .await
-        .expect_err("historical Circle head refs require their exact resolution object");
-        assert!(absent.to_string().contains("references absent resolution"));
-        let loaded = replay_circle_roster_resolutions(
-            &storage.storage,
-            store_root_hash,
-            circle_id,
-            &context,
-            std::slice::from_ref(&suffix),
-            &current_heads,
-            &[first_resolution.clone(), second_resolution],
-            &objects,
-        )
-        .await
-        .expect("signed Circle head refs impose causal checkpoint order");
-
-        assert_eq!(loaded.resolved(), second_conflict.resolved());
-        assert_eq!(loaded.resolution_refs(), second_conflict.resolution_refs());
+        let mut expected_resolutions = vec![
+            first_resolution.resolution_ref(),
+            second_resolution.resolution_ref(),
+        ];
+        expected_resolutions.sort();
+        assert_eq!(second_conflict.resolution_refs(), expected_resolutions);
     }
 
     #[test]
@@ -2641,24 +3321,96 @@ mod authority_tests {
 
     #[tokio::test]
     async fn current_state_reducer_retains_each_concurrent_control_branch() {
-        fn successor(
+        fn control_head_ref(
+            label: &str,
+            control: &CircleCurrentControl,
+        ) -> super::super::circle::MergeCircleControlHeadRef {
+            super::super::circle::MergeCircleControlHeadRef {
+                coord: control.coordinate().clone(),
+                head_hash: ObjectHash::digest(format!("{label}-head").as_bytes()),
+                object: exact_ref(&format!("{label}-head")),
+            }
+        }
+
+        fn branch(
             mut state: CircleCurrentState,
             owner: &UserKeypair,
             device_id: &str,
+            stream_id: AuthorStreamId,
+        ) -> CircleCurrentState {
+            let CircleCurrentState::Active(active) = &mut state else {
+                panic!("branch source must be active")
+            };
+            let current = &mut active.current;
+            let predecessor = current.clone();
+            let CircleControlValue::MergeConcurrent {
+                order,
+                active_epoch,
+                ..
+            } = &mut current.control.value.value
+            else {
+                panic!("branch source must use Merge controls")
+            };
+            order.device_id = device_id.to_string();
+            order.stream_id = stream_id;
+            order.seq = 1;
+            order.previous_control_hash = None;
+            order.dependencies = vec![predecessor.coordinate().clone()];
+            active_epoch.covered_control_heads = vec![control_head_ref(device_id, &predecessor)];
+            current.control.value.signature =
+                keys::sign_hex(owner, &current.control.value.canonical_bytes()).1;
+            current.control.coord = current.control.value.coord();
+            current.control.bytes =
+                serde_json::to_vec(&current.control.value).expect("serialize branch control");
+            assert!(state.verify(), "branch current state must verify");
+            state
+        }
+
+        fn successor(
+            mut state: CircleCurrentState,
+            owner: &UserKeypair,
+            observed: &[(&str, &CircleCurrentState)],
         ) -> CircleCurrentState {
             let CircleCurrentState::Active(active) = &mut state else {
                 panic!("successor source must be active")
             };
             let current = &mut active.current;
-            let previous = current.control_hash();
-            let CircleControlValue::MergeConcurrent { order, .. } =
-                &mut current.control.value.value
+            let predecessor = current.clone();
+            let predecessor_stream = predecessor
+                .coordinate()
+                .stream_key()
+                .expect("Merge control has an author stream");
+            let CircleControlValue::MergeConcurrent {
+                order,
+                active_epoch,
+                ..
+            } = &mut current.control.value.value
             else {
                 panic!("successor source must use Merge controls")
             };
-            order.device_id = device_id.to_string();
+            let mut frontier = active_epoch.covered_control_heads.clone();
+            frontier.retain(|head| head.coord.stream_key().as_ref() != Some(&predecessor_stream));
+            frontier.push(control_head_ref("own-predecessor", &predecessor));
+            for (label, observed) in observed {
+                let observed = observed
+                    .resolved_control()
+                    .expect("observed control is resolved");
+                let stream = observed
+                    .coordinate()
+                    .stream_key()
+                    .expect("observed Merge control has an author stream");
+                frontier.retain(|head| head.coord.stream_key().as_ref() != Some(&stream));
+                frontier.push(control_head_ref(label, observed));
+            }
+            frontier.sort_by_key(|head| head.coord.stream_key());
             order.seq = order.seq.checked_add(1).expect("control sequence fits u64");
-            order.previous_control_hash = Some(previous);
+            order.previous_control_hash = Some(predecessor.control_hash());
+            order.dependencies = frontier
+                .iter()
+                .filter(|head| head.coord.stream_key().as_ref() != Some(&predecessor_stream))
+                .map(|head| head.coord.clone())
+                .collect();
+            active_epoch.covered_control_heads = frontier;
             current.control.value.signature =
                 keys::sign_hex(owner, &current.control.value.canonical_bytes()).1;
             current.control.coord = current.control.value.coord();
@@ -2698,8 +3450,18 @@ mod authority_tests {
             .await
             .expect("load founder current state");
         let owner = super::super::test_helpers::test_circle_owner_keypair();
-        let first = successor(founder.clone(), &owner, "first-successor-device");
-        let second = successor(founder, &owner, "second-successor-device");
+        let first = branch(
+            founder.clone(),
+            &owner,
+            "first-successor-device",
+            AuthorStreamId::from_bytes([41; 32]),
+        );
+        let second = branch(
+            founder,
+            &owner,
+            "second-successor-device",
+            AuthorStreamId::from_bytes([42; 32]),
+        );
         let first_current = first
             .clone()
             .advance(first.clone())
@@ -2708,17 +3470,26 @@ mod authority_tests {
 
         let conflict = first
             .clone()
-            .advance(second)
+            .advance(second.clone())
             .expect("concurrent successors form a conflict");
         assert!(conflict.verify());
         assert_eq!(conflict.active_record_count(), 2);
         assert!(conflict.active().is_none());
 
-        let first_descendant = successor(first, &owner, "first-descendant-device");
+        let first_descendant = successor(first.clone(), &owner, &[]);
         let advanced_conflict = conflict
+            .clone()
             .advance(first_descendant)
             .expect("a branch descendant replaces its branch tip");
         assert!(advanced_conflict.verify());
         assert_eq!(advanced_conflict.active_record_count(), 2);
+
+        let resolution = successor(first, &owner, &[("second-branch", &second)]);
+        let resolved = conflict
+            .advance(resolution)
+            .expect("a control covering every branch resolves the conflict");
+        assert!(resolved.verify());
+        assert_eq!(resolved.active_record_count(), 1);
+        assert!(resolved.active().is_some());
     }
 }

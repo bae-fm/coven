@@ -18,9 +18,7 @@ use super::membership::{
 use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
-use super::store_commit::{
-    membership_head_slot_prefix, GrantStreamAnchor, StreamActivationId, SuccessorLink,
-};
+use super::store_commit::{membership_head_slot_prefix, GrantStreamAnchor, SuccessorLink};
 use super::wrapped_store_key::{
     load_wrapped_store_key, prepare_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKey,
     WrappedStoreKeyRef,
@@ -385,9 +383,14 @@ async fn prepare_membership_publication(
             Some(super::store_commit::GrantStreamAnchor::StoreMembership { first_slot }) => {
                 first_slot.clone()
             }
-            Some(super::store_commit::GrantStreamAnchor::OwnerRecovery { .. }) => {
+            Some(
+                super::store_commit::GrantStreamAnchor::OwnerRecovery { .. }
+                | super::store_commit::GrantStreamAnchor::CircleControl { .. }
+                | super::store_commit::GrantStreamAnchor::CircleRoster { .. }
+                | super::store_commit::GrantStreamAnchor::CircleMetadata { .. },
+            ) => {
                 return Err(InviteError::InvalidDurableMutation(format!(
-                    "Owner grant {} uses a recovery anchor as its membership stream",
+                    "Owner grant {} uses another domain's anchor as its membership stream",
                     coord.author_owner_grant
                 )))
             }
@@ -430,12 +433,13 @@ async fn prepare_membership_publication(
         predecessor.clone(),
         entry.resolution_dependencies.clone(),
         SuccessorLink {
-            activation: StreamActivationId::store_membership(
-                &root,
-                &registration_ref,
-                &coord.author_owner_grant,
-                anchor,
-            ),
+            activation: super::store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                registration_ref.clone(),
+                coord.author_owner_grant.clone(),
+                anchor.clone(),
+            )
+            .activation_id(),
             predecessor: predecessor
                 .as_ref()
                 .map(|reference| reference.object.clone()),

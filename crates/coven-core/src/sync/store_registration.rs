@@ -296,8 +296,11 @@ async fn prepare_self_retirement(
             let seq = previous
                 .as_ref()
                 .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-            let stream_id =
-                super::membership::AuthorStreamId::store_announcements(&root, &registration_ref);
+            let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+                root.store_root_hash,
+                &registration_ref,
+                super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            );
             let coord = StoreCommitCoord::MergeConcurrent {
                 stream_id,
                 sequence: seq,
@@ -535,10 +538,10 @@ async fn prepare_self_retirement(
                 registration_ref.clone(),
                 commit_ref.clone(),
                 SuccessorLink {
-                    activation: super::store_commit::StreamActivationId::store_announcements(
-                        &root,
-                        &registration_ref,
-                    ),
+                    activation: registration
+                        .store_announcement_activation(&registration_ref)
+                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                        .activation_id(),
                     predecessor: predecessor_head.map(|head| head.object),
                     next_slot,
                 },
@@ -938,11 +941,10 @@ async fn prepare_or_load_initial_recovery_ack(
             };
             let ack = StoreAck::parse_at(&bytes, root, &reference, registration)
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let expected_activation =
-                super::store_commit::StreamActivationId::store_acknowledgements(
-                    root,
-                    registration_ref,
-                );
+            let expected_activation = registration
+                .store_acknowledgement_activation(registration_ref)
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                .activation_id();
             if ack.sequence != 1
                 || ack.successor.predecessor.is_some()
                 || ack.registration != *registration_ref
@@ -985,10 +987,10 @@ async fn prepare_or_load_initial_recovery_ack(
                 },
                 published_at.to_string(),
                 SuccessorLink {
-                    activation: super::store_commit::StreamActivationId::store_acknowledgements(
-                        root,
-                        registration_ref,
-                    ),
+                    activation: registration
+                        .store_acknowledgement_activation(registration_ref)
+                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                        .activation_id(),
                     predecessor: None,
                     next_slot,
                 },
@@ -1657,8 +1659,11 @@ pub async fn recover_owner_device_merge(
     .await
     .map_err(database_error)?;
 
-    let stream_id =
-        super::membership::AuthorStreamId::store_announcements(&root, &registration_ref);
+    let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        &registration_ref,
+        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
     let order = StoreCommitOrder::MergeConcurrent {
         seq: 1,
         predecessor: None,
@@ -1736,10 +1741,10 @@ pub async fn recover_owner_device_merge(
         registration_ref.clone(),
         commit_ref.clone(),
         SuccessorLink {
-            activation: super::store_commit::StreamActivationId::store_announcements(
-                &root,
-                &registration_ref,
-            ),
+            activation: registration
+                .store_announcement_activation(&registration_ref)
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                .activation_id(),
             predecessor: None,
             next_slot: next_head,
         },
@@ -2294,13 +2299,10 @@ pub(crate) async fn bootstrap_pending_device(
             },
             published_at.to_string(),
             SuccessorLink {
-                activation: super::store_commit::StreamActivationId::store_acknowledgements(
-                    &attempt.store_root,
-                    &super::store_commit::StoreDeviceRegistrationRef::from_registration(
-                        &expected_registration,
-                        registration_prepared.reference().clone(),
-                    ),
-                ),
+                activation: expected_registration
+                    .store_acknowledgement_activation(&registration_ref)
+                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                    .activation_id(),
                 predecessor: None,
                 next_slot,
             },

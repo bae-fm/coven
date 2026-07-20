@@ -1,6 +1,5 @@
 //! Durable construction and ordered publication of local Store commits.
 
-use super::causal_grants::AuthorStreamId;
 use super::membership::{MembershipChain, SerialAuthorizationState};
 use super::storage::{
     BlobWriteAuthority, CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef,
@@ -140,7 +139,11 @@ pub(crate) async fn exact_next_announcement_slot(
     let Some(target) = previous else {
         return Ok((first_slot.clone(), None));
     };
-    let expected_stream = AuthorStreamId::store_announcements(root, registration_ref);
+    let expected_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        registration_ref,
+        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
     if !matches!(
         target.coord,
         StoreCommitCoord::MergeConcurrent { stream_id, .. } if stream_id == expected_stream
@@ -149,8 +152,10 @@ pub(crate) async fn exact_next_announcement_slot(
             "local predecessor belongs to another Store announcement stream".to_string(),
         ));
     }
-    let activation =
-        super::store_commit::StreamActivationId::store_announcements(root, registration_ref);
+    let activation = registration
+        .store_announcement_activation(registration_ref)
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+        .activation_id();
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreHead,
@@ -312,7 +317,11 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         let store_root_hash = root.store_root_hash;
-        let stream_id = AuthorStreamId::store_announcements(&root, &registration_ref);
+        let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &registration_ref,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
         let previous = db.latest_local_store_position().await?;
         let seq = previous
             .as_ref()
@@ -470,6 +479,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package,
                 circle_packages: &circle_packages,
@@ -498,8 +508,10 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let activation =
-            super::store_commit::StreamActivationId::store_announcements(&root, &registration_ref);
+        let activation = registration
+            .store_announcement_activation(&registration_ref)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            .activation_id();
         let head = StoreDeviceHead::signed(
             store_root_hash,
             registration_ref,
@@ -2603,6 +2615,7 @@ async fn prepare_serial_store_branch(
                     device_registrations: Vec::new(),
                     device_exclusion_proposals: Vec::new(),
                     device_exclusion_outcomes: Vec::new(),
+                    stream_activations: Vec::new(),
                     circle_controls: Vec::new(),
                     store_package,
                     circle_packages: &circle_packages,
@@ -3291,7 +3304,11 @@ pub(crate) async fn prepare_store_operation_commit(
                 .as_ref()
                 .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
             let coord = StoreCommitCoord::MergeConcurrent {
-                stream_id: AuthorStreamId::store_announcements(&root, &registration_ref),
+                stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
+                    root.store_root_hash,
+                    &registration_ref,
+                    super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                ),
                 sequence: seq,
             };
             let order = StoreCommitOrder::MergeConcurrent {
@@ -3634,6 +3651,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                     device_registrations: Vec::new(),
                     device_exclusion_proposals: Vec::new(),
                     device_exclusion_outcomes: Vec::new(),
+                    stream_activations: Vec::new(),
                     circle_controls: Vec::new(),
                     store_package: None,
                     circle_packages: &[],
@@ -3848,10 +3866,11 @@ pub(crate) async fn prepare_store_operation_candidate(
                 plan.registration_ref.clone(),
                 commit_ref.clone(),
                 SuccessorLink {
-                    activation: super::store_commit::StreamActivationId::store_announcements(
-                        &plan.root,
-                        &plan.registration_ref,
-                    ),
+                    activation: plan
+                        .registration
+                        .store_announcement_activation(&plan.registration_ref)
+                        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+                        .activation_id(),
                     predecessor: predecessor_head.map(|reference| reference.object),
                     next_slot,
                 },
@@ -4039,6 +4058,9 @@ async fn record_activated_serial_store_operation(
     let recorded_ref = reference.clone();
     let registration_activation = activation.candidate.registration_activation.clone();
     let device_operations = activation.device_operations;
+    let stream_activations =
+        super::circle_activation::VerifiedStreamActivations::none(&commit, &recorded_ref)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     db.call(move |connection| {
         let tx = connection
             .unchecked_transaction()
@@ -4059,6 +4081,7 @@ async fn record_activated_serial_store_operation(
             &recorded_ref,
             &authorization_after,
             &device_operations,
+            &stream_activations,
         )?;
         tx.commit().map_err(crate::database::DbError::from)
     })
@@ -4236,6 +4259,9 @@ async fn publish_prepared_merge_store_operation(
     let recorded_ref = reference.clone();
     let registration_activation = activation.candidate.registration_activation;
     let device_operations = activation.device_operations;
+    let stream_activations =
+        super::circle_activation::VerifiedStreamActivations::none(&commit, &recorded_ref)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     db.call(move |connection| {
         let tx = connection
             .unchecked_transaction()
@@ -4255,6 +4281,7 @@ async fn publish_prepared_merge_store_operation(
             &commit,
             &recorded_ref,
             &device_operations,
+            &stream_activations,
         )?;
         tx.commit().map_err(crate::database::DbError::from)
     })
