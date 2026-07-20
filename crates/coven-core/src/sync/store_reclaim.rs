@@ -1440,29 +1440,29 @@ async fn choose_snapshot(
                     membership.write_policy()
                 )));
             }
-            let owner = match &snapshot.meta.coverage {
-                CommitFrontier::MergeConcurrent(_) => {
-                    membership.is_owner(&registration.author_pubkey)
-                }
-                CommitFrontier::Serial(position) => {
-                    super::store_pull::load_serial_authorization_at_position(
-                        storage,
-                        root,
-                        position.clone(),
-                    )
-                    .await
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
-                    .membership
-                    .is_owner(&registration.author_pubkey)
-                }
-            };
-            if owner {
-                authorized.push(snapshot);
-            }
+            authorized.push(snapshot);
         }
     }
-    let snapshot = super::store_snapshot::select_maximal_store_snapshot(authorized)
-        .ok_or(StoreReclaimError::NoSnapshot)?;
+    let selected = match super::store_snapshot::select_maximal_stable_store_snapshot(
+        storage,
+        coordination,
+        root,
+        authorized,
+    )
+    .await
+    {
+        Ok(Some(selected)) => selected,
+        Ok(None) => return Err(StoreReclaimError::NoSnapshot),
+        Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+            return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
+        }
+        Err(
+            super::store_pull::StorePullError::SnapshotAuthorInactive
+            | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
+        ) => return Err(StoreReclaimError::NoSnapshot),
+        Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
+    };
+    let snapshot = selected.snapshot;
     let image = storage
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
@@ -1482,24 +1482,7 @@ async fn choose_snapshot(
             "snapshot image differs from its signed exact reference".to_string(),
         ));
     }
-    let authority = match super::store_pull::verify_store_snapshot_stability(
-        storage,
-        coordination,
-        root,
-        &snapshot,
-    )
-    .await
-    {
-        Ok(stability) => stability.into_authority(),
-        Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
-            return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
-        }
-        Err(
-            super::store_pull::StorePullError::SnapshotAuthorInactive
-            | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
-        ) => return Err(StoreReclaimError::NoSnapshot),
-        Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
-    };
+    let authority = selected.stability.into_authority();
     let mut acknowledgements = authority
         .acknowledgements
         .values()
@@ -1598,6 +1581,114 @@ mod tests {
             u64::try_from(bytes.len()).expect("proof length fits u64"),
             ObjectHash::digest(bytes),
         )
+    }
+
+    #[tokio::test]
+    async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_snapshot() {
+        let db = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "reclaim-stable-snapshot-selection",
+            signer.clone(),
+        )
+        .await
+        .expect("create Store");
+        let first_changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('stable-snapshot-row', 'stable', NULL, \
+                 '0000000001000-0000-stable-snapshot', '2026-01-01')",
+            ],
+        )
+        .await;
+        let first_commit = store
+            .publish_changeset("founder", 1, &first_changeset, db.schema_version())
+            .await
+            .expect("publish first Store position");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = first_commit.coord else {
+            unreachable!("fixture uses Merge")
+        };
+        let first_coverage =
+            CommitFrontier::MergeConcurrent(BTreeMap::from([(stream_id, first_commit.clone())]));
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load Store membership");
+        let chain = membership
+            .chain
+            .as_ref()
+            .expect("initialized Store has membership");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            b"stable reclaim snapshot".to_vec(),
+            first_coverage.clone(),
+            &signer,
+            Some(chain),
+            &db,
+        )
+        .await
+        .expect("publish stable snapshot");
+        crate::sync::test_helpers::publish_store_ack_fixture(
+            &db,
+            &store.storage,
+            None,
+            first_coverage,
+            &signer,
+            Some(chain),
+        )
+        .await
+        .expect("acknowledge stable snapshot");
+        let stable = db
+            .latest_local_store_snapshot()
+            .await
+            .expect("load stable snapshot")
+            .expect("stable snapshot exists");
+
+        let second_changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('unstable-snapshot-row', 'unstable', NULL, \
+                 '0000000002000-0000-unstable-snapshot', '2026-01-01')",
+            ],
+        )
+        .await;
+        let second_commit = store
+            .publish_changeset("founder", 3, &second_changeset, db.schema_version())
+            .await
+            .expect("publish second Store position");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            b"unacknowledged reclaim snapshot".to_vec(),
+            CommitFrontier::MergeConcurrent(BTreeMap::from([(stream_id, second_commit)])),
+            &signer,
+            Some(chain),
+            &db,
+        )
+        .await
+        .expect("publish unacknowledged snapshot");
+        let registrations = db
+            .activated_store_device_registration_records()
+            .await
+            .expect("load active registrations");
+
+        let selected = choose_snapshot(
+            &store.storage,
+            None,
+            &store.root,
+            ReclaimMembership::MergeConcurrent {
+                membership: chain,
+                discovery_proof: membership.discovery_proof,
+            },
+            &registrations,
+        )
+        .await
+        .expect("select the stable reclaim snapshot");
+
+        assert_eq!(selected.snapshot.reference, stable.reference);
     }
 
     #[tokio::test]

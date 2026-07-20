@@ -754,6 +754,72 @@ pub(crate) fn select_maximal_store_snapshot(
     candidates.pop()
 }
 
+pub(crate) struct SelectedStableStoreSnapshot {
+    pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
+    pub(crate) stability: super::store_pull::VerifiedStoreSnapshotStability,
+}
+
+pub(crate) async fn select_maximal_stable_store_snapshot(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    root: &StoreRootRef,
+    candidates: Vec<crate::database::PublishedStoreSnapshot>,
+) -> Result<Option<SelectedStableStoreSnapshot>, super::store_pull::StorePullError> {
+    let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
+        return Ok(None);
+    };
+    let maximal_reference = maximal_candidate.reference;
+    let mut stable = Vec::new();
+    let mut maximal_rejection = None;
+    for snapshot in candidates {
+        match super::store_pull::verify_store_snapshot_stability(
+            storage,
+            serial_coordination,
+            root,
+            &snapshot,
+        )
+        .await
+        {
+            Ok(stability) => stable.push(SelectedStableStoreSnapshot {
+                snapshot,
+                stability,
+            }),
+            Err(error) => match &error {
+                super::store_pull::StorePullError::SnapshotNotStable { .. }
+                | super::store_pull::StorePullError::SnapshotAuthorInactive
+                | super::store_pull::StorePullError::SnapshotAuthorNotOwner => {
+                    if snapshot.reference == maximal_reference {
+                        maximal_rejection = Some(error);
+                    }
+                }
+                _ => return Err(error),
+            },
+        }
+    }
+    let selected = select_maximal_store_snapshot(
+        stable
+            .iter()
+            .map(|candidate| candidate.snapshot.clone())
+            .collect(),
+    );
+    if let Some(selected) = selected {
+        let index = stable
+            .iter()
+            .position(|candidate| candidate.snapshot.reference == selected.reference)
+            .ok_or_else(|| {
+                super::store_pull::StorePullError::Database(
+                    "stable Store snapshot selection lost its verified candidate".to_string(),
+                )
+            })?;
+        return Ok(Some(stable.swap_remove(index)));
+    }
+    Err(maximal_rejection.ok_or_else(|| {
+        super::store_pull::StorePullError::Database(
+            "Store snapshot candidates produced no stability decision".to_string(),
+        )
+    })?)
+}
+
 pub(crate) async fn select_store_snapshot_for_acknowledgement(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
@@ -892,25 +958,23 @@ pub(crate) async fn select_store_snapshot(
             load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?,
         );
     }
-    let chosen = select_maximal_store_snapshot(authorized).ok_or_else(|| {
-        SnapshotError::Bucket(super::storage::StorageError::NotFound(
-            "Store snapshot stream".to_string(),
-        ))
-    })?;
+    let selected =
+        select_maximal_stable_store_snapshot(storage, serial_coordination, root, authorized)
+            .await
+            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
+            .ok_or_else(|| {
+                SnapshotError::Bucket(super::storage::StorageError::NotFound(
+                    "Store snapshot stream".to_string(),
+                ))
+            })?;
+    let chosen = selected.snapshot;
     if chosen.meta.schema_version > binary_schema_version {
         return Err(SnapshotError::SchemaTooNew {
             snapshot_version: chosen.meta.schema_version,
             supported: binary_schema_version,
         });
     }
-    let stability = super::store_pull::verify_store_snapshot_stability(
-        storage,
-        serial_coordination,
-        root,
-        &chosen,
-    )
-    .await
-    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+    let stability = selected.stability;
     let image_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotImage,
