@@ -20,12 +20,34 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            retained_merge_materializations,
+            "
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
+    input_hash TEXT NOT NULL CHECK (length(input_hash) = 64),
+    canonical_input BLOB NOT NULL CHECK (length(canonical_input) > 0),
+    PRIMARY KEY (device_id, seq),
+    UNIQUE (device_id, seq, commit_ref, input_hash),
+    CHECK (device_id != 'serial')
+"
+        );
+        $visit!(
             materialized_commits,
             "
     device_id TEXT NOT NULL,
     seq INTEGER NOT NULL CHECK (seq > 0),
     commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
-    PRIMARY KEY (device_id, seq)
+    retained_commit_ref TEXT CHECK (retained_commit_ref IS NULL OR json_valid(retained_commit_ref)),
+    retained_input_hash TEXT CHECK (retained_input_hash IS NULL OR length(retained_input_hash) = 64),
+    PRIMARY KEY (device_id, seq),
+    CHECK (
+        (device_id = 'serial') =
+        (retained_commit_ref IS NULL AND retained_input_hash IS NULL)
+    ),
+    CHECK ((retained_commit_ref IS NULL) = (retained_input_hash IS NULL)),
+    FOREIGN KEY (device_id, seq, retained_commit_ref, retained_input_hash)
+        REFERENCES retained_merge_materializations(device_id, seq, commit_ref, input_hash)
 "
         );
         $visit!(
@@ -957,6 +979,43 @@ mod tests {
                 ("activation_head".to_string(), 0),
             ]
         );
+    }
+
+    #[test]
+    fn merge_materialization_requires_its_exact_retained_input() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        apply_coven_schema(&conn).expect("apply coven schema");
+
+        conn.execute(
+            "INSERT INTO materialized_commits (device_id, seq, commit_ref)
+             VALUES ('merge-stream', 1, '{}')",
+            [],
+        )
+        .expect_err("Merge materialization without retained input must fail");
+
+        conn.execute(
+            "INSERT INTO retained_merge_materializations
+             (device_id, seq, commit_ref, input_hash, canonical_input)
+             VALUES ('merge-stream', 1, '{}', ?1, x'7b7d')",
+            ["a".repeat(64)],
+        )
+        .expect("retain exact Merge input");
+        conn.execute(
+            "INSERT INTO materialized_commits
+             (device_id, seq, commit_ref, retained_commit_ref, retained_input_hash)
+             VALUES ('merge-stream', 1, '{}', '{}', ?1)",
+            ["a".repeat(64)],
+        )
+        .expect("materialize Merge commit with retained input");
+
+        conn.execute(
+            "INSERT INTO materialized_commits (device_id, seq, commit_ref)
+             VALUES ('serial', 1, '{}')",
+            [],
+        )
+        .expect("Serial materialization has no Merge retained input");
     }
 
     #[test]

@@ -1167,6 +1167,7 @@ mod tests {
             circle_id: creation.circle_id,
             control: control.clone(),
             local_access: Some(super::super::circle_ops::VerifiedCircleAccess {
+                envelope: own_access.envelope.clone(),
                 leaf: own_access.leaf.clone(),
                 active: Some(super::super::circle_ops::VerifiedCircleActive {
                     roster: creation.roster.clone(),

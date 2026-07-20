@@ -4242,29 +4242,79 @@ pub enum StoreDeviceExclusionOutcomeRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedStoreDeviceOperations {
     proposals: Vec<(
-        StoreDeviceExclusionProposalRef,
+        RetainedStoreDeviceExclusionProposal,
         StoreDeviceExclusionProposal,
     )>,
     outcomes: Vec<VerifiedStoreDeviceExclusionOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum VerifiedStoreDeviceExclusionOutcome {
+enum VerifiedStoreDeviceExclusionOutcome {
     Excluded {
-        reference: StoreDeviceExclusionRef,
+        source: RetainedStoreDeviceExclusionOutcome,
         accepted_cut: StoreHistoryCut,
     },
-    Cancelled(StoreDeviceExclusionCancellationRef),
+    Cancelled(RetainedStoreDeviceExclusionOutcome),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedStoreDeviceRegistrationActivations {
+    registrations: Vec<RetainedStoreDeviceRegistrationActivation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedStoreDeviceRegistrationActivation {
+    canonical_registration: Vec<u8>,
+    authority: StoreDeviceRegistrationActivation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedStoreDeviceOperations {
+    proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+    outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedStoreDeviceExclusionProposal {
+    reference: StoreDeviceExclusionProposalRef,
+    canonical_proposal: Vec<u8>,
+    canonical_target_registration: Vec<u8>,
+    canonical_owner_registration: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RetainedStoreDeviceExclusionOutcome {
+    Excluded {
+        reference: StoreDeviceExclusionRef,
+        canonical_outcome: Vec<u8>,
+        proposal: RetainedStoreDeviceExclusionProposal,
+        canonical_owner_registration: Vec<u8>,
+    },
+    Cancelled {
+        reference: StoreDeviceExclusionCancellationRef,
+        canonical_outcome: Vec<u8>,
+        proposal: RetainedStoreDeviceExclusionProposal,
+        canonical_owner_registration: Vec<u8>,
+    },
 }
 
 impl VerifiedStoreDeviceOperations {
     pub(crate) fn proposals(
         &self,
-    ) -> &[(
-        StoreDeviceExclusionProposalRef,
-        StoreDeviceExclusionProposal,
-    )] {
-        &self.proposals
+    ) -> impl ExactSizeIterator<
+        Item = (
+            &StoreDeviceExclusionProposalRef,
+            &StoreDeviceExclusionProposal,
+        ),
+    > {
+        self.proposals
+            .iter()
+            .map(|(source, proposal)| (&source.reference, proposal))
     }
 
     pub(crate) fn exclusions(
@@ -4272,44 +4322,88 @@ impl VerifiedStoreDeviceOperations {
     ) -> impl Iterator<Item = (&StoreDeviceExclusionRef, &StoreHistoryCut)> {
         self.outcomes.iter().filter_map(|outcome| match outcome {
             VerifiedStoreDeviceExclusionOutcome::Excluded {
-                reference,
+                source,
                 accepted_cut,
-            } => Some((reference, accepted_cut)),
+            } => Some((source.exclusion_reference(), accepted_cut)),
             VerifiedStoreDeviceExclusionOutcome::Cancelled(_) => None,
         })
     }
 
-    pub(crate) fn from_commit(
+    pub(crate) fn from_retained_sources(
+        root: &StoreRootRef,
         commit: &StoreBatchCommit,
-        proposals: Vec<(
-            StoreDeviceExclusionProposalRef,
-            StoreDeviceExclusionProposal,
-        )>,
-        outcomes: Vec<VerifiedStoreDeviceExclusionOutcome>,
+        proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+        outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
     ) -> Result<Self, StoreProtocolError> {
         let proposal_refs = proposals
             .iter()
-            .map(|(reference, _)| reference.clone())
+            .map(|source| source.reference.clone())
             .collect::<Vec<_>>();
         let outcome_refs = outcomes
             .iter()
-            .map(VerifiedStoreDeviceExclusionOutcome::wire_reference)
+            .map(RetainedStoreDeviceExclusionOutcome::wire_reference)
             .collect::<Vec<_>>();
         if proposal_refs.as_slice() != commit.device_exclusion_proposals()
             || outcome_refs.as_slice() != commit.device_exclusion_outcomes()
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        Ok(Self {
+        let retained = RetainedStoreDeviceOperations {
+            proposals: proposals.clone(),
+            outcomes: outcomes.clone(),
+        };
+        let proposals = proposals
+            .into_iter()
+            .map(|source| {
+                let proposal = source.verify(root)?;
+                if proposal.frozen_device_state != commit.device_state {
+                    return Err(StoreProtocolError::DeviceStateMismatch);
+                }
+                Ok((source, proposal))
+            })
+            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        let outcomes = outcomes
+            .into_iter()
+            .map(|source| source.verify(root, commit))
+            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        let verified = Self {
             proposals,
             outcomes,
-        })
+        };
+        if verified.to_retained() != retained {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(verified)
     }
 
     pub(crate) fn without_exclusions(
         commit: &StoreBatchCommit,
     ) -> Result<Self, StoreProtocolError> {
-        Self::from_commit(commit, Vec::new(), Vec::new())
+        if !commit.device_exclusion_proposals().is_empty()
+            || !commit.device_exclusion_outcomes().is_empty()
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(Self {
+            proposals: Vec::new(),
+            outcomes: Vec::new(),
+        })
+    }
+
+    pub(crate) fn to_retained(&self) -> RetainedStoreDeviceOperations {
+        RetainedStoreDeviceOperations {
+            proposals: self
+                .proposals
+                .iter()
+                .map(|(source, _)| source.clone())
+                .collect(),
+            outcomes: self
+                .outcomes
+                .iter()
+                .map(VerifiedStoreDeviceExclusionOutcome::source)
+                .cloned()
+                .collect(),
+        }
     }
 
     pub(crate) fn apply_to(
@@ -4318,17 +4412,17 @@ impl VerifiedStoreDeviceOperations {
         predecessor_ref: &StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
         let mut state = predecessor;
-        for (reference, proposal) in &self.proposals {
-            state = state.propose_exclusion(reference.clone(), proposal, predecessor_ref)?;
+        for (source, proposal) in &self.proposals {
+            state = state.propose_exclusion(source.reference.clone(), proposal, predecessor_ref)?;
         }
         for outcome in &self.outcomes {
             state = match outcome {
                 VerifiedStoreDeviceExclusionOutcome::Excluded {
-                    reference,
+                    source,
                     accepted_cut,
-                } => state.exclude(reference.clone(), accepted_cut.clone())?,
-                VerifiedStoreDeviceExclusionOutcome::Cancelled(reference) => {
-                    state.cancel_exclusion(reference.clone())?
+                } => state.exclude(source.exclusion_reference().clone(), accepted_cut.clone())?,
+                VerifiedStoreDeviceExclusionOutcome::Cancelled(source) => {
+                    state.cancel_exclusion(source.cancellation_reference().clone())?
                 }
             };
         }
@@ -4336,15 +4430,377 @@ impl VerifiedStoreDeviceOperations {
     }
 }
 
-impl VerifiedStoreDeviceExclusionOutcome {
+impl RetainedStoreDeviceRegistrationActivations {
+    pub(crate) fn from_verified(
+        root: &StoreRootRef,
+        commit: &StoreBatchCommit,
+        registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+    ) -> Result<Self, StoreProtocolError> {
+        if registrations.len() != commit.device_registrations().len() {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        let retained = Self {
+            registrations: registrations
+                .iter()
+                .map(
+                    |(registration, authority)| RetainedStoreDeviceRegistrationActivation {
+                        canonical_registration: registration.to_bytes(),
+                        authority: authority.clone(),
+                    },
+                )
+                .collect(),
+        };
+        retained.verify_for(root, commit)?;
+        Ok(retained)
+    }
+
+    pub(crate) fn verify_for(
+        &self,
+        root: &StoreRootRef,
+        commit: &StoreBatchCommit,
+    ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, StoreProtocolError>
+    {
+        if self.registrations.len() != commit.device_registrations().len() {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        commit
+            .device_registrations()
+            .iter()
+            .zip(&self.registrations)
+            .map(|(activated, retained)| retained.verify(root, activated))
+            .collect()
+    }
+}
+
+impl RetainedStoreDeviceRegistrationActivation {
+    fn verify(
+        &self,
+        root: &StoreRootRef,
+        activated: &ActivatedStoreDeviceRegistrationRef,
+    ) -> Result<(StoreDeviceRegistration, StoreDeviceRegistrationActivation), StoreProtocolError>
+    {
+        let registration = verify_retained_registration(
+            root,
+            &activated.registration,
+            &self.canonical_registration,
+        )?;
+        verify_registration_activation_binding(activated, &registration, &self.authority)?;
+        Ok((registration, self.authority.clone()))
+    }
+}
+
+impl RetainedStoreDeviceOperations {
+    pub(crate) fn from_sources(
+        proposals: Vec<RetainedStoreDeviceExclusionProposal>,
+        outcomes: Vec<RetainedStoreDeviceExclusionOutcome>,
+    ) -> Self {
+        Self {
+            proposals,
+            outcomes,
+        }
+    }
+
+    pub(crate) fn verify_for(
+        &self,
+        root: &StoreRootRef,
+        commit: &StoreBatchCommit,
+    ) -> Result<VerifiedStoreDeviceOperations, StoreProtocolError> {
+        VerifiedStoreDeviceOperations::from_retained_sources(
+            root,
+            commit,
+            self.proposals.clone(),
+            self.outcomes.clone(),
+        )
+    }
+}
+
+impl RetainedStoreDeviceExclusionProposal {
+    pub(crate) fn from_verified(
+        proposal: &super::store_objects::VerifiedDeviceExclusionProposal,
+    ) -> Self {
+        Self {
+            reference: proposal.reference.clone(),
+            canonical_proposal: proposal.object.bytes.clone(),
+            canonical_target_registration: proposal.target.to_bytes(),
+            canonical_owner_registration: proposal.owner.to_bytes(),
+        }
+    }
+
+    fn verify(
+        &self,
+        root: &StoreRootRef,
+    ) -> Result<StoreDeviceExclusionProposal, StoreProtocolError> {
+        self.verify_with_registrations(root)
+            .map(|(proposal, _, _)| proposal)
+    }
+
+    fn verify_with_registrations(
+        &self,
+        root: &StoreRootRef,
+    ) -> Result<
+        (
+            StoreDeviceExclusionProposal,
+            StoreDeviceRegistration,
+            StoreDeviceRegistration,
+        ),
+        StoreProtocolError,
+    > {
+        self.reference
+            .object
+            .verify(&self.canonical_proposal)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let unverified: StoreDeviceExclusionProposal =
+            serde_json::from_slice(&self.canonical_proposal)
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        if unverified.to_bytes() != self.canonical_proposal {
+            return Err(StoreProtocolError::Malformed(
+                "retained Store device exclusion proposal is not canonically encoded".to_string(),
+            ));
+        }
+        let target = verify_retained_registration(
+            root,
+            &unverified.target,
+            &self.canonical_target_registration,
+        )?;
+        let owner = verify_retained_registration(
+            root,
+            &unverified.owner_registration,
+            &self.canonical_owner_registration,
+        )?;
+        let proposal = StoreDeviceExclusionProposal::parse_at(
+            &self.canonical_proposal,
+            &self.reference,
+            &target,
+            &owner,
+        )?;
+        Ok((proposal, target, owner))
+    }
+}
+
+impl RetainedStoreDeviceExclusionOutcome {
+    pub(crate) fn from_verified(
+        reference: &StoreDeviceExclusionOutcomeRef,
+        proposal: RetainedStoreDeviceExclusionProposal,
+        outcome: &super::store_objects::VerifiedDeviceExclusionOutcome,
+    ) -> Result<Self, StoreProtocolError> {
+        match (reference, &outcome.object.value) {
+            (
+                StoreDeviceExclusionOutcomeRef::Excluded(reference),
+                StoreDeviceExclusionOutcome::Excluded(_),
+            ) => Ok(Self::Excluded {
+                reference: reference.clone(),
+                canonical_outcome: outcome.object.bytes.clone(),
+                proposal,
+                canonical_owner_registration: outcome.owner.to_bytes(),
+            }),
+            (
+                StoreDeviceExclusionOutcomeRef::Cancelled(reference),
+                StoreDeviceExclusionOutcome::Cancelled(_),
+            ) => Ok(Self::Cancelled {
+                reference: reference.clone(),
+                canonical_outcome: outcome.object.bytes.clone(),
+                proposal,
+                canonical_owner_registration: outcome.owner.to_bytes(),
+            }),
+            _ => Err(StoreProtocolError::DeviceStateMismatch),
+        }
+    }
+
     fn wire_reference(&self) -> StoreDeviceExclusionOutcomeRef {
         match self {
             Self::Excluded { reference, .. } => {
                 StoreDeviceExclusionOutcomeRef::Excluded(reference.clone())
             }
-            Self::Cancelled(reference) => {
+            Self::Cancelled { reference, .. } => {
                 StoreDeviceExclusionOutcomeRef::Cancelled(reference.clone())
             }
+        }
+    }
+
+    fn exclusion_reference(&self) -> &StoreDeviceExclusionRef {
+        match self {
+            Self::Excluded { reference, .. } => reference,
+            Self::Cancelled { .. } => unreachable!("verified exclusion changed variant"),
+        }
+    }
+
+    fn cancellation_reference(&self) -> &StoreDeviceExclusionCancellationRef {
+        match self {
+            Self::Cancelled { reference, .. } => reference,
+            Self::Excluded { .. } => unreachable!("verified cancellation changed variant"),
+        }
+    }
+
+    fn verify(
+        self,
+        root: &StoreRootRef,
+        commit: &StoreBatchCommit,
+    ) -> Result<VerifiedStoreDeviceExclusionOutcome, StoreProtocolError> {
+        let (reference, canonical_outcome, proposal_source, canonical_owner_registration) =
+            match &self {
+                Self::Excluded {
+                    reference,
+                    canonical_outcome,
+                    proposal,
+                    canonical_owner_registration,
+                } => (
+                    StoreDeviceExclusionOutcomeRef::Excluded(reference.clone()),
+                    canonical_outcome,
+                    proposal,
+                    canonical_owner_registration,
+                ),
+                Self::Cancelled {
+                    reference,
+                    canonical_outcome,
+                    proposal,
+                    canonical_owner_registration,
+                } => (
+                    StoreDeviceExclusionOutcomeRef::Cancelled(reference.clone()),
+                    canonical_outcome,
+                    proposal,
+                    canonical_owner_registration,
+                ),
+            };
+        reference
+            .object()
+            .verify(canonical_outcome)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let (proposal, target, _) = proposal_source.verify_with_registrations(root)?;
+        let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(canonical_outcome)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        if unverified.to_bytes() != *canonical_outcome {
+            return Err(StoreProtocolError::Malformed(
+                "retained Store device exclusion outcome is not canonically encoded".to_string(),
+            ));
+        }
+        let owner_reference = match &unverified {
+            StoreDeviceExclusionOutcome::Excluded(exclusion) => &exclusion.owner_registration,
+            StoreDeviceExclusionOutcome::Cancelled(cancellation) => {
+                &cancellation.owner_registration
+            }
+        };
+        let owner =
+            verify_retained_registration(root, owner_reference, canonical_owner_registration)?;
+        let outcome = StoreDeviceExclusionOutcome::parse_at(
+            canonical_outcome,
+            &reference,
+            &proposal,
+            &target,
+            &owner,
+        )?;
+        match (&self, outcome) {
+            (Self::Excluded { .. }, StoreDeviceExclusionOutcome::Excluded(exclusion)) => {
+                if matches!(
+                    &exclusion.proof,
+                    StoreDeviceExclusionProof::MergeConcurrent {
+                        frozen_device_state,
+                        ..
+                    } if frozen_device_state != &proposal.frozen_device_state
+                ) {
+                    return Err(StoreProtocolError::DeviceStateMismatch);
+                }
+                let proof_policy = match &exclusion.proof {
+                    StoreDeviceExclusionProof::MergeConcurrent { .. } => {
+                        WritePolicy::MergeConcurrent
+                    }
+                    StoreDeviceExclusionProof::Serial => WritePolicy::Serial,
+                };
+                if proof_policy != commit.policy() {
+                    return Err(StoreProtocolError::WritePolicyMismatch {
+                        expected: commit.policy(),
+                        actual: proof_policy,
+                    });
+                }
+                let accepted_cut = match exclusion.proof {
+                    StoreDeviceExclusionProof::MergeConcurrent { cutoff, .. } => cutoff,
+                    StoreDeviceExclusionProof::Serial => commit.order.predecessor_cut()?,
+                };
+                Ok(VerifiedStoreDeviceExclusionOutcome::Excluded {
+                    source: self,
+                    accepted_cut,
+                })
+            }
+            (Self::Cancelled { .. }, StoreDeviceExclusionOutcome::Cancelled(_)) => {
+                Ok(VerifiedStoreDeviceExclusionOutcome::Cancelled(self))
+            }
+            _ => Err(StoreProtocolError::DeviceStateMismatch),
+        }
+    }
+}
+
+fn verify_retained_registration(
+    root: &StoreRootRef,
+    reference: &StoreDeviceRegistrationRef,
+    canonical_registration: &[u8],
+) -> Result<StoreDeviceRegistration, StoreProtocolError> {
+    reference
+        .object
+        .verify(canonical_registration)
+        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    let registration =
+        StoreDeviceRegistration::parse_at(canonical_registration, root, reference.device_id)?;
+    if registration.to_bytes() != canonical_registration {
+        return Err(StoreProtocolError::Malformed(
+            "retained Store device registration is not canonically encoded".to_string(),
+        ));
+    }
+    reference.verify_registration(&registration)?;
+    Ok(registration)
+}
+
+fn verify_registration_activation_binding(
+    activated: &ActivatedStoreDeviceRegistrationRef,
+    registration: &StoreDeviceRegistration,
+    authority: &StoreDeviceRegistrationActivation,
+) -> Result<(), StoreProtocolError> {
+    match (&registration.origin, &activated.authority, authority) {
+        (
+            StoreDeviceRegistrationOrigin::Join {
+                attempt_id: origin_attempt,
+                outcome_slot,
+                ..
+            },
+            StoreDeviceRegistrationActivationRef::Join {
+                attempt_id,
+                outcome,
+            },
+            StoreDeviceRegistrationActivation::Join {
+                attempt_id: retained_attempt,
+                outcome: retained_outcome,
+            },
+        ) if origin_attempt == attempt_id
+            && attempt_id == retained_attempt
+            && outcome_slot == outcome.slot()
+            && outcome == retained_outcome =>
+        {
+            Ok(())
+        }
+        (
+            StoreDeviceRegistrationOrigin::Recovery {
+                recovery_id: origin_recovery,
+                recovery_slot,
+                ..
+            },
+            StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
+            StoreDeviceRegistrationActivation::Recovery {
+                recovery_id: retained_recovery,
+                node: retained_node,
+            },
+        ) if origin_recovery == recovery_id
+            && recovery_id == retained_recovery
+            && recovery_slot == node.slot()
+            && node == retained_node =>
+        {
+            Ok(())
+        }
+        _ => Err(StoreProtocolError::DeviceStateMismatch),
+    }
+}
+
+impl VerifiedStoreDeviceExclusionOutcome {
+    fn source(&self) -> &RetainedStoreDeviceExclusionOutcome {
+        match self {
+            Self::Excluded { source, .. } | Self::Cancelled(source) => source,
         }
     }
 }
@@ -9434,6 +9890,285 @@ mod tests {
                 if terminals == &vec![StoreDeviceTerminalRef::Excluded(exclusion_ref)]
                     && cut == &accepted_cut
         ));
+    }
+
+    #[test]
+    fn retained_registration_activations_reopen_exact_canonical_inputs() {
+        let fixture = fixture();
+        let replacement = UserKeypair::generate();
+        let recovery_id = DeviceRecoveryId::from_hash(ObjectHash::digest(b"retained recovery"));
+        let recovery_slot = slot("store-v1/recovery/retained/1.json".to_string());
+        let replacement_registration = StoreDeviceRegistration::signed(
+            fixture.root_ref.clone(),
+            StoreDeviceRegistrationOrigin::Recovery {
+                recovery_id,
+                recovery_slot: recovery_slot.clone(),
+                owner_grant: fixture.root.descriptor.founder_grant.clone(),
+            },
+            fixture.registration.provider.clone(),
+            StoreCommitAnchor::Serial,
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: slot("store-v1/acks/retained/1.json".to_string()),
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: slot("store-v1/snapshots/retained/1.json".to_string()),
+            },
+            &replacement,
+        )
+        .expect("sign replacement registration");
+        let replacement_bytes = replacement_registration.to_bytes();
+        let replacement_ref = StoreDeviceRegistrationRef::from_registration(
+            &replacement_registration,
+            exact(
+                format!(
+                    "{}.json",
+                    registration_semantic_prefix(&replacement_registration.device_id.to_string())
+                ),
+                &replacement_bytes,
+            ),
+        );
+        let recovery_node = OwnerRecoveryNodeRef {
+            owner_pubkey: fixture.registration.author_pubkey.clone(),
+            owner_grant: fixture.root.descriptor.founder_grant.clone(),
+            sequence: 1,
+            node_hash: ObjectHash::digest(b"retained recovery node"),
+            object: exact(
+                recovery_slot.logical_key().to_string(),
+                b"retained recovery node",
+            ),
+        };
+        let activated = ActivatedStoreDeviceRegistrationRef {
+            registration: replacement_ref,
+            authority: StoreDeviceRegistrationActivationRef::Recovery {
+                recovery_id,
+                node: recovery_node.clone(),
+            },
+        };
+        let authority = StoreDeviceRegistrationActivation::Recovery {
+            recovery_id,
+            node: recovery_node,
+        };
+        let device_signer = fixture
+            .registration
+            .device_signer(&fixture.signer)
+            .expect("founder device signer");
+        let commit = StoreBatchCommit::signed_with_registrations(
+            fixture.root_ref.store_root_hash,
+            WriteId::from_generated("retained-registration".to_string()),
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.commit.order.clone(),
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            StoreOperationMembershipAuthority::Serial,
+            vec![activated],
+            &device_signer,
+        )
+        .expect("sign registration activation commit");
+        let input = vec![(replacement_registration.clone(), authority.clone())];
+        let retained = RetainedStoreDeviceRegistrationActivations::from_verified(
+            &fixture.root_ref,
+            &commit,
+            &input,
+        )
+        .expect("retain registration activation");
+        let encoded = serde_json::to_vec(&retained).expect("encode retained registration");
+        let decoded: RetainedStoreDeviceRegistrationActivations =
+            serde_json::from_slice(&encoded).expect("decode retained registration");
+        assert_eq!(
+            decoded
+                .verify_for(&fixture.root_ref, &commit)
+                .expect("verify retained registration"),
+            input
+        );
+
+        let mut tampered = retained.clone();
+        tampered.registrations[0].canonical_registration.push(b' ');
+        assert!(tampered.verify_for(&fixture.root_ref, &commit).is_err());
+
+        let missing = RetainedStoreDeviceRegistrationActivations {
+            registrations: Vec::new(),
+        };
+        assert!(missing.verify_for(&fixture.root_ref, &commit).is_err());
+
+        let mut substituted = retained;
+        substituted.registrations[0].canonical_registration = fixture.registration.to_bytes();
+        assert!(substituted.verify_for(&fixture.root_ref, &commit).is_err());
+    }
+
+    #[test]
+    fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
+        let fixture = fixture();
+        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+            b"retained exclusion proposal",
+        ));
+        let outcome_key = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(
+                fixture.registration_ref.device_id,
+                proposal_id,
+            )
+        );
+        let device_signer = fixture
+            .registration
+            .device_signer(&fixture.signer)
+            .expect("founder device signer");
+        let proposal = StoreDeviceExclusionProposal::signed(
+            fixture.root_ref.store_root_hash,
+            proposal_id,
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.commit.device_state.clone(),
+            slot(outcome_key.clone()),
+            fixture.registration_ref.clone(),
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.registration,
+            &device_signer,
+        )
+        .expect("sign retained exclusion proposal");
+        let proposal_bytes = proposal.to_bytes();
+        let proposal_ref = StoreDeviceExclusionProposalRef::from_proposal(
+            &proposal,
+            exact(
+                format!(
+                    "{}.json",
+                    device_exclusion_proposal_semantic_prefix(
+                        fixture.registration_ref.device_id,
+                        proposal_id,
+                        proposal.proposal_hash(),
+                    )
+                ),
+                &proposal_bytes,
+            ),
+        )
+        .expect("exact retained exclusion proposal");
+        let proposal_source = RetainedStoreDeviceExclusionProposal {
+            reference: proposal_ref.clone(),
+            canonical_proposal: proposal_bytes,
+            canonical_target_registration: fixture.registration.to_bytes(),
+            canonical_owner_registration: fixture.registration.to_bytes(),
+        };
+        let proposal_commit = StoreBatchCommit::signed_with_device_exclusions(
+            fixture.root_ref.store_root_hash,
+            WriteId::from_generated("retained-proposal".to_string()),
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.commit.order.clone(),
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            StoreOperationMembershipAuthority::Serial,
+            vec![proposal_ref.clone()],
+            Vec::new(),
+            &device_signer,
+        )
+        .expect("sign retained proposal commit");
+        let retained_proposal =
+            RetainedStoreDeviceOperations::from_sources(vec![proposal_source.clone()], Vec::new());
+        let verified_proposal = retained_proposal
+            .verify_for(&fixture.root_ref, &proposal_commit)
+            .expect("verify retained proposal input");
+        assert_eq!(
+            verified_proposal
+                .proposals()
+                .next()
+                .map(|(reference, value)| (reference.clone(), value.clone())),
+            Some((proposal_ref.clone(), proposal.clone()))
+        );
+        let mut tampered_proposal = retained_proposal;
+        tampered_proposal.proposals[0].canonical_proposal.push(b' ');
+        assert!(tampered_proposal
+            .verify_for(&fixture.root_ref, &proposal_commit)
+            .is_err());
+        let exclusion = StoreDeviceExclusion::signed(
+            proposal_ref,
+            &proposal,
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            StoreDeviceExclusionProof::Serial,
+            fixture.registration_ref.clone(),
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.registration,
+            &device_signer,
+        )
+        .expect("sign retained exclusion outcome");
+        let outcome = StoreDeviceExclusionOutcome::Excluded(exclusion);
+        let outcome_bytes = outcome.to_bytes();
+        let outcome_ref = StoreDeviceExclusionOutcomeRef::from_outcome(
+            &outcome,
+            &proposal,
+            exact(outcome_key, &outcome_bytes),
+        )
+        .expect("exact retained exclusion outcome");
+        let StoreDeviceExclusionOutcomeRef::Excluded(exclusion_ref) = outcome_ref.clone() else {
+            panic!("retained exclusion reference changed variant")
+        };
+        let outcome_source = RetainedStoreDeviceExclusionOutcome::Excluded {
+            reference: exclusion_ref,
+            canonical_outcome: outcome_bytes,
+            proposal: proposal_source,
+            canonical_owner_registration: fixture.registration.to_bytes(),
+        };
+        let commit = StoreBatchCommit::signed_with_device_exclusions(
+            fixture.root_ref.store_root_hash,
+            WriteId::from_generated("retained-exclusion".to_string()),
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.commit.order.clone(),
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            StoreOperationMembershipAuthority::Serial,
+            Vec::new(),
+            vec![outcome_ref],
+            &device_signer,
+        )
+        .expect("sign retained exclusion commit");
+        let retained =
+            RetainedStoreDeviceOperations::from_sources(Vec::new(), vec![outcome_source]);
+        let encoded = serde_json::to_vec(&retained).expect("encode retained device operations");
+        let decoded: RetainedStoreDeviceOperations =
+            serde_json::from_slice(&encoded).expect("decode retained device operations");
+        let verified = decoded
+            .verify_for(&fixture.root_ref, &commit)
+            .expect("verify retained device operations");
+        assert_eq!(verified.to_retained(), retained);
+        assert_eq!(
+            verified.exclusions().next().map(|(_, cut)| cut.clone()),
+            Some(
+                commit
+                    .order
+                    .predecessor_cut()
+                    .expect("derive accepted predecessor cut")
+            )
+        );
+
+        let mut tampered = retained.clone();
+        let RetainedStoreDeviceExclusionOutcome::Excluded {
+            canonical_outcome, ..
+        } = &mut tampered.outcomes[0]
+        else {
+            unreachable!()
+        };
+        canonical_outcome.push(b' ');
+        assert!(tampered.verify_for(&fixture.root_ref, &commit).is_err());
+
+        let missing = RetainedStoreDeviceOperations::from_sources(Vec::new(), Vec::new());
+        assert!(missing.verify_for(&fixture.root_ref, &commit).is_err());
+
+        let mut substituted = retained;
+        let RetainedStoreDeviceExclusionOutcome::Excluded {
+            canonical_owner_registration,
+            ..
+        } = &mut substituted.outcomes[0]
+        else {
+            unreachable!()
+        };
+        let mut other_registration = fixture.registration.clone();
+        other_registration.author_pubkey.push('0');
+        *canonical_owner_registration = other_registration.to_bytes();
+        assert!(substituted.verify_for(&fixture.root_ref, &commit).is_err());
     }
 
     fn device_state_has_exact_pending_proposal(

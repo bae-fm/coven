@@ -2832,6 +2832,7 @@ mod tests {
                     &reference,
                     &head.value,
                     &head.object,
+                    &[],
                 )
             })
             .await

@@ -2336,6 +2336,7 @@ fn expected_local_circle_activation(
         circle_id: creation.circle_id,
         control: creation.control.clone(),
         local_access: Some(VerifiedCircleAccess {
+            envelope: access.envelope.clone(),
             leaf: access.leaf.clone(),
             active,
         }),
@@ -5294,5 +5295,186 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn retained_circle_activation_reverifies_every_retained_boundary() {
+        fn replace_once(bytes: &[u8], original: &[u8], replacement: &[u8]) -> Vec<u8> {
+            let positions = bytes
+                .windows(original.len())
+                .enumerate()
+                .filter_map(|(index, candidate)| (candidate == original).then_some(index))
+                .collect::<Vec<_>>();
+            let [position] = positions.as_slice() else {
+                panic!("retained fixture must contain exactly one replacement target")
+            };
+            let mut replaced = Vec::with_capacity(bytes.len() - original.len() + replacement.len());
+            replaced.extend_from_slice(&bytes[..*position]);
+            replaced.extend_from_slice(replacement);
+            replaced.extend_from_slice(&bytes[*position + original.len()..]);
+            replaced
+        }
+
+        let db = open_test_db();
+        let founder = UserKeypair::generate();
+        let store = TestStore::create(&db, "retained-circle-activation", founder.clone())
+            .await
+            .expect("create retained Circle Store");
+        let peer = UserKeypair::generate();
+        let peer_pubkey = keys::public_key_hex(&peer);
+        super::super::membership_ops::invite_member(
+            &store.storage,
+            store.home.as_ref(),
+            &founder,
+            &super::super::hlc::Hlc::new("founder-device".to_string()),
+            &peer_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([73; 32]),
+            "retained-circle-activation",
+            "Retained Circle activation Store",
+            &db,
+        )
+        .await
+        .expect("invite retained Circle peer");
+        let journal = prepare_circle_operation(
+            &db,
+            &store.storage,
+            None,
+            &local_device_id(&db).await,
+            "0000000001000-0000-founder",
+            "Household",
+            &founder,
+        )
+        .await
+        .expect("prepare retained Circle activation");
+        for object in journal.operation().prepared_objects.values() {
+            super::super::store_objects::create_exact_object(&store.storage, object)
+                .await
+                .expect("publish retained Circle activation object");
+        }
+        let commit = journal.commit().expect("parse retained Circle commit");
+        let commit_ref = &journal.operation().commit_ref;
+        let author = db
+            .activated_store_device_registration(commit.author_registration.clone())
+            .await
+            .expect("load retained Circle commit author");
+        let verified = load_circle_activations(
+            &db,
+            &store.storage,
+            &store.root,
+            commit_ref,
+            &commit,
+            &author,
+            &founder,
+            &keys::public_key_hex(&founder),
+        )
+        .await
+        .expect("verify retained Circle activation fixture");
+        let retained = verified
+            .to_retained()
+            .expect("serialize retained Circle activation");
+        let founder_pubkey = keys::public_key_hex(&founder);
+        assert_eq!(
+            VerifiedCircleActivations::parse_retained(
+                &retained,
+                &commit,
+                commit_ref,
+                &author,
+                Some(&founder_pubkey),
+            )
+            .expect("parse retained Circle activation"),
+            verified
+        );
+        assert_eq!(
+            VerifiedCircleActivations::parse_retained(
+                &retained, &commit, commit_ref, &author, None,
+            )
+            .expect("parse retained Circle activation before local registration"),
+            verified
+        );
+
+        let local_access = verified.circles()[0]
+            .local_access
+            .as_ref()
+            .expect("founder has retained Circle access");
+        let envelope_bytes =
+            serde_json::to_vec(&local_access.envelope).expect("serialize retained Circle envelope");
+        let mut envelope_field = b",\"envelope\":".to_vec();
+        envelope_field.extend_from_slice(&envelope_bytes);
+        let omitted = replace_once(&retained, &envelope_field, &[]);
+        let omitted_error = VerifiedCircleActivations::parse_retained(
+            &omitted,
+            &commit,
+            commit_ref,
+            &author,
+            Some(&founder_pubkey),
+        )
+        .expect_err("retained Circle access cannot omit its envelope");
+        assert!(omitted_error
+            .to_string()
+            .contains("missing field `envelope`"));
+
+        let peer_envelope = journal
+            .operation()
+            .creation
+            .access
+            .iter()
+            .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
+            .expect("peer has an exact retained Circle envelope");
+        let local_pair = serde_json::to_vec(&super::super::circle::PreparedCircleAccess {
+            leaf: local_access.leaf.clone(),
+            envelope: local_access.envelope.clone(),
+        })
+        .expect("serialize local retained Circle access pair");
+        let substituted_pair =
+            serde_json::to_vec(peer_envelope).expect("serialize substituted Circle access pair");
+        let substituted = replace_once(&retained, &local_pair, &substituted_pair);
+        let substituted_error = VerifiedCircleActivations::parse_retained(
+            &substituted,
+            &commit,
+            commit_ref,
+            &author,
+            Some(&founder_pubkey),
+        )
+        .expect_err("retained Circle access cannot substitute another signed access pair");
+        assert!(
+            substituted_error
+                .to_string()
+                .contains("access names another local recipient"),
+            "{substituted_error}"
+        );
+
+        let mut tampered_envelope = local_access.envelope.clone();
+        tampered_envelope.signature.push('0');
+        let tampered_envelope = serde_json::to_vec(&tampered_envelope)
+            .expect("serialize tampered retained Circle envelope");
+        let tampered = replace_once(&retained, &envelope_bytes, &tampered_envelope);
+        let tampered_error = VerifiedCircleActivations::parse_retained(
+            &tampered,
+            &commit,
+            commit_ref,
+            &author,
+            Some(&founder_pubkey),
+        )
+        .expect_err("retained Circle access cannot alter a signed envelope");
+        assert!(
+            tampered_error
+                .to_string()
+                .contains("access leaf and envelope failed verification"),
+            "{tampered_error}"
+        );
+
+        let mut noncanonical = retained;
+        noncanonical.push(b'\n');
+        let canonical_error = VerifiedCircleActivations::parse_retained(
+            &noncanonical,
+            &commit,
+            commit_ref,
+            &author,
+            Some(&founder_pubkey),
+        )
+        .expect_err("retained Circle activation bytes must be canonical");
+        assert!(canonical_error.to_string().contains("not canonical"));
     }
 }

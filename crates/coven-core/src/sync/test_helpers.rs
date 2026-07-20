@@ -609,6 +609,7 @@ fn install_test_circle_current_state(
         circle_id: creation.circle_id,
         control: control.clone(),
         local_access: active.then(|| VerifiedCircleAccess {
+            envelope: own_access.envelope.clone(),
             leaf: own_access.leaf.clone(),
             active: Some(VerifiedCircleActive {
                 roster: creation.resolved_roster(),

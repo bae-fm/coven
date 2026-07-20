@@ -1744,9 +1744,8 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
     let invalid_insert = target
         .call(|conn| {
             conn.execute(
-                "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
-                 VALUES ('bad-device', -1, \
-                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+                "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
+                 VALUES ('serial', -1, '{}')",
                 [],
             )
             .map(|_| ())
@@ -1759,6 +1758,163 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
         target.snapshot_coverage_frontier().await.unwrap(),
         crate::CommitFrontier::MergeConcurrent(std::collections::BTreeMap::new()),
     );
+}
+
+#[tokio::test]
+async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
+    let source = open_test_db();
+    let storage = create_store(&source, UserKeypair::generate()).await;
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('retained-row', 'Retained', NULL, \
+                     '0000000001000-0000-retained', '2026-01-01')",
+        ],
+    )
+    .await;
+    let commit = storage
+        .publish_changeset("retained", 1, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish retained-input fixture");
+    let stream_id = commit_stream_id(&commit);
+    let target = open_test_db();
+
+    pull_into(&target, &storage, &temp_store_dir().1).await;
+
+    let queried_stream = stream_id.clone();
+    let (canonical_input, input_hash, retained_ref) = target
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT canonical_input, input_hash, commit_ref \
+                 FROM retained_merge_materializations \
+                 WHERE device_id = ?1 AND seq = 1",
+                [queried_stream],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("read retained Merge materialization input");
+    assert_eq!(
+        input_hash,
+        crate::sync::store_commit::ObjectHash::digest(&canonical_input).to_string()
+    );
+    assert_eq!(
+        retained_ref,
+        serde_json::to_string(&commit).expect("serialize retained fixture commit ref")
+    );
+    let retained: serde_json::Value =
+        serde_json::from_slice(&canonical_input).expect("parse retained Merge input");
+    let retained = retained.as_object().expect("retained input is an object");
+    assert_eq!(
+        retained
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["activation", "activation_head", "commit", "packages"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+    let activation = retained["activation"]
+        .as_object()
+        .expect("retained activation input is an object");
+    assert_eq!(
+        activation
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["circle_activations", "device_operations", "registrations"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+
+    let corrupt_stream = stream_id.clone();
+    target
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE retained_merge_materializations SET canonical_input = x'7b7d' \
+                 WHERE device_id = ?1 AND seq = 1",
+                [corrupt_stream],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("corrupt retained Merge input");
+    let error = target
+        .materialized_frontier()
+        .await
+        .expect_err("corrupt retained Merge input must invalidate its materialization");
+    assert!(error
+        .to_string()
+        .contains("input hash differs from its bytes"));
+}
+
+#[tokio::test]
+async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
+    let source = open_test_db();
+    let storage = create_store(&source, UserKeypair::generate()).await;
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('rollback-row', 'Must roll back', NULL, \
+                     '0000000001000-0000-rollback', '2026-01-01')",
+        ],
+    )
+    .await;
+    let commit = storage
+        .publish_changeset("rollback", 1, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish retained-input rollback fixture");
+    let stream_id = commit_stream_id(&commit);
+    let commit_ref = serde_json::to_string(&commit).expect("serialize exact commit ref");
+    let conflicting_stream = stream_id.clone();
+    let target = open_test_db();
+    target
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO retained_merge_materializations \
+                 (device_id, seq, commit_ref, input_hash, canonical_input) \
+                 VALUES (?1, 1, ?2, ?3, x'7b7d')",
+                rusqlite::params![conflicting_stream, commit_ref, "f".repeat(64)],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("install conflicting retained input");
+
+    let error = pull_into_result(&target, &storage, &temp_store_dir().1)
+        .await
+        .expect_err("retained input collision must fail the pull transaction");
+    assert!(error
+        .to_string()
+        .contains("already contains different exact input"));
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'rollback-row'").await);
+    let checked_stream = stream_id.clone();
+    let materialized = target
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialized_commits \
+                 WHERE device_id = ?1 AND seq = 1)",
+                [checked_stream],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("read rolled-back materialization state");
+    assert!(!materialized);
 }
 
 #[tokio::test]

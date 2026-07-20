@@ -597,11 +597,23 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let cleared_materialization_tables =
+        ["materialized_commits", "retained_merge_materializations"];
+    for table in cleared_materialization_tables {
+        tx.execute_batch(&format!(
+            "DELETE FROM {}",
+            crate::sync::session::quote_ident(table)
+        ))
+        .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
+    }
     for table in list_user_tables(conn)? {
         if synced.iter().any(|t| t.name() == table) {
             continue;
         }
         if SNAPSHOT_PRESERVED_NON_SYNCED_TABLES.contains(&table.as_str()) {
+            continue;
+        }
+        if cleared_materialization_tables.contains(&table.as_str()) {
             continue;
         }
         tx.execute_batch(&format!(
@@ -994,6 +1006,80 @@ mod tests {
                 .expect("read installed Store root"),
             Some(store.root),
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_removes_the_closed_merge_materialization_graph() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-merge-materialization-graph",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create snapshot materialization Store");
+        let changeset = crate::sync::test_helpers::capture_bytes(
+            &source,
+            &[
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('snapshot-row', 'Snapshot', 1, \
+                         '0000000001000-0000-snapshot', '2026-01-01')",
+            ],
+        )
+        .await;
+        store
+            .publish_changeset("snapshot", 1, &changeset, 1)
+            .await
+            .expect("publish snapshot materialization fixture");
+        let live_counts = source
+            .call(|connection| {
+                let materialized = connection
+                    .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(crate::database::DbError::from)?;
+                let retained = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM retained_merge_materializations",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                Ok::<_, crate::database::DbError>((materialized, retained))
+            })
+            .await
+            .expect("count live materialization graph");
+        assert!(live_counts.0 > 0);
+        assert!(live_counts.1 > 0);
+
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = crate::sync::test_helpers::test_synced_tables();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create materialization snapshot");
+        let inspection_dir = tempfile::tempdir().expect("snapshot inspection directory");
+        let inspection_path = inspection_dir.path().join("snapshot.db");
+        std::fs::write(&inspection_path, image).expect("write inspected snapshot");
+        let snapshot = Connection::open(inspection_path).expect("open inspected snapshot");
+        for table in ["materialized_commits", "retained_merge_materializations"] {
+            let count = snapshot
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count snapshot materialization table");
+            assert_eq!(count, 0, "snapshot removes {table}");
+        }
+        let foreign_key_violations = snapshot
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("check snapshot materialization foreign keys");
+        assert_eq!(foreign_key_violations, 0);
     }
 
     #[tokio::test]

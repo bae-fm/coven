@@ -28,7 +28,7 @@ use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::sync::circle::Audience;
-use crate::sync::circle_activation::VerifiedStreamActivations;
+use crate::sync::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{
@@ -44,7 +44,8 @@ use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionedObject};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta, StoreAck,
+    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceOperations,
+    RetainedStoreDeviceRegistrationActivations, SnapshotImageRef, SnapshotMeta, StoreAck,
     StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
@@ -2757,6 +2758,83 @@ enum PreparedWriteMaterialization<'a> {
         head_object: &'a ExactObjectRef,
     },
     Serial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedMergeMaterializationInput {
+    commit: PreparedExactObject,
+    activation_head: PreparedExactObject,
+    packages: Vec<AudiencePackage>,
+    activation: RetainedCommitActivationInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedCommitActivationInput {
+    registrations: RetainedStoreDeviceRegistrationActivations,
+    device_operations: RetainedStoreDeviceOperations,
+    circle_activations: Vec<u8>,
+}
+
+struct RetainedMergeMaterializationKey {
+    commit_ref: String,
+    input_hash: ObjectHash,
+}
+
+enum MaterializedCommitRetention<'a> {
+    MergeConcurrent(&'a RetainedMergeMaterializationKey),
+    Serial,
+}
+
+pub(crate) struct VerifiedMergeMaterialization<'a> {
+    commit: &'a StoreBatchCommit,
+    commit_ref: &'a StoreBatchCommitRef,
+    device_operations: &'a VerifiedStoreDeviceOperations,
+    circle_activations: &'a VerifiedCircleActivations,
+    activation_head: &'a StoreDeviceHead,
+    activation_head_object: &'a ExactObjectRef,
+    packages: &'a [AudiencePackage],
+}
+
+impl<'a> VerifiedMergeMaterialization<'a> {
+    pub(crate) fn verify(
+        commit: &'a StoreBatchCommit,
+        commit_ref: &'a StoreBatchCommitRef,
+        device_operations: &'a VerifiedStoreDeviceOperations,
+        circle_activations: &'a VerifiedCircleActivations,
+        activation_head: &'a StoreDeviceHead,
+        activation_head_object: &'a ExactObjectRef,
+        packages: &'a [AudiencePackage],
+    ) -> Result<Self, DbError> {
+        commit_ref
+            .verify_commit(commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if commit.policy() != WritePolicy::MergeConcurrent
+            || commit_ref.coord.policy() != WritePolicy::MergeConcurrent
+            || circle_activations.stream_activations().activating_commit() != commit_ref
+            || circle_activations.stream_activations().as_slice() != commit.stream_activations()
+            || circle_activations.circles().len() != commit.circle_controls().len()
+            || circle_activations
+                .circles()
+                .iter()
+                .zip(commit.circle_controls())
+                .any(|(activation, reference)| activation.reference != *reference)
+        {
+            return Err(DbError::Message(
+                "verified Merge materialization differs from its exact Store commit".to_string(),
+            ));
+        }
+        Ok(Self {
+            commit,
+            commit_ref,
+            device_operations,
+            circle_activations,
+            activation_head,
+            activation_head_object,
+            packages,
+        })
+    }
 }
 
 pub(crate) enum LocalRetirementMaterialization {
@@ -7673,6 +7751,7 @@ impl Database {
                     &accepted,
                     &authority.head,
                     authority.head_prepared.reference(),
+                    &[],
                 )?;
                 let mut completed_preparation = prepared.clone();
                 let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
@@ -12086,6 +12165,7 @@ impl Database {
                 &commit_ref,
                 &activation_head,
                 &activation_head_object,
+                &[],
             )?;
             tx.commit().map_err(DbError::from)
         })
@@ -12652,6 +12732,7 @@ impl Database {
                         &commit_ref,
                         &head,
                         &head_object,
+                        &[],
                     )?
                 }
                 LocalRetirementMaterialization::Serial { authorization } => {
@@ -13674,7 +13755,11 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let mut statement = conn
-                .prepare("SELECT device_id, seq, commit_ref FROM materialized_commits")
+                .prepare(
+                    "SELECT device_id, seq, commit_ref,
+                            retained_commit_ref, retained_input_hash
+                     FROM materialized_commits",
+                )
                 .map_err(DbError::from)?;
             let rows = statement
                 .query_map([], |row| {
@@ -13682,14 +13767,32 @@ impl Database {
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 })
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(DbError::from)?;
+            drop(statement);
             let mut activated_commit = None;
             for row in rows {
-                let (stream_id, sequence, encoded) = row.map_err(DbError::from)?;
+                let (
+                    stream_id,
+                    sequence,
+                    encoded,
+                    retained_commit_ref,
+                    retained_input_hash,
+                ) = row;
                 let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
-                let reference = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded)?;
+                let reference = Self::parse_materialized_commit_row_on(
+                    conn,
+                    &stream_id,
+                    sequence,
+                    &encoded,
+                    retained_commit_ref.as_deref(),
+                    retained_input_hash.as_deref(),
+                )?;
                 if reference.commit_hash.to_string() != commit_hash {
                     continue;
                 }
@@ -13954,8 +14057,7 @@ impl Database {
             let root = required_store_root_authority_on(&tx)?;
             let author =
                 load_activated_registration_on(&tx, &root, &unverified_commit.author_registration)?;
-            let (circle_activations, stream_activations) = verified.into_parts();
-            let [activation] = circle_activations.as_slice() else {
+            let [activation] = verified.circles() else {
                 return Err(DbError::Message(
                     "local Circle publication must carry one common-verifier result".to_string(),
                 ));
@@ -14014,8 +14116,8 @@ impl Database {
                 if activation.reference != *control_ref
                     || activation.circle_id != creation.circle_id
                     || activation.control != creation.control
-                    || stream_activations.activating_commit() != &operation.commit_ref
-                    || stream_activations.as_slice() != commit.stream_activations()
+                    || verified.stream_activations().activating_commit() != &operation.commit_ref
+                    || verified.stream_activations().as_slice() != commit.stream_activations()
                 {
                     return Err(DbError::Message(
                         "common-verifier Circle result differs from the durable signed operation"
@@ -14049,15 +14151,16 @@ impl Database {
                             "Merge Circle operation lacks its prepared Store head".to_string(),
                         )
                     })?;
-                    Self::record_materialized_merge_commit_with_device_operations_on(
-                        &tx,
+                    let materialization = VerifiedMergeMaterialization::verify(
                         &commit,
                         &operation.commit_ref,
                         &device_operations,
-                        &stream_activations,
+                        &verified,
                         head,
                         prepared_head.reference(),
+                        &[],
                     )?;
+                    Self::record_verified_merge_materialization_on(&tx, materialization)?;
                     (
                         commit,
                         activation.clone(),
@@ -14093,7 +14196,7 @@ impl Database {
                         &operation.commit_ref,
                         authorization,
                         &device_operations,
-                        &stream_activations,
+                        verified.stream_activations(),
                     )?;
                     (commit, activation.clone(), None)
                 }
@@ -14188,7 +14291,8 @@ impl Database {
         let mut frontier = BTreeMap::new();
         let mut stmt = conn
             .prepare(
-                "SELECT m.device_id, m.seq, m.commit_ref \
+                "SELECT m.device_id, m.seq, m.commit_ref,
+                        m.retained_commit_ref, m.retained_input_hash \
                  FROM materialized_commits m \
                  JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
                        GROUP BY device_id) latest \
@@ -14201,18 +14305,30 @@ impl Database {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(DbError::from)?;
+        drop(stmt);
         for row in rows {
-            let (device_id, seq, reference) = row.map_err(DbError::from)?;
+            let (device_id, seq, reference, retained_commit_ref, retained_input_hash) = row;
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }
             let seq = Self::sequence_from_sqlite(&device_id, seq)?;
             frontier.insert(
                 device_id.clone(),
-                Self::parse_stored_commit_ref(&device_id, seq, &reference)?,
+                Self::parse_materialized_commit_row_on(
+                    conn,
+                    &device_id,
+                    seq,
+                    &reference,
+                    retained_commit_ref.as_deref(),
+                    retained_input_hash.as_deref(),
+                )?,
             );
         }
 
@@ -14269,6 +14385,42 @@ impl Database {
         Ok(reference)
     }
 
+    fn parse_materialized_commit_row_on(
+        conn: &Connection,
+        stream_id: &str,
+        sequence: u64,
+        encoded: &str,
+        retained_commit_ref: Option<&str>,
+        retained_input_hash: Option<&str>,
+    ) -> Result<StoreBatchCommitRef, DbError> {
+        let reference = Self::parse_stored_commit_ref(stream_id, sequence, encoded)?;
+        match &reference.coord {
+            StoreCommitCoord::MergeConcurrent { .. } => {
+                if retained_commit_ref != Some(encoded) {
+                    return Err(DbError::Message(format!(
+                        "materialized Merge coordinate {stream_id}/{sequence} does not bind its exact retained commit"
+                    )));
+                }
+                let input_hash = retained_input_hash.ok_or_else(|| {
+                    DbError::Message(format!(
+                        "materialized Merge coordinate {stream_id}/{sequence} has no retained input hash"
+                    ))
+                })?;
+                Self::validate_retained_merge_materialization_on(
+                    conn, stream_id, sequence, &reference, input_hash,
+                )?;
+            }
+            StoreCommitCoord::Serial { .. } => {
+                if retained_commit_ref.is_some() || retained_input_hash.is_some() {
+                    return Err(DbError::Message(format!(
+                        "materialized Serial coordinate {stream_id}/{sequence} carries Merge retained input"
+                    )));
+                }
+            }
+        }
+        Ok(reference)
+    }
+
     pub(crate) fn materialized_commit_ref_on(
         conn: &Connection,
         stream_id: &str,
@@ -14276,13 +14428,29 @@ impl Database {
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let seq = Self::sequence_to_sqlite(stream_id, sequence)?;
         conn.query_row(
-            "SELECT commit_ref FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
+            "SELECT commit_ref, retained_commit_ref, retained_input_hash
+             FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
             (stream_id, seq),
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(DbError::from)?
-        .map(|encoded| Self::parse_stored_commit_ref(stream_id, sequence, &encoded))
+        .map(|(encoded, retained_commit_ref, retained_input_hash)| {
+            Self::parse_materialized_commit_row_on(
+                conn,
+                stream_id,
+                sequence,
+                &encoded,
+                retained_commit_ref.as_deref(),
+                retained_input_hash.as_deref(),
+            )
+        })
         .transpose()
     }
 
@@ -14292,10 +14460,18 @@ impl Database {
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let materialized = conn
             .query_row(
-                "SELECT seq, commit_ref FROM materialized_commits
+                "SELECT seq, commit_ref, retained_commit_ref, retained_input_hash
+                 FROM materialized_commits
                  WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
                 [device_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()
             .map_err(DbError::from)?;
@@ -14307,14 +14483,22 @@ impl Database {
             )
             .optional()
             .map_err(DbError::from)?;
-        let references = [materialized, coverage]
-            .into_iter()
-            .flatten()
-            .map(|(seq, reference)| {
-                let seq = Self::sequence_from_sqlite(device_id, seq)?;
-                Self::parse_stored_commit_ref(device_id, seq, &reference)
-            })
-            .collect::<Result<Vec<_>, DbError>>()?;
+        let mut references = Vec::new();
+        if let Some((seq, reference, retained_commit_ref, retained_input_hash)) = materialized {
+            let seq = Self::sequence_from_sqlite(device_id, seq)?;
+            references.push(Self::parse_materialized_commit_row_on(
+                conn,
+                device_id,
+                seq,
+                &reference,
+                retained_commit_ref.as_deref(),
+                retained_input_hash.as_deref(),
+            )?);
+        }
+        if let Some((seq, reference)) = coverage {
+            let seq = Self::sequence_from_sqlite(device_id, seq)?;
+            references.push(Self::parse_stored_commit_ref(device_id, seq, &reference)?);
+        }
         if references.len() == 2
             && references[0].coord.sequence() == references[1].coord.sequence()
             && references[0] != references[1]
@@ -14919,58 +15103,382 @@ impl Database {
         .await
     }
 
+    fn canonical_retained_merge_packages(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        packages: &[AudiencePackage],
+    ) -> Result<Vec<AudiencePackage>, DbError> {
+        let mut by_audience = BTreeMap::new();
+        for package in packages {
+            if package.store_root_hash() != commit.store_root_hash
+                || package.write_id() != &commit.write_id
+                || package.commit_coord() != &commit_ref.coord
+                || package.candidate_family() != commit.candidate_family()
+            {
+                return Err(DbError::Message(
+                    "retained audience package differs from its exact Store commit".to_string(),
+                ));
+            }
+            package
+                .validate_blob_uploader(&commit.author_registration)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let audience = package.audience().remote_audience();
+            if by_audience
+                .insert(audience.clone(), package.clone())
+                .is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "retained Merge commit has duplicate {audience:?} packages"
+                )));
+            }
+        }
+
+        let mut ordered = Vec::new();
+        if commit.store_package().is_some() {
+            let package = by_audience.remove(&RemoteAudience::Store).ok_or_else(|| {
+                DbError::Message("retained Merge commit is missing its Store package".to_string())
+            })?;
+            commit
+                .verify_store_package(&package.to_bytes())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            ordered.push(package);
+        }
+        for reference in commit.circle_packages() {
+            let Some(package) = by_audience.remove(&RemoteAudience::Circle(reference.circle_id))
+            else {
+                continue;
+            };
+            commit
+                .verify_circle_package(reference.circle_id, &package.to_bytes())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            ordered.push(package);
+        }
+        if !by_audience.is_empty() {
+            return Err(DbError::Message(
+                "retained Merge input carries a package absent from its commit".to_string(),
+            ));
+        }
+        Ok(ordered)
+    }
+
+    fn retained_registration_activations_on(
+        conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
+        commit: &StoreBatchCommit,
+    ) -> Result<RetainedStoreDeviceRegistrationActivations, DbError> {
+        let mut registrations = Vec::with_capacity(commit.device_registrations().len());
+        for activated in commit.device_registrations() {
+            let registration = load_activated_registration_on(conn, root, &activated.registration)?;
+            let authority: String = conn
+                .query_row(
+                    "SELECT activation_authority
+                     FROM store_device_registration_activations
+                     WHERE device_id = ?1 AND registration_hash = ?2",
+                    (
+                        activated.registration.device_id.to_string(),
+                        activated.registration.registration_hash.to_string(),
+                    ),
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let authority = serde_json::from_str(&authority).map_err(|error| {
+                DbError::Message(format!(
+                    "retained Store registration activation authority: {error}"
+                ))
+            })?;
+            registrations.push((registration, authority));
+        }
+        RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, &registrations)
+            .map_err(|error| DbError::Message(error.to_string()))
+    }
+
+    fn validate_retained_merge_materialization_input_on(
+        conn: &Connection,
+        commit_ref: &StoreBatchCommitRef,
+        input: &RetainedMergeMaterializationInput,
+    ) -> Result<(), DbError> {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &commit_ref.coord
+        else {
+            return Err(DbError::Message(
+                "retained Merge input names a Serial commit".to_string(),
+            ));
+        };
+        if sequence == &0 {
+            return Err(DbError::Message(
+                "retained Merge input names sequence zero".to_string(),
+            ));
+        }
+        let root = required_store_root_authority_on(conn)?;
+        let unverified: StoreBatchCommit = serde_json::from_slice(input.commit.stored_bytes())
+            .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
+        let author = load_activated_registration_on(conn, &root, &unverified.author_registration)?;
+        let commit = StoreBatchCommit::parse_at(
+            input.commit.stored_bytes(),
+            root.store_root_hash,
+            &commit_ref.coord,
+            &author,
+        )
+        .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
+        if commit.to_bytes() != input.commit.stored_bytes() {
+            return Err(DbError::Message(
+                "retained Merge commit bytes are not canonical".to_string(),
+            ));
+        }
+        let exact_ref = StoreBatchCommitRef::from_commit(
+            &commit,
+            commit_ref.coord.clone(),
+            input.commit.reference().clone(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        if &exact_ref != commit_ref
+            || commit.author_registration.device_id.to_string() == SERIAL_STREAM_ID
+            || stream_id.to_string() == SERIAL_STREAM_ID
+        {
+            return Err(DbError::Message(
+                "retained Merge commit differs from its materialized coordinate".to_string(),
+            ));
+        }
+        let head = StoreDeviceHead::parse_at(
+            input.activation_head.stored_bytes(),
+            root.store_root_hash,
+            &author,
+            commit_ref,
+        )
+        .map_err(|error| DbError::Message(format!("retained Merge activation head: {error}")))?;
+        if head.to_bytes() != input.activation_head.stored_bytes() {
+            return Err(DbError::Message(
+                "retained Merge activation head bytes are not canonical".to_string(),
+            ));
+        }
+        let packages =
+            Self::canonical_retained_merge_packages(&commit, commit_ref, &input.packages)?;
+        if packages != input.packages {
+            return Err(DbError::Message(
+                "retained Merge packages are not in commit order".to_string(),
+            ));
+        }
+        input
+            .activation
+            .registrations
+            .verify_for(&root, &commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        input
+            .activation
+            .device_operations
+            .verify_for(&root, &commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let local_identity = local_activated_registration_ref_on(conn)?
+            .map(|reference| load_activated_registration_on(conn, &root, &reference))
+            .transpose()?
+            .map(|registration| registration.author_pubkey);
+        VerifiedCircleActivations::parse_retained(
+            &input.activation.circle_activations,
+            &commit,
+            commit_ref,
+            &author,
+            local_identity.as_deref(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        Ok(())
+    }
+
+    fn retain_merge_materialization_on(
+        conn: &Connection,
+        materialization: &VerifiedMergeMaterialization<'_>,
+    ) -> Result<RetainedMergeMaterializationKey, DbError> {
+        let root = required_store_root_authority_on(conn)?;
+        let packages = Self::canonical_retained_merge_packages(
+            materialization.commit,
+            materialization.commit_ref,
+            materialization.packages,
+        )?;
+        let input = RetainedMergeMaterializationInput {
+            commit: PreparedExactObject::new(
+                materialization.commit_ref.object.clone(),
+                materialization.commit.to_bytes(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?,
+            activation_head: PreparedExactObject::new(
+                materialization.activation_head_object.clone(),
+                materialization.activation_head.to_bytes(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?,
+            packages,
+            activation: RetainedCommitActivationInput {
+                registrations: Self::retained_registration_activations_on(
+                    conn,
+                    &root,
+                    materialization.commit,
+                )?,
+                device_operations: materialization.device_operations.to_retained(),
+                circle_activations: materialization
+                    .circle_activations
+                    .to_retained()
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            },
+        };
+        Self::validate_retained_merge_materialization_input_on(
+            conn,
+            materialization.commit_ref,
+            &input,
+        )?;
+        let canonical_input = serde_json::to_vec(&input).map_err(|error| {
+            DbError::Message(format!("serialize retained Merge materialization: {error}"))
+        })?;
+        let input_hash = ObjectHash::digest(&canonical_input);
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &materialization.commit_ref.coord
+        else {
+            return Err(DbError::Message(
+                "retained Merge materialization names a Serial coordinate".to_string(),
+            ));
+        };
+        let stream_id = stream_id.to_string();
+        let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let commit_ref_json =
+            serde_json::to_string(materialization.commit_ref).map_err(|error| {
+                DbError::Message(format!("serialize retained Merge commit ref: {error}"))
+            })?;
+        let inserted = conn
+            .execute(
+                "INSERT INTO retained_merge_materializations
+                 (device_id, seq, commit_ref, input_hash, canonical_input)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(device_id, seq) DO NOTHING",
+                rusqlite::params![
+                    &stream_id,
+                    sequence,
+                    &commit_ref_json,
+                    input_hash.to_string(),
+                    &canonical_input
+                ],
+            )
+            .map_err(DbError::from)?;
+        if inserted == 0 {
+            let stored: (String, String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT commit_ref, input_hash, canonical_input
+                     FROM retained_merge_materializations
+                     WHERE device_id = ?1 AND seq = ?2",
+                    rusqlite::params![&stream_id, sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            if stored
+                != (
+                    commit_ref_json.clone(),
+                    input_hash.to_string(),
+                    canonical_input,
+                )
+            {
+                return Err(DbError::Message(format!(
+                    "retained Merge coordinate {stream_id}/{} already contains different exact input",
+                    materialization.commit_ref.coord.sequence()
+                )));
+            }
+        }
+        Ok(RetainedMergeMaterializationKey {
+            commit_ref: commit_ref_json,
+            input_hash,
+        })
+    }
+
+    fn validate_retained_merge_materialization_on(
+        conn: &Connection,
+        stream_id: &str,
+        sequence: u64,
+        commit_ref: &StoreBatchCommitRef,
+        expected_input_hash: &str,
+    ) -> Result<(), DbError> {
+        let sequence_sql = Self::sequence_to_sqlite(stream_id, sequence)?;
+        let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
+            .query_row(
+                "SELECT commit_ref, input_hash, canonical_input
+                 FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence_sql],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)?;
+        let expected_ref = serde_json::to_string(commit_ref).map_err(|error| {
+            DbError::Message(format!("serialize materialized Merge commit ref: {error}"))
+        })?;
+        if stored_ref != expected_ref {
+            return Err(DbError::Message(format!(
+                "retained Merge coordinate {stream_id}/{sequence} names another commit"
+            )));
+        }
+        if stored_hash != expected_input_hash
+            || stored_hash != ObjectHash::digest(&canonical_input).to_string()
+        {
+            return Err(DbError::Message(format!(
+                "retained Merge coordinate {stream_id}/{sequence} input hash differs from its bytes"
+            )));
+        }
+        let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
+            .map_err(|error| {
+                DbError::Message(format!("retained Merge materialization input: {error}"))
+            })?;
+        if serde_json::to_vec(&input).map_err(|error| {
+            DbError::Message(format!("serialize retained Merge materialization: {error}"))
+        })? != canonical_input
+        {
+            return Err(DbError::Message(
+                "retained Merge materialization input is not canonical".to_string(),
+            ));
+        }
+        Self::validate_retained_merge_materialization_input_on(conn, commit_ref, &input)
+    }
+
     pub(crate) fn record_materialized_merge_commit_on(
         conn: &rusqlite::Transaction<'_>,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
+        packages: &[AudiencePackage],
     ) -> Result<(), DbError> {
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        let stream_activations = VerifiedStreamActivations::none(commit, commit_ref)
+        let circle_activations = VerifiedCircleActivations::none(commit, commit_ref)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        Self::record_materialized_merge_commit_with_device_operations_on(
-            conn,
+        let materialization = VerifiedMergeMaterialization::verify(
             commit,
             commit_ref,
             &device_operations,
-            &stream_activations,
+            &circle_activations,
             activation_head,
             activation_head_object,
-        )
+            packages,
+        )?;
+        Self::record_verified_merge_materialization_on(conn, materialization)
     }
 
-    pub(crate) fn record_materialized_merge_commit_with_device_operations_on(
+    pub(crate) fn record_verified_merge_materialization_on(
         conn: &rusqlite::Transaction<'_>,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
-        device_operations: &VerifiedStoreDeviceOperations,
-        stream_activations: &VerifiedStreamActivations,
-        activation_head: &StoreDeviceHead,
-        activation_head_object: &ExactObjectRef,
+        materialization: VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
-        if commit_ref.coord.policy() != WritePolicy::MergeConcurrent
-            || commit.policy() != WritePolicy::MergeConcurrent
-        {
-            return Err(DbError::Message(
-                "Merge materialization requires a MergeConcurrent commit".to_string(),
-            ));
-        }
         Self::record_author_exclusion_activations_on(
             conn,
-            commit,
-            commit_ref,
-            device_operations,
-            activation_head,
-            activation_head_object,
+            materialization.commit,
+            materialization.commit_ref,
+            materialization.device_operations,
+            materialization.activation_head,
+            materialization.activation_head_object,
         )?;
+        let retained_commit_ref = Self::retain_merge_materialization_on(conn, &materialization)?;
         Self::record_materialized_commit_with_device_operations_on(
             conn,
-            commit,
-            commit_ref,
-            device_operations,
-            stream_activations,
+            materialization.commit,
+            materialization.commit_ref,
+            materialization.device_operations,
+            materialization.circle_activations.stream_activations(),
+            MaterializedCommitRetention::MergeConcurrent(&retained_commit_ref),
         )
     }
 
@@ -14980,6 +15488,7 @@ impl Database {
         commit_ref: &StoreBatchCommitRef,
         device_operations: &VerifiedStoreDeviceOperations,
         stream_activations: &VerifiedStreamActivations,
+        retention: MaterializedCommitRetention<'_>,
     ) -> Result<(), DbError> {
         commit_ref
             .verify_commit(commit)
@@ -15152,6 +15661,26 @@ impl Database {
         let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::Message(format!("serialize exact Store commit ref: {error}"))
         })?;
+        let (retained_commit_ref, retained_input_hash) = match (commit.policy(), retention) {
+            (
+                WritePolicy::MergeConcurrent,
+                MaterializedCommitRetention::MergeConcurrent(retained),
+            ) if retained.commit_ref == commit_ref_json => (
+                Some(retained.commit_ref.as_str()),
+                Some(retained.input_hash.to_string()),
+            ),
+            (WritePolicy::Serial, MaterializedCommitRetention::Serial) => (None, None),
+            (WritePolicy::MergeConcurrent, MaterializedCommitRetention::MergeConcurrent(_)) => {
+                return Err(DbError::Message(
+                    "retained Merge input names another exact commit".to_string(),
+                ));
+            }
+            _ => {
+                return Err(DbError::Message(
+                    "materialized commit retention differs from write policy".to_string(),
+                ));
+            }
+        };
         conn.execute(
             "INSERT INTO store_device_state_snapshots (commit_ref, state) VALUES (?1, ?2)",
             rusqlite::params![
@@ -15165,9 +15694,16 @@ impl Database {
         )
         .map_err(DbError::from)?;
         conn.execute(
-            "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
-             VALUES (?1, ?2, ?3)",
-            (&stream_id, seq, &commit_ref_json),
+            "INSERT INTO materialized_commits
+             (device_id, seq, commit_ref, retained_commit_ref, retained_input_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &stream_id,
+                seq,
+                &commit_ref_json,
+                retained_commit_ref,
+                retained_input_hash
+            ],
         )
         .map_err(DbError::from)?;
         if stream_activations.as_slice() != commit.stream_activations() {
@@ -15539,6 +16075,7 @@ impl Database {
             commit_ref,
             device_operations,
             stream_activations,
+            MaterializedCommitRetention::Serial,
         )?;
         let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
             DbError::Message(format!("serialize Serial membership state: {error}"))
@@ -16020,8 +16557,8 @@ impl Database {
                     &prepared.commit,
                     &prepared.registrations,
                 )?;
-                let stream_activations =
-                    VerifiedStreamActivations::none(&prepared.commit, &prepared.reference)
+                let circle_activations =
+                    VerifiedCircleActivations::none(&prepared.commit, &prepared.reference)
                         .map_err(|error| DbError::Message(error.to_string()))?;
                 match (&prepared.reference.coord, &prepared.activation) {
                     (
@@ -16030,15 +16567,18 @@ impl Database {
                             head,
                             object,
                         },
-                    ) => Self::record_materialized_merge_commit_with_device_operations_on(
-                        &tx,
-                        &prepared.commit,
-                        &prepared.reference,
-                        &prepared.device_operations,
-                        &stream_activations,
-                        head,
-                        object,
-                    )?,
+                    ) => {
+                        let materialization = VerifiedMergeMaterialization::verify(
+                            &prepared.commit,
+                            &prepared.reference,
+                            &prepared.device_operations,
+                            &circle_activations,
+                            head,
+                            object,
+                            &[],
+                        )?;
+                        Self::record_verified_merge_materialization_on(&tx, materialization)?;
+                    }
                     (
                         StoreCommitCoord::Serial { .. },
                         crate::sync::store_pull::DeviceJoinBootstrapActivation::Serial,
@@ -16047,7 +16587,8 @@ impl Database {
                         &prepared.commit,
                         &prepared.reference,
                         &prepared.device_operations,
-                        &stream_activations,
+                        circle_activations.stream_activations(),
+                        MaterializedCommitRetention::Serial,
                     )?,
                     _ => {
                         return Err(DbError::Message(
@@ -16396,6 +16937,11 @@ impl Database {
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let audiences = load_prepared_audience_objects_on(conn, write_id)?;
+        let retained_packages = audiences
+            .packages
+            .iter()
+            .map(|package| package.package().clone())
+            .collect::<Vec<_>>();
         for package in &audiences.packages {
             package
                 .package()
@@ -16504,6 +17050,7 @@ impl Database {
                     commit_ref,
                     head,
                     head_object,
+                    &retained_packages,
                 )?;
             }
             PreparedWriteMaterialization::Serial => {
@@ -16517,6 +17064,7 @@ impl Database {
                     commit_ref,
                     &device_operations,
                     &stream_activations,
+                    MaterializedCommitRetention::Serial,
                 )?;
             }
         }

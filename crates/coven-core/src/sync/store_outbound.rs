@@ -1,5 +1,6 @@
 //! Durable construction and ordered publication of local Store commits.
 
+use super::circle_activation::VerifiedCircleActivations;
 use super::membership::{MembershipChain, SerialAuthorizationState};
 use super::storage::{
     BlobWriteAuthority, CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef,
@@ -26,7 +27,7 @@ use crate::database::{
     PreparedAudiencePackage, PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
     SerialCandidateAbandonmentPreparation, SerialStoreWritePreparation,
     SerialStoreWritePreparationEntry, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
-    StoreWritePreparation,
+    StoreWritePreparation, VerifiedMergeMaterialization,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
@@ -4653,9 +4654,8 @@ async fn publish_prepared_merge_store_operation(
     let recorded_ref = reference.clone();
     let registration_activation = activation.candidate.registration_activation;
     let device_operations = activation.device_operations;
-    let stream_activations =
-        super::circle_activation::VerifiedStreamActivations::none(&commit, &recorded_ref)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let circle_activations = VerifiedCircleActivations::none(&commit, &recorded_ref)
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     db.call(move |connection| {
         let tx = connection
             .unchecked_transaction()
@@ -4670,15 +4670,16 @@ async fn publish_prepared_merge_store_operation(
                 &[(activation.registration, activation.authority)],
             )?;
         }
-        Database::record_materialized_merge_commit_with_device_operations_on(
-            &tx,
+        let materialization = VerifiedMergeMaterialization::verify(
             &commit,
             &recorded_ref,
             &device_operations,
-            &stream_activations,
+            &circle_activations,
             &head,
             &activation_head.object,
+            &[],
         )?;
+        Database::record_verified_merge_materialization_on(&tx, materialization)?;
         tx.commit().map_err(crate::database::DbError::from)
     })
     .await?;
