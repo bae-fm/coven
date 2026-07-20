@@ -8,7 +8,7 @@ use super::remote_object::{
 use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
-use super::store_commit::{ObjectHash, StoreBatchCommitRef};
+use super::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHeadRef};
 use super::store_outbound::{PreparedStoreOperationCommit, StoreOutboundError};
 use super::store_reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
@@ -227,23 +227,81 @@ async fn create_and_verify(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ReclaimCommitActivation {
+    MergeConcurrent {
+        commit: StoreBatchCommitRef,
+        head: StoreDeviceHeadRef,
+    },
+    Serial {
+        commit: StoreBatchCommitRef,
+    },
+}
+
+impl ReclaimCommitActivation {
+    pub(crate) fn merge_concurrent(
+        commit: StoreBatchCommitRef,
+        head: StoreDeviceHeadRef,
+    ) -> Result<Self, StoreReclaimJournalError> {
+        let activation = Self::MergeConcurrent { commit, head };
+        activation.validate()?;
+        Ok(activation)
+    }
+
+    pub(crate) fn serial(commit: StoreBatchCommitRef) -> Result<Self, StoreReclaimJournalError> {
+        let activation = Self::Serial { commit };
+        activation.validate()?;
+        Ok(activation)
+    }
+
+    pub(crate) fn commit(&self) -> &StoreBatchCommitRef {
+        match self {
+            Self::MergeConcurrent { commit, .. } | Self::Serial { commit } => commit,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), StoreReclaimJournalError> {
+        match self {
+            Self::MergeConcurrent { commit, head } => {
+                if !matches!(commit.coord, StoreCommitCoord::MergeConcurrent { .. })
+                    || commit.object == head.object
+                {
+                    return Err(StoreReclaimJournalError::Invalid(
+                        "Merge reclaim activation has invalid commit and head identities"
+                            .to_string(),
+                    ));
+                }
+            }
+            Self::Serial { commit } => {
+                if !matches!(commit.coord, StoreCommitCoord::Serial { .. }) {
+                    return Err(StoreReclaimJournalError::Invalid(
+                        "Serial reclaim activation names a Merge commit".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ReclaimedStorePackage {
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
     },
     Receipted {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        receipt_activation: ReclaimCommitActivation,
     },
 }
 
 impl ReclaimedStorePackage {
     pub(crate) fn absent_verified(
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
     ) -> Result<Self, StoreReclaimJournalError> {
         let value = Self::AbsentVerified {
             authorization,
@@ -255,9 +313,9 @@ impl ReclaimedStorePackage {
 
     pub(crate) fn receipted(
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        receipt_activation: ReclaimCommitActivation,
     ) -> Result<Self, StoreReclaimJournalError> {
         let value = Self::Receipted {
             authorization,
@@ -277,7 +335,7 @@ impl ReclaimedStorePackage {
         }
     }
 
-    pub(crate) fn authorization_activation(&self) -> &StoreBatchCommitRef {
+    pub(crate) fn authorization_activation(&self) -> &ReclaimCommitActivation {
         match self {
             Self::AbsentVerified {
                 authorization_activation,
@@ -314,10 +372,12 @@ impl ReclaimedStorePackage {
             ..
         } = self
         {
+            receipt_activation.validate()?;
             if &receipt.authorization != authorization
                 || receipt.object == authorization.target().object
-                || receipt_activation == authorization_activation
-                || receipt_activation.coord.policy() != authorization_activation.coord.policy()
+                || receipt_activation.commit() == authorization_activation.commit()
+                || receipt_activation.commit().coord.policy()
+                    != authorization_activation.commit().coord.policy()
             {
                 return Err(StoreReclaimJournalError::Invalid(
                     "reclaim receipt does not close its exact authorization history".to_string(),
@@ -330,11 +390,12 @@ impl ReclaimedStorePackage {
 
 fn validate_reclaim_identity(
     authorization: &ReclaimAuthorizationRef,
-    authorization_activation: &StoreBatchCommitRef,
+    authorization_activation: &ReclaimCommitActivation,
 ) -> Result<(), StoreReclaimJournalError> {
+    authorization_activation.validate()?;
     let target_activation = authorization.target_activation();
-    if target_activation == authorization_activation
-        || target_activation.coord.policy() != authorization_activation.coord.policy()
+    if target_activation == authorization_activation.commit()
+        || target_activation.coord.policy() != authorization_activation.commit().coord.policy()
     {
         return Err(StoreReclaimJournalError::Invalid(
             "reclaim authorization does not follow its target in one Store history".to_string(),
@@ -352,16 +413,16 @@ pub(crate) enum DurableStoreReclaimOperation {
     },
     Authorized {
         authorization: ReclaimAuthorizationRef,
-        activation: StoreBatchCommitRef,
+        activation: ReclaimCommitActivation,
     },
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         target: super::store_commit::StorePackageRef,
     },
     ReceiptCandidate {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         object: Box<DurableStoreReclaimObject>,
         candidate: Box<PreparedStoreOperationCommit>,
     },
@@ -372,16 +433,16 @@ pub(crate) enum DurableStoreReclaimOperation {
     },
     ReceiptReplacing {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         object: Box<DurableStoreReclaimObject>,
         candidate: Box<PreparedStoreOperationCommit>,
         losing: Box<StoreReclaimCandidateLoss>,
     },
     Completed {
         authorization: ReclaimAuthorizationRef,
-        authorization_activation: StoreBatchCommitRef,
+        authorization_activation: ReclaimCommitActivation,
         receipt: ReclaimReceiptRef,
-        receipt_activation: StoreBatchCommitRef,
+        receipt_activation: ReclaimCommitActivation,
     },
 }
 

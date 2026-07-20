@@ -65,7 +65,8 @@ use crate::sync::store_device_exclusion::{
     StoreDeviceExclusionJournalError,
 };
 use crate::sync::store_reclaim_journal::{
-    DurableStoreReclaimOperation, ReclaimedStorePackage, StoreReclaimJournalError,
+    DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
+    StoreReclaimJournalError,
 };
 use crate::write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
@@ -17613,6 +17614,14 @@ impl Database {
             materialization.activation_head_object,
         )?;
         let retained_commit_ref = Self::retain_merge_materialization_on(conn, &materialization)?;
+        let activation = ReclaimCommitActivation::merge_concurrent(
+            materialization.commit_ref.clone(),
+            crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: materialization.activation_head.head_hash(),
+                object: materialization.activation_head_object.clone(),
+            },
+        )
+        .map_err(store_reclaim_journal_error)?;
         Self::record_materialized_commit_with_device_operations_on(
             conn,
             materialization.commit,
@@ -17620,6 +17629,7 @@ impl Database {
             materialization.device_operations,
             materialization.circle_activations.stream_activations(),
             MaterializedCommitRetention::MergeConcurrent(&retained_commit_ref),
+            &activation,
         )
     }
 
@@ -17630,6 +17640,7 @@ impl Database {
         device_operations: &VerifiedStoreDeviceOperations,
         stream_activations: &VerifiedStreamActivations,
         retention: MaterializedCommitRetention<'_>,
+        activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
         commit_ref
             .verify_commit(commit)
@@ -17866,7 +17877,7 @@ impl Database {
             &device_state,
             device_operations,
         )?;
-        record_store_reclaim_activation_on(conn, commit, commit_ref)
+        record_store_reclaim_activation_on(conn, commit, commit_ref, activation)
     }
 
     fn record_author_exclusion_activations_on(
@@ -18217,6 +18228,8 @@ impl Database {
             device_operations,
             stream_activations,
             MaterializedCommitRetention::Serial,
+            &ReclaimCommitActivation::serial(commit_ref.clone())
+                .map_err(store_reclaim_journal_error)?,
         )?;
         let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
             DbError::Message(format!("serialize Serial membership state: {error}"))
@@ -18608,6 +18621,8 @@ impl Database {
                         &prepared.device_operations,
                         circle_activations.stream_activations(),
                         MaterializedCommitRetention::Serial,
+                        &ReclaimCommitActivation::serial(prepared.reference.clone())
+                            .map_err(store_reclaim_journal_error)?,
                     )?,
                     _ => {
                         return Err(DbError::Message(
@@ -19089,6 +19104,8 @@ impl Database {
                     &device_operations,
                     &stream_activations,
                     MaterializedCommitRetention::Serial,
+                    &ReclaimCommitActivation::serial(commit_ref.clone())
+                        .map_err(store_reclaim_journal_error)?,
                 )?;
             }
         }
@@ -23439,12 +23456,19 @@ fn record_store_reclaim_activation_on(
     conn: &Connection,
     commit: &StoreBatchCommit,
     commit_ref: &StoreBatchCommitRef,
+    activation: &ReclaimCommitActivation,
 ) -> Result<(), DbError> {
+    activation.validate().map_err(store_reclaim_journal_error)?;
+    if activation.commit() != commit_ref {
+        return Err(DbError::Message(
+            "Store reclaim activation evidence names another commit".to_string(),
+        ));
+    }
     if let Some(authorization) = commit.reclaim_authorization() {
         let operation_id = authorization.authorization_hash;
         let next = DurableStoreReclaimOperation::Authorized {
             authorization: authorization.clone(),
-            activation: commit_ref.clone(),
+            activation: activation.clone(),
         };
         next.validate().map_err(store_reclaim_journal_error)?;
         match load_store_reclaim_operation_on(conn, operation_id)? {
@@ -23542,13 +23566,13 @@ fn record_store_reclaim_activation_on(
             authorization: authorization.clone(),
             authorization_activation: authorization_activation.clone(),
             receipt: receipt.clone(),
-            receipt_activation: commit_ref.clone(),
+            receipt_activation: activation.clone(),
         };
         let reclaimed = ReclaimedStorePackage::receipted(
             authorization,
             authorization_activation,
             receipt.clone(),
-            commit_ref.clone(),
+            activation.clone(),
         )
         .map_err(store_reclaim_journal_error)?;
         record_reclaimed_store_package_on(conn, &reclaimed)?;
@@ -25542,6 +25566,20 @@ mod tests {
         )
     }
 
+    fn reclaim_test_activation(
+        commit: StoreBatchCommitRef,
+        label: &str,
+    ) -> ReclaimCommitActivation {
+        ReclaimCommitActivation::merge_concurrent(
+            commit,
+            crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: ObjectHash::digest(format!("{label} reclaim head").as_bytes()),
+                object: reclaim_test_object(&format!("store-v1/test/{label}/reclaim-head.json")),
+            },
+        )
+        .expect("valid reclaim activation")
+    }
+
     fn snapshot_activation(label: &str) -> StreamActivationId {
         let registration_bytes = format!("{label} snapshot registration");
         let registration = crate::sync::store_commit::StoreDeviceRegistrationRef {
@@ -25789,6 +25827,9 @@ mod tests {
             },
             object: reclaim_test_object("store-v1/reclaim/authorizations/closed.json"),
         };
+        let authorization_activation =
+            reclaim_test_activation(authorization_activation, "authorization");
+        let receipt_activation = reclaim_test_activation(receipt_activation, "receipt");
         let operation = DurableStoreReclaimOperation::Authorized {
             authorization: authorization.clone(),
             activation: authorization_activation.clone(),

@@ -6663,6 +6663,30 @@ async fn reference_is_materialized(
     }
 }
 
+pub(crate) async fn verify_merge_commit_currently_materialized(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    reference: &StoreBatchCommitRef,
+) -> Result<(), StorePullError> {
+    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
+        return Err(StorePullError::Database(
+            "Merge activation authority names a Serial commit".to_string(),
+        ));
+    };
+    let stream_id = stream_id.to_string();
+    let coverage = db.snapshot_coverage_frontier().await?;
+    match reference_is_materialized(db, storage, root, &coverage, &stream_id, reference).await? {
+        MaterializedCheck::Yes => Ok(()),
+        MaterializedCheck::Missing => Err(StorePullError::Database(
+            "Merge activation commit is absent from current accepted history".to_string(),
+        )),
+        MaterializedCheck::Held(reason) => Err(StorePullError::Database(format!(
+            "Merge activation commit is not current accepted history: {reason:?}"
+        ))),
+    }
+}
+
 async fn resolve_candidate_device_operations(
     db: &Database,
     storage: &dyn SyncStorage,

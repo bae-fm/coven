@@ -871,7 +871,7 @@ async fn execute_reclaim_delete(
 ) -> Result<(), StoreReclaimError> {
     let super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
         authorization,
-        ..
+        activation,
     } = &operation
     else {
         return Err(StoreReclaimError::Authorization(
@@ -882,11 +882,15 @@ async fn execute_reclaim_delete(
         .local_store_root_ref()
         .await?
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
-    let opened =
-        super::store_objects::load_reclaim_authorization_ref(storage, &root, authorization).await?;
-    let verified =
-        verify_store_package_reclaim_evidence(storage, coordination, &root, &opened.evidence.value)
-            .await?;
+    let verified = verify_authorized_store_package_reclaim(
+        db,
+        storage,
+        coordination,
+        &root,
+        authorization,
+        activation,
+    )
+    .await?;
     let target = verified.target;
     if db
         .store_package_is_retained_for_replay(target.package.clone(), target.activation.clone())
@@ -900,13 +904,123 @@ async fn execute_reclaim_delete(
         .delete_protocol_object(&target.package.object)
         .await
         .map_err(|source| StoreReclaimError::Delete {
-            commit_hash: opened.evidence.value.claim.target.activation.commit_hash,
+            commit_hash: target.activation.commit_hash,
             source,
         })?;
-    verify_reclaim_target_absent(storage, &root, &opened).await?;
+    verify_reclaim_target_absent(storage, &root, &target).await?;
     db.mark_store_reclaim_target_absent(operation, target.package)
         .await?;
     Ok(())
+}
+
+struct VerifiedAuthorizedStorePackageReclaim {
+    target: StorePackageReclaimTarget,
+}
+
+async fn verify_authorized_store_package_reclaim(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    authorization_ref: &ReclaimAuthorizationRef,
+    activation: &super::store_reclaim_journal::ReclaimCommitActivation,
+) -> Result<VerifiedAuthorizedStorePackageReclaim, StoreReclaimError> {
+    let opened =
+        super::store_objects::load_reclaim_authorization_ref(storage, root, authorization_ref)
+            .await?;
+    verify_reclaim_authorization_activation(
+        db,
+        storage,
+        coordination,
+        root,
+        authorization_ref,
+        activation,
+    )
+    .await?;
+    let verified =
+        verify_store_package_reclaim_evidence(storage, coordination, root, &opened.evidence.value)
+            .await?;
+    Ok(VerifiedAuthorizedStorePackageReclaim {
+        target: verified.target,
+    })
+}
+
+async fn verify_reclaim_authorization_activation(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    authorization: &ReclaimAuthorizationRef,
+    activation: &super::store_reclaim_journal::ReclaimCommitActivation,
+) -> Result<(), StoreReclaimError> {
+    activation
+        .validate()
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let commit_ref = activation.commit();
+    let (commit_value, author) =
+        super::store_pull::load_commit_with_author(storage, root, commit_ref)
+            .await
+            .map_err(StoreReclaimError::Object)?;
+    if commit_value.reclaim_authorization() != Some(authorization) {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim activation commit names another authorization".to_string(),
+        ));
+    }
+    match activation {
+        super::store_reclaim_journal::ReclaimCommitActivation::MergeConcurrent { commit, head } => {
+            if coordination.is_some() {
+                return Err(StoreReclaimError::PolicyMismatch(
+                    "Merge reclaim activation received Serial coordination".to_string(),
+                ));
+            }
+            let opened = super::store_objects::load_head_ref(
+                storage,
+                root.store_root_hash,
+                head,
+                &author,
+                commit,
+            )
+            .await?;
+            if opened.value.commit != *commit {
+                return Err(StoreReclaimError::Authorization(
+                    "Merge reclaim head activates another commit".to_string(),
+                ));
+            }
+            let (_, accepted_head) = super::store_outbound::exact_next_announcement_slot(
+                storage,
+                root,
+                &commit_value.author_registration,
+                &author,
+                Some(commit),
+            )
+            .await?;
+            if accepted_head.as_ref() != Some(head) {
+                return Err(StoreReclaimError::Authorization(
+                    "Merge reclaim activation head is not the exact accepted stream position"
+                        .to_string(),
+                ));
+            }
+            super::store_pull::verify_merge_commit_currently_materialized(db, storage, root, commit)
+                .await
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+        }
+        super::store_reclaim_journal::ReclaimCommitActivation::Serial { commit } => {
+            let coordination = coordination.ok_or_else(|| {
+                StoreReclaimError::PolicyMismatch(
+                    "Serial reclaim activation requires coordination".to_string(),
+                )
+            })?;
+            super::store_pull::observe_serial_successors_after(
+                storage,
+                coordination,
+                root,
+                &super::store_commit::StoreSerialPredecessor::Commit(commit.clone()),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+        }
+    }
 }
 
 struct VerifiedStorePackageReclaimEvidence {
@@ -1268,25 +1382,24 @@ async fn prepare_reclaim_receipt(
 async fn verify_reclaim_target_absent(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    opened: &super::store_objects::VerifiedReclaimAuthorization,
+    target: &StorePackageReclaimTarget,
 ) -> Result<(), StoreReclaimError> {
-    let claim = &opened.evidence.value.claim;
-    let stream_id = match &claim.target.activation.coord {
+    let stream_id = match &target.activation.coord {
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
         StoreCommitCoord::Serial { .. } => super::store_commit::SERIAL_STREAM_ID.to_string(),
     };
     let prefix = super::store_commit::package_semantic_prefix(
-        claim.target.package.candidate_family,
+        target.package.candidate_family,
         &stream_id,
-        claim.target.activation.coord.sequence(),
-        claim.target.package.content_hash,
+        target.activation.coord.sequence(),
+        target.package.content_hash,
     );
     let context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StorePackage,
     );
     match storage
-        .read_protocol_object(&context, &claim.target.package.object, &prefix)
+        .read_protocol_object(&context, &target.package.object, &prefix)
         .await
     {
         Err(StorageError::NotFound(_)) => Ok(()),
@@ -1728,7 +1841,15 @@ mod tests {
         let operation =
             super::super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
                 authorization: receipt.authorization.clone(),
-                activation: authorization_activation,
+                activation:
+                    super::super::store_reclaim_journal::ReclaimCommitActivation::merge_concurrent(
+                        authorization_activation,
+                        super::super::store_commit::StoreDeviceHeadRef {
+                            head_hash: ObjectHash::digest(b"reclaim authorization head"),
+                            object: proof_object("store-v1/heads/reclaim-authorization.json"),
+                        },
+                    )
+                    .expect("valid reclaim activation"),
             };
         let deletion = execute_reclaim_delete(&db, &store.storage, None, operation).await;
         assert!(
@@ -1756,5 +1877,500 @@ mod tests {
             )
             .await
             .expect("unverified reclaim proof must leave its target readable");
+    }
+
+    #[tokio::test]
+    async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
+        let db = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "reclaim-activation-head",
+            signer.clone(),
+        )
+        .await
+        .expect("create Store");
+        let changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('reclaim-head-row', 'reclaim', NULL, \
+                 '0000000001000-0000-reclaim-head', '2026-01-01')",
+            ],
+        )
+        .await;
+        let target_activation = store
+            .publish_changeset("founder", 1, &changeset, db.schema_version())
+            .await
+            .expect("publish target package activation");
+        let (target_commit, _) = super::super::store_pull::load_commit_with_author(
+            &store.storage,
+            &store.root,
+            &target_activation,
+        )
+        .await
+        .expect("load target activation");
+        let target_package = target_commit
+            .store_package()
+            .expect("target activation carries a Store package")
+            .clone();
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = target_activation.coord else {
+            unreachable!("fixture uses Merge")
+        };
+        let coverage = CommitFrontier::MergeConcurrent(BTreeMap::from([(
+            stream_id,
+            target_activation.clone(),
+        )]));
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load reclaim membership");
+        let chain = membership
+            .chain
+            .as_ref()
+            .expect("initialized Store has membership");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            b"reclaim activation snapshot".to_vec(),
+            coverage.clone(),
+            &signer,
+            Some(chain),
+            &db,
+        )
+        .await
+        .expect("publish covering snapshot");
+        crate::sync::test_helpers::publish_store_ack_fixture(
+            &db,
+            &store.storage,
+            None,
+            coverage,
+            &signer,
+            Some(chain),
+        )
+        .await
+        .expect("publish covering acknowledgement");
+        let snapshot = db
+            .latest_local_store_snapshot()
+            .await
+            .expect("load covering snapshot")
+            .expect("covering snapshot exists");
+        let acknowledgement = db
+            .latest_local_store_ack()
+            .await
+            .expect("load covering acknowledgement")
+            .expect("covering acknowledgement exists")
+            .reference;
+        db.call(|connection| {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(
+                &transaction,
+            )?;
+            transaction.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("release target retained replay ownership");
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load local device id")
+            .expect("local device id exists");
+        let reclaim_membership = ReclaimMembership::MergeConcurrent {
+            membership: chain,
+            discovery_proof: membership.discovery_proof,
+        };
+        prepare_reclaim_authorization(
+            &db,
+            &store.storage,
+            None,
+            &device_id,
+            &signer,
+            reclaim_membership,
+            &store.root,
+            StorePackageReclaimClaim {
+                target: StorePackageReclaimTarget {
+                    package: target_package.clone(),
+                    activation: target_activation.clone(),
+                },
+                covering_snapshot: StoreSnapshotLocator {
+                    author_registration: snapshot.meta.author_registration.clone(),
+                    snapshot: snapshot.reference.clone(),
+                },
+                acknowledgements: vec![acknowledgement],
+            },
+        )
+        .await
+        .expect("prepare reclaim authorization");
+        let candidate = db
+            .store_reclaim_operations()
+            .await
+            .expect("load reclaim candidate")
+            .into_iter()
+            .next()
+            .expect("reclaim candidate exists");
+        let prepared_candidate = candidate
+            .candidate()
+            .expect("reclaim operation has a candidate");
+        let activation_head = prepared_candidate
+            .merge_head_ref()
+            .expect("Merge reclaim candidate has an activation head");
+        let (_, activation_head_prepared) = prepared_candidate
+            .merge_publication_for_test()
+            .expect("Merge reclaim candidate has a prepared activation head");
+        let activation_head_prepared = activation_head_prepared.clone();
+        drive_reclaim_candidate(
+            &db,
+            &store.storage,
+            None,
+            &device_id,
+            &signer,
+            reclaim_membership,
+            candidate,
+        )
+        .await
+        .expect("activate reclaim authorization");
+        store
+            .storage
+            .delete_protocol_object(&activation_head.object)
+            .await
+            .expect("remove reclaim activation head");
+        let authorized = db
+            .store_reclaim_operations()
+            .await
+            .expect("load activated reclaim")
+            .into_iter()
+            .next()
+            .expect("activated reclaim exists");
+
+        let deletion = execute_reclaim_delete(&db, &store.storage, None, authorized.clone()).await;
+
+        assert!(
+            deletion.is_err(),
+            "a reclaim authorization without its exact Merge activation head must not delete"
+        );
+        store
+            .storage
+            .read_protocol_object(
+                &ProtocolObjectContext::store_encrypted(
+                    store.root.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
+                &target_package.object,
+                &super::super::store_commit::package_semantic_prefix(
+                    target_package.candidate_family,
+                    &stream_id.to_string(),
+                    target_activation.coord.sequence(),
+                    target_package.content_hash,
+                ),
+            )
+            .await
+            .expect("missing activation authority leaves target readable");
+
+        store
+            .storage
+            .create_protocol_object(&activation_head_prepared)
+            .await
+            .expect("restore exact reclaim activation head");
+        let activation_commit = match &authorized {
+            super::super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
+                activation,
+                ..
+            } => activation.commit().clone(),
+            _ => unreachable!("fixture has an activated reclaim"),
+        };
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id: activation_stream,
+            sequence: activation_sequence,
+        } = activation_commit.coord
+        else {
+            unreachable!("fixture uses Merge")
+        };
+        db.call(move |connection| {
+            let removed = connection
+                .execute(
+                    "DELETE FROM materialized_commits \
+                     WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+                    rusqlite::params![
+                        activation_stream.to_string(),
+                        i64::try_from(activation_sequence).expect("activation sequence fits i64"),
+                        serde_json::to_string(&activation_commit).expect("serialize activation"),
+                    ],
+                )
+                .map_err(crate::database::DbError::from)?;
+            if removed != 1 {
+                return Err(crate::database::DbError::Message(
+                    "reclaim activation materialization was not removed".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .expect("retract reclaim activation materialization");
+
+        assert!(
+            execute_reclaim_delete(&db, &store.storage, None, authorized)
+                .await
+                .is_err(),
+            "a retracted Merge reclaim activation must not delete"
+        );
+        store
+            .storage
+            .read_protocol_object(
+                &ProtocolObjectContext::store_encrypted(
+                    store.root.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
+                &target_package.object,
+                &super::super::store_commit::package_semantic_prefix(
+                    target_package.candidate_family,
+                    &stream_id.to_string(),
+                    target_activation.coord.sequence(),
+                    target_package.content_hash,
+                ),
+            )
+            .await
+            .expect("retracted activation authority leaves target readable");
+    }
+
+    #[tokio::test]
+    async fn serial_reclaim_activation_requires_the_live_coordinated_chain() {
+        let db = crate::sync::test_helpers::open_serial_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "serial-reclaim-activation",
+            signer.clone(),
+        )
+        .await
+        .expect("create Serial Store");
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load Serial device id")
+            .expect("Serial device id exists");
+        let changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('serial-reclaim-row', 'reclaim', NULL, \
+                 '0000000001000-0000-serial-reclaim', '2026-01-01')",
+            ],
+        )
+        .await;
+        db.enqueue_store_changeset_for_test(changeset)
+            .await
+            .expect("enqueue Serial target package");
+        let (_directory, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        super::super::store_outbound::prepare_pending_store_write_with_coordination(
+            &db,
+            &store.storage,
+            Some(&store.storage),
+            &device_id,
+            "2026-07-16T00:00:00Z",
+            &signer,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare Serial target package");
+        assert_eq!(
+            super::super::store_outbound::drain_store_writes_with_coordination(
+                &db,
+                &store.storage,
+                Some(&store.storage),
+            )
+            .await
+            .expect("publish Serial target package"),
+            1
+        );
+        let target_activation = db
+            .latest_local_store_position()
+            .await
+            .expect("load Serial target activation")
+            .expect("Serial target activation exists");
+        let (target_commit, _) = super::super::store_pull::load_commit_with_author(
+            &store.storage,
+            &store.root,
+            &target_activation,
+        )
+        .await
+        .expect("load Serial target commit");
+        let target = target_commit
+            .store_package()
+            .expect("Serial target commit carries a Store package")
+            .clone();
+        let (founder_ref, _, _) = store
+            .founder_device_authority()
+            .await
+            .expect("load Serial founder authority");
+        let plan = super::super::store_outbound::prepare_store_operation_commit(
+            &db,
+            &store.storage,
+            Some(&store.storage),
+            &device_id,
+            &signer,
+            None,
+        )
+        .await
+        .expect("prepare Serial reclaim activation");
+        let evidence = ReclaimEvidence::signed(
+            store.root.store_root_hash,
+            StorePackageReclaimClaim {
+                target: StorePackageReclaimTarget {
+                    package: target.clone(),
+                    activation: target_activation,
+                },
+                covering_snapshot: StoreSnapshotLocator {
+                    author_registration: founder_ref.clone(),
+                    snapshot: super::super::store_commit::StoreSnapshotRef {
+                        generation: 0,
+                        snapshot_hash: ObjectHash::digest(b"Serial reclaim snapshot"),
+                        object: proof_object("store-v1/snapshots/serial/reclaim.json"),
+                    },
+                },
+                acknowledgements: vec![StoreAckRef {
+                    registration: founder_ref,
+                    sequence: 1,
+                    ack_hash: ObjectHash::digest(b"Serial reclaim acknowledgement"),
+                    object: proof_object("store-v1/acks/serial/reclaim.json"),
+                }],
+            },
+            &signer,
+        )
+        .expect("sign Serial reclaim evidence");
+        let evidence_context = ProtocolObjectContext::store_encrypted(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreReclaimEvidence,
+        );
+        let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
+        let evidence_slot = store
+            .storage
+            .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
+            .await
+            .expect("allocate Serial reclaim evidence");
+        let evidence_prepared = store
+            .storage
+            .prepare_protocol_object(
+                &evidence_context,
+                evidence_slot,
+                &evidence_prefix,
+                evidence.to_bytes(),
+            )
+            .expect("prepare Serial reclaim evidence");
+        store
+            .storage
+            .create_protocol_object(&evidence_prepared)
+            .await
+            .expect("publish Serial reclaim evidence");
+        let evidence_ref =
+            ReclaimEvidenceRef::from_evidence(&evidence, evidence_prepared.reference().clone());
+        let authorization = ReclaimAuthorization::signed(
+            store.root.store_root_hash,
+            target,
+            evidence_ref,
+            StoreReclaimAuthority {
+                membership: plan.membership_state().clone(),
+                owner_grant: plan
+                    .owner_grant()
+                    .expect("Serial reclaim plan has an Owner grant")
+                    .clone(),
+            },
+            &signer,
+        );
+        let authorization_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreReclaimAuthorization,
+        );
+        let authorization_prefix =
+            reclaim_authorization_semantic_prefix(authorization.authorization_hash());
+        let authorization_slot = store
+            .storage
+            .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
+            .await
+            .expect("allocate Serial reclaim authorization");
+        let authorization_prepared = store
+            .storage
+            .prepare_protocol_object(
+                &authorization_context,
+                authorization_slot,
+                &authorization_prefix,
+                authorization.to_bytes(),
+            )
+            .expect("prepare Serial reclaim authorization");
+        store
+            .storage
+            .create_protocol_object(&authorization_prepared)
+            .await
+            .expect("publish Serial reclaim authorization");
+        let authorization_ref = ReclaimAuthorizationRef::from_authorization(
+            &authorization,
+            authorization_prepared.reference().clone(),
+        );
+        let candidate = super::super::store_outbound::prepare_store_operation_candidate(
+            &db,
+            &store.storage,
+            plan,
+            super::super::store_outbound::StoreOperationBatch::ReclaimAuthorization(Box::new(
+                authorization_ref.clone(),
+            )),
+        )
+        .await
+        .expect("prepare Serial reclaim candidate");
+        let (base_head, accepted_head) = candidate
+            .serial_publication_for_test()
+            .expect("Serial reclaim candidate has coordinated publication");
+        let base_head = base_head.clone();
+        let accepted_head = accepted_head.clone();
+        store
+            .storage
+            .create_protocol_object(&candidate.prepared)
+            .await
+            .expect("publish Serial reclaim commit");
+        let accepted = CoordinationStorage::replace_head(
+            &store.storage,
+            super::super::store_commit::serial_head_key(),
+            &base_head.version,
+            &accepted_head.to_bytes(),
+        )
+        .await
+        .expect("activate Serial reclaim commit");
+        let activation = super::super::store_reclaim_journal::ReclaimCommitActivation::serial(
+            candidate.reference,
+        )
+        .expect("valid Serial reclaim activation");
+
+        verify_reclaim_authorization_activation(
+            &db,
+            &store.storage,
+            Some(&store.storage),
+            &store.root,
+            &authorization_ref,
+            &activation,
+        )
+        .await
+        .expect("live coordinated chain accepts reclaim activation");
+
+        CoordinationStorage::replace_head(
+            &store.storage,
+            super::super::store_commit::serial_head_key(),
+            &accepted.version,
+            &base_head.bytes,
+        )
+        .await
+        .expect("replace Serial head with branch omitting reclaim activation");
+        assert!(
+            verify_reclaim_authorization_activation(
+                &db,
+                &store.storage,
+                Some(&store.storage),
+                &store.root,
+                &authorization_ref,
+                &activation,
+            )
+            .await
+            .is_err(),
+            "a Serial reclaim commit absent from the live coordinated chain is not authority"
+        );
     }
 }
