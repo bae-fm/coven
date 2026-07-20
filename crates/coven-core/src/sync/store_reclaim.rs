@@ -629,6 +629,12 @@ pub async fn reclaim_store_packages(
         if reclaim_target_is_recorded(db, &package).await? {
             continue;
         }
+        if db
+            .store_package_is_retained_for_replay(package.clone(), commit.clone())
+            .await?
+        {
+            continue;
+        }
         let acknowledgements =
             active_acknowledgement_refs(membership, &registrations, &acknowledgements);
         Box::pin(prepare_reclaim_authorization(
@@ -905,6 +911,17 @@ async fn execute_reclaim_delete(
     let opened =
         super::store_objects::load_reclaim_authorization_ref(storage, &root, authorization).await?;
     let target = opened.authorization.value.target.clone();
+    if db
+        .store_package_is_retained_for_replay(
+            target.clone(),
+            opened.evidence.value.claim.target.activation.clone(),
+        )
+        .await?
+    {
+        return Err(StoreReclaimError::Authorization(
+            "Store package remains retained for accepted replay".to_string(),
+        ));
+    }
     storage
         .delete_protocol_object(&target.object)
         .await

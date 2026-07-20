@@ -862,6 +862,18 @@ fn protocol_object_aad_context(context: &ProtocolObjectContext, semantic_prefix:
     aad
 }
 
+async fn run_storage_cpu<T>(
+    operation: &'static str,
+    work: Box<dyn FnOnce() -> Result<T, StorageError> + Send>,
+) -> Result<T, StorageError>
+where
+    T: Send + 'static,
+{
+    super::blocking::run(work)
+        .await
+        .map_err(|error| StorageError::Storage(format!("{operation}: {error}")))?
+}
+
 fn key_tag(fingerprint: &[u8; KEY_FINGERPRINT_LEN]) -> Vec<u8> {
     let mut tag = Vec::with_capacity(KEY_TAG_LEN);
     tag.extend_from_slice(KEY_TAG_MAGIC);
@@ -1621,16 +1633,22 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<Vec<u8>, StorageError> {
         context.validate_reference(object, semantic_prefix)?;
         let stored = self.exact.read_at(object.slot()).await?;
-        object.verify(&stored)?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        self.protocol_cipher_for_open(context)
-            .open(stored, &aad)
-            .map_err(|error| {
-                StorageError::Decryption(format!(
-                    "protocol object {}: {error}",
-                    object.slot().logical_key()
-                ))
-            })
+        let cipher = self.protocol_cipher_for_open(context);
+        let object = object.clone();
+        run_storage_cpu(
+            "verify and open protocol object",
+            Box::new(move || {
+                object.verify(&stored)?;
+                cipher.open(stored, &aad).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "protocol object {}: {error}",
+                        object.slot().logical_key()
+                    ))
+                })
+            }),
+        )
+        .await
     }
 
     async fn read_protocol_slot(
@@ -1653,20 +1671,28 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
         context.validate_slot(slot, semantic_prefix)?;
         let stored = self.exact.read_at(slot).await?;
-        let object = ExactObjectRef::new(
-            slot.clone(),
-            stored.len() as u64,
-            crate::sync::store_commit::ObjectHash::digest(&stored),
-        );
-        let prepared = PreparedExactObject::new(object, stored.clone())?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        let opened = self
-            .protocol_cipher_for_open(context)
-            .open(stored, &aad)
-            .map_err(|error| {
-                StorageError::Decryption(format!("protocol object {}: {error}", slot.logical_key()))
-            })?;
-        Ok((opened, prepared))
+        let cipher = self.protocol_cipher_for_open(context);
+        let slot = slot.clone();
+        run_storage_cpu(
+            "identify and open protocol slot",
+            Box::new(move || {
+                let object = ExactObjectRef::new(
+                    slot.clone(),
+                    stored.len() as u64,
+                    crate::sync::store_commit::ObjectHash::digest(&stored),
+                );
+                let prepared = PreparedExactObject::new(object, stored.clone())?;
+                let opened = cipher.open(stored, &aad).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "protocol object {}: {error}",
+                        slot.logical_key()
+                    ))
+                })?;
+                Ok((opened, prepared))
+            }),
+        )
+        .await
     }
 
     async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {

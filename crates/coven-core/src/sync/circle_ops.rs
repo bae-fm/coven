@@ -32,7 +32,8 @@ use crate::keys::{self, UserKeypair};
 
 pub(crate) use super::circle_activation::{
     load_circle_activations, load_exact_slot_bytes, verify_control_context, CircleAuthoringState,
-    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleReference,
+    CircleMembershipAuthority, VerifiedCircleAccess, VerifiedCircleActivations,
+    VerifiedCircleActive, VerifiedCircleReference,
 };
 
 #[cfg(test)]
@@ -2196,6 +2197,12 @@ async fn publish_circle_operation(
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
+    let membership_authority = match &journal.operation().policy {
+        CircleOperationPolicy::MergeConcurrent { .. } => CircleMembershipAuthority::MergeConcurrent,
+        CircleOperationPolicy::Serial { authorization, .. } => {
+            CircleMembershipAuthority::Serial(authorization.clone())
+        }
+    };
     let verified = load_circle_activations(
         db,
         storage,
@@ -2205,6 +2212,7 @@ async fn publish_circle_operation(
         &author,
         identity,
         &founder,
+        &membership_authority,
     )
     .await?;
     let expected = expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
@@ -3775,6 +3783,7 @@ mod tests {
         super::super::store_ack::stage_store_ack(
             &db,
             &store.storage,
+            None,
             super::super::store_commit::CommitFrontier::from_refs(
                 crate::WritePolicy::MergeConcurrent,
                 db.materialized_frontier()
@@ -4157,6 +4166,7 @@ mod tests {
             &author,
             &signer,
             &keys::public_key_hex(&signer),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("invented access references must fail activation");
@@ -4359,6 +4369,7 @@ mod tests {
             &author,
             &peer,
             &keys::public_key_hex(&founder),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("Active access must name a resolved Circle member");
@@ -4469,6 +4480,7 @@ mod tests {
             &author,
             &peer,
             &keys::public_key_hex(&founder),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("inactive Circle member verifies the public activation graph");
@@ -4511,6 +4523,7 @@ mod tests {
             &baseline_author,
             &baseline_signer,
             &keys::public_key_hex(&baseline_signer),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("baseline exact Circle activation verifies remotely");
@@ -4642,6 +4655,7 @@ mod tests {
             &author,
             &signer,
             &keys::public_key_hex(&signer),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("metadata cannot borrow authority from a different roster state");
@@ -5368,6 +5382,7 @@ mod tests {
             &author,
             &founder,
             &keys::public_key_hex(&founder),
+            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("verify retained Circle activation fixture");

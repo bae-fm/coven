@@ -14,6 +14,7 @@ use super::circle::{
 };
 use super::circle_ops::CircleOperationError;
 use super::circle_roster::CircleMaterializedRoster;
+use super::membership::SerialAuthorizationState;
 use super::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix, CandidateFamilyId,
@@ -44,6 +45,12 @@ pub(crate) struct VerifiedCircleAccess {
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CircleMembershipAuthority {
+    MergeConcurrent,
+    Serial(SerialAuthorizationState),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1241,13 +1248,13 @@ async fn resolve_circle_stream_authority(
             storage,
             root,
             &commit.order,
-            |reference, predecessor| {
+            Box::new(|reference, predecessor| {
                 reference == &activating_commit
                     && predecessor
                         .stream_activations()
                         .binary_search(&activation)
                         .is_ok()
-            },
+            }),
         )
         .await
         .map_err(|error| match error {
@@ -1287,9 +1294,10 @@ pub(crate) async fn load_circle_activations(
     author: &StoreDeviceRegistration,
     identity: &UserKeypair,
     founder_pubkey: &str,
+    membership_authority: &CircleMembershipAuthority,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
-    load_circle_activations_with_prefix(
+    Box::pin(load_circle_activations_with_prefix(
         db,
         storage,
         root,
@@ -1298,8 +1306,9 @@ pub(crate) async fn load_circle_activations(
         author,
         identity,
         founder_pubkey,
+        membership_authority,
         &verified_prefix,
-    )
+    ))
     .await
 }
 
@@ -1312,6 +1321,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
     author: &StoreDeviceRegistration,
     identity: &UserKeypair,
     founder_pubkey: &str,
+    membership_authority: &CircleMembershipAuthority,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     commit_ref
@@ -1505,8 +1515,14 @@ pub(crate) async fn load_circle_activations_with_prefix(
         let verified_access =
             load_verified_access_pairs(storage, commit, reference.circle_id(), &control, objects)
                 .await?;
-        let checkpoint_members =
-            verify_control_membership(storage, root, &control, founder_pubkey).await?;
+        let checkpoint_members = Box::pin(verify_control_membership(
+            storage,
+            root,
+            &control,
+            founder_pubkey,
+            membership_authority,
+        ))
+        .await?;
         let own_pubkey = keys::public_key_hex(identity);
         if !checkpoint_members
             .iter()
@@ -2461,8 +2477,10 @@ async fn load_circle_authority_roster(
             let target_control_hash = order.previous_control_hash.expect("checked as present");
             let mut predecessor = commit.order.predecessor().cloned();
             while let Some(reference) = predecessor {
-                let (preceding_commit, _) =
-                    super::store_pull::load_commit_with_author(storage, root, &reference).await?;
+                let (preceding_commit, _) = Box::pin(super::store_pull::load_commit_with_author(
+                    storage, root, &reference,
+                ))
+                .await?;
                 if let Some(reference) =
                     preceding_commit.circle_controls().iter().find(|reference| {
                         reference.circle_id() == circle_id
@@ -2470,7 +2488,8 @@ async fn load_circle_authority_roster(
                     })
                 {
                     let preceding_control =
-                        load_circle_control_at_reference(storage, root, reference).await?;
+                        Box::pin(load_circle_control_at_reference(storage, root, reference))
+                            .await?;
                     let CircleControlValue::Serial { order, .. } = preceding_control.value else {
                         return Err(CircleOperationError::InvalidState(
                             "Serial Circle predecessor contains Merge control order".to_string(),
@@ -2629,15 +2648,17 @@ async fn load_serial_circle_roster_by_state_hash(
     }
     let mut predecessor = commit.order.predecessor().cloned();
     while let Some(reference) = predecessor {
-        let (preceding_commit, _) =
-            super::store_pull::load_commit_with_author(storage, root, &reference).await?;
+        let (preceding_commit, _) = Box::pin(super::store_pull::load_commit_with_author(
+            storage, root, &reference,
+        ))
+        .await?;
         for reference in preceding_commit
             .circle_controls()
             .iter()
             .filter(|reference| reference.circle_id() == circle_id)
         {
             let preceding_control =
-                load_circle_control_at_reference(storage, root, reference).await?;
+                Box::pin(load_circle_control_at_reference(storage, root, reference)).await?;
             let CircleControlValue::Serial { order, .. } = preceding_control.value else {
                 return Err(CircleOperationError::InvalidState(
                     "Serial Circle history contains Merge control order".to_string(),
@@ -3007,21 +3028,25 @@ async fn verify_control_membership(
     root: &StoreRootRef,
     control: &PreparedCircleControl,
     founder_pubkey: &str,
+    authority: &CircleMembershipAuthority,
 ) -> Result<Vec<(String, super::membership::MemberRole)>, CircleOperationError> {
-    let (members, expected_state) = match &control.value.value {
-        CircleControlValue::MergeConcurrent {
-            active_epoch,
-            membership_authority,
-            ..
-        } => {
+    let (members, expected_state) = match (&control.value.value, authority) {
+        (
+            CircleControlValue::MergeConcurrent {
+                active_epoch,
+                membership_authority,
+                ..
+            },
+            CircleMembershipAuthority::MergeConcurrent,
+        ) => {
             let state = &active_epoch.store_membership;
-            let chain = super::membership_ops::load_anchored_chain_at_exact_heads(
+            let chain = Box::pin(super::membership_ops::load_anchored_chain_at_exact_heads(
                 storage,
                 root,
                 founder_pubkey,
                 &state.heads,
                 &state.resolutions,
-            )
+            ))
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             if !chain.authorizes_write_authority(membership_authority, &control.value.author_pubkey)
@@ -3047,18 +3072,11 @@ async fn verify_control_membership(
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             (chain.current_members(), expected)
         }
-        CircleControlValue::Serial { active_epoch, .. } => {
+        (
+            CircleControlValue::Serial { active_epoch, .. },
+            CircleMembershipAuthority::Serial(authorization),
+        ) => {
             let state = &active_epoch.store_membership;
-            let commit = match &state.position {
-                super::store_commit::SerialStorePosition::Genesis { .. } => None,
-                super::store_commit::SerialStorePosition::Commit(reference) => {
-                    Some(reference.clone())
-                }
-            };
-            let authorization =
-                super::store_pull::load_serial_authorization_at_position(storage, root, commit)
-                    .await
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             if !authorization
                 .membership
                 .can_write(&control.value.author_pubkey)
@@ -3070,10 +3088,16 @@ async fn verify_control_membership(
             let expected = StoreMembershipStateRef::serial(
                 state.position.clone(),
                 state.recovery.clone(),
-                &authorization,
+                authorization,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             (authorization.membership.current_members(), expected)
+        }
+        _ => {
+            return Err(CircleOperationError::InvalidState(
+                "Circle control write policy differs from its supplied membership authority"
+                    .to_string(),
+            ));
         }
     };
     if expected_state != control.value.store_membership_state_ref() {

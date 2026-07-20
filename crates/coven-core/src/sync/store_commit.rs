@@ -3632,6 +3632,39 @@ pub struct DeviceJoinAttempt {
     pub signature: String,
 }
 
+pub(crate) struct UnverifiedDeviceJoinAttempt(DeviceJoinAttempt);
+
+impl UnverifiedDeviceJoinAttempt {
+    pub(crate) fn owner_registration(&self) -> &StoreDeviceRegistrationRef {
+        &self.0.owner_registration
+    }
+
+    pub(crate) fn verify_at(
+        self,
+        expected: &DeviceJoinAttemptRef,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<DeviceJoinAttempt, StoreProtocolError> {
+        let attempt = self.0;
+        require_version(attempt.version)?;
+        attempt.validate_shape()?;
+        if attempt.attempt_id != expected.attempt_id
+            || attempt.attempt_hash() != expected.attempt_hash
+            || &attempt.attempt_slot != expected.object.slot()
+        {
+            return Err(StoreProtocolError::JoinAttemptMismatch);
+        }
+        attempt.owner_registration.verify_registration(owner)?;
+        if !keys::verify_signature_hex(
+            &owner.device_signing_pubkey,
+            &attempt.signature,
+            &attempt.canonical_signed_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(attempt)
+    }
+}
+
 #[derive(Serialize)]
 struct DeviceJoinAttemptSignedFields<'a> {
     version: u32,
@@ -3731,25 +3764,15 @@ impl DeviceJoinAttempt {
         expected: &DeviceJoinAttemptRef,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let attempt: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        require_version(attempt.version)?;
-        attempt.validate_shape()?;
-        if attempt.attempt_id != expected.attempt_id
-            || attempt.attempt_hash() != expected.attempt_hash
-            || &attempt.attempt_slot != expected.object.slot()
-        {
-            return Err(StoreProtocolError::JoinAttemptMismatch);
-        }
-        attempt.owner_registration.verify_registration(owner)?;
-        if !keys::verify_signature_hex(
-            &owner.device_signing_pubkey,
-            &attempt.signature,
-            &attempt.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(attempt)
+        Self::parse_unverified(bytes)?.verify_at(expected, owner)
+    }
+
+    pub(crate) fn parse_unverified(
+        bytes: &[u8],
+    ) -> Result<UnverifiedDeviceJoinAttempt, StoreProtocolError> {
+        serde_json::from_slice(bytes)
+            .map(UnverifiedDeviceJoinAttempt)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
     }
 
     fn validate_shape(&self) -> Result<(), StoreProtocolError> {
@@ -6447,7 +6470,7 @@ pub struct StoreAck {
     pub sequence: u64,
     pub store_cut: StoreHistoryCut,
     pub device_state: StoreDeviceStateRef,
-    pub snapshot: Option<StoreSnapshotRef>,
+    pub snapshot: Option<StoreSnapshotLocator>,
     pub exclusions: StoreAckExclusionState,
     pub last_sync: String,
     pub successor: SuccessorLink,
@@ -6461,6 +6484,78 @@ pub struct StoreAckRef {
     pub sequence: u64,
     pub ack_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSnapshotLocator {
+    pub author_registration: StoreDeviceRegistrationRef,
+    pub snapshot: StoreSnapshotRef,
+}
+
+/// The exact membership and device state represented by one Store snapshot.
+/// Both references retain their policy-specific coordinates, while their state
+/// hashes identify the resolved state across state-neutral commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSnapshotState {
+    pub membership: StoreMembershipStateRef,
+    pub devices: StoreDeviceStateRef,
+}
+
+impl StoreSnapshotState {
+    fn validate(
+        &self,
+        store_root_hash: ObjectHash,
+        coverage: &CommitFrontier,
+    ) -> Result<(), StoreProtocolError> {
+        self.membership.validate_shape()?;
+        validate_store_device_state_ref(&self.devices)?;
+        if self.membership.write_policy() != coverage.policy()
+            || self.devices.write_policy() != coverage.policy()
+        {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: coverage.policy(),
+                actual: if self.membership.write_policy() != coverage.policy() {
+                    self.membership.write_policy()
+                } else {
+                    self.devices.write_policy()
+                },
+            });
+        }
+        if self.membership.recovery() != self.devices.recovery() {
+            return Err(StoreProtocolError::OwnerRecoveryMismatch);
+        }
+        match (coverage, &self.membership, &self.devices) {
+            (
+                CommitFrontier::MergeConcurrent(expected),
+                StoreMembershipStateRef::MergeConcurrent(_),
+                StoreDeviceStateRef::MergeConcurrent { frontier, .. },
+            ) if frontier == &CommitFrontier::MergeConcurrent(expected.clone()) => Ok(()),
+            (
+                CommitFrontier::Serial(expected),
+                StoreMembershipStateRef::Serial(membership),
+                StoreDeviceStateRef::Serial { position, .. },
+            ) => {
+                let expected = match expected {
+                    Some(commit) => StoreSerialPredecessor::Commit(commit.clone()),
+                    None => match position {
+                        StoreSerialPredecessor::Genesis { root, .. }
+                            if root.store_root_hash == store_root_hash =>
+                        {
+                            position.clone()
+                        }
+                        _ => return Err(StoreProtocolError::DeviceStateMismatch),
+                    },
+                };
+                if membership.position != expected || position != &expected {
+                    return Err(StoreProtocolError::DeviceStateMismatch);
+                }
+                Ok(())
+            }
+            _ => Err(StoreProtocolError::DeviceStateMismatch),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6487,7 +6582,7 @@ struct AckSignedFields<'a> {
     sequence: u64,
     store_cut: &'a StoreHistoryCut,
     device_state: &'a StoreDeviceStateRef,
-    snapshot: Option<&'a StoreSnapshotRef>,
+    snapshot: Option<&'a StoreSnapshotLocator>,
     exclusions: &'a StoreAckExclusionState,
     last_sync: &'a str,
     successor: &'a SuccessorLink,
@@ -6500,7 +6595,7 @@ impl StoreAck {
         sequence: u64,
         store_cut: StoreHistoryCut,
         device_state: StoreDeviceStateRef,
-        snapshot: Option<StoreSnapshotRef>,
+        snapshot: Option<StoreSnapshotLocator>,
         exclusions: StoreAckExclusionState,
         last_sync: String,
         successor: SuccessorLink,
@@ -6637,6 +6732,7 @@ pub struct SnapshotMeta {
     pub predecessor: Option<StoreSnapshotRef>,
     pub image: SnapshotImageRef,
     pub coverage: CommitFrontier,
+    pub state: StoreSnapshotState,
     pub schema_version: u32,
     pub created_at: String,
     pub successor: SuccessorLink,
@@ -6667,6 +6763,7 @@ struct SnapshotSignedFields<'a> {
     predecessor: Option<&'a StoreSnapshotRef>,
     image: &'a SnapshotImageRef,
     coverage: &'a CommitFrontier,
+    state: &'a StoreSnapshotState,
     schema_version: u32,
     created_at: &'a str,
     successor: &'a SuccessorLink,
@@ -6680,6 +6777,7 @@ impl SnapshotMeta {
         predecessor: Option<StoreSnapshotRef>,
         image: SnapshotImageRef,
         coverage: CommitFrontier,
+        state: StoreSnapshotState,
         schema_version: u32,
         created_at: String,
         successor: SuccessorLink,
@@ -6690,6 +6788,7 @@ impl SnapshotMeta {
             predecessor.as_ref().map(|value| value.snapshot_hash),
         )?;
         validate_commit_frontier(&coverage)?;
+        state.validate(store_root_hash, &coverage)?;
         let mut meta = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
@@ -6698,6 +6797,7 @@ impl SnapshotMeta {
             predecessor,
             image,
             coverage,
+            state,
             schema_version,
             created_at,
             successor,
@@ -6719,6 +6819,7 @@ impl SnapshotMeta {
                 predecessor: self.predecessor.as_ref(),
                 image: &self.image,
                 coverage: &self.coverage,
+                state: &self.state,
                 schema_version: self.schema_version,
                 created_at: &self.created_at,
                 successor: &self.successor,
@@ -6773,6 +6874,8 @@ impl SnapshotMeta {
             meta.predecessor.as_ref().map(|value| value.snapshot_hash),
         )?;
         validate_commit_frontier(&meta.coverage)?;
+        meta.state
+            .validate(expected_store_root_hash, &meta.coverage)?;
         if !keys::verify_signature_hex(
             &author.device_signing_pubkey,
             &meta.signature,

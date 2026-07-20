@@ -46,7 +46,8 @@ use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     create_exact_test_store, host_exec, open_serial_test_db, open_test_db, open_test_db_with_blob,
-    pubkey_hex, temp_store_dir, test_migrations, test_synced_tables, test_synced_tables_with_blob,
+    pubkey_hex, publish_store_ack_fixture, temp_store_dir, test_migrations, test_synced_tables,
+    test_synced_tables_with_blob,
 };
 
 struct RestoreCloudKitOps {
@@ -1026,17 +1027,29 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         })
         .await
         .expect("create owner snapshot");
+    let snapshot_coverage =
+        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &store_root,
         snapshot,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        snapshot_coverage.clone(),
         &owner_keypair,
         Some(&membership),
         &db,
     )
     .await
     .expect("publish owner snapshot");
+    publish_store_ack_fixture(
+        &db,
+        &owner_storage,
+        None,
+        snapshot_coverage,
+        &owner_keypair,
+        Some(&membership),
+    )
+    .await
+    .expect("publish owner snapshot acknowledgement");
 
     let joiner_keypair = owner_keypair.clone();
     let joiner_storage = CloudSyncStorage::new(
@@ -1096,6 +1109,10 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     .await;
 
     let err = result.expect_err("the blocked config.yaml write must fail bootstrap");
+    assert!(
+        matches!(&err, BootstrapError::Config(_)),
+        "bootstrap must reach the blocked config save, got {err:?}"
+    );
 
     let failed_registration = {
         let connection =
@@ -1366,22 +1383,41 @@ async fn prepare_owner_recovery_restore(
         })
         .await
         .expect("create recovery snapshot");
+    let snapshot_coverage = match write_policy {
+        crate::WritePolicy::MergeConcurrent => {
+            crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new())
+        }
+        crate::WritePolicy::Serial => crate::sync::store_commit::CommitFrontier::Serial(None),
+    };
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &root,
         snapshot,
-        match write_policy {
-            crate::WritePolicy::MergeConcurrent => {
-                crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new())
-            }
-            crate::WritePolicy::Serial => crate::sync::store_commit::CommitFrontier::Serial(None),
-        },
+        snapshot_coverage.clone(),
         &owner,
         membership.as_ref(),
         &owner_db,
     )
     .await
     .expect("publish recovery snapshot");
+    let coordination = match write_policy {
+        crate::WritePolicy::MergeConcurrent => None,
+        crate::WritePolicy::Serial => Some(
+            owner_storage
+                .serial_coordination()
+                .expect("Serial recovery fixture has coordination storage"),
+        ),
+    };
+    publish_store_ack_fixture(
+        &owner_db,
+        &owner_storage,
+        coordination,
+        snapshot_coverage,
+        &owner,
+        membership.as_ref(),
+    )
+    .await
+    .expect("publish recovery snapshot acknowledgement");
     let authority = published_owner_recovery_authority(&owner_storage, &root, &owner).await;
     let code = encode_restore_code(&RestoreCode {
         v: crate::sync::restore_code::RESTORE_CODE_VERSION,
@@ -1523,17 +1559,29 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
         })
         .await
         .expect("owner snapshot");
+    let snapshot_coverage =
+        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &store_root,
         snapshot,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        snapshot_coverage.clone(),
         &owner_keypair,
         Some(&membership),
         &db_owner,
     )
     .await
     .expect("publish owner snapshot");
+    publish_store_ack_fixture(
+        &db_owner,
+        &owner_storage,
+        None,
+        snapshot_coverage,
+        &owner_keypair,
+        Some(&membership),
+    )
+    .await
+    .expect("publish owner snapshot acknowledgement");
 
     let snapshot_before = owner_storage
         .cloud_home()
@@ -1696,21 +1744,34 @@ async fn restore_pins_the_chain_founder_as_owner() {
         })
         .await
         .expect("owner snapshot");
+    let snapshot_coverage =
+        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &storage.storage,
         &storage.root,
         snapshot,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        snapshot_coverage.clone(),
         &owner_keypair,
         Some(&chain),
         &db_owner,
     )
     .await
     .expect("publish owner snapshot");
+    publish_store_ack_fixture(
+        &db_owner,
+        &storage.storage,
+        None,
+        snapshot_coverage,
+        &owner_keypair,
+        Some(&chain),
+    )
+    .await
+    .expect("publish owner snapshot acknowledgement");
 
     let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(
         &storage.storage,
+        None,
         "test-lib",
         storage.root.clone(),
         &MembershipFloor::MergeConcurrent(chain.head_refs().to_vec()),
@@ -1859,6 +1920,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let (_tmp_b, lib_b) = temp_store_dir();
     let error = bootstrap_from_snapshot(
         &storage.storage,
+        None,
         "test-lib",
         storage.root.clone(),
         &membership_floor,
@@ -2113,6 +2175,40 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &test_migrations(),
     )
     .expect("open restored database");
+    let (restored_notes, restored_photos, restored_parent_links, foreign_key_violations) = restored
+        .call(|conn| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM note_photos WHERE id = 'photo1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM note_photos AS photo
+                     JOIN notes AS note ON note.id = photo.note_id
+                     WHERE photo.id = 'photo1' AND note.id = 'n1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .await
+        .expect("inspect restored snapshot rows");
+    assert_eq!(
+        (
+            restored_notes,
+            restored_photos,
+            restored_parent_links,
+            foreign_key_violations,
+        ),
+        (1, 1, 1, 0)
+    );
     let restored_device_snapshots = restored
         .call(|conn| {
             conn.query_row(

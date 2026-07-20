@@ -136,10 +136,42 @@ async fn recover_serial_owner_state(
     )
     .await
     .expect("publish Serial bootstrap snapshot");
+    crate::sync::store_ack::stage_store_ack(
+        source,
+        storage,
+        Some(
+            storage
+                .serial_coordination()
+                .expect("Serial bootstrap coordination"),
+        ),
+        crate::sync::store_commit::CommitFrontier::Serial(None),
+        "2024-01-01T00:00:01Z".to_string(),
+        owner,
+    )
+    .await
+    .expect("stage Serial bootstrap stability acknowledgement");
+    crate::sync::store_ack::drain_outbound_store_acks(
+        source,
+        storage,
+        Some(
+            storage
+                .serial_coordination()
+                .expect("Serial bootstrap coordination"),
+        ),
+        owner,
+        None,
+    )
+    .await
+    .expect("activate Serial bootstrap stability acknowledgement");
     let target_dir = tempfile::tempdir().expect("create Serial bootstrap destination");
     let target_path = target_dir.path().join("store.sqlite");
     let bootstrap = crate::sync::snapshot::bootstrap_from_snapshot(
         storage,
+        Some(
+            storage
+                .serial_coordination()
+                .expect("Serial bootstrap coordination"),
+        ),
         store_id,
         root.clone(),
         &crate::join_code::MembershipFloor::Serial(None),
@@ -167,6 +199,21 @@ async fn recover_serial_owner_state(
     crate::sync::cycle::ensure_serial_founder_authorization(storage, &target, root, &protocol)
         .await
         .expect("install exact Serial founder authorization");
+    crate::sync::store_pull::pull_store_commits_with_coordination(
+        &target,
+        target.synced_tables(),
+        storage,
+        Some(
+            storage
+                .serial_coordination()
+                .expect("Serial bootstrap coordination"),
+        ),
+        root.store_root_hash,
+        &StoreDir::new(target_dir.path()),
+        None,
+    )
+    .await
+    .expect("pull accepted Serial commits after bootstrap snapshot");
     let owner_grant = protocol.descriptor.founder_grant.clone();
     let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
         root,
@@ -2350,6 +2397,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let restore_path = restore_dir.db_path();
     let bootstrap = crate::sync::snapshot::bootstrap_from_snapshot(
         &storage.storage,
+        None,
         "test-lib",
         storage.root.clone(),
         &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
@@ -3292,8 +3340,10 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
             .await
             .unwrap()
             .expect("Serial founder device exists");
-        let (_remote_dir, remote, remote_device_id) =
-            recover_serial_owner_state(&storage, &local, store_id, &root, &founder).await;
+        let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
+            &storage, &local, store_id, &root, &founder,
+        ))
+        .await;
         let coordination = storage.serial_coordination().unwrap();
         let authorization = crate::sync::store_outbound::current_serial_authorization(
             &remote,
@@ -3442,115 +3492,121 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
 
 #[tokio::test]
 async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remote_commits() {
-    let store_id = "serial-conflict-before-pull";
-    let home = InMemoryCloudHome::new();
-    let owner = UserKeypair::generate();
-    let storage = cycle_cloud_storage(
-        Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        store_id,
-        owner.clone(),
-    )
-    .with_test_serial_coordination(Arc::new(home.clone()));
-    let local = open_serial_test_db();
-    let root = create_exact_test_store(&local, &storage, store_id, &owner)
-        .await
-        .expect("create exact Serial Store");
-    let local_device_id = local
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .unwrap()
-        .expect("Serial founder device exists");
-    let (_remote_dir, remote, remote_device_id) =
-        recover_serial_owner_state(&storage, &local, store_id, &root, &owner).await;
-    host_exec(
-        &remote,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('remote-row', 'remote', NULL, 1, '0000000001000-0000-remote', '2026-01-01')",
-    )
-    .await;
-    let (_remote_temp, remote_store_dir) = temp_store_dir();
-    assert!(
-        crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+    tokio::spawn(async {
+        let store_id = "serial-conflict-before-pull";
+        let home = InMemoryCloudHome::new();
+        let owner = UserKeypair::generate();
+        let storage = cycle_cloud_storage(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            store_id,
+            owner.clone(),
+        )
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let local = open_serial_test_db();
+        let root = create_exact_test_store(&local, &storage, store_id, &owner)
+            .await
+            .expect("create exact Serial Store");
+        let local_device_id = local
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .unwrap()
+            .expect("Serial founder device exists");
+        let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
+            &storage, &local, store_id, &root, &owner,
+        ))
+        .await;
+        host_exec(
             &remote,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('remote-row', 'remote', NULL, 1, '0000000001000-0000-remote', '2026-01-01')",
+        )
+        .await;
+        let (_remote_temp, remote_store_dir) = temp_store_dir();
+        assert!(
+            crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+                &remote,
+                &storage,
+                Some(storage.serial_coordination().unwrap()),
+                &remote_device_id,
+                "2026-01-01T00:00:00Z",
+                &owner,
+                &remote_store_dir,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            crate::sync::store_outbound::drain_store_writes_with_coordination(
+                &remote,
+                &storage,
+                Some(storage.serial_coordination().unwrap()),
+            )
+            .await
+            .unwrap(),
+            1
+        );
+
+        assert_eq!(
+            local.local_store_root_ref().await.unwrap(),
+            Some(root.clone())
+        );
+        host_exec(
+            &local,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('local-row', 'local', NULL, 1, '0000000001000-0000-local', '2026-01-01')",
+        )
+        .await;
+        let local_write = local.pending_writes().await.unwrap().remove(0).write_id;
+        let (_local_temp, local_store_dir) = temp_store_dir();
+        cycle::run_single_sync_cycle_with_coordination(
             &storage,
             Some(storage.serial_coordination().unwrap()),
-            &remote_device_id,
-            "2026-01-01T00:00:00Z",
+            store_id,
+            &local_device_id,
+            &Hlc::new(local_device_id.clone()),
+            &SystemClock,
+            &local,
+            storage.cipher_state().as_ref(),
+            storage.shared_pending_rotation().as_ref(),
             &owner,
-            &remote_store_dir,
+            None,
+            None,
+            &local_store_dir,
+            Some(&home),
             None,
         )
         .await
-        .unwrap()
-    );
-    assert_eq!(
-        crate::sync::store_outbound::drain_store_writes_with_coordination(
-            &remote,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .unwrap(),
-        1
-    );
+        .expect("record the stale provisional branch without applying its successor");
 
-    assert_eq!(
-        local.local_store_root_ref().await.unwrap(),
-        Some(root.clone())
-    );
-    host_exec(
-        &local,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('local-row', 'local', NULL, 1, '0000000001000-0000-local', '2026-01-01')",
-    )
-    .await;
-    let local_write = local.pending_writes().await.unwrap().remove(0).write_id;
-    let (_local_temp, local_store_dir) = temp_store_dir();
-    cycle::run_single_sync_cycle_with_coordination(
-        &storage,
-        Some(storage.serial_coordination().unwrap()),
-        store_id,
-        &local_device_id,
-        &Hlc::new(local_device_id.clone()),
-        &SystemClock,
-        &local,
-        storage.cipher_state().as_ref(),
-        storage.shared_pending_rotation().as_ref(),
-        &owner,
-        None,
-        None,
-        &local_store_dir,
-        Some(&home),
-        None,
-    )
+        assert!(matches!(
+            local.write_status(&local_write).await.unwrap(),
+            crate::WriteStatus::Conflict(_)
+        ));
+        assert_eq!(
+            local
+                .exact_materialized_ref(crate::sync::store_commit::SERIAL_STREAM_ID, 2)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            query_text(
+                &local,
+                "SELECT CAST(COUNT(*) AS TEXT) FROM notes WHERE id = 'remote-row'"
+            )
+            .await,
+            "0"
+        );
+        assert_eq!(
+            query_text(&local, "SELECT title FROM notes WHERE id = 'local-row'").await,
+            "local"
+        );
+    })
     .await
-    .expect("record the stale provisional branch without applying its successor");
-
-    assert!(matches!(
-        local.write_status(&local_write).await.unwrap(),
-        crate::WriteStatus::Conflict(_)
-    ));
-    assert_eq!(
-        local
-            .exact_materialized_ref(crate::sync::store_commit::SERIAL_STREAM_ID, 2)
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        query_text(
-            &local,
-            "SELECT CAST(COUNT(*) AS TEXT) FROM notes WHERE id = 'remote-row'"
-        )
-        .await,
-        "0"
-    );
-    assert_eq!(
-        query_text(&local, "SELECT title FROM notes WHERE id = 'local-row'").await,
-        "local"
-    );
+    .expect("Serial stale provisional branch cycle task");
 }
 
 #[tokio::test]
@@ -5678,30 +5734,42 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         )
         .await;
 
-        let mut local_at_snapshot = None;
-        for sequence in 1..=5 {
-            local_at_snapshot = Some(
+        storage
+            .publish_changeset("local", 1, &changeset, SCHEMA_VERSION)
+            .await
+            .expect("publish local Store commit before peer setup");
+        let mut peer_at_snapshot = None;
+        for sequence in 1..=6 {
+            peer_at_snapshot = Some(
                 storage
-                    .publish_changeset("local", sequence, &changeset, SCHEMA_VERSION)
+                    .publish_changeset("peer", sequence, &changeset, SCHEMA_VERSION)
                     .await
-                    .expect("publish local Store commit before snapshot"),
+                    .expect("publish peer Store commit before snapshot"),
             );
         }
-        let local_at_snapshot = local_at_snapshot.expect("local Store stream reaches sequence 5");
-        let peer_stream = crate::sync::membership::AuthorStreamId::from_bytes([9; 32]);
-        let peer_at_snapshot = crate::sync::store_commit::StoreBatchCommitRef {
-            coord: crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
-                stream_id: peer_stream,
-                sequence: 1000,
-            },
-            ..local_at_snapshot.clone()
-        };
+        let peer_at_snapshot = peer_at_snapshot.expect("peer Store stream reaches sequence 6");
+        let (_peer_temp, peer_store_dir) = temp_store_dir();
+        pull_into(&db, &storage, &peer_store_dir).await;
+        let local_at_snapshot = db
+            .latest_local_store_position()
+            .await
+            .expect("read local Store position after peer setup")
+            .expect("local Store stream has an exact snapshot position");
+        let local_snapshot_sequence = local_at_snapshot.coord.sequence();
         let local_stream = match &local_at_snapshot.coord {
             crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
                 *stream_id
             }
             crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
                 panic!("MergeConcurrent local fixture published a Serial commit")
+            }
+        };
+        let peer_stream = match &peer_at_snapshot.coord {
+            crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
+                *stream_id
+            }
+            crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
+                panic!("MergeConcurrent peer fixture published a Serial commit")
             }
         };
         let membership = storage
@@ -5728,7 +5796,10 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         .await
         .expect("publish cadence snapshot");
 
-        for sequence in 6..=105 {
+        let local_after_snapshot = local_snapshot_sequence
+            .checked_add(100)
+            .expect("local snapshot cadence sequence does not overflow");
+        for sequence in local_snapshot_sequence + 1..=local_after_snapshot {
             storage
                 .publish_changeset("local", sequence, &changeset, SCHEMA_VERSION)
                 .await
@@ -5741,7 +5812,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 .expect("local Store stream has commits")
                 .coord
                 .sequence(),
-            105,
+            local_after_snapshot,
         );
 
         let unregistered_member = UserKeypair::generate();
@@ -6166,15 +6237,15 @@ async fn run_cycle_m_storage(
 
 // ---- changeset reclamation through a real cycle ----
 
-/// A package that becomes both snapshot-covered and acknowledged by every active
-/// device is reclaimed by the cycle that publishes the snapshot. Peer A has
-/// pushed A/1; M pulls it, acknowledges it, snapshots it, and reclaims its package.
+/// A package remains available after it becomes snapshot-covered and acknowledged
+/// while an accepted Merge materialization still needs it for replay. Peer A has
+/// pushed A/1; M pulls it, acknowledges it, snapshots it, and retains its package.
 ///
 /// The mock is built with M's keypair so the head it signs for M and the ack M
 /// publishes share an author, the same identity a real device's storage and ack
 /// share — which is what lets reclamation honor M's ack against M's head.
 #[tokio::test]
-async fn cycle_reclaims_a_fully_acked_changeset() {
+async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
     let keypair = UserKeypair::generate();
     let db_m = open_test_db();
     let storage = Arc::new(cycle_test_store(&db_m, &keypair).await);
@@ -6224,7 +6295,7 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
         device_id,
     )
     .await
-    .expect("reclamation cycle succeeds");
+    .expect("retained-replay cycle succeeds");
 
     let snapshot = latest_store_snapshot_meta(&db_m)
         .await
@@ -6275,8 +6346,8 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
             if frontier.get(&published_stream) == Some(&published)
     ));
     assert!(
-        !store_package_exists(&db_m, &storage, &stream_id, 1).await,
-        "the fully covered and acknowledged Store package is reclaimed",
+        store_package_exists(&db_m, &storage, &stream_id, 1).await,
+        "the accepted Merge materialization retains its Store package for replay",
     );
 }
 
@@ -6343,6 +6414,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     crate::sync::store_ack::stage_store_ack(
         &behind_db,
         &storage.storage,
+        None,
         behind_frontier,
         T0.to_string(),
         &behind,

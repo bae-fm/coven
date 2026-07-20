@@ -57,6 +57,21 @@ pub enum LwwComparison {
     IncomingGrossFuture,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncomingTimestampPolicy {
+    Received { receiver_wall_ms: u64 },
+    LocallyAuthored,
+}
+
+impl IncomingTimestampPolicy {
+    pub(crate) fn received_wall_ms(self) -> Option<u64> {
+        match self {
+            Self::Received { receiver_wall_ms } => Some(receiver_wall_ms),
+            Self::LocallyAuthored => None,
+        }
+    }
+}
+
 impl TableSchema {
     pub fn for_apply(
         conn: &Connection,
@@ -117,22 +132,25 @@ impl TableSchema {
     }
 }
 
-pub fn compare_lww_stamps(
+pub(crate) fn compare_lww_stamps(
     table: &str,
     incoming: Timestamp,
     local: Timestamp,
-    receiver_wall_ms: u64,
+    timestamp_policy: IncomingTimestampPolicy,
 ) -> LwwComparison {
-    if !incoming.is_within_future_bound(receiver_wall_ms) {
-        warn!(
-            table,
-            incoming = %incoming,
-            receiver_wall_ms,
-            "incoming _updated_at is grossly beyond the offline-skew allowance, \
-             refusing to let it win; keeping local"
-        );
-        LwwComparison::IncomingGrossFuture
-    } else if incoming > local {
+    if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
+        if !incoming.is_within_future_bound(receiver_wall_ms) {
+            warn!(
+                table,
+                incoming = %incoming,
+                receiver_wall_ms,
+                "incoming _updated_at is grossly beyond the offline-skew allowance, \
+                 refusing to let it win; keeping local"
+            );
+            return LwwComparison::IncomingGrossFuture;
+        }
+    }
+    if incoming > local {
         LwwComparison::IncomingWins
     } else {
         LwwComparison::LocalWins
@@ -162,12 +180,12 @@ pub fn compare_lww_stamps(
 /// [`Timestamp`]s; an unparseable value keeps local. A grossly-future incoming
 /// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
 /// refused (kept local) so a broken clock can't win every conflict.
-pub fn arbitrate_row_conflict(
+pub(crate) fn arbitrate_row_conflict(
     conflict_type: ConflictType,
     item: ChangesetItem,
     table: &str,
     schema: &TableSchema,
-    receiver_wall_ms: u64,
+    timestamp_policy: IncomingTimestampPolicy,
 ) -> ConflictAction {
     match conflict_type {
         ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => {
@@ -222,7 +240,7 @@ pub fn arbitrate_row_conflict(
 
             match (incoming, local) {
                 (Some(inc), Some(loc)) => {
-                    match compare_lww_stamps(table, inc, loc, receiver_wall_ms) {
+                    match compare_lww_stamps(table, inc, loc, timestamp_policy) {
                         LwwComparison::IncomingWins => ConflictAction::SQLITE_CHANGESET_REPLACE,
                         LwwComparison::LocalWins | LwwComparison::IncomingGrossFuture => {
                             ConflictAction::SQLITE_CHANGESET_OMIT

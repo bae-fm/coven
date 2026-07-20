@@ -864,13 +864,18 @@ async fn prepare_cycle_before_pull(
                 }
                 crate::WritePolicy::Serial => super::store_commit::SERIAL_STREAM_ID.to_string(),
             };
-            snapshot
-                .meta
-                .coverage
-                .clone()
-                .into_refs()
-                .remove(&local_stream_id)
-                .map(|reference| reference.coord.sequence())
+            // A published snapshot with no local-stream coverage is a snapshot
+            // of that stream at genesis, not an absent snapshot.
+            Some(
+                snapshot
+                    .meta
+                    .coverage
+                    .clone()
+                    .into_refs()
+                    .remove(&local_stream_id)
+                    .map(|reference| reference.coord.sequence())
+                    .unwrap_or(0),
+            )
         }
     };
     let has_snapshot = last_snapshot.is_some();
@@ -1237,9 +1242,16 @@ async fn stage_cycle_ack(
         .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
     let frontier = super::store_commit::CommitFrontier::from_refs(db.write_policy(), frontier)
         .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-    super::store_ack::stage_store_ack(db, storage, frontier, sync_time.to_owned(), user_keypair)
-        .await
-        .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+    super::store_ack::stage_store_ack(
+        db,
+        storage,
+        serial_coordination,
+        frontier,
+        sync_time.to_owned(),
+        user_keypair,
+    )
+    .await
+    .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
     Ok(())
 }
 

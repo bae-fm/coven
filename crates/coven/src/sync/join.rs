@@ -721,8 +721,17 @@ impl DeviceJoinClient {
         std::fs::create_dir_all(&*store_dir)?;
         on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
+        let coordination = match &self.code.membership_floor {
+            MembershipFloor::MergeConcurrent(_) => None,
+            MembershipFloor::Serial(_) => {
+                Some(join.storage.serial_coordination().map_err(|error| {
+                    BootstrapError::Membership(format!("Serial coordination: {error}"))
+                })?)
+            }
+        };
         let snapshot = bootstrap_from_snapshot(
             &join.storage,
+            coordination,
             &self.code.store_id,
             offer.store_root.clone(),
             &self.code.membership_floor,
@@ -1040,8 +1049,15 @@ pub(crate) async fn bootstrap_and_save_store(
     let db_path = store_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
     let binary_schema_version = supported_version(migrations);
+    let coordination = match membership_floor {
+        MembershipFloor::MergeConcurrent(_) => None,
+        MembershipFloor::Serial(_) => Some(storage.serial_coordination().map_err(|error| {
+            BootstrapError::Membership(format!("Serial coordination: {error}"))
+        })?),
+    };
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
+        coordination,
         store_id,
         store_root.clone(),
         membership_floor,
@@ -1054,15 +1070,6 @@ pub(crate) async fn bootstrap_and_save_store(
         "Bootstrapped from snapshot ({} device coverage entries)",
         bootstrap_result.coverage_count()
     );
-
-    let coordination =
-        if bootstrap_result.write_policy() == crate::WritePolicy::Serial {
-            Some(storage.serial_coordination().map_err(|error| {
-                BootstrapError::Membership(format!("Serial coordination: {error}"))
-            })?)
-        } else {
-            None
-        };
 
     let committed = async {
         // Pull Store commits beyond the snapshot coverage.

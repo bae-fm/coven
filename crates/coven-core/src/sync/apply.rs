@@ -31,7 +31,9 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
 use tracing::warn;
 
-use super::conflict::{arbitrate_row_conflict, compare_lww_stamps, LwwComparison, TableSchema};
+use super::conflict::{
+    arbitrate_row_conflict, compare_lww_stamps, IncomingTimestampPolicy, LwwComparison, TableSchema,
+};
 use super::hlc::Timestamp;
 #[cfg(any(test, feature = "test-utils"))]
 use super::session::SyncedTable;
@@ -161,6 +163,18 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
     changeset: ValidatedChangeset<B>,
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
+    resolve_and_apply_changeset_with_policy_on(
+        conn,
+        changeset,
+        IncomingTimestampPolicy::Received { receiver_wall_ms },
+    )
+}
+
+pub(crate) fn resolve_and_apply_changeset_with_policy_on<B: AsRef<[u8]>>(
+    conn: &Connection,
+    changeset: ValidatedChangeset<B>,
+    timestamp_policy: IncomingTimestampPolicy,
+) -> Result<ApplyResult, DbError> {
     let ValidatedChangeset { bytes, schema } = changeset;
     let bytes = bytes.as_ref();
     #[cfg(test)]
@@ -168,7 +182,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
 
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
-    let premerged_updates = premerge_losing_update_columns(conn, bytes, &schema, receiver_wall_ms)?;
+    let premerged_updates = premerge_losing_update_columns(conn, bytes, &schema, timestamp_policy)?;
 
     let closure_flag = fk_flag.clone();
     let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
@@ -224,7 +238,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
                 item,
                 &table,
                 &closure_schema,
-                receiver_wall_ms,
+                timestamp_policy,
             )
         },
     )
@@ -390,7 +404,7 @@ fn premerge_losing_update_columns(
     conn: &Connection,
     bytes: &[u8],
     schema: &TableSchema,
-    receiver_wall_ms: u64,
+    timestamp_policy: IncomingTimestampPolicy,
 ) -> Result<HashSet<RowKey>, DbError> {
     if bytes.is_empty() {
         return Ok(HashSet::new());
@@ -404,7 +418,7 @@ fn premerge_losing_update_columns(
         let Some(update) = incoming_update(item, schema)? else {
             continue;
         };
-        if merge_losing_update(conn, schema, &update, receiver_wall_ms)? {
+        if merge_losing_update(conn, schema, &update, timestamp_policy)? {
             handled.insert(RowKey {
                 table: update.table,
                 pk: update.pk,
@@ -482,7 +496,7 @@ fn merge_losing_update(
     conn: &Connection,
     schema: &TableSchema,
     update: &IncomingUpdate,
-    receiver_wall_ms: u64,
+    timestamp_policy: IncomingTimestampPolicy,
 ) -> Result<bool, DbError> {
     let columns = schema.columns(&update.table).ok_or_else(|| {
         DbError::Message(format!("synced table {} has no column map", update.table))
@@ -546,7 +560,7 @@ fn merge_losing_update(
         &update.table,
         update.incoming_updated_at.clone(),
         local_updated_at,
-        receiver_wall_ms,
+        timestamp_policy,
     ) {
         LwwComparison::IncomingWins | LwwComparison::IncomingGrossFuture => return Ok(false),
         LwwComparison::LocalWins => {}

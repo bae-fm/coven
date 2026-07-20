@@ -222,7 +222,7 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 pub use write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition,
     SerializationConflict, WriteBlock, WriteId, WritePolicy, WriteReceipt, WriteResolution,
-    WriteStatus,
+    WriteRetractionWitness, WriteStatus,
 };
 
 // Managed local blob store: the host constructs it; coven never does.

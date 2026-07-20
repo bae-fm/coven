@@ -6,6 +6,7 @@ mod blob_content_hash_tests;
 // (`crate::blob::upload`) both count attempts in multiples of one base interval,
 // so the formula is `pub(crate)`.
 pub mod backoff;
+pub(crate) mod blocking;
 pub(crate) mod causal_grants;
 pub mod circle;
 pub(crate) mod circle_activation;

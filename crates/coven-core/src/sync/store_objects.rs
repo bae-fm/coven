@@ -75,19 +75,21 @@ pub async fn load_provider_access_grant_ref(
         ProtocolObjectDomain::ProviderAccessGrant,
     );
     let semantic_prefix = provider_access_grant_semantic_prefix(&reference.grant_id);
+    let expected = reference.clone();
+    let administrator = administrator.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.grant_hash,
-        |bytes| {
+        move |bytes| {
             let grant: super::provider::StoreMemberProviderAccessGrant =
                 serde_json::from_slice(bytes)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            reference
+            expected
                 .verify(&grant)
-                .and_then(|()| grant.verify(&store, administrator))
+                .and_then(|()| grant.verify(&store, &administrator))
                 .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
             Ok(grant)
         },
@@ -109,19 +111,21 @@ pub async fn load_provider_access_withdrawal_ref(
         ProtocolObjectDomain::ProviderAccessWithdrawal,
     );
     let semantic_prefix = provider_access_withdrawal_semantic_prefix(&reference.grant_id);
+    let expected = reference.clone();
+    let administrator = administrator.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.receipt_hash,
-        |bytes| {
+        move |bytes| {
             let receipt: super::provider::StoreMemberProviderAccessWithdrawalReceipt =
                 serde_json::from_slice(bytes)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            reference
+            expected
                 .verify(&receipt)
-                .and_then(|()| receipt.verify(administrator))
+                .and_then(|()| receipt.verify(&administrator))
                 .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
             Ok(receipt)
         },
@@ -162,22 +166,49 @@ pub async fn load_exact_object<T>(
     object: &ExactObjectRef,
     semantic_prefix: &str,
     semantic_hash: ObjectHash,
-    verify: impl FnOnce(&[u8]) -> Result<T, StoreProtocolError>,
-) -> Result<VerifiedObject<T>, StoreObjectError> {
+    verify: impl FnOnce(&[u8]) -> Result<T, StoreProtocolError> + Send + 'static,
+) -> Result<VerifiedObject<T>, StoreObjectError>
+where
+    T: Send + 'static,
+{
     let bytes = storage
         .read_protocol_object(context, object, semantic_prefix)
         .await?;
-    let value = verify(&bytes).map_err(|source| StoreObjectError::InvalidObject {
-        semantic_prefix: semantic_prefix.to_string(),
-        key: object.slot().logical_key().to_string(),
-        source: Box::new(source),
-    })?;
+    let verify_bytes = bytes.clone();
+    let value = run_blocking_object_verification(
+        semantic_prefix,
+        object,
+        Box::new(move || verify(&verify_bytes)),
+    )
+    .await?;
     Ok(VerifiedObject {
         value,
         bytes,
         semantic_hash,
         object: object.clone(),
     })
+}
+
+pub(crate) async fn run_blocking_object_verification<T>(
+    semantic_prefix: &str,
+    object: &ExactObjectRef,
+    verify: Box<dyn FnOnce() -> Result<T, StoreProtocolError> + Send>,
+) -> Result<T, StoreObjectError>
+where
+    T: Send + 'static,
+{
+    super::blocking::run(verify)
+        .await
+        .map_err(|error| {
+            StoreObjectError::Storage(StorageError::Storage(format!(
+                "Store object verification task failed: {error}"
+            )))
+        })?
+        .map_err(|source| StoreObjectError::InvalidObject {
+            semantic_prefix: semantic_prefix.to_string(),
+            key: object.slot().logical_key().to_string(),
+            source: Box::new(source),
+        })
 }
 
 /// Delete one supplied exact reference and verify that exact object is absent.
@@ -198,13 +229,14 @@ pub async fn load_store_protocol_root(
         ProtocolObjectDomain::StoreProtocolRoot,
     );
     let semantic_prefix = store_protocol_root_logical_key();
+    let expected = reference.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         semantic_prefix,
         reference.store_root_hash,
-        |bytes| StoreProtocolRoot::parse_pinned(bytes, reference),
+        move |bytes| StoreProtocolRoot::parse_pinned(bytes, &expected),
     )
     .await
 }
@@ -215,18 +247,32 @@ pub async fn load_registration_ref(
     reference: &StoreDeviceRegistrationRef,
 ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let pinned_root = load_store_protocol_root(storage, store_root).await?.value;
+    load_registration_ref_with_root(storage, store_root, &pinned_root, reference).await
+}
+
+pub(crate) async fn load_registration_ref_with_root(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    pinned_root: &StoreProtocolRoot,
+    reference: &StoreDeviceRegistrationRef,
+) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
     let semantic_prefix = registration_slot_semantic_prefix(&reference.object)?;
+    let expected_root = store_root.clone();
+    let expected_reference = reference.clone();
+    let pinned_root = pinned_root.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.registration_hash,
-        |bytes| verify_opened_registration(bytes, store_root, reference, &pinned_root),
+        move |bytes| {
+            verify_opened_registration(bytes, &expected_root, &expected_reference, &pinned_root)
+        },
     )
     .await
 }
@@ -236,6 +282,14 @@ pub async fn load_founder_registration(
     root: &StoreRootRef,
 ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let root_value = load_store_protocol_root(storage, root).await?.value;
+    load_founder_registration_with_root(storage, root, &root_value).await
+}
+
+pub(crate) async fn load_founder_registration_with_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &StoreProtocolRoot,
+) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
@@ -248,21 +302,28 @@ pub async fn load_founder_registration(
             &semantic_prefix,
         )
         .await?;
-    let unverified: StoreDeviceRegistration =
-        serde_json::from_slice(&bytes).map_err(|error| StoreObjectError::InvalidObject {
-            semantic_prefix: semantic_prefix.clone(),
-            key: object.slot().logical_key().to_string(),
-            source: Box::new(StoreProtocolError::Malformed(error.to_string())),
-        })?;
-    let reference = StoreDeviceRegistrationRef::from_registration(&unverified, object.clone());
-    let value =
-        verify_opened_registration(&bytes, root, &reference, &root_value).map_err(|source| {
-            StoreObjectError::InvalidObject {
-                semantic_prefix: semantic_prefix.clone(),
-                key: object.slot().logical_key().to_string(),
-                source: Box::new(source),
-            }
-        })?;
+    let verify_bytes = bytes.clone();
+    let verify_object = object.clone();
+    let verify_root = root.clone();
+    let verify_root_value = root_value.clone();
+    let (value, reference) = run_blocking_object_verification(
+        &semantic_prefix,
+        &object,
+        Box::new(move || {
+            let unverified: StoreDeviceRegistration = serde_json::from_slice(&verify_bytes)
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let reference =
+                StoreDeviceRegistrationRef::from_registration(&unverified, verify_object);
+            let value = verify_opened_registration(
+                &verify_bytes,
+                &verify_root,
+                &reference,
+                &verify_root_value,
+            )?;
+            Ok((value, reference))
+        }),
+    )
+    .await?;
     Ok(VerifiedObject {
         value,
         bytes,
@@ -340,32 +401,17 @@ pub async fn load_device_join_attempt_ref(
         ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let semantic_prefix = device_join_attempt_semantic_prefix(reference.attempt_id);
-    let bytes = storage
-        .read_protocol_object(&context, &reference.object, &semantic_prefix)
-        .await?;
-    let parse_bytes = bytes.clone();
     let expected = reference.clone();
     let owner = owner.clone();
-    let value = tokio::task::spawn_blocking(move || {
-        DeviceJoinAttempt::parse_at(&parse_bytes, &expected, &owner)
-    })
+    load_exact_object(
+        storage,
+        &context,
+        &reference.object,
+        &semantic_prefix,
+        reference.attempt_hash,
+        move |bytes| DeviceJoinAttempt::parse_at(bytes, &expected, &owner),
+    )
     .await
-    .map_err(|error| {
-        StoreObjectError::Storage(StorageError::Storage(format!(
-            "device join attempt verification task failed: {error}"
-        )))
-    })?
-    .map_err(|source| StoreObjectError::InvalidObject {
-        semantic_prefix: semantic_prefix.clone(),
-        key: reference.object.slot().logical_key().to_string(),
-        source: Box::new(source),
-    })?;
-    Ok(VerifiedObject {
-        value,
-        bytes,
-        semantic_hash: reference.attempt_hash,
-        object: reference.object.clone(),
-    })
 }
 
 pub async fn load_device_join_outcome_ref(
@@ -383,30 +429,35 @@ pub async fn load_device_join_outcome_ref(
         DeviceJoinOutcomeRef::Activated { outcome_hash, .. }
         | DeviceJoinOutcomeRef::Cancelled { outcome_hash, .. } => *outcome_hash,
     };
+    let expected = reference.clone();
+    let expected_owner = owner.clone();
+    let expected_store_root_hash = store_root.store_root_hash;
     load_exact_object(
         storage,
         &context,
         reference.object(),
         &semantic_prefix,
         expected_hash,
-        |bytes| {
+        move |bytes| {
             let outcome: DeviceJoinOutcome = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            if outcome.store_root_hash != store_root.store_root_hash {
+            if outcome.store_root_hash != expected_store_root_hash {
                 return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: store_root.store_root_hash,
+                    expected: expected_store_root_hash,
                     actual: outcome.store_root_hash,
                 });
             }
-            outcome.owner_registration.verify_registration(owner)?;
+            outcome
+                .owner_registration
+                .verify_registration(&expected_owner)?;
             if !crate::keys::verify_signature_hex(
-                &owner.device_signing_pubkey,
+                &expected_owner.device_signing_pubkey,
                 &outcome.signature,
                 &outcome.canonical_signed_bytes(),
             ) {
                 return Err(StoreProtocolError::InvalidSignature);
             }
-            reference.verify_outcome(&outcome)?;
+            expected.verify_outcome(&outcome)?;
             Ok(outcome)
         },
     )
@@ -427,19 +478,21 @@ pub async fn load_device_exclusion_proposal_ref(
         reference.proposal_id,
         reference.proposal_hash,
     );
+    let expected = reference.clone();
+    let expected_store_root_hash = store_root.store_root_hash;
     let opened = load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.proposal_hash,
-        |bytes| {
+        move |bytes| {
             let proposal: StoreDeviceExclusionProposal = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            reference.verify_proposal(&proposal)?;
-            if proposal.store_root_hash != store_root.store_root_hash {
+            expected.verify_proposal(&proposal)?;
+            if proposal.store_root_hash != expected_store_root_hash {
                 return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: store_root.store_root_hash,
+                    expected: expected_store_root_hash,
                     actual: proposal.store_root_hash,
                 });
             }
@@ -486,17 +539,18 @@ pub async fn load_device_exclusion_outcome_ref(
         proposal.object.value.target.device_id,
         proposal.object.value.proposal_id,
     );
+    let expected = reference.clone();
     let opened = load_exact_object(
         storage,
         &context,
         reference.object(),
         &semantic_prefix,
         reference.outcome_hash(),
-        |bytes| {
+        move |bytes| {
             let outcome: StoreDeviceExclusionOutcome = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            if outcome.outcome_hash() != reference.outcome_hash()
-                || outcome.proposal() != reference.proposal()
+            if outcome.outcome_hash() != expected.outcome_hash()
+                || outcome.proposal() != expected.proposal()
             {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
@@ -543,13 +597,16 @@ pub async fn load_store_ack_ref(
         ProtocolObjectDomain::StoreAck,
     );
     let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), reference.sequence);
+    let expected_root = store_root.clone();
+    let expected = reference.clone();
+    let expected_registration = registration.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.ack_hash,
-        |bytes| StoreAck::parse_at(bytes, store_root, reference, registration),
+        move |bytes| StoreAck::parse_at(bytes, &expected_root, &expected, &expected_registration),
     )
     .await
 }
@@ -565,19 +622,21 @@ pub async fn load_reclaim_authorization_ref(
     );
     let evidence_prefix =
         super::store_reclaim::reclaim_evidence_semantic_prefix(reference.evidence.evidence_hash);
+    let expected_evidence = reference.evidence.clone();
+    let expected_store_root_hash = store_root.store_root_hash;
     let evidence = load_exact_object(
         storage,
         &evidence_context,
         &reference.evidence.object,
         &evidence_prefix,
         reference.evidence.evidence_hash,
-        |bytes| {
+        move |bytes| {
             let evidence: super::store_reclaim::ReclaimEvidence = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            reference.evidence.verify(&evidence)?;
-            if evidence.store_root_hash != store_root.store_root_hash {
+            expected_evidence.verify(&evidence)?;
+            if evidence.store_root_hash != expected_store_root_hash {
                 return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: store_root.store_root_hash,
+                    expected: expected_store_root_hash,
                     actual: evidence.store_root_hash,
                 });
             }
@@ -592,20 +651,22 @@ pub async fn load_reclaim_authorization_ref(
     let authorization_prefix =
         super::store_reclaim::reclaim_authorization_semantic_prefix(reference.authorization_hash);
     let owner_pubkey = evidence.value.author_pubkey.clone();
+    let expected_authorization = reference.clone();
+    let expected_store_root_hash = store_root.store_root_hash;
     let authorization = load_exact_object(
         storage,
         &authorization_context,
         &reference.object,
         &authorization_prefix,
         reference.authorization_hash,
-        |bytes| {
+        move |bytes| {
             let authorization: super::store_reclaim::ReclaimAuthorization =
                 serde_json::from_slice(bytes)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            reference.verify(&authorization, &owner_pubkey)?;
-            if authorization.store_root_hash != store_root.store_root_hash {
+            expected_authorization.verify(&authorization, &owner_pubkey)?;
+            if authorization.store_root_hash != expected_store_root_hash {
                 return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: store_root.store_root_hash,
+                    expected: expected_store_root_hash,
                     actual: authorization.store_root_hash,
                 });
             }
@@ -775,13 +836,15 @@ pub async fn load_owner_recovery_node_ref(
         store_root.store_root_hash,
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
+    let expected_root = store_root.clone();
+    let expected = reference.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.node_hash,
-        |bytes| OwnerRecoveryNode::parse_at(bytes, store_root, reference),
+        move |bytes| OwnerRecoveryNode::parse_at(bytes, &expected_root, &expected),
     )
     .await
 }
@@ -801,16 +864,22 @@ pub async fn load_commit_ref(
             })?;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let expected_reference = reference.clone();
+    let expected_author = author.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.commit_hash,
-        |bytes| {
-            let commit =
-                StoreBatchCommit::parse_at(bytes, store_root_hash, &reference.coord, author)?;
-            reference.verify_commit(&commit)?;
+        move |bytes| {
+            let commit = StoreBatchCommit::parse_at(
+                bytes,
+                store_root_hash,
+                &expected_reference.coord,
+                &expected_author,
+            )?;
+            expected_reference.verify_commit(&commit)?;
             Ok(commit)
         },
     )
@@ -828,18 +897,26 @@ pub async fn load_head_ref(
         head_slot_prefix(&registration.device_id.to_string(), commit.coord.sequence());
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
+    let expected = reference.clone();
+    let expected_registration = registration.clone();
+    let expected_commit = commit.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.head_hash,
-        |bytes| {
-            let head = StoreDeviceHead::parse_at(bytes, store_root_hash, registration, commit)?;
+        move |bytes| {
+            let head = StoreDeviceHead::parse_at(
+                bytes,
+                store_root_hash,
+                &expected_registration,
+                &expected_commit,
+            )?;
             let actual = head.head_hash();
-            if actual != reference.head_hash {
+            if actual != expected.head_hash {
                 return Err(StoreProtocolError::ObjectHashMismatch {
-                    expected: reference.head_hash,
+                    expected: expected.head_hash,
                     actual,
                 });
             }
@@ -880,14 +957,15 @@ pub async fn load_store_package(
         commit.store_root_hash,
         ProtocolObjectDomain::StorePackage,
     );
+    let expected_commit = commit.clone();
     load_exact_object(
         storage,
         &context,
         &package.object,
         &semantic_prefix,
         package.content_hash,
-        |bytes| {
-            commit.verify_store_package(bytes)?;
+        move |bytes| {
+            expected_commit.verify_store_package(bytes)?;
             Ok(bytes.to_vec())
         },
     )
@@ -938,14 +1016,16 @@ pub async fn load_circle_package(
         ProtocolObjectDomain::CirclePackage,
         encryption,
     );
+    let expected_commit = commit.clone();
+    let expected_circle_id = package.circle_id;
     load_exact_object(
         storage,
         &context,
         &package.package.object,
         &semantic_prefix,
         package.package.content_hash,
-        |bytes| {
-            commit.verify_circle_package(package.circle_id, bytes)?;
+        move |bytes| {
+            expected_commit.verify_circle_package(expected_circle_id, bytes)?;
             Ok(bytes.to_vec())
         },
     )
@@ -1002,16 +1082,19 @@ pub async fn load_membership_entry_ref(
         store_root_hash,
         ProtocolObjectDomain::StoreMembershipEntry,
     );
+    let expected_coord = coord.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         coord.entry_hash,
-        |bytes| {
+        move |bytes| {
             let entry: MembershipEntry = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            if entry.coord() != *coord || !super::membership::verify_membership_entry(&entry) {
+            if entry.coord() != expected_coord
+                || !super::membership::verify_membership_entry(&entry)
+            {
                 return Err(StoreProtocolError::Malformed(
                     "exact membership entry differs from its reference".to_string(),
                 ));
@@ -1045,18 +1128,21 @@ pub async fn load_membership_head_ref(
         store_root_hash,
         ProtocolObjectDomain::StoreMembershipHead,
     );
+    let expected_coord = coord.clone();
+    let expected_head_hash = reference.head_hash;
+    let expected_registration = registration.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         semantic_prefix,
         reference.head_hash,
-        |bytes| {
+        move |bytes| {
             let head: AuthorHead = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            if head.entry_coord() != *coord
-                || head.head_hash() != reference.head_hash
-                || !head.verify(registration)
+            if head.entry_coord() != expected_coord
+                || head.head_hash() != expected_head_hash
+                || !head.verify(&expected_registration)
             {
                 return Err(StoreProtocolError::Malformed(
                     "exact membership head differs from its reference".to_string(),
@@ -1082,19 +1168,20 @@ pub async fn load_membership_resolution_ref(
         store_root_hash,
         ProtocolObjectDomain::StoreMembershipResolution,
     );
+    let expected = reference.clone();
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.resolution_hash,
-        |bytes| {
+        move |bytes| {
             let resolution: StoreMembershipConflictResolution = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
             if resolution.store_root_hash != store_root_hash
-                || resolution.conflict_hash != reference.conflict_hash
-                || resolution.resolver_pubkey != reference.resolver_pubkey
-                || resolution.resolution_hash() != reference.resolution_hash
+                || resolution.conflict_hash != expected.conflict_hash
+                || resolution.resolver_pubkey != expected.resolver_pubkey
+                || resolution.resolution_hash() != expected.resolution_hash
                 || !resolution.verify_signature()
             {
                 return Err(StoreProtocolError::Malformed(

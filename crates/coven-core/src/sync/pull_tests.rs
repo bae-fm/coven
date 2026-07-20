@@ -67,6 +67,276 @@ async fn row_blob_ref(
         .expect("load exact row blob reference")
 }
 
+async fn stored_remote_object(
+    db: &crate::database::Database,
+    object: &crate::sync::storage::ExactObjectRef,
+) -> crate::sync::remote_object::RemoteObjectRecord {
+    let object_id = crate::sync::remote_object::remote_object_id(object);
+    db.call(move |conn| {
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM remote_objects WHERE object_id = ?1",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(crate::database::DbError::from)?;
+        serde_json::from_str(&state)
+            .map_err(|error| crate::database::DbError::Message(error.to_string()))
+    })
+    .await
+    .expect("load exact remote object")
+}
+
+async fn stored_remote_objects(
+    db: &crate::database::Database,
+) -> Vec<crate::sync::remote_object::RemoteObjectRecord> {
+    db.call(|conn| {
+        let mut statement = conn
+            .prepare("SELECT state FROM remote_objects ORDER BY object_id")
+            .map_err(crate::database::DbError::from)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(crate::database::DbError::from)?;
+        let mut objects = Vec::new();
+        for row in rows {
+            let state = row.map_err(crate::database::DbError::from)?;
+            objects.push(serde_json::from_str(&state).map_err(|error| {
+                crate::database::DbError::Message(format!("parse remote object: {error}"))
+            })?);
+        }
+        Ok(objects)
+    })
+    .await
+    .expect("load remote objects")
+}
+
+async fn replace_retained_merge_input(
+    db: &crate::database::Database,
+    stream_id: String,
+    canonical_input: Vec<u8>,
+) {
+    db.call(move |conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(crate::database::DbError::from)?;
+        tx.pragma_update(None, "defer_foreign_keys", true)
+            .map_err(crate::database::DbError::from)?;
+        let stored_hash: String = tx
+            .query_row(
+                "SELECT input_hash FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = 1",
+                [&stream_id],
+                |row| row.get(0),
+            )
+            .map_err(crate::database::DbError::from)?;
+        let old_hash = stored_hash.parse().map_err(|error| {
+            crate::database::DbError::Message(format!("stored retained input hash: {error}"))
+        })?;
+        let new_hash = crate::sync::store_commit::ObjectHash::digest(&canonical_input);
+        let mut statement = tx
+            .prepare(
+                "SELECT indexed.object_id, remote.state
+                 FROM retained_replay_objects AS indexed
+                 JOIN remote_objects AS remote ON remote.object_id = indexed.object_id
+                 WHERE indexed.device_id = ?1 AND indexed.seq = 1
+                 ORDER BY indexed.object_id",
+            )
+            .map_err(crate::database::DbError::from)?;
+        let rows = statement
+            .query_map([&stream_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(crate::database::DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(crate::database::DbError::from)?;
+        drop(statement);
+        if rows.is_empty() {
+            return Err(crate::database::DbError::Message(
+                "retained Merge input has no indexed replay objects".to_string(),
+            ));
+        }
+        for (object_id, state) in rows {
+            let mut remote: crate::sync::remote_object::RemoteObjectRecord =
+                serde_json::from_str(&state).map_err(|error| {
+                    crate::database::DbError::Message(format!(
+                        "parse retained replay object {object_id}: {error}"
+                    ))
+                })?;
+            let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut remote
+            else {
+                return Err(crate::database::DbError::Message(format!(
+                    "retained replay object {object_id} is not shared"
+                )));
+            };
+            let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+                &mut record.state
+            else {
+                return Err(crate::database::DbError::Message(format!(
+                    "retained replay object {object_id} is not activated"
+                )));
+            };
+            let old_owner = ownership
+                .activated
+                .iter()
+                .find_map(|owner| match owner {
+                    crate::sync::remote_object::SharedObjectOwner::RetainedReplay(
+                        crate::sync::remote_object::RetainedReplayOwner::Commit {
+                            commit,
+                            input_hash,
+                        },
+                    ) if *input_hash == old_hash => Some((owner.clone(), commit.clone())),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    crate::database::DbError::Message(format!(
+                        "retained replay object {object_id} lacks its indexed owner"
+                    ))
+                })?;
+            ownership.activated.remove(&old_owner.0);
+            ownership.activated.insert(
+                crate::sync::remote_object::SharedObjectOwner::RetainedReplay(
+                    crate::sync::remote_object::RetainedReplayOwner::Commit {
+                        commit: old_owner.1,
+                        input_hash: new_hash,
+                    },
+                ),
+            );
+            tx.execute(
+                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                rusqlite::params![
+                    object_id,
+                    serde_json::to_string(&remote).map_err(|error| {
+                        crate::database::DbError::Message(format!(
+                            "serialize rebound retained replay object: {error}"
+                        ))
+                    })?
+                ],
+            )
+            .map_err(crate::database::DbError::from)?;
+        }
+        tx.execute(
+            "UPDATE retained_merge_materializations
+             SET input_hash = ?2, canonical_input = ?3
+             WHERE device_id = ?1 AND seq = 1",
+            rusqlite::params![&stream_id, new_hash.to_string(), &canonical_input],
+        )
+        .map_err(crate::database::DbError::from)?;
+        tx.execute(
+            "UPDATE materialized_commits SET retained_input_hash = ?2
+             WHERE device_id = ?1 AND seq = 1",
+            rusqlite::params![&stream_id, new_hash.to_string()],
+        )
+        .map_err(crate::database::DbError::from)?;
+        tx.execute(
+            "UPDATE retained_replay_objects SET input_hash = ?2
+             WHERE device_id = ?1 AND seq = 1",
+            rusqlite::params![&stream_id, new_hash.to_string()],
+        )
+        .map_err(crate::database::DbError::from)?;
+        tx.commit().map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("replace retained Merge input and its exact ownership closure");
+}
+
+fn is_external_circle_package(
+    remote: &crate::sync::remote_object::RemoteObjectRecord,
+    retained_for_replay: bool,
+) -> bool {
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record) = remote else {
+        return false;
+    };
+    if !matches!(
+        record.identity.domain,
+        crate::sync::remote_object::SharedLiveSetObjectDomain::CirclePackage { .. }
+    ) || !matches!(
+        record.bytes.stored(),
+        crate::sync::remote_object::RemoteStoredRepresentation::ExternalExact { .. }
+    ) {
+        return false;
+    }
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        &record.state
+    else {
+        return false;
+    };
+    let has_commit = ownership.activated.iter().any(|owner| {
+        matches!(
+            owner,
+            crate::sync::remote_object::SharedObjectOwner::StoreCommit(_)
+        )
+    });
+    let has_replay = ownership.activated.iter().any(|owner| {
+        matches!(
+            owner,
+            crate::sync::remote_object::SharedObjectOwner::RetainedReplay(_)
+        )
+    });
+    has_commit && has_replay == retained_for_replay
+}
+
+async fn retained_store_package_pin(
+    db: &crate::database::Database,
+    commit: &crate::sync::store_commit::StoreBatchCommitRef,
+) -> (
+    crate::sync::remote_object::RetainedReplayOwner,
+    crate::sync::store_commit::StorePackageRef,
+    crate::sync::remote_object::RemoteObjectRecord,
+) {
+    let stream_id = commit_stream_id(commit);
+    let sequence = commit.coord.sequence() as i64;
+    let (input_hash, canonical_input): (String, Vec<u8>) = db
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT input_hash, canonical_input FROM retained_merge_materializations \
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("load retained package input");
+    let retained: serde_json::Value =
+        serde_json::from_slice(&canonical_input).expect("parse retained package input");
+    let reference: crate::sync::store_commit::StorePackageRef =
+        serde_json::from_value(retained["packages"][0]["store"]["reference"].clone())
+            .expect("parse retained Store package reference");
+    let owner = crate::sync::remote_object::RetainedReplayOwner::Commit {
+        commit: commit.clone(),
+        input_hash: input_hash
+            .parse()
+            .expect("parse retained package input hash"),
+    };
+    let remote = stored_remote_object(db, &reference.object).await;
+    (owner, reference, remote)
+}
+
+async fn replace_stored_remote_object(
+    db: &crate::database::Database,
+    object: &crate::sync::storage::ExactObjectRef,
+    remote: &crate::sync::remote_object::RemoteObjectRecord,
+) {
+    let object_id = crate::sync::remote_object::remote_object_id(object);
+    let state = serde_json::to_string(remote).expect("serialize test remote object");
+    db.call(move |conn| {
+        let updated = conn
+            .execute(
+                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                rusqlite::params![object_id.to_string(), state],
+            )
+            .map_err(crate::database::DbError::from)?;
+        if updated != 1 {
+            return Err(crate::database::DbError::Message(
+                "test remote object disappeared".to_string(),
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .expect("replace test remote object");
+}
+
 fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) -> String {
     match &reference.coord {
         crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
@@ -1599,7 +1869,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
     let target = open_test_db();
     exec(
         &target,
-        "CREATE TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
+        "CREATE TEMP TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
          BEGIN SELECT RAISE(ABORT, 'injected materialized-position write failure'); END;",
     )
     .await;
@@ -1607,7 +1877,10 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
     let error = pull_into_result(&target, &storage, &store_dir)
         .await
         .expect_err("materialized-position failure aborts the pull");
-    assert!(matches!(error, StorePullError::Database(_)));
+    assert!(
+        matches!(error, StorePullError::Database(_)),
+        "unexpected pull error: {error:?}"
+    );
     assert!(
         !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "the row cannot commit when its position write fails",
@@ -1823,6 +2096,48 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
             .map(str::to_string)
             .collect()
     );
+    let retained_store = retained["packages"]
+        .as_array()
+        .expect("retained packages are an array")
+        .first()
+        .and_then(|value| value.get("store"))
+        .expect("retained Store package is exact-reference tagged");
+    let package_ref: crate::sync::store_commit::StorePackageRef =
+        serde_json::from_value(retained_store["reference"].clone())
+            .expect("parse retained Store package ref");
+    let package_remote = stored_remote_object(&target, &package_ref.object).await;
+    let parsed_input_hash = input_hash.parse().expect("parse retained input hash");
+    assert!(matches!(
+        package_remote,
+        crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+            if matches!(
+                &record.identity.domain,
+                crate::sync::remote_object::SharedLiveSetObjectDomain::StorePackage {
+                    reference
+                } if reference == &package_ref
+            )
+                && matches!(
+                    record.bytes.stored(),
+                    crate::sync::remote_object::RemoteStoredRepresentation::ExternalExact {
+                        object
+                    } if object == &package_ref.object
+                )
+                && matches!(
+                    &record.state,
+                    crate::sync::remote_object::OwnedObjectState::UploadedVerified {
+                        ownership
+                    } if ownership.activated.contains(
+                        &crate::sync::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
+                    ) && ownership.activated.contains(
+                        &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(
+                            crate::sync::remote_object::RetainedReplayOwner::Commit {
+                                commit: commit.clone(),
+                                input_hash: parsed_input_hash,
+                            }
+                        )
+                    )
+                )
+    ));
     let activation = retained["activation"]
         .as_object()
         .expect("retained activation input is an object");
@@ -1851,38 +2166,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
     );
     assert!(encoded.contains(&package_application));
     let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
-    let missing_receiver_hash =
-        crate::sync::store_commit::ObjectHash::digest(&missing_receiver).to_string();
-    let missing_receiver_stream = stream_id.clone();
-    let stored_input_hash = input_hash.clone();
-    target
-        .call(move |conn| {
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::database::DbError::from)?;
-            tx.pragma_update(None, "defer_foreign_keys", true)
-                .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "UPDATE retained_merge_materializations
-                 SET input_hash = ?2, canonical_input = ?3
-                 WHERE device_id = ?1 AND seq = 1",
-                rusqlite::params![
-                    &missing_receiver_stream,
-                    &missing_receiver_hash,
-                    &missing_receiver
-                ],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "UPDATE materialized_commits SET retained_input_hash = ?2
-                 WHERE device_id = ?1 AND seq = 1",
-                rusqlite::params![&missing_receiver_stream, &missing_receiver_hash],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.commit().map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("remove retained receive-time conflict bound");
+    replace_retained_merge_input(&target, stream_id.clone(), missing_receiver).await;
     let error = target
         .materialized_frontier()
         .await
@@ -1891,32 +2175,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
         .to_string()
         .contains("package application does not match its applied packages"));
 
-    let restore_stream = stream_id.clone();
-    let restore_input = canonical_input.clone();
-    target
-        .call(move |conn| {
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::database::DbError::from)?;
-            tx.pragma_update(None, "defer_foreign_keys", true)
-                .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "UPDATE retained_merge_materializations
-                 SET input_hash = ?2, canonical_input = ?3
-                 WHERE device_id = ?1 AND seq = 1",
-                rusqlite::params![&restore_stream, &stored_input_hash, &restore_input],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "UPDATE materialized_commits SET retained_input_hash = ?2
-                 WHERE device_id = ?1 AND seq = 1",
-                rusqlite::params![&restore_stream, &stored_input_hash],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.commit().map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("restore retained Merge input");
+    replace_retained_merge_input(&target, stream_id.clone(), canonical_input.clone()).await;
 
     let corrupt_stream = stream_id.clone();
     target
@@ -1941,6 +2200,149 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
 }
 
 #[tokio::test]
+async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins() {
+    let source = open_test_db();
+    let storage = create_store(&source, UserKeypair::generate()).await;
+    let first_changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('pin-first', 'First', NULL, \
+                     '0000000001000-0000-pins', '2026-01-01')",
+        ],
+    )
+    .await;
+    let first = storage
+        .publish_changeset("pins", 1, &first_changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish first replay-pin fixture");
+    let second_changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('pin-second', 'Second', NULL, \
+                     '0000000002000-0000-pins', '2026-01-01')",
+        ],
+    )
+    .await;
+    let second = storage
+        .publish_changeset("pins", 2, &second_changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish second replay-pin fixture");
+    let target = open_test_db();
+    pull_into(&target, &storage, &temp_store_dir().1).await;
+
+    let (_first_owner, first_package, first_remote) =
+        retained_store_package_pin(&target, &first).await;
+    let (second_owner, second_package, second_remote) =
+        retained_store_package_pin(&target, &second).await;
+
+    let mut missing = second_remote.clone();
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut missing else {
+        unreachable!("retained package is shared")
+    };
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        &mut record.state
+    else {
+        unreachable!("retained package is activated")
+    };
+    assert!(ownership.activated.remove(
+        &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
+    ));
+    replace_stored_remote_object(&target, &second_package.object, &missing).await;
+    assert!(target
+        .materialized_frontier()
+        .await
+        .expect_err("missing replay pin must invalidate materialization")
+        .to_string()
+        .contains("retained-replay ownership index"));
+    replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
+
+    let mut tampered = missing;
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut tampered
+    else {
+        unreachable!("retained package is shared")
+    };
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        &mut record.state
+    else {
+        unreachable!("retained package is activated")
+    };
+    let crate::sync::remote_object::RetainedReplayOwner::Commit { commit, .. } = &second_owner;
+    ownership.activated.insert(
+        crate::sync::remote_object::SharedObjectOwner::RetainedReplay(
+            crate::sync::remote_object::RetainedReplayOwner::Commit {
+                commit: commit.clone(),
+                input_hash: crate::sync::store_commit::ObjectHash::digest(b"tampered input"),
+            },
+        ),
+    );
+    replace_stored_remote_object(&target, &second_package.object, &tampered).await;
+    assert!(target
+        .materialized_frontier()
+        .await
+        .expect_err("tampered replay pin must invalidate materialization")
+        .to_string()
+        .contains("retained-replay ownership index"));
+    replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
+
+    let mut invented = first_remote;
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut invented
+    else {
+        unreachable!("retained package is shared")
+    };
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        &mut record.state
+    else {
+        unreachable!("retained package is activated")
+    };
+    ownership.activated.insert(
+        crate::sync::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
+    );
+    replace_stored_remote_object(&target, &first_package.object, &invented).await;
+    let crate::sync::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
+        &second_owner;
+    let crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence,
+    } = &commit.coord
+    else {
+        unreachable!("retained replay fixture is MergeConcurrent")
+    };
+    let stream_id = stream_id.to_string();
+    let sequence = i64::try_from(*sequence).expect("invented replay sequence fits SQLite");
+    let commit_ref = serde_json::to_string(commit).expect("serialize invented replay owner");
+    let input_hash = input_hash.to_string();
+    let first_object_id =
+        crate::sync::remote_object::remote_object_id(&first_package.object).to_string();
+    target
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO retained_replay_objects
+                 (device_id, seq, commit_ref, input_hash, object_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![stream_id, sequence, commit_ref, input_hash, first_object_id],
+            )
+            .map_err(crate::database::DbError::from)?;
+            Ok(())
+        })
+        .await
+        .expect("invent replay ownership index row");
+    assert!(target
+        .store_package_is_retained_for_replay(first_package, first)
+        .await
+        .expect_err("invented replay pin must block reclamation validation")
+        .to_string()
+        .contains("ownership differs from its exact object closure"));
+    assert!(target
+        .materialized_frontier()
+        .await
+        .expect_err("invented replay pin must invalidate materialization")
+        .to_string()
+        .contains("ownership differs from its exact object closure"));
+}
+
+#[tokio::test]
 async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
@@ -1958,29 +2360,54 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .await
         .expect("publish retained-input rollback fixture");
     let stream_id = commit_stream_id(&commit);
-    let commit_ref = serde_json::to_string(&commit).expect("serialize exact commit ref");
-    let conflicting_stream = stream_id.clone();
-    let target = open_test_db();
-    target
+    let target_dir = tempfile::tempdir().expect("create retained collision database directory");
+    let target_path = target_dir.path().join("store.sqlite");
+    let copied_path = target_path.clone();
+    source
         .call(move |conn| {
-            conn.execute(
-                "INSERT INTO retained_merge_materializations \
-                 (device_id, seq, commit_ref, input_hash, canonical_input) \
-                 VALUES (?1, 1, ?2, ?3, x'7b7d')",
-                rusqlite::params![conflicting_stream, commit_ref, "f".repeat(64)],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            conn.execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
         })
         .await
-        .expect("install conflicting retained input");
+        .expect("copy the locally-authored retained input");
+    let (target, _stamper) = crate::database::Database::open(
+        &target_path,
+        test_synced_tables(),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
+        "test-device".to_string(),
+        &test_migrations(),
+    )
+    .expect("open copied retained collision database");
+    let conflicting_stream = stream_id.clone();
+    target
+        .call(move |conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            tx.execute(
+                "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = 1",
+                [&conflicting_stream],
+            )
+            .map_err(crate::database::DbError::from)?;
+            tx.execute("DELETE FROM notes WHERE id = 'rollback-row'", [])
+                .map_err(crate::database::DbError::from)?;
+            tx.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("remove the locally materialized outcome while retaining its exact input");
 
     let error = pull_into_result(&target, &storage, &temp_store_dir().1)
         .await
         .expect_err("retained input collision must fail the pull transaction");
-    assert!(error
-        .to_string()
-        .contains("already contains different exact input"));
+    assert!(
+        error
+            .to_string()
+            .contains("already contains different exact input"),
+        "unexpected pull error: {error:?}"
+    );
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'rollback-row'").await);
     let checked_stream = stream_id.clone();
     let materialized = target
@@ -3278,6 +3705,11 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let (_source_tmp, source_store_dir) = temp_store_dir();
     store_local(&source_store_dir, "p1ab", b"PHOTOBYTES").await;
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+    let commit = db1
+        .latest_local_store_position()
+        .await
+        .expect("read blob commit position")
+        .expect("blob write has a Store commit");
 
     // Destination pulls. A `CacheEager` photo lands in the store dir's evictable
     // locator-keyed cache on pull.
@@ -3287,12 +3719,53 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded = std::fs::read(exact_cache_path(
-        &ld,
-        &row_blob_ref(&db2, "note_photos", "p1ab").await,
-    ))
-    .expect("downloaded photo");
+    let blob_row = row_blob_ref(&db2, "note_photos", "p1ab").await;
+    let downloaded = std::fs::read(exact_cache_path(&ld, &blob_row)).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
+    let stored = blob_row
+        .stored()
+        .expect("pulled blob row carries exact storage")
+        .clone();
+    let remote = stored_remote_object(&db2, stored.object()).await;
+    let stream_id = commit_stream_id(&commit);
+    let sequence = commit.coord.sequence() as i64;
+    let input_hash: crate::sync::store_commit::ObjectHash = db2
+        .call(move |conn| {
+            let hash: String = conn
+                .query_row(
+                    "SELECT input_hash FROM retained_merge_materializations \
+                     WHERE device_id = ?1 AND seq = ?2",
+                    rusqlite::params![stream_id, sequence],
+                    |row| row.get(0),
+                )
+                .map_err(crate::database::DbError::from)?;
+            hash.parse().map_err(|error| {
+                crate::database::DbError::Message(format!(
+                    "parse retained blob input hash: {error}"
+                ))
+            })
+        })
+        .await
+        .expect("load retained blob input hash");
+    assert!(matches!(
+        remote,
+        crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+            if matches!(
+                &record.state,
+                crate::sync::remote_object::OwnedObjectState::UploadedVerified {
+                    ownership
+                } if ownership.activated.contains(
+                    &crate::sync::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
+                ) && ownership.activated.contains(
+                    &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(
+                        crate::sync::remote_object::RetainedReplayOwner::Commit {
+                            commit: commit.clone(),
+                            input_hash,
+                        }
+                    )
+                )
+            )
+    ));
 }
 
 /// A `CacheLazy` blob is authenticated before its row crosses to the puller, but
@@ -3816,6 +4289,13 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
             .all(|change| !crate::sync::gate::is_routing_table(&change.table)),
         "host-visible row changes must not expose Coven routing tables"
     );
+    assert!(
+        stored_remote_objects(&target)
+            .await
+            .iter()
+            .any(|remote| is_external_circle_package(remote, true)),
+        "pulled Merge Circle package must carry external exact and replay ownership"
+    );
 }
 
 #[tokio::test]
@@ -4091,6 +4571,13 @@ async fn serial_circle_pull_scenario() {
             &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
         )
         .await
+    );
+    assert!(
+        stored_remote_objects(&target)
+            .await
+            .iter()
+            .any(|remote| is_external_circle_package(remote, false)),
+        "pulled Serial Circle package must carry external exact commit ownership"
     );
 
     let second_circle_id =

@@ -5,7 +5,9 @@ use super::snapshot::{CreatedSnapshot, SnapshotError};
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
-    ObjectHash, SnapshotImageRef, SnapshotMeta, StoreRootRef, StoreSnapshotRef, SuccessorLink,
+    ObjectHash, SnapshotImageRef, SnapshotMeta, StoreHistoryCut, StoreProtocolError, StoreRootRef,
+    StoreSerialPredecessor, StoreSnapshotLocator, StoreSnapshotRef, StoreSnapshotState,
+    SuccessorLink,
 };
 use crate::keys::UserKeypair;
 
@@ -73,6 +75,84 @@ pub(crate) async fn push_store_snapshot(
             db.write_policy()
         )));
     }
+    let history_cut = match &coverage {
+        CommitFrontier::MergeConcurrent(frontier) => {
+            StoreHistoryCut::MergeConcurrent(frontier.clone())
+        }
+        CommitFrontier::Serial(Some(commit)) => {
+            StoreHistoryCut::Serial(StoreSerialPredecessor::Commit(commit.clone()))
+        }
+        CommitFrontier::Serial(None)
+            if matches!(
+                registration.origin,
+                super::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+            ) =>
+        {
+            StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
+                root: root.clone(),
+                founder_registration: registration_ref.clone(),
+            })
+        }
+        CommitFrontier::Serial(None) => {
+            return Err(SnapshotError::PublicationState(
+                "only the founder registration can publish a Serial genesis snapshot".to_string(),
+            ));
+        }
+    };
+    let (devices, resolved_devices) = db
+        .store_device_state_for_history_cut(&history_cut)
+        .await
+        .map_err(publication_error)?;
+    let membership_state = match db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            let membership = membership.ok_or_else(|| {
+                SnapshotError::PublicationState(
+                    "Merge snapshot publication has no exact membership state".to_string(),
+                )
+            })?;
+            let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
+            else {
+                return Err(SnapshotError::PublicationState(
+                    "Merge snapshot publication requires resolved membership".to_string(),
+                ));
+            };
+            super::circle_control::StoreMembershipStateRef::merge_concurrent(
+                membership.head_refs().to_vec(),
+                membership.resolution_refs().to_vec(),
+                resolved_devices.recovery.clone(),
+                resolved.state_hash,
+            )
+            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+        }
+        crate::WritePolicy::Serial => {
+            let authorization = db
+                .serial_authorization_state()
+                .await
+                .map_err(publication_error)?
+                .ok_or_else(|| {
+                    SnapshotError::PublicationState(
+                        "Serial snapshot publication has no authorization state".to_string(),
+                    )
+                })?;
+            super::circle_control::StoreMembershipStateRef::serial(
+                match &history_cut {
+                    StoreHistoryCut::Serial(position) => position.clone(),
+                    StoreHistoryCut::MergeConcurrent(_) => {
+                        return Err(SnapshotError::PublicationState(
+                            "Serial snapshot publication produced a Merge history cut".to_string(),
+                        ));
+                    }
+                },
+                resolved_devices.recovery,
+                &authorization,
+            )
+            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+        }
+    };
+    let state = StoreSnapshotState {
+        membership: membership_state,
+        devices,
+    };
     let previous = db
         .latest_local_store_snapshot()
         .await
@@ -156,6 +236,7 @@ pub(crate) async fn push_store_snapshot(
         predecessor.clone(),
         image,
         coverage,
+        state,
         schema_version,
         created_at,
         SuccessorLink {
@@ -525,8 +606,26 @@ pub async fn load_store_snapshot_ref(
         .read_protocol_object(&context, &reference.object, &prefix)
         .await
         .map_err(SnapshotError::Bucket)?;
-    let meta =
-        verify_store_snapshot_bytes(root, registration_ref, registration, reference, &bytes)?;
+    let verify_root = root.clone();
+    let verify_registration_ref = registration_ref.clone();
+    let verify_registration = registration.clone();
+    let verify_reference = reference.clone();
+    let meta = super::store_objects::run_blocking_object_verification(
+        &prefix,
+        &reference.object,
+        Box::new(move || {
+            verify_store_snapshot_bytes(
+                &verify_root,
+                &verify_registration_ref,
+                &verify_registration,
+                &verify_reference,
+                &bytes,
+            )
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+        }),
+    )
+    .await
+    .map_err(SnapshotError::StoreObject)?;
     Ok((reference.clone(), meta))
 }
 
@@ -567,12 +666,144 @@ pub(crate) fn verify_store_snapshot_bytes(
     Ok(meta)
 }
 
+async fn load_store_snapshot_stream(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
+    registration: &super::store_commit::StoreDeviceRegistration,
+) -> Result<Vec<crate::database::PublishedStoreSnapshot>, SnapshotError> {
+    let mut slot = snapshot_first_slot(registration)?.clone();
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreSnapshotMeta,
+    );
+    let mut sequence = 1_u64;
+    let mut predecessor = None;
+    let mut snapshots = Vec::new();
+    loop {
+        let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), sequence);
+        let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
+            Ok(value) => value,
+            Err(super::storage::StorageError::NotFound(_)) => break,
+            Err(error) => return Err(SnapshotError::Bucket(error)),
+        };
+        let verify_root = root.clone();
+        let verify_registration_ref = registration_ref.clone();
+        let verify_registration = registration.clone();
+        let verify_object = object.clone();
+        let (reference, meta) = super::store_objects::run_blocking_object_verification(
+            &prefix,
+            &object,
+            Box::new(move || {
+                let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
+                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                let reference = StoreSnapshotRef {
+                    sequence,
+                    snapshot_hash: semantic_hash,
+                    object: verify_object,
+                };
+                let meta = verify_store_snapshot_bytes(
+                    &verify_root,
+                    &verify_registration_ref,
+                    &verify_registration,
+                    &reference,
+                    &bytes,
+                )
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                Ok((reference, meta))
+            }),
+        )
+        .await
+        .map_err(SnapshotError::StoreObject)?;
+        if meta.predecessor != predecessor {
+            return Err(SnapshotError::Parse(
+                "Store snapshot stream has an invalid exact predecessor".to_string(),
+            ));
+        }
+        let successor_slot = meta.successor.next_slot.clone();
+        slot = successor_slot.clone();
+        predecessor = Some(reference.clone());
+        snapshots.push(crate::database::PublishedStoreSnapshot {
+            reference,
+            successor_slot,
+            meta,
+        });
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| SnapshotError::Parse("Store snapshot sequence overflow".to_string()))?;
+    }
+    Ok(snapshots)
+}
+
+fn select_maximal_store_snapshot(
+    mut candidates: Vec<crate::database::PublishedStoreSnapshot>,
+) -> Option<crate::database::PublishedStoreSnapshot> {
+    let all = candidates.clone();
+    candidates.retain(|snapshot| {
+        !all.iter().any(|other| {
+            other.reference != snapshot.reference
+                && coverage_dominates(&other.meta.coverage, &snapshot.meta.coverage)
+        })
+    });
+    candidates.sort_by_key(|snapshot| snapshot.reference.snapshot_hash);
+    candidates.pop()
+}
+
+pub(crate) async fn select_store_snapshot_for_acknowledgement(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    root: &StoreRootRef,
+    frontier: &CommitFrontier,
+    device_state: &super::store_commit::StoreDeviceStateRef,
+) -> Result<Option<StoreSnapshotLocator>, SnapshotError> {
+    if frontier.policy() != db.write_policy() {
+        return Err(SnapshotError::PublicationState(
+            "Store acknowledgement frontier uses another write policy".to_string(),
+        ));
+    }
+    let registrations = db
+        .activated_store_device_registration_records()
+        .await
+        .map_err(publication_error)?;
+    let mut candidates = Vec::new();
+    for (registration_ref, registration) in registrations {
+        for snapshot in
+            load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?
+        {
+            if snapshot.meta.coverage.policy() != frontier.policy()
+                || !frontier.covers(&snapshot.meta.coverage)
+                || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
+                || snapshot.meta.state.devices.recovery() != device_state.recovery()
+            {
+                continue;
+            }
+            super::store_pull::verify_store_snapshot_for_acknowledgement(
+                storage,
+                serial_coordination,
+                root,
+                &snapshot,
+            )
+            .await
+            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+            candidates.push(snapshot);
+        }
+    }
+    Ok(
+        select_maximal_store_snapshot(candidates).map(|snapshot| StoreSnapshotLocator {
+            author_registration: snapshot.meta.author_registration,
+            snapshot: snapshot.reference,
+        }),
+    )
+}
+
 fn publication_error(error: crate::database::DbError) -> SnapshotError {
     SnapshotError::PublicationState(error.to_string())
 }
 
 pub(crate) async fn select_store_snapshot(
     storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     root: &StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
     binary_schema_version: u32,
@@ -582,6 +813,7 @@ pub(crate) async fn select_store_snapshot(
         crate::WritePolicy,
         crate::database::PublishedStoreSnapshot,
         Vec<u8>,
+        super::store_pull::VerifiedStoreSnapshotStability,
     ),
     SnapshotError,
 > {
@@ -651,70 +883,11 @@ pub(crate) async fn select_store_snapshot(
     };
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
-        let mut slot = match &registration.snapshots {
-            DeviceStreamAnchor::StoreSnapshots { first_slot } => first_slot.clone(),
-            _ => {
-                return Err(SnapshotError::Parse(
-                    "activated registration lacks a Store snapshot anchor".to_string(),
-                ))
-            }
-        };
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotMeta,
+        authorized.extend(
+            load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?,
         );
-        let mut sequence = 1_u64;
-        let mut predecessor = None;
-        loop {
-            let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), sequence);
-            let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
-                Ok(value) => value,
-                Err(super::storage::StorageError::NotFound(_)) => break,
-                Err(error) => return Err(SnapshotError::Bucket(error)),
-            };
-            let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-            let reference = StoreSnapshotRef {
-                sequence,
-                snapshot_hash: semantic_hash,
-                object,
-            };
-            let meta =
-                SnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &registration)
-                    .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-            if meta.author_registration != registration_ref
-                || meta.predecessor != predecessor
-                || meta.successor.predecessor
-                    != predecessor
-                        .as_ref()
-                        .map(|value: &StoreSnapshotRef| value.object.clone())
-            {
-                return Err(SnapshotError::Parse(
-                    "Store snapshot stream has an invalid exact link".to_string(),
-                ));
-            }
-            let successor_slot = meta.successor.next_slot.clone();
-            slot = successor_slot.clone();
-            predecessor = Some(reference.clone());
-            authorized.push(crate::database::PublishedStoreSnapshot {
-                reference,
-                successor_slot,
-                meta,
-            });
-            sequence = sequence.checked_add(1).ok_or_else(|| {
-                SnapshotError::Parse("Store snapshot sequence overflow".to_string())
-            })?;
-        }
     }
-    let candidates = authorized.clone();
-    authorized.retain(|snapshot| {
-        !candidates.iter().any(|other| {
-            other.reference != snapshot.reference
-                && coverage_dominates(&other.meta.coverage, &snapshot.meta.coverage)
-        })
-    });
-    authorized.sort_by_key(|snapshot| snapshot.reference.snapshot_hash);
-    let chosen = authorized.pop().ok_or_else(|| {
+    let chosen = select_maximal_store_snapshot(authorized).ok_or_else(|| {
         SnapshotError::Bucket(super::storage::StorageError::NotFound(
             "Store snapshot stream".to_string(),
         ))
@@ -725,6 +898,14 @@ pub(crate) async fn select_store_snapshot(
             supported: binary_schema_version,
         });
     }
+    let stability = super::store_pull::verify_store_snapshot_stability(
+        storage,
+        serial_coordination,
+        root,
+        &chosen,
+    )
+    .await
+    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
     let image_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotImage,
@@ -746,7 +927,7 @@ pub(crate) async fn select_store_snapshot(
         ));
     }
     let write_policy = root_value.descriptor.write_policy;
-    Ok((verified_root, write_policy, chosen, image))
+    Ok((verified_root, write_policy, chosen, image, stability))
 }
 
 fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
@@ -807,7 +988,7 @@ mod tests {
         db: &Database,
         storage: &CloudSyncStorage,
         signer: &UserKeypair,
-    ) -> (ObjectHash, String) {
+    ) -> (ObjectHash, String, MembershipChain) {
         let root = super::super::store_protocol_root::create_store(
             db,
             storage,
@@ -828,7 +1009,12 @@ mod tests {
             creation_id: root.descriptor.creation_id,
         };
         let device_id = super::super::store_commit::StoreDeviceId::derive(&root_ref, &origin);
-        (root.object_hash(), device_id.to_string())
+        let membership = super::super::pull::load_cycle_membership(storage, db)
+            .await
+            .expect("load snapshot test membership")
+            .chain
+            .expect("snapshot test membership exists");
+        (root.object_hash(), device_id.to_string(), membership)
     }
 
     fn snapshot(bytes: &[u8]) -> CreatedSnapshot {
@@ -843,6 +1029,7 @@ mod tests {
         root: ObjectHash,
         db: &Database,
         signer: &UserKeypair,
+        membership: &MembershipChain,
         bytes: &[u8],
         created_at: &str,
     ) -> Result<SnapshotMeta, SnapshotError> {
@@ -854,7 +1041,7 @@ mod tests {
             1,
             signer,
             created_at.to_string(),
-            None,
+            Some(membership),
             db,
         )
         .await
@@ -892,9 +1079,29 @@ mod tests {
         )
         .await
         .expect("publish exact snapshot selector fixture");
-
-        let (_, _, selected, image) = select_store_snapshot(
+        crate::sync::store_ack::stage_store_ack(
+            &db,
             &store.storage,
+            None,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            "2026-07-16T00:00:01Z".to_string(),
+            &signer,
+        )
+        .await
+        .expect("stage exact snapshot selector acknowledgement");
+        crate::sync::store_ack::drain_outbound_store_acks(
+            &db,
+            &store.storage,
+            None,
+            &signer,
+            Some(&membership),
+        )
+        .await
+        .expect("activate exact snapshot selector acknowledgement");
+
+        let (_, _, selected, image, _) = select_store_snapshot(
+            &store.storage,
+            None,
             &store.root,
             &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
             1,
@@ -918,13 +1125,14 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(&path, "snapshot-test-device");
-        let (root, _) = initialize(&db, &storage, &signer).await;
+        let (root, _, membership) = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(1);
         assert!(publish(
             &storage,
             root,
             &db,
             &signer,
+            &membership,
             b"restart image",
             "2026-07-16T00:00:00Z",
         )
@@ -957,7 +1165,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (root_hash, device_id) = initialize(&db, &storage, &signer).await;
+        let (root_hash, device_id, membership) = initialize(&db, &storage, &signer).await;
         assert!(db
             .export_activated_device_continuation(&signer)
             .await
@@ -969,6 +1177,7 @@ mod tests {
             root_hash,
             &db,
             &signer,
+            &membership,
             b"continued snapshot",
             "2026-07-16T00:00:00Z",
         )
@@ -1060,7 +1269,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (root, _) = initialize(&db, &storage, &signer).await;
+        let (root, _, membership) = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_after_call(1);
 
         let published = publish(
@@ -1068,6 +1277,7 @@ mod tests {
             root,
             &db,
             &signer,
+            &membership,
             b"lost response image",
             "2026-07-16T00:00:00Z",
         )
@@ -1091,7 +1301,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (root, _) = initialize(&db, &storage, &signer).await;
+        let (root, _, membership) = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(2);
 
         assert!(publish(
@@ -1099,6 +1309,7 @@ mod tests {
             root,
             &db,
             &signer,
+            &membership,
             b"ordered image",
             "2026-07-16T00:00:00Z",
         )
@@ -1129,13 +1340,14 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (root, _) = initialize(&db, &storage, &signer).await;
+        let (root, _, membership) = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(1);
         assert!(publish(
             &storage,
             root,
             &db,
             &signer,
+            &membership,
             b"collision image",
             "2026-07-16T00:00:00Z",
         )
@@ -1175,12 +1387,13 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (root, _) = initialize(&db, &storage, &signer).await;
+        let (root, _, membership) = initialize(&db, &storage, &signer).await;
         let first = publish(
             &storage,
             root,
             &db,
             &signer,
+            &membership,
             b"first image",
             "2026-07-16T00:00:00Z",
         )
@@ -1197,6 +1410,7 @@ mod tests {
             root,
             &db,
             &signer,
+            &membership,
             b"second image",
             "2026-07-16T00:00:01Z",
         )

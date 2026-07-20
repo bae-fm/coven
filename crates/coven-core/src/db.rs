@@ -47,6 +47,19 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            merge_retraction_cleanups,
+            "
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
+    cleanup_hash TEXT NOT NULL CHECK (length(cleanup_hash) = 64),
+    canonical_cleanup BLOB NOT NULL CHECK (length(canonical_cleanup) > 0),
+    PRIMARY KEY (device_id, seq),
+    UNIQUE (commit_ref),
+    CHECK (device_id != 'serial')
+"
+        );
+        $visit!(
             materialized_commits,
             "
     device_id TEXT NOT NULL,
@@ -213,6 +226,21 @@ macro_rules! coven_tables {
             "
     object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),
     state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
+            retained_replay_objects,
+            "
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
+    input_hash TEXT NOT NULL CHECK (length(input_hash) = 64),
+    object_id TEXT NOT NULL CHECK (length(object_id) = 64),
+    PRIMARY KEY (device_id, seq, object_id),
+    CHECK (device_id != 'serial'),
+    FOREIGN KEY (device_id, seq, commit_ref, input_hash)
+        REFERENCES retained_merge_materializations(device_id, seq, commit_ref, input_hash),
+    FOREIGN KEY (object_id) REFERENCES remote_objects(object_id)
 "
         );
         $visit!(
@@ -735,6 +763,11 @@ fn all_coven_table_names() -> std::collections::BTreeSet<&'static str> {
     names
 }
 
+#[cfg(test)]
+pub(crate) fn all_table_names() -> std::collections::BTreeSet<&'static str> {
+    all_coven_table_names()
+}
+
 pub(crate) fn live_coven_schema_manifest(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<CovenSchemaManifest> {
@@ -1067,6 +1100,49 @@ mod tests {
         insert(1, 1).expect_err("a second active baseline must fail");
         insert(2, 1).expect_err("the baseline key must remain the singleton");
         insert(0, 1).expect_err("baseline generation cannot use another singleton key");
+    }
+
+    #[test]
+    fn retained_replay_object_index_requires_both_exact_records() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let input_hash = "a".repeat(64);
+        let object_id = "b".repeat(64);
+        conn.execute(
+            "INSERT INTO retained_merge_materializations
+             (device_id, seq, commit_ref, input_hash, canonical_input)
+             VALUES ('merge-stream', 1, '{}', ?1, x'7b7d')",
+            [&input_hash],
+        )
+        .expect("retain exact Merge input");
+        conn.execute(
+            "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+            [&object_id],
+        )
+        .expect("insert exact remote object");
+        conn.execute(
+            "INSERT INTO retained_replay_objects
+             (device_id, seq, commit_ref, input_hash, object_id)
+             VALUES ('merge-stream', 1, '{}', ?1, ?2)",
+            [&input_hash, &object_id],
+        )
+        .expect("index retained replay ownership");
+
+        assert!(conn
+            .execute(
+                "DELETE FROM retained_merge_materializations
+                 WHERE device_id = 'merge-stream' AND seq = 1",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "DELETE FROM remote_objects WHERE object_id = ?1",
+                [&object_id],
+            )
+            .is_err());
     }
 
     #[test]

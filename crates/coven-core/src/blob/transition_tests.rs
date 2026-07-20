@@ -1006,134 +1006,147 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
 /// cloud blob is tombstoned, while A keeps the external file and reads from it.
 #[tokio::test]
 async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
-    let kp_a = UserKeypair::generate();
-    let db_a = open_test_db_with_blob(photo_decl());
-    let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext();
-    let kp_b = UserKeypair::generate();
-    let hlc_a = Hlc::new("A".to_string());
-    let hlc_b = Hlc::new("B".to_string());
-    let db_b = open_test_db_with_blob(photo_decl());
-    let (tmp_a, lib_a) = temp_store_dir();
-    let (_tmp_b, lib_b) = temp_store_dir();
-    let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
+    tokio::spawn(async {
+        let kp_a = UserKeypair::generate();
+        let db_a = open_test_db_with_blob(photo_decl());
+        let storage = create_store(&db_a, kp_a.clone()).await;
+        let enc = plaintext();
+        let kp_b = UserKeypair::generate();
+        let hlc_a = Hlc::new("A".to_string());
+        let hlc_b = Hlc::new("B".to_string());
+        let db_b = open_test_db_with_blob(photo_decl());
+        let (tmp_a, lib_a) = temp_store_dir();
+        let (_tmp_b, lib_b) = temp_store_dir();
+        let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
-    invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
-    seed_remote_release(
-        &storage,
-        &db_a,
-        &lib_a,
-        &hlc_a,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
-    // B is a registered reader that has not acknowledged A yet, so A's snapshot
-    // cycle keeps A's release changeset for B to pull — reclamation is paused until
-    // every current device acks. Without a peer head A would be single-device and
-    // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
-    // incremental pull.
-    // A pushes the Remote release; B pulls it.
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
-    crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
-    assert!(
-        row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "B has the Remote release",
-    );
-    let remote_blob = photo_ref(&db_a, "photoaaa")
+        Box::pin(invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b)).await;
+        Box::pin(seed_remote_release(
+            &storage,
+            &db_a,
+            &lib_a,
+            &hlc_a,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        ))
+        .await;
+        // B is a registered reader that has not acknowledged A yet, so A's snapshot
+        // cycle keeps A's release changeset for B to pull — reclamation is paused until
+        // every current device acks. Without a peer head A would be single-device and
+        // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
+        // incremental pull.
+        // A pushes the Remote release; B pulls it.
+        Box::pin(run_cycle(
+            &storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None,
+        ))
+        .await;
+        crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+        assert!(
+            row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+            "B has the Remote release",
+        );
+        let remote_blob = photo_ref(&db_a, "photoaaa")
+            .await
+            .stored()
+            .cloned()
+            .expect("Remote photo has exact storage authority");
+
+        // A makes it Local to a chosen folder.
+        let dest_dir = tmp_a.path().join("dest");
+        let dest_path = dest_dir.join("photoaaa.jpg");
+        let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let recorder = Recorder::default();
+        let reads_before_make_local = storage.home.exact_stream_read_count();
+        Box::pin(make_local(
+            &db_a,
+            &storage.storage,
+            &lib_a,
+            &hlc_a,
+            None,
+            Some(&recorder),
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        ))
         .await
-        .stored()
-        .cloned()
-        .expect("Remote photo has exact storage authority");
+        .expect("make_local");
 
-    // A makes it Local to a chosen folder.
-    let dest_dir = tmp_a.path().join("dest");
-    let dest_path = dest_dir.join("photoaaa.jpg");
-    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
-    let (_cancel_tx, cancel) = watch::channel(false);
-    let recorder = Recorder::default();
-    let reads_before_make_local = storage.home.exact_stream_read_count();
-    make_local(
-        &db_a,
-        &storage.storage,
-        &lib_a,
-        &hlc_a,
-        None,
-        Some(&recorder),
-        "notes",
-        "n1",
-        &dest,
-        &cancel,
-    )
+        assert_eq!(
+            storage.home.exact_stream_read_count(),
+            reads_before_make_local + 1,
+            "make_local materializes the Remote blob through the file download path",
+        );
+        assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");
+        assert_eq!(
+            std::fs::read(&dest_path).unwrap(),
+            bytes,
+            "the file is materialized to the chosen folder",
+        );
+        assert_eq!(
+            external_blob(&db_a, "note_photos", "photoaaa")
+                .await
+                .expect("materialized photo has external ownership")
+                .path,
+            dest_path,
+            "A now reads the blob from the external file",
+        );
+        assert_eq!(
+            pending_deletes(&db_a).await,
+            vec!["photoaaa".to_string()],
+            "the cloud blob's delete is enqueued in the same commit as the flip",
+        );
+        assert_eq!(
+            *recorder.made_local.lock().unwrap(),
+            vec![("notes".to_string(), "n1".to_string())],
+        );
+        assert_eq!(
+            *recorder.materialized.lock().unwrap(),
+            vec![("photoaaa".to_string(), 1, 1)],
+            "materialize progress reported once for the single blob",
+        );
+
+        // A's retract cycle: the gate flip false emits DELETEs and the tombstone drain
+        // writes the cloud tombstone.
+        Box::pin(run_cycle(
+            &storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None,
+        ))
+        .await;
+        assert!(
+            storage
+                .home
+                .exists(&exact_tombstone_key(&remote_blob))
+                .await
+                .unwrap(),
+            "the cloud blob is tombstoned",
+        );
+
+        // B's next cycle pulls the retract: its subtree disappears.
+        Box::pin(run_cycle(
+            &storage, "B", &hlc_b, &db_b, &enc, &kp_b, &lib_b, None,
+        ))
+        .await;
+        assert!(
+            !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+            "B's subtree is removed by the gate retract",
+        );
+
+        // A still reads the photo from its external file (no cloud copy needed).
+        let read = cache::read_blob(
+            &db_a,
+            &lib_a,
+            Some(&storage.storage),
+            &photo_ref(&db_a, "photoaaa").await,
+        )
+        .await
+        .expect("A reads from its external file");
+        assert_eq!(read, bytes, "A plays its own local file");
+    })
     .await
-    .expect("make_local");
-
-    assert_eq!(
-        storage.home.exact_stream_read_count(),
-        reads_before_make_local + 1,
-        "make_local materializes the Remote blob through the file download path",
-    );
-    assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");
-    assert_eq!(
-        std::fs::read(&dest_path).unwrap(),
-        bytes,
-        "the file is materialized to the chosen folder",
-    );
-    assert_eq!(
-        external_blob(&db_a, "note_photos", "photoaaa")
-            .await
-            .expect("materialized photo has external ownership")
-            .path,
-        dest_path,
-        "A now reads the blob from the external file",
-    );
-    assert_eq!(
-        pending_deletes(&db_a).await,
-        vec!["photoaaa".to_string()],
-        "the cloud blob's delete is enqueued in the same commit as the flip",
-    );
-    assert_eq!(
-        *recorder.made_local.lock().unwrap(),
-        vec![("notes".to_string(), "n1".to_string())],
-    );
-    assert_eq!(
-        *recorder.materialized.lock().unwrap(),
-        vec![("photoaaa".to_string(), 1, 1)],
-        "materialize progress reported once for the single blob",
-    );
-
-    // A's retract cycle: the gate flip false emits DELETEs and the tombstone drain
-    // writes the cloud tombstone.
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
-    assert!(
-        storage
-            .home
-            .exists(&exact_tombstone_key(&remote_blob))
-            .await
-            .unwrap(),
-        "the cloud blob is tombstoned",
-    );
-
-    // B's next cycle pulls the retract: its subtree disappears.
-    run_cycle(&storage, "B", &hlc_b, &db_b, &enc, &kp_b, &lib_b, None).await;
-    assert!(
-        !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "B's subtree is removed by the gate retract",
-    );
-
-    // A still reads the photo from its external file (no cloud copy needed).
-    let read = cache::read_blob(
-        &db_a,
-        &lib_a,
-        Some(&storage.storage),
-        &photo_ref(&db_a, "photoaaa").await,
-    )
-    .await
-    .expect("A reads from its external file");
-    assert_eq!(read, bytes, "A plays its own local file");
+    .expect("multi-device make-local task");
 }
 
 #[tokio::test]

@@ -1464,6 +1464,27 @@ pub(crate) async fn load_exact_membership_head(
     root: &StoreRootRef,
     reference: &MembershipHeadRef,
 ) -> Result<AuthorHead, AnchoredChainError> {
+    let root_value = Box::pin(super::store_objects::load_store_protocol_root(
+        storage, root,
+    ))
+    .await
+    .map_err(map_membership_object_error)?
+    .value;
+    Box::pin(load_exact_membership_head_with_root(
+        storage,
+        root,
+        &root_value,
+        reference,
+    ))
+    .await
+}
+
+async fn load_exact_membership_head_with_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    reference: &MembershipHeadRef,
+) -> Result<AuthorHead, AnchoredChainError> {
     let coord = &reference.coord;
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
@@ -1493,11 +1514,15 @@ pub(crate) async fn load_exact_membership_head(
             "membership head differs from its exact reference".to_string(),
         ));
     }
-    let registration =
-        super::store_objects::load_registration_ref(storage, root, &head.author_registration)
-            .await
-            .map_err(map_membership_object_error)?
-            .value;
+    let registration = Box::pin(super::store_objects::load_registration_ref_with_root(
+        storage,
+        root,
+        root_value,
+        &head.author_registration,
+    ))
+    .await
+    .map_err(map_membership_object_error)?
+    .value;
     if registration.author_pubkey != coord.author_pubkey || !head.verify(&registration) {
         return Err(AnchoredChainError::LoadFailed(
             "membership head is not signed by its exact certified device".to_string(),
@@ -1513,10 +1538,31 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root_value = super::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .map_err(map_membership_object_error)?
-        .value;
+    let root_value = Box::pin(super::store_objects::load_store_protocol_root(
+        storage, root,
+    ))
+    .await
+    .map_err(map_membership_object_error)?
+    .value;
+    Box::pin(load_anchored_chain_at_exact_heads_with_root(
+        storage,
+        root,
+        &root_value,
+        owner_pubkey,
+        exact_heads,
+        exact_resolutions,
+    ))
+    .await
+}
+
+pub(crate) async fn load_anchored_chain_at_exact_heads_with_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    owner_pubkey: &str,
+    exact_heads: &[MembershipHeadRef],
+    exact_resolutions: &[StoreMembershipConflictResolutionRef],
+) -> Result<MembershipChain, AnchoredChainError> {
     validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
     if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {
         return Err(AnchoredChainError::LoadFailed(
@@ -1530,12 +1576,15 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
         let mut current = Some(requested.clone());
         let mut requested_head = None;
         while let Some(reference) = current {
-            let head = load_exact_membership_head(storage, root, &reference).await?;
-            let loaded_entry = super::store_objects::load_membership_entry_ref(
+            let head = Box::pin(load_exact_membership_head_with_root(
+                storage, root, root_value, &reference,
+            ))
+            .await?;
+            let loaded_entry = Box::pin(super::store_objects::load_membership_entry_ref(
                 storage,
                 root.store_root_hash,
                 &head.entry,
-            )
+            ))
             .await
             .map_err(map_membership_object_error)?;
             if loaded_entry.value.resolution_dependencies != head.resolutions {
@@ -1569,9 +1618,11 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
             "membership signed heads name a different resolution cut".to_string(),
         ));
     }
-    let founder_registration = super::store_objects::load_founder_registration(storage, root)
-        .await
-        .map_err(map_membership_object_error)?;
+    let founder_registration = Box::pin(super::store_objects::load_founder_registration_with_root(
+        storage, root, root_value,
+    ))
+    .await
+    .map_err(map_membership_object_error)?;
     let founder_registration_ref =
         super::store_commit::StoreDeviceRegistrationRef::from_registration(
             &founder_registration.value,
@@ -1583,7 +1634,13 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
         &root_value.descriptor.founder_provider_admin,
     );
     let entry_values = entries.values().cloned().collect::<Vec<_>>();
-    validate_provider_admin_records(storage, root, &root_value, &entry_values).await?;
+    Box::pin(validate_provider_admin_records(
+        storage,
+        root,
+        root_value,
+        &entry_values,
+    ))
+    .await?;
     let mut chain = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
         entries.into_iter().collect(),
         heads,
@@ -1593,11 +1650,11 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
     if !exact_resolutions.is_empty() {
         let mut resolutions = Vec::with_capacity(exact_resolutions.len());
         for reference in exact_resolutions {
-            let value = super::store_objects::load_membership_resolution_ref(
+            let value = Box::pin(super::store_objects::load_membership_resolution_ref(
                 storage,
                 root.store_root_hash,
                 reference,
-            )
+            ))
             .await
             .map_err(map_membership_object_error)?
             .value;
@@ -1636,10 +1693,14 @@ async fn validate_provider_admin_records(
         else {
             continue;
         };
-        let registration =
-            super::store_objects::load_registration_ref(storage, root, administrator)
-                .await
-                .map_err(map_membership_object_error)?;
+        let registration = Box::pin(super::store_objects::load_registration_ref_with_root(
+            storage,
+            root,
+            root_value,
+            administrator,
+        ))
+        .await
+        .map_err(map_membership_object_error)?;
         if registration.value.store_root != *root || registration.value.provider != *provider {
             return Err(AnchoredChainError::LoadFailed(
                 "provider administrator grant does not match its exact device registration"

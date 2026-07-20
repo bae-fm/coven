@@ -28,6 +28,8 @@ pub enum StoreAckError {
     InvalidOutbound(String),
     #[error("Store acknowledgement activation: {0}")]
     Outbound(#[from] super::store_outbound::StoreOutboundError),
+    #[error("Store acknowledgement snapshot: {0}")]
+    Snapshot(#[from] super::snapshot::SnapshotError),
 }
 
 impl From<crate::database::DbError> for StoreAckError {
@@ -39,6 +41,7 @@ impl From<crate::database::DbError> for StoreAckError {
 pub async fn stage_store_ack(
     db: &Database,
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
     frontier: CommitFrontier,
     last_sync: String,
     signer: &UserKeypair,
@@ -102,15 +105,15 @@ pub async fn stage_store_ack(
         None => (1, None, acknowledgement_first_slot(&registration)?.clone()),
     };
     let (device_state, _) = db.store_device_state_for_history_cut(&history_cut).await?;
-    let snapshot = match db.latest_local_store_snapshot().await? {
-        Some(snapshot) if frontier.covers(&snapshot.meta.coverage) => Some(snapshot.reference),
-        Some(_) => {
-            return Err(StoreAckError::InvalidOutbound(
-                "latest Store snapshot is outside the acknowledgement frontier".to_string(),
-            ))
-        }
-        None => None,
-    };
+    let snapshot = super::store_snapshot::select_store_snapshot_for_acknowledgement(
+        db,
+        storage,
+        coordination,
+        &root,
+        &frontier,
+        &device_state,
+    )
+    .await?;
     let proposal_freezes = db.store_device_exclusion_freezes().await?;
     let exclusions = match frontier {
         CommitFrontier::MergeConcurrent(_) => {
@@ -404,9 +407,22 @@ mod tests {
                 .expect("read acknowledgement frontier"),
         )
         .expect("shape acknowledgement frontier");
-        stage_store_ack(db, storage, frontier, last_sync.to_string(), signer)
-            .await
-            .expect("stage exact acknowledgement")
+        let coordination = match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => None,
+            crate::WritePolicy::Serial => {
+                Some(storage as &dyn super::super::storage::CoordinationStorage)
+            }
+        };
+        stage_store_ack(
+            db,
+            storage,
+            coordination,
+            frontier,
+            last_sync.to_string(),
+            signer,
+        )
+        .await
+        .expect("stage exact acknowledgement")
     }
 
     fn drain<'a>(

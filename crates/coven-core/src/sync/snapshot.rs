@@ -171,6 +171,7 @@ pub struct BootstrapResult {
         super::store_objects::VerifiedObject<super::store_commit::StoreDeviceRegistration>,
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: super::store_commit::CommitFrontier,
+    stability: super::store_pull::VerifiedStoreSnapshotStability,
 }
 
 impl BootstrapResult {
@@ -215,8 +216,16 @@ impl BootstrapResult {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
             let write_policy = self.coverage.policy();
+            let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
+                self.snapshot,
+                self.store_root,
+                self.founder_registration,
+                self.stability,
+            )
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             let (db, _stamper) = Database::open_initialized_store(
                 &requested,
+                install,
                 synced_tables,
                 blob_tombstone_grace,
                 transfer_limits,
@@ -225,14 +234,6 @@ impl BootstrapResult {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            db.install_bootstrap_state(
-                &self.coverage,
-                self.snapshot,
-                self.store_root,
-                self.founder_registration,
-            )
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             Ok(db)
         }
         .await;
@@ -597,6 +598,8 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(&tx)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let cleared_materialization_tables =
         ["materialized_commits", "retained_merge_materializations"];
     for table in cleared_materialization_tables {
@@ -749,6 +752,7 @@ pub fn should_create_snapshot(
 /// installs all bootstrap state in one database transaction.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     store_id: &str,
     expected_store_root: super::store_commit::StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
@@ -757,9 +761,10 @@ pub async fn bootstrap_from_snapshot(
 ) -> Result<BootstrapResult, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (store_root, write_policy, snapshot, plaintext) =
+    let (store_root, write_policy, snapshot, plaintext, stability) =
         super::store_snapshot::select_store_snapshot(
             storage,
+            serial_coordination,
             &expected_store_root,
             membership_floor,
             binary_schema_version,
@@ -793,6 +798,7 @@ pub async fn bootstrap_from_snapshot(
         founder_registration,
         snapshot,
         coverage,
+        stability,
     })
 }
 
@@ -952,7 +958,7 @@ mod tests {
             })
             .await
             .expect("create bootstrap database image");
-        crate::sync::test_helpers::publish_snapshot_fixture(
+        let published_snapshot = crate::sync::test_helpers::publish_snapshot_fixture(
             &store.storage,
             &store.root,
             image,
@@ -963,11 +969,31 @@ mod tests {
         )
         .await
         .expect("publish bootstrap database image");
+        crate::sync::store_ack::stage_store_ack(
+            &source,
+            &store.storage,
+            None,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            "2026-07-16T00:00:01Z".to_string(),
+            &signer,
+        )
+        .await
+        .expect("stage snapshot stability acknowledgement");
+        crate::sync::store_ack::drain_outbound_store_acks(
+            &source,
+            &store.storage,
+            None,
+            &signer,
+            Some(&membership),
+        )
+        .await
+        .expect("activate snapshot stability acknowledgement");
 
         let destination = tempfile::tempdir().expect("bootstrap destination");
         let database_path = destination.path().join("store.db");
         let bootstrap = bootstrap_from_snapshot(
             &store.storage,
+            None,
             "snapshot-bootstrap-exact-root",
             store.root.clone(),
             &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
@@ -994,8 +1020,80 @@ mod tests {
                 .local_store_root_ref()
                 .await
                 .expect("read installed Store root"),
-            Some(store.root),
+            Some(store.root.clone()),
         );
+        let baseline = installed
+            .call(Database::generation_zero_replay_baseline_on)
+            .await
+            .expect("load installed snapshot replay baseline");
+        assert_eq!(baseline.exact_cut, published_snapshot.coverage);
+        match &baseline.authority {
+            crate::sync::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) => {
+                assert_eq!(authority.store_root, store.root);
+                assert_eq!(authority.metadata, published_snapshot);
+            }
+            crate::sync::retained_replay::RetainedReplayAuthority::Genesis(_) => {
+                panic!("snapshot bootstrap installed a genesis replay baseline")
+            }
+        }
+        baseline
+            .validate_image()
+            .expect("validate snapshot replay baseline");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-bootstrap-requires-stability",
+            signer.clone(),
+        )
+        .await
+        .expect("create unstable bootstrap Store");
+        let membership = store
+            .open_into(&source)
+            .await
+            .expect("open unstable bootstrap Store membership");
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = crate::sync::test_helpers::test_synced_tables();
+        let image_tables = tables.clone();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &image_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create unstable bootstrap database image");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            image,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            &signer,
+            Some(&membership),
+            &source,
+        )
+        .await
+        .expect("publish unstable bootstrap database image");
+
+        let destination = tempfile::tempdir().expect("bootstrap destination");
+        let database_path = destination.path().join("store.db");
+        let result = bootstrap_from_snapshot(
+            &store.storage,
+            None,
+            "snapshot-bootstrap-requires-stability",
+            store.root,
+            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            1,
+            &database_path,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!database_path.exists());
     }
 
     #[tokio::test]
@@ -1035,12 +1133,18 @@ mod tests {
                         |row| row.get::<_, i64>(0),
                     )
                     .map_err(crate::database::DbError::from)?;
-                Ok::<_, crate::database::DbError>((materialized, retained))
+                let replay_objects = connection
+                    .query_row("SELECT COUNT(*) FROM retained_replay_objects", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(crate::database::DbError::from)?;
+                Ok::<_, crate::database::DbError>((materialized, retained, replay_objects))
             })
             .await
             .expect("count live materialization graph");
         assert!(live_counts.0 > 0);
         assert!(live_counts.1 > 0);
+        assert!(live_counts.2 > 0);
 
         let image_dir = tempfile::tempdir().expect("snapshot image directory");
         let image_path = image_dir.path().to_path_buf();
@@ -1056,7 +1160,11 @@ mod tests {
         let inspection_path = inspection_dir.path().join("snapshot.db");
         std::fs::write(&inspection_path, image).expect("write inspected snapshot");
         let snapshot = Connection::open(inspection_path).expect("open inspected snapshot");
-        for table in ["materialized_commits", "retained_merge_materializations"] {
+        for table in [
+            "materialized_commits",
+            "retained_replay_objects",
+            "retained_merge_materializations",
+        ] {
             let count = snapshot
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                     row.get::<_, i64>(0)

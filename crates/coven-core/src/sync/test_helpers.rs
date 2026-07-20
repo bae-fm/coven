@@ -1430,6 +1430,41 @@ pub async fn publish_snapshot_fixture(
     .map_err(|error| error.to_string())
 }
 
+pub async fn publish_store_ack_fixture(
+    db: &Database,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
+    frontier: crate::sync::store_commit::CommitFrontier,
+    signer: &UserKeypair,
+    membership: Option<&crate::sync::membership::MembershipChain>,
+) -> Result<(), String> {
+    crate::sync::store_ack::stage_store_ack(
+        db,
+        storage,
+        coordination,
+        frontier,
+        "2026-07-16T00:00:01Z".to_string(),
+        signer,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let published = crate::sync::store_ack::drain_outbound_store_acks(
+        db,
+        storage,
+        coordination,
+        signer,
+        membership,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if published != 1 {
+        return Err(format!(
+            "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run_cycle_fixture(
     db: &Database,
     storage: crate::sync::cloud_storage::CloudSyncStorage,

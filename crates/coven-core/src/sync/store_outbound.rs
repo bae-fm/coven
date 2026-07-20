@@ -1,5 +1,8 @@
 //! Durable construction and ordered publication of local Store commits.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::circle_activation::VerifiedCircleActivations;
 use super::membership::{MembershipChain, SerialAuthorizationState};
 use super::storage::{
@@ -1749,7 +1752,15 @@ pub async fn abandon_merge_candidate(
         crate::database::MergeAbandonmentState::None => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
                 super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                db.finish_retracted_merge_candidate_cleanup(write_id.clone())
+                    .await?;
                 return Ok(MergeCandidateAbandonment::Abandoned);
+            }
+            if matches!(
+                db.write_status(&write_id).await?,
+                crate::WriteStatus::Resolved(_)
+            ) {
+                return Ok(MergeCandidateAbandonment::NotRequired);
             }
             if let Some(candidate) = db.blocked_merge_candidate(write_id.clone()).await? {
                 if let Some(nonactivation) =
@@ -2344,8 +2355,7 @@ pub(crate) async fn drain_store_writes_with_coordination(
             Ok(true) => {}
             Err(error) => {
                 if let Some(block) = blocked_status(&error) {
-                    db.set_write_status(&write_id, crate::WriteStatus::Blocked(block))
-                        .await?;
+                    db.block_write_if_unresolved(&write_id, block).await?;
                 }
                 return Err(error);
             }
@@ -3335,8 +3345,9 @@ async fn record_preparation_failure(
     let Some(block) = blocked_status(error) else {
         return Ok(());
     };
-    db.set_write_status(write_id, crate::WriteStatus::Blocked(block))
+    db.block_write_if_unresolved(write_id, block)
         .await
+        .map(|_| ())
         .map_err(|status_error| {
             StoreOutboundError::Database(format!(
                 "record blocked status for write {write_id} after {error}: {status_error}"
@@ -3477,6 +3488,12 @@ async fn publish_prepared_remote_objects(
                         source,
                     }
                 })?;
+            }
+            super::remote_object::RemoteStoredRepresentation::ExternalExact { .. } => {
+                return Err(StoreOutboundError::InvalidOutbound(format!(
+                    "prepared outbound object {} has no locally stored representation",
+                    remote.object_id()
+                )));
             }
         }
         if prepared_state {
@@ -3804,6 +3821,42 @@ pub(crate) struct PreparedStoreOperationCommit {
 }
 
 impl PreparedStoreOperationCommit {
+    pub(crate) fn has_same_durable_activation_as(&self, other: &Self) -> bool {
+        self.reference == other.reference
+            && self.commit.to_bytes() == other.commit.to_bytes()
+            && self.prepared.reference() == other.prepared.reference()
+            && self.registration_activation == other.registration_activation
+            && match (&self.publication, &other.publication) {
+                (
+                    StoreOperationPublication::MergeConcurrent { head, prepared },
+                    StoreOperationPublication::MergeConcurrent {
+                        head: other_head,
+                        prepared: other_prepared,
+                    },
+                ) => {
+                    head.to_bytes() == other_head.to_bytes()
+                        && prepared.reference() == other_prepared.reference()
+                }
+                (
+                    StoreOperationPublication::Serial {
+                        base_head,
+                        head,
+                        authorization_after,
+                    },
+                    StoreOperationPublication::Serial {
+                        base_head: other_base_head,
+                        head: other_head,
+                        authorization_after: other_authorization_after,
+                    },
+                ) => {
+                    base_head == other_base_head
+                        && head.to_bytes() == other_head.to_bytes()
+                        && authorization_after == other_authorization_after
+                }
+                _ => false,
+            }
+    }
+
     pub(crate) fn merge_publication(&self) -> Option<(&StoreDeviceHead, &PreparedExactObject)> {
         match &self.publication {
             StoreOperationPublication::MergeConcurrent { head, prepared } => Some((head, prepared)),
@@ -4555,141 +4608,157 @@ async fn resolve_serial_store_operation_conflict(
     }
 }
 
-async fn publish_prepared_merge_store_operation(
-    db: &Database,
-    storage: &dyn SyncStorage,
+fn publish_prepared_merge_store_operation<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
     root: StoreRootRef,
     activation: PreparedStoreOperationActivation,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    let commit = activation.candidate.commit.clone();
-    let prepared = activation.candidate.prepared.clone();
-    let reference = activation.candidate.reference.clone();
-    let commit_context = ProtocolObjectContext::signed_plaintext(
-        commit.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Merge operation candidate carries a Serial coordinate".to_string(),
-        ));
-    };
-    let commit_prefix = commit_semantic_prefix(
-        commit.candidate_family(),
-        &stream_id.to_string(),
-        commit.seq(),
-        commit.commit_hash(),
-    );
-    storage
-        .create_protocol_object(&prepared)
-        .await
-        .map_err(StoreObjectError::from)?;
-    let opened = storage
-        .read_protocol_object(&commit_context, &reference.object, &commit_prefix)
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened != commit.to_bytes() {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Store operation commit exact readback differs from its signed bytes".to_string(),
-        ));
-    }
-    if !activation.retained_operation_objects.is_empty() {
-        db.mark_candidate_commit_uploaded(reference.clone()).await?;
-    }
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        commit.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let head_prefix = head_slot_prefix(
-        &commit.author_registration.device_id.to_string(),
-        commit.seq(),
-    );
-    match storage.create_protocol_object(&prepared_head).await {
-        Ok(()) => {}
-        Err(StorageError::SlotCollision(_)) => {
-            return Box::pin(resolve_merge_store_operation_head_collision(
-                db,
-                storage,
-                activation,
-                commit,
-                reference,
-                head,
-                prepared_head,
-                head_prefix,
-            ))
-            .await;
+) -> Pin<
+    Box<
+        dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreOutboundError>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let commit = activation.candidate.commit.clone();
+        let prepared = activation.candidate.prepared.clone();
+        let reference = activation.candidate.reference.clone();
+        let commit_context = ProtocolObjectContext::signed_plaintext(
+            commit.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge operation candidate carries a Serial coordinate".to_string(),
+            ));
+        };
+        let commit_prefix = commit_semantic_prefix(
+            commit.candidate_family(),
+            &stream_id.to_string(),
+            commit.seq(),
+            commit.commit_hash(),
+        );
+        storage
+            .create_protocol_object(&prepared)
+            .await
+            .map_err(StoreObjectError::from)?;
+        let opened = storage
+            .read_protocol_object(&commit_context, &reference.object, &commit_prefix)
+            .await
+            .map_err(StoreObjectError::from)?;
+        if opened != commit.to_bytes() {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Store operation commit exact readback differs from its signed bytes".to_string(),
+            ));
         }
-        Err(error) => return Err(StoreObjectError::from(error).into()),
-    }
-    let opened_head = storage
-        .read_protocol_object(&head_context, prepared_head.reference(), &head_prefix)
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened_head != head.to_bytes() {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Store operation head exact readback differs from its signed bytes".to_string(),
-        ));
-    }
-    let activation_head = StoreDeviceHeadRef {
-        head_hash: head.head_hash(),
-        object: prepared_head.reference().clone(),
-    };
-    let operation_object_ids = if !activation.retained_operation_objects.is_empty() {
-        db.mark_store_head_uploaded(activation_head.clone()).await?;
-        Some(
-            std::iter::once(super::remote_object::remote_object_id(&reference.object))
-                .chain(
-                    activation
-                        .retained_operation_objects
-                        .iter()
-                        .map(super::remote_object::remote_object_id),
-                )
-                .chain(std::iter::once(super::remote_object::remote_object_id(
-                    prepared_head.reference(),
-                )))
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
-    let recorded_ref = reference.clone();
-    let registrations = activation
-        .candidate
-        .registration_activation
-        .into_iter()
-        .map(|activation| (activation.registration, activation.authority))
-        .collect::<Vec<_>>();
-    let device_operations = activation.device_operations;
-    let circle_activations = VerifiedCircleActivations::none(&commit, &recorded_ref)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    db.call(move |connection| {
-        let tx = connection
-            .unchecked_transaction()
-            .map_err(crate::database::DbError::from)?;
-        if let Some(object_ids) = operation_object_ids {
-            Database::activate_store_operation_remote_objects_on(&tx, &recorded_ref, &object_ids)?;
+        if !activation.retained_operation_objects.is_empty() {
+            db.mark_candidate_commit_uploaded(reference.clone()).await?;
         }
-        if !registrations.is_empty() {
-            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            commit.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let head_prefix = head_slot_prefix(
+            &commit.author_registration.device_id.to_string(),
+            commit.seq(),
+        );
+        match storage.create_protocol_object(&prepared_head).await {
+            Ok(()) => {}
+            Err(StorageError::SlotCollision(_)) => {
+                return Box::pin(resolve_merge_store_operation_head_collision(
+                    db,
+                    storage,
+                    activation,
+                    commit,
+                    reference,
+                    head,
+                    prepared_head,
+                    head_prefix,
+                ))
+                .await;
+            }
+            Err(error) => return Err(StoreObjectError::from(error).into()),
         }
-        let materialization = VerifiedMergeMaterialization::verify(
-            &root,
-            &commit,
-            &recorded_ref,
-            &registrations,
-            &device_operations,
-            &circle_activations,
-            &head,
-            &activation_head.object,
-            &[],
-            None,
-        )?;
-        Database::record_verified_merge_materialization_on(&tx, materialization)?;
-        tx.commit().map_err(crate::database::DbError::from)
+        let opened_head = storage
+            .read_protocol_object(&head_context, prepared_head.reference(), &head_prefix)
+            .await
+            .map_err(StoreObjectError::from)?;
+        if opened_head != head.to_bytes() {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Store operation head exact readback differs from its signed bytes".to_string(),
+            ));
+        }
+        let activation_head = StoreDeviceHeadRef {
+            head_hash: head.head_hash(),
+            object: prepared_head.reference().clone(),
+        };
+        let operation_object_ids = if !activation.retained_operation_objects.is_empty() {
+            db.mark_store_head_uploaded(activation_head.clone()).await?;
+            Some(
+                std::iter::once(super::remote_object::remote_object_id(&reference.object))
+                    .chain(
+                        activation
+                            .retained_operation_objects
+                            .iter()
+                            .map(super::remote_object::remote_object_id),
+                    )
+                    .chain(std::iter::once(super::remote_object::remote_object_id(
+                        prepared_head.reference(),
+                    )))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let recorded_ref = reference.clone();
+        let registrations = activation
+            .candidate
+            .registration_activation
+            .into_iter()
+            .map(|activation| (activation.registration, activation.authority))
+            .collect::<Vec<_>>();
+        let device_operations = activation.device_operations;
+        let circle_activations = VerifiedCircleActivations::none(&commit, &recorded_ref)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        db.call(move |connection| {
+            let tx = connection
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            if let Some(object_ids) = operation_object_ids {
+                Database::activate_store_operation_remote_objects_on(
+                    &tx,
+                    &recorded_ref,
+                    &object_ids,
+                )?;
+            }
+            if !registrations.is_empty() {
+                Database::record_activated_store_device_registrations_on(
+                    &tx,
+                    &commit,
+                    &registrations,
+                )?;
+            }
+            let materialization = VerifiedMergeMaterialization::verify(
+                &root,
+                &commit,
+                &recorded_ref,
+                &registrations,
+                &device_operations,
+                &circle_activations,
+                &head,
+                &activation_head.object,
+                &[],
+                None,
+            )?;
+            Database::record_verified_merge_materialization_on(&tx, materialization)?;
+            tx.commit().map_err(crate::database::DbError::from)
+        })
+        .await?;
+        Ok(StoreOperationPublicationOutcome::Activated(reference))
     })
-    .await?;
-    Ok(StoreOperationPublicationOutcome::Activated(reference))
 }
 
 async fn resolve_merge_store_operation_head_collision(
@@ -7054,12 +7123,21 @@ mod tests {
                         super::super::remote_object::OwnedObjectState::UploadedVerified {
                             ownership
                         } if ownership.pending.is_empty()
-                            && ownership.activated
-                                == std::collections::BTreeSet::from([
-                                    super::super::remote_object::SharedObjectOwner::StoreCommit(
-                                        fixture.commit_ref.clone()
-                                    )
-                                ])
+                            && ownership.activated.contains(
+                                &super::super::remote_object::SharedObjectOwner::StoreCommit(
+                                    fixture.commit_ref.clone()
+                                )
+                            )
+                            && ownership.activated.iter().any(|owner| matches!(
+                                owner,
+                                super::super::remote_object::SharedObjectOwner::RetainedReplay(
+                                    super::super::remote_object::RetainedReplayOwner::Commit {
+                                        commit,
+                                        ..
+                                    }
+                                ) if commit == &fixture.commit_ref
+                            ))
+                            && ownership.activated.len() == 2
                     )
         ));
         let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;

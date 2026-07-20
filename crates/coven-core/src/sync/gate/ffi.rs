@@ -61,7 +61,7 @@ unsafe fn extract_value(
     let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
     let rc = read_value(iter, col, &mut val);
     if rc != ffi::SQLITE_OK as c_int || val.is_null() {
-        return (rc == ffi::SQLITE_OK as c_int, None);
+        return (false, None);
     }
     (true, value_to_string(val))
 }
@@ -330,5 +330,53 @@ impl ChangeRow {
             x if x == ffi::SQLITE_DELETE => self.old_truth(col),
             _ => self.new_truth(col).or_else(|| self.old_truth(col)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn changeset_values_distinguish_unchanged_columns_from_sql_null() {
+        let connection = Connection::open_in_memory().expect("open changeset database");
+        connection
+            .execute_batch(
+                "CREATE TABLE rows (
+                     id TEXT PRIMARY KEY,
+                     parent_id TEXT NOT NULL,
+                     nullable TEXT,
+                     changed TEXT NOT NULL
+                 ) STRICT;
+                 INSERT INTO rows VALUES ('row', 'parent', 'present', 'before');",
+            )
+            .expect("create changeset row");
+        let mut session = rusqlite::session::Session::new(&connection).expect("create session");
+        session.attach(Some("rows")).expect("attach rows");
+        connection
+            .execute(
+                "UPDATE rows SET nullable = NULL, changed = 'after' WHERE id = 'row'",
+                [],
+            )
+            .expect("update row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract changeset");
+
+        let mut rows = Vec::new();
+        unsafe {
+            for_each_change(&changeset, |_iter, row| {
+                rows.push(row);
+                Ok(())
+            })
+        }
+        .expect("walk changeset");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].new_value(1), None);
+        assert_eq!(rows[0].new_value(2), Some(None));
+        assert_eq!(rows[0].new_value(3), Some(Some("after")));
     }
 }

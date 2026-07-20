@@ -22,7 +22,9 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 }
 #[tokio::test]
 async fn device_join_client_four_transfer_retries_and_process_restarts_preserve_exact_state() {
-    Box::pin(run_device_join_client_four_transfer_retries_and_process_restarts()).await;
+    tokio::spawn(run_device_join_client_four_transfer_retries_and_process_restarts())
+        .await
+        .expect("device join state-machine task");
 }
 
 async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
@@ -73,17 +75,29 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         })
         .await
         .expect("create join snapshot");
+    let snapshot_coverage =
+        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &store.storage,
         &store.root,
         snapshot,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        snapshot_coverage.clone(),
         &owner,
         Some(&membership),
         &owner_db,
     )
     .await
     .expect("publish join snapshot");
+    publish_store_ack_fixture(
+        &owner_db,
+        &store.storage,
+        None,
+        snapshot_coverage,
+        &owner,
+        Some(&membership),
+    )
+    .await
+    .expect("publish join snapshot acknowledgement");
     let authorization =
         crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(membership);
     let invite_code = encode(&invite);

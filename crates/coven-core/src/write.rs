@@ -109,6 +109,50 @@ pub enum WriteStatus {
 pub enum WriteResolution {
     Discarded,
     Replaced { replacement: WriteId },
+    Retracted { witness: WriteRetractionWitness },
+}
+
+/// Durable proof that a previously published write cannot activate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteRetractionWitness {
+    original: PublishedPosition,
+    nonactivation: crate::sync::remote_object::CandidateNonactivation,
+}
+
+impl WriteRetractionWitness {
+    pub(crate) fn new(
+        original: PublishedPosition,
+        nonactivation: crate::sync::remote_object::CandidateNonactivation,
+    ) -> Result<Self, String> {
+        let candidate = nonactivation
+            .reference()
+            .map_err(|error| error.to_string())?;
+        if original.commit() != &candidate {
+            return Err("write retraction proof names another published commit".to_string());
+        }
+        let witness = Self {
+            original,
+            nonactivation,
+        };
+        witness.validate()?;
+        Ok(witness)
+    }
+
+    pub fn original_position(&self) -> &PublishedPosition {
+        &self.original
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let candidate = self
+            .nonactivation
+            .reference()
+            .map_err(|error| error.to_string())?;
+        if self.original.commit() != &candidate {
+            return Err("write retraction proof names another published commit".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// One table/primary-key identity affected by the shared part of a write.

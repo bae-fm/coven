@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use tracing::debug;
 
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
-use super::model::{foreign_keys, rows_referencing, GateColumn, Gates, TableGate};
+use super::model::{foreign_keys, rows_referencing, truthy, GateColumn, Gates, TableGate};
 use super::outbound::{
     full_state_diff, gate_store_outbound, query_column_text, row_id_for_column_value,
     FullStateDirection,
@@ -398,6 +398,16 @@ fn delete_scoped_rows(
         row_ids.sort();
         for row_id in row_ids {
             conn.execute(
+                "DELETE FROM row_blob_locators WHERE table_name = ?1 AND row_id = ?2",
+                (&table, row_id),
+            )
+            .map_err(|error| {
+                GateError::Sql(
+                    format!("delete ineligible row blob bindings {table}.{row_id}"),
+                    error,
+                )
+            })?;
+            conn.execute(
                 &format!(
                     "DELETE FROM {} WHERE {} = ?1",
                     quote_ident(&table),
@@ -424,6 +434,24 @@ fn delete_scoped_rows(
                 })?;
             }
         }
+        conn.execute(
+            &format!(
+                "DELETE FROM row_blob_locators AS locator
+                 WHERE locator.table_name = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM {table} AS host WHERE host.{id} = locator.row_id
+                   )",
+                table = quote_ident(&table),
+                id = quote_ident("id"),
+            ),
+            [&table],
+        )
+        .map_err(|error| {
+            GateError::Sql(
+                format!("delete orphaned row blob bindings for {table}"),
+                error,
+            )
+        })?;
         if has_routing_tables {
             conn.execute(
                 &format!(
@@ -458,38 +486,48 @@ unsafe fn partition_outbound_raw(
     let mut ancestor_deletes = HashSet::new();
     let captured_deletes = collect_deletes(changeset)?;
     let mut non_local_deletes = HashSet::new();
-    let serial_deleted_rows = if write_policy == WritePolicy::Serial {
-        captured_deleted_audiences(conn, &captured_deletes, gates)?
-    } else {
-        BTreeMap::new()
-    };
+    let deleted_audiences = captured_deleted_audiences(conn, &captured_deletes, gates)?;
     let store_changeset = gate_store_outbound(conn, changeset, gates)?;
-    for_each_change(&store_changeset, |iter, _row| {
+    let mut store_rows = HashSet::new();
+    for_each_change(&store_changeset, |iter, row| {
+        let row_id = row
+            .pk()
+            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+        store_rows.insert((row.table.clone(), row_id.to_string()));
         partition_group(conn, &mut groups, Audience::Store, write_policy)?
             .group
             .add_change(iter)?;
         Ok(())
     })?;
     for_each_change(changeset, |iter, row| {
-        if !gates.table_is_scoped(&row.table) {
+        if !gates.tables.contains_key(&row.table) {
             return Ok(());
         }
-        validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
-        if let Some((source, destination)) = scoped_row_move(conn, gates, &row)? {
+        if gates.table_is_scoped(&row.table) {
+            validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
+        }
+        if let Some((source, destination)) = row_audience_move(conn, gates, &row)? {
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
             moves.push((source, destination, (row.table.clone(), row_id.to_string())));
             return Ok(());
         }
-        let audience = if row.op == ffi::SQLITE_DELETE {
-            let row_id = row
-                .pk()
-                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+        let row_id = row
+            .pk()
+            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+        let row_key = (row.table.clone(), row_id.to_string());
+        let audience = if !gates.table_is_scoped(&row.table) {
+            if store_rows.contains(&row_key) {
+                Audience::Store
+            } else {
+                Audience::Local
+            }
+        } else if row.op == ffi::SQLITE_DELETE {
             routing
                 .deleted_rows
-                .get(&(row.table.clone(), row_id.to_string()))
-                .or_else(|| serial_deleted_rows.get(&(row.table.clone(), row_id.to_string())))
+                .get(&row_key)
+                .or_else(|| deleted_audiences.get(&row_key))
                 .cloned()
                 .map(Ok)
                 .unwrap_or_else(|| change_audience(conn, gates, &row))?
@@ -497,22 +535,17 @@ unsafe fn partition_outbound_raw(
             change_audience(conn, gates, &row)?
         };
         if audience != Audience::Local {
-            let row_id = row
-                .pk()
-                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
             if row.op == ffi::SQLITE_INSERT {
-                let component = scoped_materialization_rows(
-                    conn,
-                    gates,
-                    (row.table.clone(), row_id.to_string()),
-                )?;
+                let component = scoped_materialization_rows(conn, gates, row_key.clone())?;
                 ancestor_inserts.extend(required_store_ancestors(conn, gates, &component)?);
             } else if row.op == ffi::SQLITE_DELETE {
-                non_local_deletes.insert((row.table.clone(), row_id.to_string()));
+                non_local_deletes.insert(row_key);
             }
         }
-        let partition = partition_group(conn, &mut groups, audience, write_policy)?;
-        partition.group.add_change(iter)?;
+        if gates.table_is_scoped(&row.table) || audience == Audience::Local {
+            let partition = partition_group(conn, &mut groups, audience, write_policy)?;
+            partition.group.add_change(iter)?;
+        }
         Ok(())
     })?;
     for (table, id) in required_store_ancestors_for_deleted_rows(
@@ -657,7 +690,7 @@ fn captured_deleted_audiences(
     let mut audiences = BTreeMap::new();
     for key in deleted
         .keys()
-        .filter(|(table, _)| gates.table_is_scoped(table))
+        .filter(|(table, _)| gates.tables.contains_key(table))
     {
         let audience = resolve_deleted_audience(conn, gates, deleted, key, &mut HashSet::new())?;
         audiences.insert(key.clone(), audience);
@@ -690,6 +723,15 @@ fn resolve_deleted_audience(
                 reason: error.to_string(),
             })
         }
+        Some(TableGate::Root { gate_col }) => {
+            let kept = row.old_value(gate_col.index).flatten().is_some_and(truthy);
+            Ok(if kept {
+                Audience::Store
+            } else {
+                Audience::Local
+            })
+        }
+        Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => Ok(Audience::Store),
         Some(TableGate::Child {
             fk_col,
             parent,
@@ -865,7 +907,7 @@ fn routing_transitions(
                 );
                 return Ok(());
             }
-            let Some((_source, destination)) = scoped_row_move(conn, gates, &row)? else {
+            let Some((_source, destination)) = row_audience_move(conn, gates, &row)? else {
                 return Ok(());
             };
             let stamp = live_row_stamp(conn, &row.table, row_id)?;
@@ -1111,7 +1153,7 @@ unsafe fn partition_group<'a>(
     }
 }
 
-fn scoped_row_move(
+fn row_audience_move(
     conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
@@ -1133,6 +1175,20 @@ fn scoped_row_move(
                 })
             };
             (parse(source_value)?, parse(destination_value)?)
+        }
+        Some(TableGate::Root { gate_col }) => {
+            let Some(destination_value) = row.new_value(gate_col.index) else {
+                return Ok(None);
+            };
+            let source_value = row.old_value(gate_col.index).flatten();
+            let audience = |value: Option<&str>| {
+                if value.is_some_and(truthy) {
+                    Audience::Store
+                } else {
+                    Audience::Local
+                }
+            };
+            (audience(source_value), audience(destination_value))
         }
         Some(TableGate::Child {
             fk_col,
@@ -1168,10 +1224,7 @@ fn scoped_row_move(
             };
             (resolve(source_key)?, resolve(destination_key)?)
         }
-        None
-        | Some(TableGate::Root { .. })
-        | Some(TableGate::RemoteRoot)
-        | Some(TableGate::Parent { .. }) => return Ok(None),
+        None | Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => return Ok(None),
     };
     Ok((source != destination).then_some((source, destination)))
 }
@@ -1228,6 +1281,25 @@ fn change_audience(
                 reason: error.to_string(),
             })
         }
+        Some(TableGate::Root { gate_col }) => {
+            let value = match row.op {
+                op if op == ffi::SQLITE_INSERT => row
+                    .new
+                    .get(gate_col.index)
+                    .and_then(|value| value.as_deref()),
+                _ => {
+                    let row_id = row
+                        .pk()
+                        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+                    return live_row_audience(conn, gates, &row.table, row_id);
+                }
+            };
+            Ok(if value.is_some_and(truthy) {
+                Audience::Store
+            } else {
+                Audience::Local
+            })
+        }
         Some(TableGate::Child {
             fk_col,
             parent,
@@ -1242,10 +1314,8 @@ fn change_audience(
             })?;
             live_row_audience(conn, gates, parent, &parent_id)
         }
-        None
-        | Some(TableGate::Root { .. })
-        | Some(TableGate::RemoteRoot)
-        | Some(TableGate::Parent { .. }) => {
+        Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => Ok(Audience::Store),
+        None => {
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
@@ -1413,6 +1483,21 @@ mod tests {
     use crate::sync::session::{RowIdentity, SyncedTable};
     use rusqlite::session::Session;
 
+    fn row_blob_locator_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE row_blob_locators (
+                 table_name TEXT NOT NULL,
+                 row_id TEXT NOT NULL,
+                 column_name TEXT NOT NULL,
+                 row_stamp TEXT NOT NULL,
+                 audience_authority TEXT NOT NULL CHECK (json_valid(audience_authority)),
+                 remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
+                 PRIMARY KEY (table_name, row_id, column_name, row_stamp)
+             ) STRICT;",
+        )
+        .expect("create row blob locator schema");
+    }
+
     fn routing_schema(conn: &Connection) {
         conn.execute_batch(
             "CREATE TABLE notes (
@@ -1435,6 +1520,7 @@ mod tests {
              ) STRICT;",
         )
         .expect("create inbound audience test schema");
+        row_blob_locator_schema(conn);
     }
 
     fn note_gates(conn: &Connection) -> Gates {
@@ -1703,6 +1789,7 @@ mod tests {
              ) STRICT;",
         )
         .expect("create Serial scoped schema");
+        row_blob_locator_schema(&conn);
         let inactive = CircleId::from_bytes([1; 16]);
         let active = CircleId::from_bytes([2; 16]);
         conn.execute(

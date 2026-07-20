@@ -9,7 +9,9 @@
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -37,24 +39,26 @@ use crate::sync::membership::{
 };
 use crate::sync::provider::ProviderAdminState;
 use crate::sync::remote_object::{
-    remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, SharedLiveSetObjectDomain,
+    remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
+    SharedLiveSetObjectDomain,
 };
 use crate::sync::retained_replay::{
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, GENERATION_ZERO,
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    RetainedReplaySnapshotAuthority, GENERATION_ZERO,
 };
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionedObject};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceOperations,
-    RetainedStoreDeviceRegistrationActivations, SnapshotImageRef, SnapshotMeta, StoreAck,
-    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
+    RetainedStoreDeviceOperations, RetainedStoreDeviceRegistrationActivations, SnapshotImageRef,
+    SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot, StoreSerialHead, StoreSerialHeadState,
-    StoreSerialPredecessor, StoreSnapshotRef, StreamActivationId, VerifiedStoreDeviceOperations,
-    SERIAL_STREAM_ID,
+    StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSerialHead,
+    StoreSerialHeadState, StoreSerialPredecessor, StoreSnapshotRef, StreamActivationId,
+    VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use crate::sync::store_device_exclusion::{
     DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
@@ -372,6 +376,13 @@ fn apply_store_device_exclusion_freezes_on(
         }
     }
     desired.sort_by_key(|freeze| freeze.proposal.proposal_id);
+    replace_store_device_exclusion_freezes_on(conn, &desired)
+}
+
+fn replace_store_device_exclusion_freezes_on(
+    conn: &Connection,
+    desired: &[StoreDeviceProposalAck],
+) -> Result<(), DbError> {
     conn.execute("DELETE FROM store_device_exclusion_freezes", [])
         .map_err(DbError::from)?;
     for freeze in desired {
@@ -623,10 +634,125 @@ struct DatabaseCore {
     write_policy: WritePolicy,
 }
 
-#[derive(Clone, Copy)]
+pub(crate) struct VerifiedSnapshotBootstrapInstall {
+    snapshot: PublishedStoreSnapshot,
+    store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
+    founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
+    stability: RetainedReplaySnapshotAuthority,
+}
+
+impl VerifiedSnapshotBootstrapInstall {
+    pub(crate) fn new(
+        snapshot: PublishedStoreSnapshot,
+        store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
+        founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
+        stability: crate::sync::store_pull::VerifiedStoreSnapshotStability,
+    ) -> Result<Self, DbError> {
+        if store_root.value.to_bytes() != store_root.bytes
+            || store_root.value.object_hash() != store_root.semantic_hash
+        {
+            return Err(DbError::Message(
+                "bootstrap Store root differs from its verified object".to_string(),
+            ));
+        }
+        let root = crate::sync::store_commit::StoreRootRef {
+            store_root_id: store_root.value.descriptor.store_root_id(),
+            store_root_hash: store_root.semantic_hash,
+            object: store_root.object.clone(),
+        };
+        let founder_reference =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        if founder.semantic_hash != founder_reference.registration_hash {
+            return Err(DbError::Message(
+                "bootstrap founder semantic hash differs from its exact registration".to_string(),
+            ));
+        }
+        let stability = stability.into_authority();
+        stability.validate()?;
+        if stability.store_root != root
+            || stability.founder_registration != founder_reference
+            || stability.snapshot != snapshot.reference
+            || stability.metadata != snapshot.meta
+            || snapshot.meta.successor.next_slot != snapshot.successor_slot
+            || snapshot.meta.coverage.policy() != store_root.value.descriptor.write_policy
+        {
+            return Err(DbError::Message(
+                "bootstrap snapshot differs from its verified stability authority".to_string(),
+            ));
+        }
+        Ok(Self {
+            snapshot,
+            store_root,
+            founder,
+            stability,
+        })
+    }
+
+    fn install_on(
+        &self,
+        conn: &Connection,
+        write_policy: WritePolicy,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        let root = crate::sync::store_commit::StoreRootRef {
+            store_root_id: self.store_root.value.descriptor.store_root_id(),
+            store_root_hash: self.store_root.semantic_hash,
+            object: self.store_root.object.clone(),
+        };
+        let founder_reference = StoreDeviceRegistrationRef::from_registration(
+            &self.founder.value,
+            self.founder.object.clone(),
+        );
+        let genesis = ResolvedStoreDeviceState::founder(
+            &root,
+            founder_reference.clone(),
+            &self.store_root.value.descriptor.founder_pubkey,
+            self.store_root.value.descriptor.founder_grant.clone(),
+            &self.store_root.value.descriptor.founder_recovery,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        validate_snapshot_object_owners_on(conn, &root, &self.snapshot.meta)?;
+        install_store_root_authority_on(conn, &root, &self.store_root.bytes)?;
+        install_store_founder_state_on(
+            conn,
+            &root,
+            &founder_reference,
+            &self.founder.value,
+            &self.founder.bytes,
+            &genesis,
+        )?;
+        conn.execute("DELETE FROM snapshot_coverage", [])
+            .map_err(DbError::from)?;
+        for (stream_id, reference) in self.snapshot.meta.coverage.clone().into_refs() {
+            let encoded = serde_json::to_string(&reference).map_err(|error| {
+                DbError::Message(format!("serialize snapshot exact commit ref: {error}"))
+            })?;
+            conn.execute(
+                "INSERT INTO snapshot_coverage
+                 (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    &stream_id,
+                    Database::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
+                    encoded,
+                    self.snapshot.reference.snapshot_hash.to_string(),
+                ),
+            )
+            .map_err(DbError::from)?;
+        }
+        install_snapshot_replay_baseline_on(
+            conn,
+            write_policy,
+            schema_version,
+            routing_hash,
+            self.stability.clone(),
+        )
+    }
+}
+
 enum CovenMetadataOpen {
     Detect,
-    InitializeVerifiedSnapshot,
+    VerifiedSnapshot(Box<VerifiedSnapshotBootstrapInstall>),
 }
 
 fn serialized_write_policy(write_policy: WritePolicy) -> Result<String, DbError> {
@@ -866,8 +992,8 @@ impl DatabaseCore {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
-        let initialized = match metadata_open {
-            CovenMetadataOpen::InitializeVerifiedSnapshot => false,
+        let initialized = match &metadata_open {
+            CovenMetadataOpen::VerifiedSnapshot(_) => false,
             CovenMetadataOpen::Detect => {
                 let initialized = has_coven_initialization_marker(&conn)?;
                 if !initialized
@@ -923,6 +1049,9 @@ impl DatabaseCore {
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
                     .map_err(|error| DbError::Message(error.to_string()))?;
+                if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
+                    install.install_on(&tx, write_policy, schema_version, resolved.hash())?;
+                }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();
             match outcome {
@@ -1171,6 +1300,11 @@ pub(crate) struct PreparedStoreWritePartitions {
     pub local: Option<gate::AudiencePartition>,
 }
 
+pub(crate) struct MergeReplayWriteOverlay {
+    pub(crate) write_id: WriteId,
+    pub(crate) partitions: PreparedStoreWritePartitions,
+}
+
 #[derive(Clone, Copy)]
 enum StoreWriteRouting<'a> {
     Unscoped,
@@ -1298,6 +1432,18 @@ pub(crate) struct AuthorExclusionActivationLocator {
 }
 
 impl AuthorExclusionActivationLocator {
+    pub(crate) fn verified(
+        exclusion: crate::sync::store_commit::StoreDeviceExclusionRef,
+        accepted_cut: BTreeMap<crate::sync::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+        activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
+    ) -> Self {
+        Self {
+            exclusion,
+            accepted_cut,
+            activation_head,
+        }
+    }
+
     pub(crate) fn exclusion(&self) -> &crate::sync::store_commit::StoreDeviceExclusionRef {
         &self.exclusion
     }
@@ -1627,40 +1773,40 @@ fn install_store_root_authority_on(
     .map_err(DbError::from)
 }
 
-fn validate_generation_zero_replay_authority_on(
+fn validate_replay_authority_on(
     conn: &Connection,
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
     let (root_ref, root) = load_store_root_authority_on(conn)?.ok_or_else(|| {
-        DbError::Message("retained replay genesis image has no Store root authority".to_string())
+        DbError::Message("retained replay image has no Store root authority".to_string())
     })?;
-    if root_ref != baseline.authority.store_root
+    let (authority_root, founder_registration) = match &baseline.authority {
+        RetainedReplayAuthority::Genesis(authority) => {
+            (&authority.store_root, &authority.founder_registration)
+        }
+        RetainedReplayAuthority::StableSnapshot(authority) => {
+            authority.validate()?;
+            (&authority.store_root, &authority.founder_registration)
+        }
+    };
+    if &root_ref != authority_root
         || root.descriptor.write_policy != baseline.write_policy
         || root.descriptor.schema_version != baseline.schema_version
         || root.descriptor.sync_routing_hash != baseline.routing_hash
     {
         return Err(DbError::Message(
-            "retained replay genesis authority differs from its Store root".to_string(),
+            "retained replay authority differs from its Store root".to_string(),
         ));
     }
-    let founder =
-        load_activated_registration_on(conn, &root_ref, &baseline.authority.founder_registration)?;
+    let founder = load_activated_registration_on(conn, &root_ref, founder_registration)?;
     let authority: String = conn
         .query_row(
             "SELECT activation_authority
              FROM store_device_registration_activations
              WHERE device_id = ?1 AND registration_hash = ?2",
             (
-                baseline
-                    .authority
-                    .founder_registration
-                    .device_id
-                    .to_string(),
-                baseline
-                    .authority
-                    .founder_registration
-                    .registration_hash
-                    .to_string(),
+                founder_registration.device_id.to_string(),
+                founder_registration.registration_hash.to_string(),
             ),
             |row| row.get(0),
         )
@@ -1674,12 +1820,24 @@ fn validate_generation_zero_replay_authority_on(
     if founder.store_root != root_ref
         || authority
             != (crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
-                root: root_ref,
+                root: root_ref.clone(),
             })
     {
         return Err(DbError::Message(
-            "retained replay genesis founder differs from its exact activation".to_string(),
+            "retained replay founder differs from its exact activation".to_string(),
         ));
+    }
+    if let RetainedReplayAuthority::StableSnapshot(authority) = &baseline.authority {
+        for registration in authority.active_registrations.values() {
+            let installed =
+                load_activated_registration_on(conn, &root_ref, &registration.reference)?;
+            if installed != registration.value {
+                return Err(DbError::Message(
+                    "retained snapshot active registration differs from its installed authority"
+                        .to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1689,7 +1847,7 @@ fn validate_generation_zero_replay_baseline_on(
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
     baseline.validate_image()?;
-    validate_generation_zero_replay_authority_on(conn, baseline)?;
+    validate_replay_authority_on(conn, baseline)?;
     let image = crate::sync::retained_replay::open_image(&baseline.image_bytes)?;
     let routing = load_coven_metadata(&image, baseline.write_policy)?;
     if routing.hash() != baseline.routing_hash {
@@ -1701,7 +1859,7 @@ fn validate_generation_zero_replay_baseline_on(
         &image,
         baseline.write_policy == WritePolicy::MergeConcurrent && routing.has_scoped_graph(),
     )?;
-    validate_generation_zero_replay_authority_on(&image, baseline)
+    validate_replay_authority_on(&image, baseline)
 }
 
 struct StoredGenerationZeroReplayBaseline {
@@ -1750,8 +1908,8 @@ fn load_generation_zero_replay_baseline_on(
         .map_err(|error| DbError::Message(format!("retained replay write policy: {error}")))?;
     let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
         .map_err(|error| DbError::Message(format!("retained replay exact cut: {error}")))?;
-    let authority: RetainedReplayGenesisAuthority = serde_json::from_slice(&stored.authority_bytes)
-        .map_err(|error| DbError::Message(format!("retained replay genesis authority: {error}")))?;
+    let authority: RetainedReplayAuthority = serde_json::from_slice(&stored.authority_bytes)
+        .map_err(|error| DbError::Message(format!("retained replay authority: {error}")))?;
     if serde_json::to_string(&parsed_write_policy)
         .map_err(|error| DbError::Message(format!("serialize retained replay policy: {error}")))?
         != stored.write_policy
@@ -1759,9 +1917,7 @@ fn load_generation_zero_replay_baseline_on(
             DbError::Message(format!("serialize retained replay exact cut: {error}"))
         })? != stored.exact_cut
         || serde_json::to_vec(&authority).map_err(|error| {
-            DbError::Message(format!(
-                "serialize retained replay genesis authority: {error}"
-            ))
+            DbError::Message(format!("serialize retained replay authority: {error}"))
         })? != stored.authority_bytes
     {
         return Err(DbError::Message(
@@ -1806,7 +1962,36 @@ fn install_generation_zero_replay_baseline_on(
         routing_hash,
         authority,
     )?;
-    validate_generation_zero_replay_authority_on(conn, &baseline)?;
+    insert_retained_replay_baseline_on(conn, &baseline)
+}
+
+fn install_snapshot_replay_baseline_on(
+    conn: &Connection,
+    write_policy: WritePolicy,
+    schema_version: u32,
+    routing_hash: ObjectHash,
+    authority: RetainedReplaySnapshotAuthority,
+) -> Result<(), DbError> {
+    if load_generation_zero_replay_baseline_on(conn)?.is_some() {
+        return Err(DbError::Message(
+            "retained replay baseline already exists before snapshot bootstrap".to_string(),
+        ));
+    }
+    let baseline = RetainedReplayBaseline::stable_snapshot(
+        conn,
+        write_policy,
+        schema_version,
+        routing_hash,
+        authority,
+    )?;
+    insert_retained_replay_baseline_on(conn, &baseline)
+}
+
+fn insert_retained_replay_baseline_on(
+    conn: &Connection,
+    baseline: &RetainedReplayBaseline,
+) -> Result<(), DbError> {
+    validate_replay_authority_on(conn, baseline)?;
     conn.execute(
         "INSERT INTO retained_replay_baselines
          (singleton, generation, write_policy, exact_cut, schema_version,
@@ -1833,12 +2018,60 @@ fn install_generation_zero_replay_baseline_on(
     let installed = load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
         DbError::Message("installed retained replay baseline is absent".to_string())
     })?;
-    if installed != baseline {
+    if &installed != baseline {
         return Err(DbError::Message(
             "installed retained replay baseline differs from its verified image".to_string(),
         ));
     }
     Ok(())
+}
+
+fn ensure_founder_replay_baseline_on(
+    conn: &Connection,
+    write_policy: WritePolicy,
+    schema_version: u32,
+    routing_hash: ObjectHash,
+    authority: RetainedReplayGenesisAuthority,
+) -> Result<(), DbError> {
+    if let Some(existing) = load_generation_zero_replay_baseline_on(conn)? {
+        let authority_matches = match &existing.authority {
+            RetainedReplayAuthority::Genesis(existing) => existing == &authority,
+            RetainedReplayAuthority::StableSnapshot(existing) => {
+                existing.store_root == authority.store_root
+                    && existing.founder_registration == authority.founder_registration
+            }
+        };
+        if existing.write_policy != write_policy
+            || existing.schema_version != schema_version
+            || existing.routing_hash != routing_hash
+            || !authority_matches
+        {
+            return Err(DbError::Message(
+                "retained replay baseline differs from the installed founder authority".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    let accepted_history: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM materialized_commits)
+                    + (SELECT COUNT(*) FROM snapshot_coverage)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if accepted_history != 0 {
+        return Err(DbError::Message(
+            "accepted Store history exists without a retained replay baseline".to_string(),
+        ));
+    }
+    install_generation_zero_replay_baseline_on(
+        conn,
+        write_policy,
+        schema_version,
+        routing_hash,
+        authority,
+    )
 }
 
 fn install_store_founder_state_on(
@@ -2986,8 +3219,54 @@ enum PreparedWriteMaterialization<'a> {
 struct RetainedMergeMaterializationInput {
     commit: PreparedExactObject,
     activation_head: PreparedExactObject,
-    packages: Vec<AudiencePackage>,
+    packages: Vec<RetainedAudiencePackage>,
     activation: RetainedCommitActivationInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeRetractionCleanupInput {
+    commit: PreparedExactObject,
+    activation_head: PreparedExactObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RetainedAudiencePackage {
+    Store {
+        reference: StorePackageRef,
+        package: AudiencePackage,
+    },
+    Circle {
+        reference: CirclePackageRef,
+        package: AudiencePackage,
+    },
+}
+
+impl RetainedAudiencePackage {
+    fn package(&self) -> &AudiencePackage {
+        match self {
+            Self::Store { package, .. } | Self::Circle { package, .. } => package,
+        }
+    }
+
+    fn domain(&self) -> SharedLiveSetObjectDomain {
+        match self {
+            Self::Store { reference, .. } => SharedLiveSetObjectDomain::StorePackage {
+                reference: reference.clone(),
+            },
+            Self::Circle { reference, .. } => SharedLiveSetObjectDomain::CirclePackage {
+                reference: reference.clone(),
+            },
+        }
+    }
+
+    fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::Store { reference, .. } => &reference.object,
+            Self::Circle { reference, .. } => &reference.package.object,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3026,7 +3305,94 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     activation_head_object: &'a ExactObjectRef,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
-    registrations: RetainedStoreDeviceRegistrationActivations,
+    registrations: &'a [(
+        StoreDeviceRegistration,
+        crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    )],
+}
+
+#[derive(Clone)]
+pub(crate) struct OwnedVerifiedMergeMaterialization {
+    root: crate::sync::store_commit::StoreRootRef,
+    commit: StoreBatchCommit,
+    commit_ref: StoreBatchCommitRef,
+    registrations: Vec<(
+        StoreDeviceRegistration,
+        crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    )>,
+    device_operations: VerifiedStoreDeviceOperations,
+    circle_activations: VerifiedCircleActivations,
+    activation_head: StoreDeviceHead,
+    activation_head_object: ExactObjectRef,
+    packages: Vec<AudiencePackage>,
+    package_application: Option<RetainedPackageApplication>,
+    input_hash: ObjectHash,
+}
+
+impl OwnedVerifiedMergeMaterialization {
+    pub(crate) fn as_verified(&self) -> Result<VerifiedMergeMaterialization<'_>, DbError> {
+        VerifiedMergeMaterialization::verify(
+            &self.root,
+            &self.commit,
+            &self.commit_ref,
+            &self.registrations,
+            &self.device_operations,
+            &self.circle_activations,
+            &self.activation_head,
+            &self.activation_head_object,
+            &self.packages,
+            self.package_application,
+        )
+    }
+
+    pub(crate) fn input_hash(&self) -> ObjectHash {
+        self.input_hash
+    }
+
+    pub(crate) fn root(&self) -> &crate::sync::store_commit::StoreRootRef {
+        &self.root
+    }
+
+    pub(crate) fn commit(&self) -> &StoreBatchCommit {
+        &self.commit
+    }
+
+    pub(crate) fn commit_ref(&self) -> &StoreBatchCommitRef {
+        &self.commit_ref
+    }
+
+    pub(crate) fn registrations(
+        &self,
+    ) -> &[(
+        StoreDeviceRegistration,
+        crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    )] {
+        &self.registrations
+    }
+
+    pub(crate) fn device_operations(&self) -> &VerifiedStoreDeviceOperations {
+        &self.device_operations
+    }
+
+    pub(crate) fn circle_activations(&self) -> &VerifiedCircleActivations {
+        &self.circle_activations
+    }
+
+    pub(crate) fn activation_head(&self) -> &StoreDeviceHead {
+        &self.activation_head
+    }
+
+    pub(crate) fn activation_head_object(&self) -> &ExactObjectRef {
+        &self.activation_head_object
+    }
+
+    pub(crate) fn packages(&self) -> &[AudiencePackage] {
+        &self.packages
+    }
+
+    pub(crate) fn package_application(&self) -> Option<RetainedPackageApplication> {
+        self.package_application
+    }
 }
 
 impl<'a> VerifiedMergeMaterialization<'a> {
@@ -3034,7 +3400,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         root: &crate::sync::store_commit::StoreRootRef,
         commit: &'a StoreBatchCommit,
         commit_ref: &'a StoreBatchCommitRef,
-        registrations: &[(
+        registrations: &'a [(
             StoreDeviceRegistration,
             crate::sync::store_commit::StoreDeviceRegistrationActivation,
         )],
@@ -3065,9 +3431,8 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 "verified Merge materialization differs from its exact Store commit".to_string(),
             ));
         }
-        let registrations =
-            RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+        RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(Self {
             commit,
             commit_ref,
@@ -3690,6 +4055,93 @@ fn merge_candidate_cleanup_targets_on(
     Ok(targets)
 }
 
+fn finish_merge_retraction_cleanup_on(
+    tx: &rusqlite::Transaction<'_>,
+    candidate: &PreparedMergeCandidate,
+) -> Result<(), DbError> {
+    if !merge_candidate_cleanup_targets_on(tx, &candidate.commit.write_id, candidate, false)?
+        .is_empty()
+    {
+        return Err(DbError::Message(
+            "Merge retraction cleanup still has remote targets".to_string(),
+        ));
+    }
+    let mut object_ids = candidate_graph_exact_objects(&candidate.commit)?
+        .iter()
+        .map(remote_object_id)
+        .collect::<BTreeSet<_>>();
+    object_ids.insert(remote_object_id(&candidate.reference.object));
+    for object_id in object_ids {
+        let remote = load_remote_object_on(tx, object_id)?;
+        if !remote
+            .candidate_cleanup_complete(&candidate.reference)
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "finish Merge retraction cleanup for {object_id}: {error}"
+                ))
+            })?
+        {
+            return Err(DbError::Message(format!(
+                "Merge retraction object {object_id} is not terminal"
+            )));
+        }
+        if matches!(
+            remote,
+            RemoteObjectRecord::CandidateCommit(
+                crate::sync::remote_object::CandidateCommitRecord {
+                    state: crate::sync::remote_object::CandidateCommitState::AbsentVerified { .. },
+                    ..
+                }
+            ) | RemoteObjectRecord::CandidateExclusive(
+                crate::sync::remote_object::CandidateObjectRecord {
+                    state: crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. },
+                    ..
+                }
+            )
+        ) {
+            let removed = tx
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if removed != 1 {
+                return Err(DbError::Message(format!(
+                    "Merge retraction object {object_id} disappeared during finalization"
+                )));
+            }
+        }
+    }
+    let StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence,
+    } = &candidate.reference.coord
+    else {
+        unreachable!("validated Merge retraction candidate")
+    };
+    let deleted = tx
+        .execute(
+            "DELETE FROM merge_retraction_cleanups
+             WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+            rusqlite::params![
+                stream_id.to_string(),
+                Database::sequence_to_sqlite(&stream_id.to_string(), *sequence)?,
+                serde_json::to_string(&candidate.reference).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize completed Merge retraction cleanup ref: {error}"
+                    ))
+                })?,
+            ],
+        )
+        .map_err(DbError::from)?;
+    if deleted != 1 {
+        return Err(DbError::Message(
+            "Merge retraction cleanup disappeared during finalization".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 enum MergeCandidateHeadCleanup {
     Remote { complete: bool },
     ProtocolInert,
@@ -4183,6 +4635,10 @@ impl Database {
         }
     }
 
+    pub(crate) fn notify_write_status(&self, write_id: WriteId, status: WriteStatus) {
+        Self::notify_write_status_in(&self.state.write_statuses, &write_id, status);
+    }
+
     fn set_write_status_on(
         conn: &Connection,
         write_id: &WriteId,
@@ -4214,6 +4670,45 @@ impl Database {
             Self::set_write_status_on(conn, &stored_id, &stored_status)?;
             Self::notify_write_status_in(&statuses, &stored_id, stored_status);
             Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn block_write_if_unresolved(
+        &self,
+        write_id: &WriteId,
+        block: crate::WriteBlock,
+    ) -> Result<bool, DbError> {
+        let write_id = write_id.clone();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let raw: String = conn
+                .query_row(
+                    "SELECT status FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let current: WriteStatus = serde_json::from_str(&raw).map_err(|error| {
+                DbError::Message(format!("write {write_id} status before blocking: {error}"))
+            })?;
+            match current {
+                WriteStatus::Resolved(_) => Ok(false),
+                WriteStatus::Pending
+                | WriteStatus::Publishing
+                | WriteStatus::Blocked(_)
+                | WriteStatus::Conflict(_) => {
+                    let blocked = WriteStatus::Blocked(block);
+                    Self::set_write_status_on(conn, &write_id, &blocked)?;
+                    Self::notify_write_status_in(&statuses, &write_id, blocked);
+                    Ok(true)
+                }
+                state @ (WriteStatus::LocalOnly | WriteStatus::Published(_)) => {
+                    Err(DbError::Message(format!(
+                        "write {write_id} cannot become blocked from {state:?}"
+                    )))
+                }
+            }
         })
         .await
     }
@@ -5036,6 +5531,7 @@ impl Database {
 
     pub(crate) fn open_initialized_store(
         path: &Path,
+        install: VerifiedSnapshotBootstrapInstall,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
@@ -5053,7 +5549,7 @@ impl Database {
             write_policy,
             Arc::new(hlc),
             migrations,
-            CovenMetadataOpen::InitializeVerifiedSnapshot,
+            CovenMetadataOpen::VerifiedSnapshot(Box::new(install)),
         )
     }
 
@@ -5506,18 +6002,16 @@ impl Database {
             .map_err(|error| {
                 DbError::Message(format!("partition scoped host transaction: {error}"))
             }),
-            StoreWriteRouting::Unscoped => {
-                let changeset = gate::gate_outbound(tx, captured, gates)
-                    .map_err(|error| DbError::Message(format!("gate host transaction: {error}")))?;
-                Ok((!changeset.is_empty())
-                    .then_some(gate::AudiencePartition {
-                        audience: crate::sync::circle::Audience::Store,
-                        control: None,
-                        changeset,
-                    })
-                    .into_iter()
-                    .collect())
-            }
+            StoreWriteRouting::Unscoped => gate::partition_outbound(
+                tx,
+                captured,
+                &gate::RoutingChanges::empty(),
+                gates,
+                write_policy,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("partition gated host transaction: {error}"))
+            }),
         }
     }
 
@@ -5834,12 +6328,8 @@ impl Database {
             let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored else {
                 return Ok(None);
             };
-            let partitions = Self::prepared_store_write_partitions_on(
-                conn,
-                &write_id,
-                &changeset,
-                write_policy,
-            )?;
+            let partitions =
+                Self::store_write_partitions_on(conn, &write_id, &changeset, write_policy)?;
             Ok(Some(PreparedStoreWrite {
                 write_id: WriteId::from_generated(write_id),
                 changeset,
@@ -5855,7 +6345,7 @@ impl Database {
         .await
     }
 
-    fn prepared_store_write_partitions_on(
+    fn store_write_partitions_on(
         conn: &Connection,
         write_id: &str,
         stored_store_changeset: &[u8],
@@ -5969,11 +6459,6 @@ impl Database {
             }
             Some(_) | None => {}
         }
-        if store.is_none() && circles.is_empty() {
-            return Err(DbError::Message(format!(
-                "pending write {write_id} has no durable audience partitions"
-            )));
-        }
         Ok(PreparedStoreWritePartitions {
             store,
             circles,
@@ -6076,7 +6561,7 @@ impl Database {
                         return Ok(None);
                     }
                 }
-                let partitions = Self::prepared_store_write_partitions_on(
+                let partitions = Self::store_write_partitions_on(
                     &tx,
                     &write_id,
                     &changeset,
@@ -6246,7 +6731,7 @@ impl Database {
                     stage.write_id
                 )));
             }
-            let partitions = Self::prepared_store_write_partitions_on(
+            let partitions = Self::store_write_partitions_on(
                 &tx,
                 stage.write_id.as_str(),
                 &stored_changeset,
@@ -6900,7 +7385,7 @@ impl Database {
                         write.write_id
                     )));
                 }
-                let partitions = Self::prepared_store_write_partitions_on(
+                let partitions = Self::store_write_partitions_on(
                     &tx,
                     write.write_id.as_str(),
                     &stored_changeset,
@@ -7227,7 +7712,7 @@ impl Database {
                                 .to_string(),
                         ));
                     }
-                    let partitions = Self::prepared_store_write_partitions_on(
+                    let partitions = Self::store_write_partitions_on(
                         conn,
                         write_id.as_str(),
                         &stored_changeset,
@@ -7523,7 +8008,7 @@ impl Database {
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?;
                     let write_id = WriteId::from_generated(write_id);
-                    let partitions = Self::prepared_store_write_partitions_on(
+                    let partitions = Self::store_write_partitions_on(
                         conn,
                         write_id.as_str(),
                         &stored_changeset,
@@ -7907,14 +8392,18 @@ impl Database {
                     "Store publication expected one prepared write, found {prepared_count}"
                 )));
             }
-            let (stored_write_id, raw_prepared): (String, String) = tx
+            let (stored_write_id, raw_status, raw_prepared): (String, String, String) = tx
                 .query_row(
-                    "SELECT write_id, prepared FROM store_writes
+                    "SELECT write_id, status, prepared FROM store_writes
                      WHERE prepared IS NOT NULL ORDER BY ordinal LIMIT 1",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(DbError::from)?;
+            let current_status: WriteStatus =
+                serde_json::from_str(&raw_status).map_err(|error| {
+                    DbError::Message(format!("prepared Store write status: {error}"))
+                })?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
             let exclusion_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?
@@ -7929,12 +8418,53 @@ impl Database {
             .is_some()
             {
                 let device_id = exclusion_candidate.commit.author_registration.device_id;
+                let write_id = WriteId::from_generated(stored_write_id.clone());
+                if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) =
+                    &current_status
+                {
+                    witness.validate().map_err(DbError::Message)?;
+                    if witness.original_position().commit() != &exclusion_candidate.reference {
+                        return Err(DbError::Message(
+                            "terminal write retraction names another prepared candidate"
+                                .to_string(),
+                        ));
+                    }
+                    tx.execute(
+                        "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                        [write_id.as_str()],
+                    )
+                    .map_err(DbError::from)?;
+                    tx.execute(
+                        "DELETE FROM store_write_packages WHERE write_id = ?1",
+                        [write_id.as_str()],
+                    )
+                    .map_err(DbError::from)?;
+                    tx.execute(
+                        "DELETE FROM store_write_blobs WHERE write_id = ?1",
+                        [write_id.as_str()],
+                    )
+                    .map_err(DbError::from)?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE store_writes SET prepared = NULL
+                             WHERE write_id = ?1 AND status = ?2 AND prepared = ?3",
+                            rusqlite::params![write_id.as_str(), &raw_status, &raw_prepared],
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError::Message(
+                            "terminally retracted Store write changed during completion"
+                                .to_string(),
+                        ));
+                    }
+                    tx.commit().map_err(DbError::from)?;
+                    return Ok(CompletePreparedStoreWriteOutcome::AuthorExcluded { device_id });
+                }
                 let status = WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
                     reason: format!(
                         "Store author {device_id} was excluded before candidate activation"
                     ),
                 });
-                let write_id = WriteId::from_generated(stored_write_id.clone());
                 Self::set_write_status_on(&tx, &write_id, &status)?;
                 tx.commit().map_err(DbError::from)?;
                 Self::notify_write_status_in(&statuses, &write_id, status);
@@ -10008,6 +10538,58 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn store_package_is_retained_for_replay(
+        &self,
+        target: StorePackageRef,
+        activation: StoreBatchCommitRef,
+    ) -> Result<bool, DbError> {
+        self.call(move |conn| {
+            let object_id = remote_object_id(&target.object);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !exists {
+                return Ok(false);
+            }
+            let remote = load_remote_object_on(conn, object_id)?;
+            let retained = remote
+                .store_package_is_retained_for_replay(&target, &activation)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "validate Store package {object_id} replay ownership: {error}"
+                    ))
+                })?;
+            if !retained {
+                return Ok(false);
+            }
+            for owner in remote.retained_replay_owners() {
+                let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+                let StoreCommitCoord::MergeConcurrent {
+                    stream_id,
+                    sequence,
+                } = &commit.coord
+                else {
+                    return Err(DbError::Message(format!(
+                        "Store package {object_id} has a Serial retained-replay owner"
+                    )));
+                };
+                Self::load_retained_merge_materialization_on(
+                    conn,
+                    &stream_id.to_string(),
+                    *sequence,
+                    commit,
+                    &input_hash.to_string(),
+                )?;
+            }
+            Ok(true)
+        })
+        .await
+    }
+
     pub(crate) async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
@@ -10573,45 +11155,61 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn complete_outbound_store_device_exclusion_activation(
-        &self,
+    pub(crate) fn complete_outbound_store_device_exclusion_activation<'a>(
+        &'a self,
         expected: DurableStoreDeviceExclusionOperation,
-    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let DurableStoreDeviceExclusionOperation::CandidatePrepared { object, candidate } =
-            expected.clone()
-        else {
-            return Err(DbError::Message(
-                "Store-device exclusion has no activated candidate".to_string(),
-            ));
-        };
-        let next = DurableStoreDeviceExclusionOperation::Completed(
-            StoreDeviceExclusionCompletion::Activated {
-                object,
-                candidate: candidate.clone(),
-            },
-        );
-        next.validate()
-            .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            let stream = match &candidate.reference.coord {
-                StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-                StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+    ) -> Pin<
+        Box<dyn Future<Output = Result<DurableStoreDeviceExclusionOperation, DbError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let next = match &expected {
+                DurableStoreDeviceExclusionOperation::CandidatePrepared { object, candidate } => {
+                    DurableStoreDeviceExclusionOperation::Completed(
+                        StoreDeviceExclusionCompletion::Activated {
+                            object: object.clone(),
+                            candidate: candidate.clone(),
+                        },
+                    )
+                }
+                _ => {
+                    return Err(DbError::Message(
+                        "Store-device exclusion has no activated candidate".to_string(),
+                    ));
+                }
             };
-            if Self::materialized_commit_ref_on(&tx, &stream, candidate.reference.coord.sequence())?
-                != Some(candidate.reference.clone())
-            {
-                return Err(DbError::Message(
+            let expected = Box::new(expected);
+            let next = Box::new(next);
+            self.call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                require_store_device_exclusion_transition_on(
+                    &tx,
+                    expected.as_ref(),
+                    next.as_ref(),
+                )?;
+                let candidate = expected
+                    .candidate()
+                    .expect("candidate-prepared exclusion has a candidate");
+                let stream = match &candidate.reference.coord {
+                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                };
+                if Self::materialized_commit_ref_on(
+                    &tx,
+                    &stream,
+                    candidate.reference.coord.sequence(),
+                )? != Some(candidate.reference.clone())
+                {
+                    return Err(DbError::Message(
                     "Store-device exclusion completion is not materialized at its exact position"
                         .to_string(),
                 ));
-            }
-            update_store_device_exclusion_on(&tx, &expected, &next, false)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+                }
+                update_store_device_exclusion_on(&tx, expected.as_ref(), next.as_ref(), false)?;
+                tx.commit().map_err(DbError::from)?;
+                Ok(*next)
+            })
+            .await
         })
-        .await
     }
 
     pub(crate) async fn complete_outbound_store_device_exclusion_slot_loss(
@@ -11548,6 +12146,9 @@ impl Database {
                 "Store founder registration author differs from the owner anchor".to_string(),
             ));
         }
+        let write_policy = self.write_policy();
+        let schema_version = self.schema_version();
+        let routing_hash = self.sync_routing_hash();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             install_store_founder_state_on(
@@ -11567,6 +12168,16 @@ impl Database {
             for reference in &head_refs {
                 crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
             }
+            ensure_founder_replay_baseline_on(
+                &tx,
+                write_policy,
+                schema_version,
+                routing_hash,
+                RetainedReplayGenesisAuthority {
+                    store_root: root,
+                    founder_registration: founder_reference,
+                },
+            )?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -11799,7 +12410,7 @@ impl Database {
                         || baseline.schema_version != schema_version
                         || baseline.routing_hash != routing_hash
                         || baseline.authority
-                            != (RetainedReplayGenesisAuthority {
+                            != RetainedReplayAuthority::Genesis(RetainedReplayGenesisAuthority {
                                 store_root: root.clone(),
                                 founder_registration: registration.clone(),
                             })
@@ -14553,6 +15164,12 @@ impl Database {
             .await
     }
 
+    pub(crate) async fn retained_merge_replay_inputs(
+        &self,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        self.call(Self::load_retained_merge_replay_inputs_on).await
+    }
+
     pub(crate) async fn exact_materialized_ref(
         &self,
         stream_id: &str,
@@ -14713,9 +15330,15 @@ impl Database {
                         "materialized Merge coordinate {stream_id}/{sequence} has no retained input hash"
                     ))
                 })?;
-                Self::validate_retained_merge_materialization_on(
+                let retained = Self::load_retained_merge_materialization_on(
                     conn, stream_id, sequence, &reference, input_hash,
                 )?;
+                retained.as_verified()?;
+                if retained.input_hash().to_string() != input_hash {
+                    return Err(DbError::Message(format!(
+                        "materialized Merge coordinate {stream_id}/{sequence} differs from its opened input"
+                    )));
+                }
             }
             StoreCommitCoord::Serial { .. } => {
                 if retained_commit_ref.is_some() || retained_input_hash.is_some() {
@@ -15414,21 +16037,9 @@ impl Database {
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         packages: &[AudiencePackage],
-    ) -> Result<Vec<AudiencePackage>, DbError> {
+    ) -> Result<Vec<RetainedAudiencePackage>, DbError> {
         let mut by_audience = BTreeMap::new();
         for package in packages {
-            if package.store_root_hash() != commit.store_root_hash
-                || package.write_id() != &commit.write_id
-                || package.commit_coord() != &commit_ref.coord
-                || package.candidate_family() != commit.candidate_family()
-            {
-                return Err(DbError::Message(
-                    "retained audience package differs from its exact Store commit".to_string(),
-                ));
-            }
-            package
-                .validate_blob_uploader(&commit.author_registration)
-                .map_err(|error| DbError::Message(error.to_string()))?;
             let audience = package.audience().remote_audience();
             if by_audience
                 .insert(audience.clone(), package.clone())
@@ -15445,20 +16056,18 @@ impl Database {
             let package = by_audience.remove(&RemoteAudience::Store).ok_or_else(|| {
                 DbError::Message("retained Merge commit is missing its Store package".to_string())
             })?;
-            commit
-                .verify_store_package(&package.to_bytes())
-                .map_err(|error| DbError::Message(error.to_string()))?;
-            ordered.push(package);
+            ordered.push(Self::retained_audience_package(
+                commit, commit_ref, package,
+            )?);
         }
         for reference in commit.circle_packages() {
             let Some(package) = by_audience.remove(&RemoteAudience::Circle(reference.circle_id))
             else {
                 continue;
             };
-            commit
-                .verify_circle_package(reference.circle_id, &package.to_bytes())
-                .map_err(|error| DbError::Message(error.to_string()))?;
-            ordered.push(package);
+            ordered.push(Self::retained_audience_package(
+                commit, commit_ref, package,
+            )?);
         }
         if !by_audience.is_empty() {
             return Err(DbError::Message(
@@ -15468,11 +16077,318 @@ impl Database {
         Ok(ordered)
     }
 
-    fn validate_retained_merge_materialization_input_on(
+    fn retained_audience_package(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        package: AudiencePackage,
+    ) -> Result<RetainedAudiencePackage, DbError> {
+        if package.store_root_hash() != commit.store_root_hash
+            || package.write_id() != &commit.write_id
+            || package.commit_coord() != &commit_ref.coord
+            || package.candidate_family() != commit.candidate_family()
+        {
+            return Err(DbError::Message(
+                "retained audience package differs from its exact Store commit".to_string(),
+            ));
+        }
+        package
+            .validate_blob_uploader(&commit.author_registration)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        match package.audience() {
+            crate::sync::audience_package::PackageAudience::Store => {
+                let reference = commit.store_package().ok_or_else(|| {
+                    DbError::Message(
+                        "retained Store package is absent from its exact commit".to_string(),
+                    )
+                })?;
+                if package.schema_version() != reference.schema_version {
+                    return Err(DbError::Message(
+                        "retained Store package schema version differs from its exact commit"
+                            .to_string(),
+                    ));
+                }
+                commit
+                    .verify_store_package(&package.to_bytes())
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                Ok(RetainedAudiencePackage::Store {
+                    reference: reference.clone(),
+                    package,
+                })
+            }
+            crate::sync::audience_package::PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } => {
+                let reference = commit
+                    .circle_packages()
+                    .iter()
+                    .find(|reference| reference.circle_id == *circle_id)
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "retained Circle package {circle_id} is absent from its exact commit"
+                        ))
+                    })?;
+                if reference.control != *control
+                    || reference.key_fingerprint != *key_fingerprint
+                    || package.schema_version() != reference.package.schema_version
+                {
+                    return Err(DbError::Message(format!(
+                        "retained Circle package {circle_id} differs from its exact commit"
+                    )));
+                }
+                commit
+                    .verify_circle_package(*circle_id, &package.to_bytes())
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                Ok(RetainedAudiencePackage::Circle {
+                    reference: reference.clone(),
+                    package,
+                })
+            }
+        }
+    }
+
+    fn retained_merge_object_ids(
+        input: &RetainedMergeMaterializationInput,
+    ) -> BTreeSet<ObjectHash> {
+        let mut object_ids = BTreeSet::new();
+        for retained in &input.packages {
+            object_ids.insert(remote_object_id(retained.object()));
+            for binding in retained.package().blob_bindings() {
+                object_ids.insert(remote_object_id(binding.blob().object()));
+            }
+        }
+        object_ids
+    }
+
+    fn validate_retained_package_remote(
+        remote: &RemoteObjectRecord,
+        retained: &RetainedAudiencePackage,
+        owner: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let expected_domain = retained.domain();
+        let expected_bytes = retained.package().to_bytes();
+        let expected_owner =
+            crate::sync::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
+        if !matches!(
+            remote,
+            RemoteObjectRecord::SharedLiveSet(record)
+                if record.identity.domain == expected_domain
+                    && record.identity.semantic_hash == ObjectHash::digest(&expected_bytes)
+                    && record.identity.object == *retained.object()
+                    && record.bytes.canonical_semantic_bytes() == expected_bytes
+                    && !matches!(
+                        record.bytes.stored(),
+                        crate::sync::remote_object::RemoteStoredRepresentation::Blob { .. }
+                    )
+                    && matches!(
+                        &record.state,
+                        crate::sync::remote_object::OwnedObjectState::UploadedVerified {
+                            ownership
+                        } if ownership.activated.contains(&expected_owner)
+                    )
+        ) {
+            return Err(DbError::Message(format!(
+                "retained package {} differs from its exact activated remote object",
+                remote_object_id(retained.object())
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_retained_blob_remote(
+        remote: &RemoteObjectRecord,
+        stored: &StoredBlobRef,
+        owner: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let locator_bytes = stored.locator().to_bytes();
+        let expected_owner =
+            crate::sync::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
+        if !matches!(
+            remote,
+            RemoteObjectRecord::SharedLiveSet(record)
+                if record.identity.domain == SharedLiveSetObjectDomain::StoredBlob
+                    && record.identity.semantic_hash == ObjectHash::digest(&locator_bytes)
+                    && record.identity.object == *stored.object()
+                    && record.bytes.canonical_semantic_bytes() == locator_bytes
+                    && matches!(
+                        record.bytes.stored(),
+                        crate::sync::remote_object::RemoteStoredRepresentation::Blob { object }
+                            if object == stored.object()
+                    )
+                    && matches!(
+                        &record.state,
+                        crate::sync::remote_object::OwnedObjectState::UploadedVerified {
+                            ownership
+                        } if ownership.activated.contains(&expected_owner)
+                    )
+        ) {
+            return Err(DbError::Message(format!(
+                "retained blob {} differs from its exact activated remote object",
+                remote_object_id(stored.object())
+            )));
+        }
+        Ok(())
+    }
+
+    fn pin_retained_merge_objects_on(
+        conn: &rusqlite::Transaction<'_>,
+        input: &RetainedMergeMaterializationInput,
+        owner: &RetainedReplayOwner,
+    ) -> Result<(), DbError> {
+        let commit = owner.commit();
+        let mut pinned = BTreeSet::new();
+        for retained in &input.packages {
+            let object_id = remote_object_id(retained.object());
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            Self::validate_retained_package_remote(&remote, retained, commit)?;
+            remote
+                .merge_retained_replay_owner(owner.clone())
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "pin retained package {object_id} for replay: {error}"
+                    ))
+                })?;
+            update_remote_object_on(conn, object_id, &remote)?;
+            index_retained_replay_owner_on(conn, object_id, owner)?;
+            pinned.insert(object_id);
+            for binding in retained.package().blob_bindings() {
+                let stored = binding.blob();
+                let object_id = remote_object_id(stored.object());
+                if !pinned.insert(object_id) {
+                    continue;
+                }
+                let mut remote = load_remote_object_on(conn, object_id)?;
+                Self::validate_retained_blob_remote(&remote, stored, commit)?;
+                remote
+                    .merge_retained_replay_owner(owner.clone())
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "pin retained blob {object_id} for replay: {error}"
+                        ))
+                    })?;
+                update_remote_object_on(conn, object_id, &remote)?;
+                index_retained_replay_owner_on(conn, object_id, owner)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_retained_merge_pin_closure_on(
+        conn: &Connection,
+        input: &RetainedMergeMaterializationInput,
+        owner: &RetainedReplayOwner,
+    ) -> Result<(), DbError> {
+        let commit = owner.commit();
+        for retained in &input.packages {
+            let remote = load_remote_object_on(conn, remote_object_id(retained.object()))?;
+            Self::validate_retained_package_remote(&remote, retained, commit)?;
+            if !remote
+                .retained_replay_owners()
+                .any(|actual| actual == owner)
+            {
+                return Err(DbError::Message(format!(
+                    "retained package {} is missing its exact replay owner",
+                    remote_object_id(retained.object())
+                )));
+            }
+            for binding in retained.package().blob_bindings() {
+                let stored = binding.blob();
+                let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
+                Self::validate_retained_blob_remote(&remote, stored, commit)?;
+                if !remote
+                    .retained_replay_owners()
+                    .any(|actual| actual == owner)
+                {
+                    return Err(DbError::Message(format!(
+                        "retained blob {} is missing its exact replay owner",
+                        remote_object_id(stored.object())
+                    )));
+                }
+            }
+        }
+        let expected = Self::retained_merge_object_ids(input);
+        let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &commit.coord
+        else {
+            return Err(DbError::Message(
+                "retained Merge replay owner names a Serial commit".to_string(),
+            ));
+        };
+        let stream_id = stream_id.to_string();
+        let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let commit_ref = serde_json::to_string(commit).map_err(|error| {
+            DbError::Message(format!("serialize retained replay commit ref: {error}"))
+        })?;
+        let input_hash = input_hash.to_string();
+        let mut rows = conn
+            .prepare(
+                "SELECT object_id FROM retained_replay_objects
+                 WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3 AND input_hash = ?4
+                 ORDER BY object_id",
+            )
+            .map_err(DbError::from)?;
+        let actual = rows
+            .query_map(
+                rusqlite::params![stream_id, sequence, commit_ref, input_hash],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(DbError::from)?
+            .map(|row| {
+                let object_id = row.map_err(DbError::from)?;
+                object_id.parse().map_err(|error| {
+                    DbError::Message(format!("retained replay object id {object_id}: {error}"))
+                })
+            })
+            .collect::<Result<BTreeSet<_>, DbError>>()?;
+        if actual != expected {
+            return Err(DbError::Message(
+                "retained Merge replay ownership differs from its exact object closure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_retained_replay_ownership_from_snapshot_on(
+        conn: &rusqlite::Transaction<'_>,
+    ) -> Result<(), DbError> {
+        let mut statement = conn
+            .prepare("SELECT DISTINCT object_id FROM retained_replay_objects ORDER BY object_id")
+            .map_err(DbError::from)?;
+        let object_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in object_ids {
+            let object_id = encoded.parse().map_err(|error| {
+                DbError::Message(format!("snapshot retained replay object id: {error}"))
+            })?;
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            remote
+                .remove_all_retained_replay_owners()
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "remove snapshot retained replay owner from {object_id}: {error}"
+                    ))
+                })?;
+            update_remote_object_on(conn, object_id, &remote)?;
+        }
+        conn.execute("DELETE FROM retained_replay_objects", [])
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    fn open_retained_merge_materialization_input_on(
         conn: &Connection,
         commit_ref: &StoreBatchCommitRef,
         input: &RetainedMergeMaterializationInput,
-    ) -> Result<(), DbError> {
+        input_hash: ObjectHash,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let StoreCommitCoord::MergeConcurrent {
             stream_id,
             sequence,
@@ -15558,8 +16474,14 @@ impl Database {
                 "retained Merge activation head bytes are not canonical".to_string(),
             ));
         }
+        let package_values = input
+            .packages
+            .iter()
+            .map(RetainedAudiencePackage::package)
+            .cloned()
+            .collect::<Vec<_>>();
         let packages =
-            Self::canonical_retained_merge_packages(&commit, commit_ref, &input.packages)?;
+            Self::canonical_retained_merge_packages(&commit, commit_ref, &package_values)?;
         if packages != input.packages {
             return Err(DbError::Message(
                 "retained Merge packages are not in commit order".to_string(),
@@ -15571,7 +16493,7 @@ impl Database {
                     .to_string(),
             ));
         }
-        input
+        let device_operations = input
             .activation
             .device_operations
             .verify_for(&root, &commit)
@@ -15583,7 +16505,7 @@ impl Database {
             }),
             None => None,
         };
-        VerifiedCircleActivations::parse_retained(
+        let circle_activations = VerifiedCircleActivations::parse_retained(
             &input.activation.circle_activations,
             &commit,
             commit_ref,
@@ -15591,11 +16513,23 @@ impl Database {
             local_identity.as_deref(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
-        Ok(())
+        Ok(OwnedVerifiedMergeMaterialization {
+            root,
+            commit,
+            commit_ref: commit_ref.clone(),
+            registrations,
+            device_operations,
+            circle_activations,
+            activation_head: head,
+            activation_head_object: input.activation_head.reference().clone(),
+            packages: package_values,
+            package_application: input.activation.package_application,
+            input_hash,
+        })
     }
 
     fn retain_merge_materialization_on(
-        conn: &Connection,
+        conn: &rusqlite::Transaction<'_>,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<RetainedMergeMaterializationKey, DbError> {
         let packages = Self::canonical_retained_merge_packages(
@@ -15616,7 +16550,12 @@ impl Database {
             .map_err(|error| DbError::Message(error.to_string()))?,
             packages,
             activation: RetainedCommitActivationInput {
-                registrations: materialization.registrations.clone(),
+                registrations: RetainedStoreDeviceRegistrationActivations::from_verified(
+                    &required_store_root_authority_on(conn)?,
+                    materialization.commit,
+                    materialization.registrations,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?,
                 device_operations: materialization.device_operations.to_retained(),
                 circle_activations: materialization
                     .circle_activations
@@ -15625,15 +16564,16 @@ impl Database {
                 package_application: materialization.package_application,
             },
         };
-        Self::validate_retained_merge_materialization_input_on(
-            conn,
-            materialization.commit_ref,
-            &input,
-        )?;
         let canonical_input = serde_json::to_vec(&input).map_err(|error| {
             DbError::Message(format!("serialize retained Merge materialization: {error}"))
         })?;
         let input_hash = ObjectHash::digest(&canonical_input);
+        Self::open_retained_merge_materialization_input_on(
+            conn,
+            materialization.commit_ref,
+            &input,
+            input_hash,
+        )?;
         let StoreCommitCoord::MergeConcurrent {
             stream_id,
             sequence,
@@ -15687,19 +16627,25 @@ impl Database {
                 )));
             }
         }
+        let replay_owner = RetainedReplayOwner::Commit {
+            commit: materialization.commit_ref.clone(),
+            input_hash,
+        };
+        Self::pin_retained_merge_objects_on(conn, &input, &replay_owner)?;
+        Self::validate_retained_merge_pin_closure_on(conn, &input, &replay_owner)?;
         Ok(RetainedMergeMaterializationKey {
             commit_ref: commit_ref_json,
             input_hash,
         })
     }
 
-    fn validate_retained_merge_materialization_on(
+    fn load_retained_merge_materialization_on(
         conn: &Connection,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
-    ) -> Result<(), DbError> {
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let sequence_sql = Self::sequence_to_sqlite(stream_id, sequence)?;
         let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
             .query_row(
@@ -15737,7 +16683,610 @@ impl Database {
                 "retained Merge materialization input is not canonical".to_string(),
             ));
         }
-        Self::validate_retained_merge_materialization_input_on(conn, commit_ref, &input)
+        let input_hash = stored_hash.parse().map_err(|error| {
+            DbError::Message(format!(
+                "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
+            ))
+        })?;
+        let verified = Self::open_retained_merge_materialization_input_on(
+            conn, commit_ref, &input, input_hash,
+        )?;
+        Self::validate_retained_merge_pin_closure_on(
+            conn,
+            &input,
+            &RetainedReplayOwner::Commit {
+                commit: commit_ref.clone(),
+                input_hash,
+            },
+        )?;
+        Ok(verified)
+    }
+
+    pub(crate) fn load_retained_merge_replay_inputs_on(
+        conn: &Connection,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT device_id, seq, commit_ref, input_hash
+                 FROM retained_merge_materializations
+                 ORDER BY device_id, seq",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        rows.into_iter()
+            .map(|(stream_id, sequence, encoded_ref, input_hash)| {
+                let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
+                let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                Self::load_retained_merge_materialization_on(
+                    conn,
+                    &stream_id,
+                    sequence,
+                    &commit_ref,
+                    &input_hash,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn reconcile_store_device_exclusion_freezes_after_replay_on(
+        conn: &Connection,
+    ) -> Result<(), DbError> {
+        let root = required_store_root_authority_on(conn)?;
+        let existing = load_store_device_exclusion_freezes_on(conn, &root)?;
+        let frontier = Self::materialized_frontier_on(conn, None)?
+            .into_values()
+            .map(|reference| match reference.coord {
+                StoreCommitCoord::MergeConcurrent { stream_id, .. } => Ok((stream_id, reference)),
+                StoreCommitCoord::Serial { .. } => Err(DbError::Message(
+                    "Merge retained replay produced a Serial frontier".to_string(),
+                )),
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let (_, state) = store_device_state_for_history_cut_on(
+            conn,
+            &StoreHistoryCut::MergeConcurrent(frontier),
+        )?;
+        let mut retained = Vec::new();
+        for freeze in existing.into_values() {
+            let proposal_state = state
+                .devices
+                .get(&freeze.proposal.target.device_id)
+                .and_then(|record| record.proposals.get(&freeze.proposal.proposal_id));
+            match proposal_state {
+                Some(StoreDeviceProposalState::Pending { proposal })
+                    if proposal == &freeze.proposal =>
+                {
+                    retained.push(freeze);
+                }
+                Some(StoreDeviceProposalState::Cancelled { outcome })
+                    if outcome.proposal == freeze.proposal => {}
+                Some(StoreDeviceProposalState::Superseded { proposal, .. })
+                    if proposal == &freeze.proposal => {}
+                None => {}
+                Some(_) => {
+                    return Err(DbError::Message(
+                        "stored device exclusion freeze differs from replayed device state"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        retained.sort_by_key(|freeze| freeze.proposal.proposal_id);
+        replace_store_device_exclusion_freezes_on(conn, &retained)
+    }
+
+    pub(crate) fn load_merge_replay_write_overlays_on(
+        conn: &Connection,
+        active_accepted_writes: &BTreeSet<WriteId>,
+        retracted_writes: &BTreeSet<WriteId>,
+    ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
+        if !active_accepted_writes.is_disjoint(retracted_writes) {
+            return Err(DbError::Message(
+                "retained replay classifies one write as active and retracted".to_string(),
+            ));
+        }
+        let mut statement = conn
+            .prepare(
+                "SELECT write_id, status, changeset
+                 FROM store_writes
+                 ORDER BY ordinal",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut overlays = Vec::new();
+        for (encoded_write_id, raw_status, stored_store_changeset) in rows {
+            let write_id = WriteId::from_generated(encoded_write_id.clone());
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!(
+                    "retained replay write {encoded_write_id} status: {error}"
+                ))
+            })?;
+            let partitions = Self::store_write_partitions_on(
+                conn,
+                &encoded_write_id,
+                &stored_store_changeset,
+                WritePolicy::MergeConcurrent,
+            )?;
+            let active = active_accepted_writes.contains(&write_id);
+            let retracted = retracted_writes.contains(&write_id);
+            let partitions = match status {
+                WriteStatus::LocalOnly => {
+                    if partitions.store.is_some() || !partitions.circles.is_empty() {
+                        return Err(DbError::Message(format!(
+                            "Local-only write {encoded_write_id} carries a shared partition"
+                        )));
+                    }
+                    PreparedStoreWritePartitions {
+                        store: None,
+                        circles: Vec::new(),
+                        local: partitions.local,
+                    }
+                }
+                WriteStatus::Pending => partitions,
+                WriteStatus::Publishing | WriteStatus::Blocked(_) => {
+                    if retracted {
+                        return Err(DbError::Message(format!(
+                            "unresolved write {encoded_write_id} is already terminally retracted"
+                        )));
+                    }
+                    if active {
+                        PreparedStoreWritePartitions {
+                            store: None,
+                            circles: Vec::new(),
+                            local: partitions.local,
+                        }
+                    } else {
+                        partitions
+                    }
+                }
+                WriteStatus::Published(position) => {
+                    if position.commit().coord.policy() != WritePolicy::MergeConcurrent {
+                        return Err(DbError::Message(format!(
+                            "Merge retained replay found a Serial published write {encoded_write_id}"
+                        )));
+                    }
+                    if retracted {
+                        PreparedStoreWritePartitions {
+                            store: None,
+                            circles: Vec::new(),
+                            local: None,
+                        }
+                    } else if active {
+                        PreparedStoreWritePartitions {
+                            store: None,
+                            circles: Vec::new(),
+                            local: partitions.local,
+                        }
+                    } else {
+                        return Err(DbError::Message(format!(
+                            "published write {encoded_write_id} has no retained replay input"
+                        )));
+                    }
+                }
+                WriteStatus::Resolved(_) => PreparedStoreWritePartitions {
+                    store: None,
+                    circles: Vec::new(),
+                    local: None,
+                },
+                WriteStatus::Conflict(_) => {
+                    return Err(DbError::Message(format!(
+                        "Merge retained replay found a Serial conflict write {encoded_write_id}"
+                    )));
+                }
+            };
+            if partitions.store.is_some()
+                || !partitions.circles.is_empty()
+                || partitions.local.is_some()
+            {
+                overlays.push(MergeReplayWriteOverlay {
+                    write_id,
+                    partitions,
+                });
+            }
+        }
+        Ok(overlays)
+    }
+
+    pub(crate) fn generation_zero_replay_baseline_on(
+        conn: &Connection,
+    ) -> Result<RetainedReplayBaseline, DbError> {
+        load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+            DbError::Message("generation-zero retained replay baseline is absent".to_string())
+        })
+    }
+
+    fn load_merge_retraction_cleanup_on(
+        conn: &Connection,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &candidate.coord
+        else {
+            return Err(DbError::Message(
+                "Merge retraction cleanup names a Serial commit".to_string(),
+            ));
+        };
+        let stream_id = stream_id.to_string();
+        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let encoded_ref = serde_json::to_string(candidate).map_err(|error| {
+            DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
+        })?;
+        let (stored_hash, canonical_cleanup): (String, Vec<u8>) = conn
+            .query_row(
+                "SELECT cleanup_hash, canonical_cleanup
+                 FROM merge_retraction_cleanups
+                 WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+                rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        if stored_hash != ObjectHash::digest(&canonical_cleanup).to_string() {
+            return Err(DbError::Message(
+                "Merge retraction cleanup hash differs from its bytes".to_string(),
+            ));
+        }
+        let input: MergeRetractionCleanupInput = serde_json::from_slice(&canonical_cleanup)
+            .map_err(|error| {
+                DbError::Message(format!("parse Merge retraction cleanup: {error}"))
+            })?;
+        if serde_json::to_vec(&input).map_err(|error| {
+            DbError::Message(format!("serialize Merge retraction cleanup: {error}"))
+        })? != canonical_cleanup
+        {
+            return Err(DbError::Message(
+                "Merge retraction cleanup is not canonical".to_string(),
+            ));
+        }
+        let commit = DurablePreparedProtocolObject {
+            semantic_bytes: input.commit.stored_bytes().to_vec(),
+            prepared: input.commit,
+        };
+        let head = DurablePreparedProtocolObject {
+            semantic_bytes: input.activation_head.stored_bytes().to_vec(),
+            prepared: input.activation_head,
+        };
+        let prepared = parse_prepared_merge_candidate_parts_on(conn, &commit, &head)?;
+        if &prepared.reference != candidate {
+            return Err(DbError::Message(
+                "Merge retraction cleanup opens another candidate".to_string(),
+            ));
+        }
+        Ok(prepared)
+    }
+
+    fn insert_merge_retraction_cleanup_on(
+        conn: &rusqlite::Transaction<'_>,
+        retained: &OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), DbError> {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &retained.commit_ref.coord
+        else {
+            return Err(DbError::Message(
+                "Merge retraction cleanup names a Serial commit".to_string(),
+            ));
+        };
+        let input = MergeRetractionCleanupInput {
+            commit: PreparedExactObject::new(
+                retained.commit_ref.object.clone(),
+                retained.commit.to_bytes(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?,
+            activation_head: PreparedExactObject::new(
+                retained.activation_head_object.clone(),
+                retained.activation_head.to_bytes(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?,
+        };
+        let canonical_cleanup = serde_json::to_vec(&input).map_err(|error| {
+            DbError::Message(format!("serialize Merge retraction cleanup: {error}"))
+        })?;
+        let cleanup_hash = ObjectHash::digest(&canonical_cleanup);
+        let stream_id = stream_id.to_string();
+        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let encoded_ref = serde_json::to_string(&retained.commit_ref).map_err(|error| {
+            DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
+        })?;
+        conn.execute(
+            "INSERT INTO merge_retraction_cleanups
+             (device_id, seq, commit_ref, cleanup_hash, canonical_cleanup)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &stream_id,
+                sequence_sql,
+                &encoded_ref,
+                cleanup_hash.to_string(),
+                &canonical_cleanup,
+            ],
+        )
+        .map_err(DbError::from)?;
+        Self::load_merge_retraction_cleanup_on(conn, &retained.commit_ref)?;
+        Ok(())
+    }
+
+    pub(crate) fn retract_verified_merge_materializations_on(
+        conn: &rusqlite::Transaction<'_>,
+        retractions: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
+    ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
+        let provided = retractions
+            .iter()
+            .map(|retraction| {
+                retraction
+                    .candidate_reference()
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut required = BTreeSet::new();
+        for retained in Self::load_retained_merge_replay_inputs_on(conn)? {
+            if author_exclusion_activation_for_candidate_on(
+                conn,
+                &retained.commit_ref,
+                &retained.commit.author_registration,
+            )?
+            .is_some()
+            {
+                required.insert(retained.commit_ref);
+            }
+        }
+        if provided != required {
+            return Err(DbError::Message(
+                "verified terminal retractions do not exactly cover excluded materializations"
+                    .to_string(),
+            ));
+        }
+        let mut notifications = Vec::new();
+        for verified in retractions {
+            let (nonactivation, head_nonactivation) = verified
+                .into_author_exclusion()
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let candidate = nonactivation
+                .reference()
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                exclusion,
+                accepted_cut,
+                activation_head,
+            } = nonactivation.proof()
+            else {
+                return Err(DbError::Message(
+                    "terminal Merge retraction carries another proof family".to_string(),
+                ));
+            };
+            let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
+            if locator.accepted_cut() != accepted_cut
+                || locator.activation_head() != activation_head
+            {
+                return Err(DbError::Message(
+                    "terminal Merge retraction differs from its activated exclusion".to_string(),
+                ));
+            }
+            let StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence,
+            } = &candidate.coord
+            else {
+                return Err(DbError::Message(
+                    "terminal Merge retraction names a Serial commit".to_string(),
+                ));
+            };
+            let stream_id = stream_id.to_string();
+            let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let encoded_ref = serde_json::to_string(&candidate).map_err(|error| {
+                DbError::Message(format!("serialize retracted Merge commit: {error}"))
+            })?;
+            let input_hash: String = conn
+                .query_row(
+                    "SELECT retained_input_hash FROM materialized_commits
+                     WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+                    rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let retained = Self::load_retained_merge_materialization_on(
+                conn,
+                &stream_id,
+                *sequence,
+                &candidate,
+                &input_hash,
+            )?;
+            if retained.commit.to_bytes() != nonactivation.candidate().canonical_signed_bytes
+                || retained.activation_head_object != *head_nonactivation.head().object()
+            {
+                return Err(DbError::Message(
+                    "terminal retraction differs from its retained materialization".to_string(),
+                ));
+            }
+            Self::insert_merge_retraction_cleanup_on(conn, &retained)?;
+            let replay_owner = RetainedReplayOwner::Commit {
+                commit: candidate.clone(),
+                input_hash: retained.input_hash(),
+            };
+            let mut replay_statement = conn
+                .prepare(
+                    "SELECT object_id FROM retained_replay_objects
+                     WHERE device_id = ?1 AND seq = ?2
+                     ORDER BY object_id",
+                )
+                .map_err(DbError::from)?;
+            let replay_object_ids = replay_statement
+                .query_map(rusqlite::params![&stream_id, sequence_sql], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(DbError::from)?
+                .map(|row| {
+                    let encoded = row.map_err(DbError::from)?;
+                    encoded.parse().map_err(|error| {
+                        DbError::Message(format!(
+                            "retracted Merge replay object id {encoded}: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
+            drop(replay_statement);
+            let head_object_id = remote_object_id(&retained.activation_head_object);
+            let mut activated_object_ids = candidate_graph_exact_objects(&retained.commit)?
+                .iter()
+                .map(remote_object_id)
+                .collect::<BTreeSet<_>>();
+            activated_object_ids.extend(replay_object_ids.iter().copied());
+            activated_object_ids.insert(remote_object_id(&candidate.object));
+            activated_object_ids.insert(head_object_id);
+            for object_id in &replay_object_ids {
+                let mut remote = load_remote_object_on(conn, *object_id)?;
+                remote
+                    .remove_retained_replay_owner(&replay_owner)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "remove retracted replay owner from {object_id}: {error}"
+                        ))
+                    })?;
+                update_remote_object_on(conn, *object_id, &remote)?;
+            }
+            conn.execute(
+                "DELETE FROM retained_replay_objects WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![&stream_id, sequence_sql],
+            )
+            .map_err(DbError::from)?;
+            for object_id in activated_object_ids {
+                let mut remote = load_remote_object_on(conn, object_id)?
+                    .into_observed_activated(&candidate)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "record observed Merge activation for {object_id}: {error}"
+                        ))
+                    })?;
+                let inert = remote
+                    .retract_activated_candidate(
+                        nonactivation.clone(),
+                        (object_id == head_object_id).then_some(&head_nonactivation),
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "retract activated Merge object {object_id}: {error}"
+                        ))
+                    })?;
+                finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)?;
+            }
+            let deleted = conn
+                .execute(
+                    "DELETE FROM materialized_commits
+                     WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+                    rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "retracted Merge materialization disappeared".to_string(),
+                ));
+            }
+            conn.execute(
+                "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
+                [&encoded_ref],
+            )
+            .map_err(DbError::from)?;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM retained_merge_materializations
+                     WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3 AND input_hash = ?4",
+                    rusqlite::params![
+                        &stream_id,
+                        sequence_sql,
+                        &encoded_ref,
+                        retained.input_hash().to_string()
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "retracted Merge retained input disappeared".to_string(),
+                ));
+            }
+            let raw_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM store_writes WHERE write_id = ?1",
+                    [retained.commit.write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some(raw_status) = raw_status {
+                let stored_status: WriteStatus =
+                    serde_json::from_str(&raw_status).map_err(|error| {
+                        DbError::Message(format!("retracted Merge write status: {error}"))
+                    })?;
+                let original = match stored_status {
+                    WriteStatus::Published(original) if original.commit() == &candidate => {
+                        *original
+                    }
+                    WriteStatus::Publishing | WriteStatus::Blocked(_) => {
+                        PublishedPosition::MergeConcurrent {
+                            device_id: retained.commit.author_registration.device_id.to_string(),
+                            commit: candidate.clone(),
+                        }
+                    }
+                    WriteStatus::Resolved(WriteResolution::Retracted { witness })
+                        if witness.original_position().commit() == &candidate =>
+                    {
+                        return Err(DbError::Message(
+                            "retracted Merge write still owns an active materialization"
+                                .to_string(),
+                        ));
+                    }
+                    other => {
+                        return Err(DbError::Message(format!(
+                            "retracted Merge write has incompatible status {other:?}"
+                        )));
+                    }
+                };
+                let witness = crate::WriteRetractionWitness::new(original, nonactivation.clone())
+                    .map_err(DbError::Message)?;
+                let status = WriteStatus::Resolved(WriteResolution::Retracted { witness });
+                conn.execute(
+                    "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                    [retained.commit.write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                conn.execute(
+                    "DELETE FROM store_write_packages WHERE write_id = ?1",
+                    [retained.commit.write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                conn.execute(
+                    "DELETE FROM store_write_blobs WHERE write_id = ?1",
+                    [retained.commit.write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                Self::set_write_status_on(conn, &retained.commit.write_id, &status)?;
+                notifications.push((retained.commit.write_id.clone(), status));
+            }
+        }
+        Ok(notifications)
     }
 
     pub(crate) fn record_materialized_merge_commit_on(
@@ -16660,92 +18209,6 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn install_bootstrap_state(
-        &self,
-        coverage: &CommitFrontier,
-        snapshot: PublishedStoreSnapshot,
-        store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
-        founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
-    ) -> Result<(), DbError> {
-        if store_root.value.to_bytes() != store_root.bytes
-            || store_root.value.object_hash() != store_root.semantic_hash
-        {
-            return Err(DbError::Message(
-                "bootstrap Store root differs from its verified object".to_string(),
-            ));
-        }
-        let store_root_ref = crate::sync::store_commit::StoreRootRef {
-            store_root_id: store_root.value.descriptor.store_root_id(),
-            store_root_hash: store_root.semantic_hash,
-            object: store_root.object,
-        };
-        let founder_reference =
-            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-        if founder.semantic_hash != founder_reference.registration_hash {
-            return Err(DbError::Message(
-                "bootstrap founder semantic hash differs from its exact registration".to_string(),
-            ));
-        }
-        let genesis = ResolvedStoreDeviceState::founder(
-            &store_root_ref,
-            founder_reference.clone(),
-            &store_root.value.descriptor.founder_pubkey,
-            store_root.value.descriptor.founder_grant.clone(),
-            &store_root.value.descriptor.founder_recovery,
-        )
-        .map_err(|error| DbError::Message(error.to_string()))?;
-        if coverage.policy() != self.write_policy() {
-            return Err(DbError::Message(format!(
-                "snapshot coverage uses {:?}, database uses {:?}",
-                coverage.policy(),
-                self.write_policy()
-            )));
-        }
-        if snapshot.meta.coverage != *coverage
-            || snapshot.meta.store_root_hash != store_root_ref.store_root_hash
-            || snapshot.meta.snapshot_hash() != snapshot.reference.snapshot_hash
-            || snapshot.meta.successor.next_slot != snapshot.successor_slot
-        {
-            return Err(DbError::Message(
-                "bootstrap snapshot state differs from its exact signed metadata".to_string(),
-            ));
-        }
-        let coverage = coverage.clone().into_refs();
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            validate_snapshot_object_owners_on(&tx, &store_root_ref, &snapshot.meta)?;
-            install_store_root_authority_on(&tx, &store_root_ref, &store_root.bytes)?;
-            install_store_founder_state_on(
-                &tx,
-                &store_root_ref,
-                &founder_reference,
-                &founder.value,
-                &founder.bytes,
-                &genesis,
-            )?;
-            tx.execute("DELETE FROM snapshot_coverage", [])
-                .map_err(DbError::from)?;
-            for (stream_id, reference) in coverage {
-                let encoded = serde_json::to_string(&reference).map_err(|error| {
-                    DbError::Message(format!("serialize snapshot exact commit ref: {error}"))
-                })?;
-                tx.execute(
-                    "INSERT INTO snapshot_coverage \
-                     (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
-                    (
-                        &stream_id,
-                        Self::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
-                        encoded,
-                        snapshot.reference.snapshot_hash.to_string(),
-                    ),
-                )
-                .map_err(DbError::from)?;
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
@@ -16773,50 +18236,44 @@ impl Database {
                 &plan.genesis,
             )?;
 
-            let coverage_refs = match plan.coverage.clone() {
-                crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(frontier) => frontier
-                    .into_iter()
-                    .map(|(stream_id, reference)| (stream_id.to_string(), reference))
-                    .collect::<BTreeMap<_, _>>(),
-                crate::sync::store_commit::StoreHistoryCut::Serial(
-                    StoreSerialPredecessor::Commit(reference),
-                ) => BTreeMap::from([(SERIAL_STREAM_ID.to_string(), reference)]),
-                crate::sync::store_commit::StoreHistoryCut::Serial(
-                    StoreSerialPredecessor::Genesis { .. },
-                ) => BTreeMap::new(),
-            };
-            let mut coverage = BTreeMap::new();
-            for (stream_id, reference) in coverage_refs {
-                let sequence = reference.coord.sequence();
-                let materialized = Self::materialized_commit_ref_on(&tx, &stream_id, sequence)?;
-                if materialized.as_ref().is_some_and(|stored| stored != &reference) {
-                    return Err(DbError::Message(format!(
-                        "device join bootstrap conflicts with materialized commit at {stream_id}/{sequence}"
-                    )));
+            let frontier = Self::materialized_frontier_on(&tx, None)?;
+            let mut represented = BTreeSet::new();
+            for prepared in &plan.commits {
+                let stream_id = match &prepared.reference.coord {
+                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                };
+                let sequence = prepared.reference.coord.sequence();
+                if let Some(existing) =
+                    Self::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+                {
+                    if existing != prepared.reference {
+                        return Err(DbError::Message(format!(
+                            "device join bootstrap conflicts at {stream_id}/{sequence}"
+                        )));
+                    }
+                    represented.insert(prepared.reference.clone());
+                    continue;
                 }
-                let snapshot = tx
+                let encoded = serde_json::to_string(&prepared.reference).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize device join bootstrap commit ref: {error}"
+                    ))
+                })?;
+                let has_snapshot_state = tx
                     .query_row(
-                        "SELECT commit_ref FROM snapshot_coverage
-                         WHERE device_id = ?1 AND seq = ?2",
-                        (
-                            &stream_id,
-                            Self::sequence_to_sqlite(&stream_id, sequence)?,
-                        ),
-                        |row| row.get::<_, String>(0),
+                        "SELECT EXISTS(SELECT 1 FROM store_device_state_snapshots
+                         WHERE commit_ref = ?1)",
+                        [&encoded],
+                        |row| row.get::<_, bool>(0),
                     )
-                    .optional()
-                    .map_err(DbError::from)?
-                    .map(|encoded| Self::parse_stored_commit_ref(&stream_id, sequence, &encoded))
-                    .transpose()?;
-                if snapshot.as_ref().is_some_and(|stored| stored != &reference) {
-                    return Err(DbError::Message(format!(
-                        "device join bootstrap conflicts with snapshot coverage at {stream_id}/{sequence}"
-                    )));
+                    .map_err(DbError::from)?;
+                let covered = frontier.get(&stream_id).is_some_and(|tip| {
+                    sequence <= tip.coord.sequence()
+                });
+                if has_snapshot_state && covered {
+                    represented.insert(prepared.reference.clone());
                 }
-                coverage.insert(
-                    stream_id,
-                    (reference, materialized.is_some() || snapshot.is_some()),
-                );
             }
 
             for prepared in &plan.commits {
@@ -16824,13 +18281,7 @@ impl Database {
                     StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
                     StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
                 };
-                let already_represented = coverage.get(&stream_id).is_some_and(
-                    |(reference, represented)| {
-                        *represented
-                            && prepared.reference.coord.sequence()
-                                <= reference.coord.sequence()
-                    },
-                );
+                let already_represented = represented.contains(&prepared.reference);
                 if !already_represented
                     && (prepared.commit.store_package().is_some()
                         || !prepared.commit.circle_packages().is_empty())
@@ -16847,10 +18298,7 @@ impl Database {
                     StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
                     StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
                 };
-                if coverage.get(&stream_id).is_some_and(|(reference, represented)| {
-                    *represented
-                        && prepared.reference.coord.sequence() <= reference.coord.sequence()
-                }) {
+                if represented.contains(&prepared.reference) {
                     continue;
                 }
                 if let Some(existing) = Self::materialized_commit_ref_on(
@@ -18267,13 +19715,51 @@ impl Database {
     ) -> Result<bool, DbError> {
         let write_id = write_id.clone();
         self.call(move |conn| {
-            let raw_prepared: Option<String> = conn
+            let (raw_status, raw_prepared): (String, Option<String>) = conn
                 .query_row(
-                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
                     [write_id.as_str()],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!("Merge cleanup status: {error}"))
+            })?;
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
+                witness.validate().map_err(DbError::Message)?;
+                let candidate = witness.original_position().commit();
+                let StoreCommitCoord::MergeConcurrent {
+                    stream_id,
+                    sequence,
+                } = &candidate.coord
+                else {
+                    return Err(DbError::Message(
+                        "Merge retraction cleanup names a Serial write".to_string(),
+                    ));
+                };
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM merge_retraction_cleanups
+                             WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3
+                         )",
+                        rusqlite::params![
+                            stream_id.to_string(),
+                            Self::sequence_to_sqlite(&stream_id.to_string(), *sequence)?,
+                            serde_json::to_string(candidate).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize Merge retraction cleanup ref: {error}"
+                                ))
+                            })?,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if exists {
+                    Self::load_merge_retraction_cleanup_on(conn, candidate)?;
+                }
+                return Ok(exists);
+            }
             let Some(raw_prepared) = raw_prepared else {
                 return Ok(false);
             };
@@ -18338,7 +19824,7 @@ impl Database {
         write_id: WriteId,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.call(move |conn| {
-            let (raw_status, raw_prepared): (String, String) = conn
+            let (raw_status, raw_prepared): (String, Option<String>) = conn
                 .query_row(
                     "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
                     [write_id.as_str()],
@@ -18347,11 +19833,27 @@ impl Database {
                 .map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
                 .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &status {
+                witness.validate().map_err(DbError::Message)?;
+                let candidate = Self::load_merge_retraction_cleanup_on(
+                    conn,
+                    witness.original_position().commit(),
+                )?;
+                if candidate.commit.write_id != write_id {
+                    return Err(DbError::Message(
+                        "Merge retraction cleanup names another write".to_string(),
+                    ));
+                }
+                return merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, false);
+            }
             if !matches!(status, WriteStatus::Blocked(_)) {
                 return Err(DbError::Message(format!(
                     "Merge cleanup write {write_id} is not blocked"
                 )));
             }
+            let raw_prepared = raw_prepared.ok_or_else(|| {
+                DbError::Message("blocked Merge cleanup has no prepared candidate".to_string())
+            })?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
             let Some(candidate) = parse_prepared_merge_candidate_on(conn, &prepared)? else {
@@ -18414,51 +19916,256 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn finish_retracted_merge_candidate_cleanup(
+        &self,
+        write_id: WriteId,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let raw_status: String = tx
+                .query_row(
+                    "SELECT status FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!("Merge retraction cleanup status: {error}"))
+            })?;
+            let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status else {
+                return Ok(());
+            };
+            witness.validate().map_err(DbError::Message)?;
+            let candidate_ref = witness.original_position().commit().clone();
+            let candidate = Self::load_merge_retraction_cleanup_on(&tx, &candidate_ref)?;
+            if candidate.commit.write_id != write_id {
+                return Err(DbError::Message(
+                    "Merge retraction cleanup names another write".to_string(),
+                ));
+            }
+            finish_merge_retraction_cleanup_on(&tx, &candidate)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn pending_merge_retraction_cleanups(
+        &self,
+    ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT device_id, seq, commit_ref
+                     FROM merge_retraction_cleanups
+                     ORDER BY device_id, seq",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            rows.into_iter()
+                .map(|(stream_id, sequence, encoded_ref)| {
+                    let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
+                    let candidate =
+                        Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                    Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
+                    Ok(candidate)
+                })
+                .collect()
+        })
+        .await
+    }
+
+    pub(crate) async fn merge_retraction_cleanup_verification(
+        &self,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<AuthorExclusionCleanupVerification, DbError> {
+        self.call(move |conn| {
+            let prepared = Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
+            let Some(crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                exclusion,
+                ..
+            }) = remote
+                .candidate_nonactivation_proof(&candidate)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            else {
+                return Err(DbError::Message(
+                    "Merge retraction cleanup has no author-exclusion proof".to_string(),
+                ));
+            };
+            Ok(AuthorExclusionCleanupVerification {
+                locator: load_author_exclusion_activation_locator_on(conn, exclusion)?,
+                candidate: blocked_merge_candidate_from_prepared(prepared),
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn merge_retraction_cleanup_targets(
+        &self,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        self.call(move |conn| {
+            let prepared = Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            merge_candidate_cleanup_targets_on(conn, &prepared.commit.write_id, &prepared, false)
+        })
+        .await
+    }
+
+    pub(crate) async fn confirm_merge_retraction_cleanup_nonactivation(
+        &self,
+        candidate: StoreBatchCommitRef,
+        verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
+    ) -> Result<(), DbError> {
+        let (durable, head_nonactivation) = verified
+            .into_author_exclusion()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        self.call(move |conn| {
+            let prepared = Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            if durable
+                .reference()
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != candidate
+                || head_nonactivation.head().object() != prepared.head_prepared.reference()
+            {
+                return Err(DbError::Message(
+                    "verified Merge retraction cleanup names another candidate".to_string(),
+                ));
+            }
+            let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                exclusion,
+                accepted_cut,
+                activation_head,
+            } = durable.proof()
+            else {
+                unreachable!("verified author-exclusion cleanup")
+            };
+            let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
+            if locator.accepted_cut() != accepted_cut
+                || locator.activation_head() != activation_head
+            {
+                return Err(DbError::Message(
+                    "verified Merge retraction differs from durable exclusion authority"
+                        .to_string(),
+                ));
+            }
+            let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
+            if remote
+                .candidate_nonactivation_proof(&candidate)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != Some(durable.proof())
+            {
+                return Err(DbError::Message(
+                    "verified Merge retraction differs from candidate ownership".to_string(),
+                ));
+            }
+            if !matches!(
+                load_merge_candidate_head_cleanup_on(
+                    conn,
+                    prepared.head_prepared.reference(),
+                    &candidate,
+                )?,
+                MergeCandidateHeadCleanup::ProtocolInert
+            ) {
+                return Err(DbError::Message(
+                    "retracted Merge activation head is not retained as inert authority"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn finish_merge_retraction_cleanup(
+        &self,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let prepared = Self::load_merge_retraction_cleanup_on(&tx, &candidate)?;
+            finish_merge_retraction_cleanup_on(&tx, &prepared)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
     pub(crate) async fn merge_candidate_author_exclusion_verifications(
         &self,
         write_id: WriteId,
     ) -> Result<Vec<AuthorExclusionCleanupVerification>, DbError> {
         self.call(move |conn| {
-            let raw_prepared: String = conn
+            let (raw_status, raw_prepared): (String, Option<String>) = conn
                 .query_row(
-                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
                     [write_id.as_str()],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
             let mut candidates = Vec::new();
-            match &prepared {
-                PreparedStoreWriteState::MergeConcurrent { .. } => {
-                    candidates.push(
-                        parse_prepared_merge_candidate_on(conn, &prepared)?
-                            .expect("matched Merge candidate preparation"),
-                    );
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
+                witness.validate().map_err(DbError::Message)?;
+                let candidate = Self::load_merge_retraction_cleanup_on(
+                    conn,
+                    witness.original_position().commit(),
+                )?;
+                if candidate.commit.write_id != write_id {
+                    return Err(DbError::Message(
+                        "Merge retraction cleanup names another write".to_string(),
+                    ));
                 }
-                PreparedStoreWriteState::MergeAbandonment {
-                    candidate_commit,
-                    candidate_head,
-                    authority_commit,
-                    authority_head,
-                    ..
-                } => {
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        conn,
+                candidates.push(candidate);
+            } else {
+                let raw_prepared = raw_prepared.ok_or_else(|| {
+                    DbError::Message("Merge cleanup has no prepared candidate".to_string())
+                })?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| {
+                        DbError::Message(format!("prepared Merge cleanup: {error}"))
+                    })?;
+                match &prepared {
+                    PreparedStoreWriteState::MergeConcurrent { .. } => {
+                        candidates.push(
+                            parse_prepared_merge_candidate_on(conn, &prepared)?
+                                .expect("matched Merge candidate preparation"),
+                        );
+                    }
+                    PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
                         candidate_head,
-                    )?);
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        conn,
                         authority_commit,
                         authority_head,
-                    )?);
-                }
-                PreparedStoreWriteState::SerialPreparing
-                | PreparedStoreWriteState::Serial { .. } => {
-                    return Err(DbError::Message(
-                        "Serial state reached Merge candidate cleanup verification".to_string(),
-                    ));
+                        ..
+                    } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            conn,
+                            candidate_commit,
+                            candidate_head,
+                        )?);
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            conn,
+                            authority_commit,
+                            authority_head,
+                        )?);
+                    }
+                    PreparedStoreWriteState::SerialPreparing
+                    | PreparedStoreWriteState::Serial { .. } => {
+                        return Err(DbError::Message(
+                            "Serial state reached Merge candidate cleanup verification".to_string(),
+                        ));
+                    }
                 }
             }
             let mut verifications = Vec::new();
@@ -18504,47 +20211,65 @@ impl Database {
             .map_err(|error| DbError::Message(error.to_string()))?;
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let raw_prepared: String = tx
+            let (raw_status, raw_prepared): (String, Option<String>) = tx
                 .query_row(
-                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
                     [write_id.as_str()],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
             let reference = durable
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let mut candidates = Vec::new();
-            match &prepared {
-                PreparedStoreWriteState::MergeConcurrent { .. } => candidates.push(
-                    parse_prepared_merge_candidate_on(&tx, &prepared)?
-                        .expect("matched Merge preparation"),
-                ),
-                PreparedStoreWriteState::MergeAbandonment {
-                    candidate_commit,
-                    candidate_head,
-                    authority_commit,
-                    authority_head,
-                    ..
-                } => {
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        &tx,
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
+                witness.validate().map_err(DbError::Message)?;
+                if witness.original_position().commit() != &reference {
+                    return Err(DbError::Message(
+                        "fresh excluded-author head evidence differs from the retraction witness"
+                            .to_string(),
+                    ));
+                }
+                candidates.push(Self::load_merge_retraction_cleanup_on(&tx, &reference)?);
+            } else {
+                let raw_prepared = raw_prepared.ok_or_else(|| {
+                    DbError::Message("Merge cleanup has no prepared candidate".to_string())
+                })?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| {
+                        DbError::Message(format!("prepared Merge cleanup: {error}"))
+                    })?;
+                match &prepared {
+                    PreparedStoreWriteState::MergeConcurrent { .. } => candidates.push(
+                        parse_prepared_merge_candidate_on(&tx, &prepared)?
+                            .expect("matched Merge preparation"),
+                    ),
+                    PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
                         candidate_head,
-                    )?);
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        &tx,
                         authority_commit,
                         authority_head,
-                    )?);
-                }
-                PreparedStoreWriteState::SerialPreparing
-                | PreparedStoreWriteState::Serial { .. } => {
-                    return Err(DbError::Message(
-                        "Serial state reached excluded-author head reconciliation".to_string(),
-                    ));
+                        ..
+                    } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            &tx,
+                            candidate_commit,
+                            candidate_head,
+                        )?);
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            &tx,
+                            authority_commit,
+                            authority_head,
+                        )?);
+                    }
+                    PreparedStoreWriteState::SerialPreparing
+                    | PreparedStoreWriteState::Serial { .. } => {
+                        return Err(DbError::Message(
+                            "Serial state reached excluded-author head reconciliation".to_string(),
+                        ));
+                    }
                 }
             }
             let candidate = candidates
@@ -18604,7 +20329,10 @@ impl Database {
             }
             let mut remote = load_remote_object_on(&tx, object_id)?;
             let inert = remote
-                .reconcile_verified_candidate_head_nonactivation(&durable, &head_nonactivation)
+                .begin_candidate_nonactivation_with_verified_head_nonactivation(
+                    durable,
+                    &head_nonactivation,
+                )
                 .map_err(|error| {
                     DbError::Message(format!(
                         "reconcile excluded-author head {object_id}: {error}"
@@ -19465,6 +21193,59 @@ impl Database {
             .map_err(DbError::from)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn install_pulled_package_activation_on(
+        conn: &Connection,
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        package: &AudiencePackage,
+    ) -> Result<(), DbError> {
+        commit_ref
+            .verify_commit(commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let retained = Self::retained_audience_package(commit, commit_ref, package.clone())?;
+        let domain = retained.domain();
+        let object_id = remote_object_id(retained.object());
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if exists {
+            let remote = load_remote_object_on(conn, object_id)?;
+            let mut remote = if matches!(remote, RemoteObjectRecord::CandidateExclusive(_)) {
+                remote.into_activated(commit_ref).map_err(|error| {
+                    DbError::Message(format!(
+                        "activate locally prepared pulled package {object_id}: {error}"
+                    ))
+                })?
+            } else {
+                remote
+            };
+            remote
+                .merge_package_activation(&domain, retained.package(), commit_ref)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "merge pulled package activation {object_id}: {error}"
+                    ))
+                })?;
+            update_remote_object_on(conn, object_id, &remote)
+        } else {
+            let remote = RemoteObjectRecord::activated_external_package(
+                domain,
+                retained.package(),
+                commit_ref.clone(),
+            )
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "construct pulled package activation {object_id}: {error}"
+                ))
+            })?;
+            persist_exact_remote_object_on(conn, &remote, "pulled audience package")
+        }
     }
 
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
@@ -21703,21 +23484,28 @@ fn require_store_device_exclusion_transition_on(
     expected: &DurableStoreDeviceExclusionOperation,
     next: &DurableStoreDeviceExclusionOperation,
 ) -> Result<(), DbError> {
-    expected
-        .validate()
-        .map_err(store_device_exclusion_journal_error)?;
-    next.validate()
-        .map_err(store_device_exclusion_journal_error)?;
     if !expected.allows_transition_to(next) {
         return Err(DbError::Message(
             "invalid Store-device exclusion journal transition".to_string(),
         ));
     }
-    let current =
-        load_store_device_exclusion_on(conn, expected.operation_id())?.ok_or_else(|| {
+    let expected_state = serde_json::to_string(expected).map_err(|error| {
+        DbError::Message(format!(
+            "serialize expected Store-device exclusion: {error}"
+        ))
+    })?;
+    let current = conn
+        .query_row(
+            "SELECT state FROM outbound_store_device_exclusion WHERE operation_id = ?1",
+            [expected.operation_id().to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .ok_or_else(|| {
             DbError::Message("Store-device exclusion journal disappeared".to_string())
         })?;
-    if current != *expected {
+    if current != expected_state {
         return Err(DbError::Message(
             "Store-device exclusion journal changed during transition".to_string(),
         ));
@@ -22286,7 +24074,10 @@ fn validate_remote_object_on(
     let stored = remote.bytes().stored();
     let stored_matches = match expected_stored {
         RemoteStoredRepresentationRef::Inline(expected) => stored.inline_bytes() == Some(expected),
-        RemoteStoredRepresentationRef::Blob => stored.inline_bytes().is_none(),
+        RemoteStoredRepresentationRef::Blob => matches!(
+            stored,
+            crate::sync::remote_object::RemoteStoredRepresentation::Blob { .. }
+        ),
     };
     if remote.object() != expected_object
         || remote.bytes().canonical_semantic_bytes() != expected_semantic_bytes
@@ -22330,7 +24121,132 @@ fn load_remote_object_on(
             "prepared remote object key is {object_id}, exact reference hashes to {actual}"
         )));
     }
+    let indexed = indexed_retained_replay_owners_on(conn, object_id)?;
+    let embedded = remote
+        .retained_replay_owners()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if embedded != indexed {
+        return Err(DbError::Message(format!(
+            "prepared remote object {object_id} differs from its retained-replay ownership index"
+        )));
+    }
     Ok(remote)
+}
+
+fn indexed_retained_replay_owners_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<BTreeSet<RetainedReplayOwner>, DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT device_id, seq, commit_ref, input_hash
+             FROM retained_replay_objects WHERE object_id = ?1
+             ORDER BY device_id, seq",
+        )
+        .map_err(DbError::from)?;
+    let rows = statement
+        .query_map([object_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(DbError::from)?;
+    let mut owners = BTreeSet::new();
+    for row in rows {
+        let (device_id, sequence, encoded_commit, encoded_input_hash) =
+            row.map_err(DbError::from)?;
+        let commit: StoreBatchCommitRef =
+            serde_json::from_str(&encoded_commit).map_err(|error| {
+                DbError::Message(format!(
+                    "retained replay object {object_id} commit ref: {error}"
+                ))
+            })?;
+        let input_hash = encoded_input_hash.parse().map_err(|error| {
+            DbError::Message(format!(
+                "retained replay object {object_id} input hash: {error}"
+            ))
+        })?;
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence: commit_sequence,
+        } = &commit.coord
+        else {
+            return Err(DbError::Message(format!(
+                "retained replay object {object_id} names a Serial commit"
+            )));
+        };
+        let sequence = u64::try_from(sequence).map_err(|_| {
+            DbError::Message(format!(
+                "retained replay object {object_id} has an invalid sequence"
+            ))
+        })?;
+        if stream_id.to_string() != device_id || *commit_sequence != sequence {
+            return Err(DbError::Message(format!(
+                "retained replay object {object_id} index differs from its commit coordinate"
+            )));
+        }
+        if !owners.insert(RetainedReplayOwner::Commit { commit, input_hash }) {
+            return Err(DbError::Message(format!(
+                "retained replay object {object_id} repeats an owner"
+            )));
+        }
+    }
+    Ok(owners)
+}
+
+fn index_retained_replay_owner_on(
+    conn: &rusqlite::Transaction<'_>,
+    object_id: ObjectHash,
+    owner: &RetainedReplayOwner,
+) -> Result<(), DbError> {
+    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+    let StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence,
+    } = &commit.coord
+    else {
+        return Err(DbError::Message(
+            "retained replay object owner names a Serial commit".to_string(),
+        ));
+    };
+    let device_id = stream_id.to_string();
+    let sequence = Database::sequence_to_sqlite(&device_id, *sequence)?;
+    let commit_ref = serde_json::to_string(commit).map_err(|error| {
+        DbError::Message(format!("serialize retained replay commit ref: {error}"))
+    })?;
+    let input_hash = input_hash.to_string();
+    conn.execute(
+        "INSERT INTO retained_replay_objects
+         (device_id, seq, commit_ref, input_hash, object_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(device_id, seq, object_id) DO NOTHING",
+        rusqlite::params![
+            &device_id,
+            sequence,
+            &commit_ref,
+            &input_hash,
+            object_id.to_string()
+        ],
+    )
+    .map_err(DbError::from)?;
+    let stored: (String, String) = conn
+        .query_row(
+            "SELECT commit_ref, input_hash FROM retained_replay_objects
+             WHERE device_id = ?1 AND seq = ?2 AND object_id = ?3",
+            rusqlite::params![device_id, sequence, object_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    if stored != (commit_ref, input_hash) {
+        return Err(DbError::Message(format!(
+            "retained replay object {object_id} already has different exact ownership"
+        )));
+    }
+    Ok(())
 }
 
 fn load_protocol_inert_object_on(
@@ -23316,7 +25232,14 @@ mod tests {
         assert_eq!(baseline.write_policy, write_policy);
         assert_eq!(baseline.schema_version, db.schema_version());
         assert_eq!(baseline.routing_hash, db.sync_routing_hash());
-        assert_eq!(baseline.authority.store_root, store.root);
+        match &baseline.authority {
+            RetainedReplayAuthority::Genesis(authority) => {
+                assert_eq!(authority.store_root, store.root)
+            }
+            RetainedReplayAuthority::StableSnapshot(_) => {
+                panic!("Store creation installed a snapshot replay baseline")
+            }
+        }
         assert_eq!(baseline.exact_cut.policy(), write_policy);
         baseline.validate_image().expect("validate replay image");
     }
@@ -23597,38 +25520,55 @@ mod tests {
         )
         .expect("valid absence closure");
         let object_id = absence.object_id();
-        let saved_remote = db
+        let mut saved_remote = db
             .call(move |conn| load_remote_object_on(conn, object_id))
             .await
             .expect("load activated package ownership");
+        saved_remote
+            .remove_all_retained_replay_owners()
+            .expect("remove unrelated replay retention from reclaim closure fixture");
+        let closure_db = crate::sync::test_helpers::open_test_db();
+        let saved_remote_for_insert = saved_remote.clone();
+        closure_db
+            .call(move |conn| {
+                persist_exact_remote_object_on(
+                    conn,
+                    &saved_remote_for_insert,
+                    "reclaim closure fixture package",
+                )
+            })
+            .await
+            .expect("install solely-owned reclaim closure fixture");
         let operation_for_insert = operation.clone();
         let absence_for_insert = absence.clone();
-        db.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            insert_store_reclaim_operation_on(&tx, &operation_for_insert)?;
-            record_reclaimed_store_package_on(&tx, &absence_for_insert)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-        .expect("close reclaimed package");
+        closure_db
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                insert_store_reclaim_operation_on(&tx, &operation_for_insert)?;
+                record_reclaimed_store_package_on(&tx, &absence_for_insert)?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
+            .expect("close reclaimed package");
 
         let saved_remote_for_revival = saved_remote.clone();
-        db.call(move |conn| {
-            assert!(load_remote_object_on(conn, object_id).is_err());
-            assert_eq!(
-                load_reclaimed_store_package_on(conn, object_id)?,
-                Some(absence)
-            );
-            assert!(persist_exact_remote_object_on(
-                conn,
-                &saved_remote_for_revival,
-                "revived Store package",
-            )
-            .is_err());
-            Ok(())
-        })
-        .await
-        .expect("verify irreversible absence closure");
+        closure_db
+            .call(move |conn| {
+                assert!(load_remote_object_on(conn, object_id).is_err());
+                assert_eq!(
+                    load_reclaimed_store_package_on(conn, object_id)?,
+                    Some(absence)
+                );
+                assert!(persist_exact_remote_object_on(
+                    conn,
+                    &saved_remote_for_revival,
+                    "revived Store package",
+                )
+                .is_err());
+                Ok(())
+            })
+            .await
+            .expect("verify irreversible absence closure");
 
         let receipt = crate::sync::store_reclaim::ReclaimReceiptRef {
             receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
@@ -23643,11 +25583,13 @@ mod tests {
         )
         .expect("valid receipt closure");
         let receipted_for_insert = receipted.clone();
-        db.call(move |conn| record_reclaimed_store_package_on(conn, &receipted_for_insert))
+        closure_db
+            .call(move |conn| record_reclaimed_store_package_on(conn, &receipted_for_insert))
             .await
             .expect("attach receipt to reclaimed package");
         assert_eq!(
-            db.call(move |conn| load_reclaimed_store_package_on(conn, object_id))
+            closure_db
+                .call(move |conn| load_reclaimed_store_package_on(conn, object_id))
                 .await
                 .expect("load receipted closure"),
             Some(receipted)
