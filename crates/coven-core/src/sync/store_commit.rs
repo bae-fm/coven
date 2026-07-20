@@ -1370,6 +1370,18 @@ struct CommitSignedFields<'a> {
 }
 
 impl StoreBatchCommit {
+    pub(crate) fn verified_candidate_objects(
+        &self,
+    ) -> Result<&CandidateObjectManifest, StoreProtocolError> {
+        let expected = candidate_manifest(self.candidate_family(), &self.body)?;
+        if self.candidate_objects != expected {
+            return Err(StoreProtocolError::Malformed(
+                "candidate object manifest differs from exact commit body graph".to_string(),
+            ));
+        }
+        Ok(&self.candidate_objects)
+    }
+
     pub fn policy(&self) -> WritePolicy {
         self.order.policy()
     }
@@ -2522,11 +2534,7 @@ impl StoreBatchCommit {
                 author,
             )?;
         }
-        if self.candidate_objects != candidate_manifest(family, &self.body)? {
-            return Err(StoreProtocolError::Malformed(
-                "candidate object manifest differs from the exact commit body graph".to_string(),
-            ));
-        }
+        self.verified_candidate_objects()?;
         validate_commit_order(&self.order)?;
         validate_commit_predecessor_states(
             &self.order,
@@ -8333,6 +8341,7 @@ mod tests {
         let package = label.as_bytes();
         let write_id = WriteId::from_generated(format!("{label}-write"));
         let order = fixture.commit.order.clone();
+        let sequence = order.seq();
         let family = CandidateFamilyId::derive(
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
@@ -8345,7 +8354,7 @@ mod tests {
                 package_semantic_prefix(
                     family,
                     SERIAL_STREAM_ID,
-                    order.seq(),
+                    sequence,
                     ObjectHash::digest(package),
                 )
             ),
@@ -8605,6 +8614,137 @@ mod tests {
         ));
     }
 
+    fn closed_store_package_fixture(
+        fixture: &Fixture,
+    ) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>, Vec<u8>) {
+        let write_id = WriteId::from_generated("closed-package-graph".to_string());
+        let order = fixture.commit.order.clone();
+        let sequence = order.seq();
+        let family = CandidateFamilyId::derive(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            &write_id,
+            &order,
+        );
+        let package = super::super::audience_package::AudiencePackage::store(
+            fixture.root_ref.store_root_hash,
+            family,
+            write_id.clone(),
+            fixture.commit_ref.coord.clone(),
+            3,
+            b"closed graph changeset".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        let semantic = package.to_bytes();
+        let stored = b"encrypted closed graph package".to_vec();
+        let package_object = exact(
+            format!(
+                "{}.pkg",
+                package_semantic_prefix(
+                    family,
+                    SERIAL_STREAM_ID,
+                    sequence,
+                    ObjectHash::digest(&semantic),
+                )
+            ),
+            &stored,
+        );
+        let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
+        let commit = StoreBatchCommit::signed(
+            fixture.root_ref.store_root_hash,
+            write_id,
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            order,
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            StoreOperationMembershipAuthority::Serial,
+            StorePackageInput {
+                candidate_family: family,
+                schema_version: 3,
+                bytes: &semantic,
+                object: package_object,
+            },
+            &signer,
+        )
+        .unwrap();
+        let commit_bytes = commit.to_bytes();
+        let reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            fixture.commit_ref.coord.clone(),
+            exact(
+                format!(
+                    "{}.json",
+                    commit_semantic_prefix(
+                        family,
+                        SERIAL_STREAM_ID,
+                        sequence,
+                        commit.commit_hash(),
+                    )
+                ),
+                &commit_bytes,
+            ),
+        )
+        .unwrap();
+        (commit, reference, semantic, stored)
+    }
+
+    #[test]
+    fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_material() {
+        let fixture = fixture();
+        let (commit, owner, semantic, stored) = closed_store_package_fixture(&fixture);
+        let package = commit.store_package().cloned().unwrap();
+        let graph =
+            super::super::remote_object::CandidateObjectGraph::from_commit(&commit).unwrap();
+        assert!(matches!(
+            graph.clone().close(&commit, &owner, Vec::new()),
+            Err(super::super::remote_object::RemoteObjectRecordError::CandidateObjectMissing)
+        ));
+        let exact_material = super::super::remote_object::CandidateObjectMaterial {
+            object: package.object.clone(),
+            canonical_semantic_bytes: semantic.clone(),
+            stored_bytes: stored.clone(),
+        };
+        let invented_material = super::super::remote_object::CandidateObjectMaterial {
+            object: exact("store-v1/candidates/invented.pkg".to_string(), b"invented"),
+            canonical_semantic_bytes: b"invented".to_vec(),
+            stored_bytes: b"invented".to_vec(),
+        };
+        assert!(matches!(
+            graph.clone().close(
+                &commit,
+                &owner,
+                vec![exact_material.clone(), invented_material]
+            ),
+            Err(super::super::remote_object::RemoteObjectRecordError::CandidateObjectInvented)
+        ));
+        let mut records = graph.close(&commit, &owner, vec![exact_material]).unwrap();
+        let super::super::remote_object::RemoteObjectRecord::CandidateExclusive(record) =
+            &mut records[0]
+        else {
+            panic!("package graph must close as candidate-exclusive")
+        };
+        record.identity.domain =
+            super::super::remote_object::CandidateExclusiveObjectDomain::CirclePackage {
+                reference: CirclePackageRef {
+                    circle_id: CircleId::from_bytes([9; 16]),
+                    control: CircleControlCoord::Serial {
+                        author_pubkey: keys::public_key_hex(&fixture.signer),
+                        generation: 1,
+                        control_hash: ObjectHash::digest(b"substituted control"),
+                    },
+                    package,
+                    key_fingerprint: KeyFingerprint::from_bytes([7; 8]),
+                },
+            };
+        assert!(matches!(
+            records[0].validate(),
+            Err(super::super::remote_object::RemoteObjectRecordError::DomainMismatch)
+        ));
+    }
+
     #[test]
     fn candidate_manifest_rejects_one_exact_object_reached_twice() {
         let fixture = fixture();
@@ -8816,6 +8956,48 @@ mod tests {
             commit.device_retirements(),
             std::slice::from_ref(&retirement_ref)
         );
+        let commit_bytes = commit.to_bytes();
+        let commit_ref = StoreBatchCommitRef::from_commit(
+            &commit,
+            fixture.commit_ref.coord.clone(),
+            exact(
+                format!(
+                    "{}.json",
+                    commit_semantic_prefix(
+                        commit.candidate_family(),
+                        SERIAL_STREAM_ID,
+                        commit.seq(),
+                        commit.commit_hash(),
+                    )
+                ),
+                &commit_bytes,
+            ),
+        )
+        .unwrap();
+        let mut remotes = super::super::remote_object::CandidateObjectGraph::from_commit(&commit)
+            .unwrap()
+            .close(
+                &commit,
+                &commit_ref,
+                vec![super::super::remote_object::CandidateObjectMaterial {
+                    object: retirement_ref.object.clone(),
+                    canonical_semantic_bytes: retirement_bytes.clone(),
+                    stored_bytes: retirement_bytes.clone(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(remotes.len(), 1);
+        remotes[0].mark_uploaded_verified().unwrap();
+        let activated = remotes.pop().unwrap().into_activated(&commit_ref).unwrap();
+        assert!(matches!(
+            activated,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::RetainedAuthorityObjectDomain::SelfRetirement { reference }
+                        if reference == &retirement_ref
+                )
+        ));
 
         let active = ResolvedStoreDeviceState::founder(
             &fixture.root_ref,

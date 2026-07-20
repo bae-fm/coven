@@ -2188,12 +2188,13 @@ impl PreparedAudiencePackage {
             }
             RemoteObjectRecord::CandidateExclusive(record) => matches!(
                 record.identity.domain,
-                CandidateExclusiveObjectDomain::StorePackage
+                CandidateExclusiveObjectDomain::StorePackage { .. }
                     | CandidateExclusiveObjectDomain::CirclePackage { .. }
             ),
             RemoteObjectRecord::SharedLiveSet(record) => matches!(
                 record.identity.domain,
-                SharedLiveSetObjectDomain::StorePackage | SharedLiveSetObjectDomain::CirclePackage
+                SharedLiveSetObjectDomain::StorePackage { .. }
+                    | SharedLiveSetObjectDomain::CirclePackage { .. }
             ),
         };
         if !is_package {
@@ -2875,20 +2876,23 @@ fn begin_merge_candidate_nonactivation_on(
         ));
     }
     let mut object_ids = if include_indexed_objects {
+        let mut object_ids = candidate_graph_exact_objects(&candidate.commit)?
+            .iter()
+            .map(|object| remote_object_id(object).to_string())
+            .collect::<Vec<_>>();
         let mut statement = conn
             .prepare(
-                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                 UNION
-                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
+                "SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
                  ORDER BY remote_object_id",
             )
             .map_err(DbError::from)?;
-        let object_ids = statement
+        let indexed = statement
             .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
             .map_err(DbError::from)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(DbError::from)?;
         drop(statement);
+        object_ids.extend(indexed);
         object_ids
     } else {
         Vec::new()
@@ -2932,19 +2936,20 @@ fn merge_candidate_cleanup_targets_on(
     }
     let mut cleanup = BTreeMap::new();
     if include_indexed_objects {
+        let mut encoded = candidate_graph_exact_objects(&candidate.commit)?
+            .iter()
+            .map(|object| remote_object_id(object).to_string())
+            .collect::<Vec<_>>();
         let mut statement = conn
-            .prepare(
-                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                 UNION
-                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
-            )
+            .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
             .map_err(DbError::from)?;
-        let encoded = statement
+        let indexed = statement
             .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
             .map_err(DbError::from)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(DbError::from)?;
         drop(statement);
+        encoded.extend(indexed);
         for encoded in encoded {
             let object_id: ObjectHash = encoded.parse().map_err(|error| {
                 DbError::Message(format!("Merge cleanup remote object id: {error}"))
@@ -2978,8 +2983,8 @@ fn merge_candidate_cleanup_targets_on(
         ));
     }
     let mut targets = Vec::new();
-    for object in candidate_manifest_exact_objects(&candidate.commit) {
-        if let Some(target) = cleanup.remove(object) {
+    for object in candidate_graph_exact_objects(&candidate.commit)? {
+        if let Some(target) = cleanup.remove(&object) {
             targets.push(target);
         }
     }
@@ -7812,12 +7817,13 @@ impl Database {
             return Ok(());
         };
         let mut object_ids = vec![remote_object_id(&candidate.reference.object)];
+        object_ids.extend(
+            candidate_graph_exact_objects(&candidate.commit)?
+                .iter()
+                .map(remote_object_id),
+        );
         let mut statement = conn
-            .prepare(
-                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                 UNION
-                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
-            )
+            .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
             .map_err(DbError::from)?;
         let indexed = statement
             .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
@@ -8029,11 +8035,21 @@ impl Database {
                             .expect("matched Merge preparation");
                         removable.push(remote_object_id(&merge.reference.object));
                         removable.push(remote_object_id(merge.head_prepared.reference()));
+                        removable.extend(
+                            candidate_graph_exact_objects(&merge.commit)?
+                                .iter()
+                                .map(remote_object_id),
+                        );
                         candidate = Some(merge.reference);
                     }
                     PreparedStoreWriteState::Serial { .. } => {
                         if let Some(serial) = parse_prepared_serial_candidate(raw_prepared)? {
                             removable.push(remote_object_id(&serial.reference.object));
+                            removable.extend(
+                                candidate_graph_exact_objects(&serial.commit)?
+                                    .iter()
+                                    .map(remote_object_id),
+                            );
                             candidate = Some(serial.reference);
                         }
                     }
@@ -8041,11 +8057,7 @@ impl Database {
                 }
             }
             let mut statement = tx
-                .prepare(
-                    "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                     UNION
-                     SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
-                )
+                .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
                 .map_err(DbError::from)?;
             let indexed = statement
                 .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
@@ -12016,9 +12028,11 @@ impl Database {
     pub(crate) async fn stage_local_store_device_retirement(
         &self,
         payload: Vec<u8>,
+        remotes: Vec<RemoteObjectRecord>,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let existing: Option<(Vec<u8>, i64)> = conn
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing: Option<(Vec<u8>, i64)> = tx
                 .query_row(
                     "SELECT payload, published FROM local_store_device_retirement WHERE singleton = 1",
                     [],
@@ -12031,13 +12045,21 @@ impl Database {
                 Some(_) => Err(DbError::Message(
                     "local Store device retirement already owns different exact objects".into(),
                 )),
-                None => conn
-                    .execute(
+                None => {
+                    for remote in &remotes {
+                        persist_exact_remote_object_on(
+                            &tx,
+                            remote,
+                            "Store self-retirement candidate graph",
+                        )?;
+                    }
+                    tx.execute(
                         "INSERT INTO local_store_device_retirement (singleton, payload, published) VALUES (1, ?1, 0)",
                         [payload],
                     )
-                    .map(|_| ())
-                    .map_err(DbError::from),
+                    .map_err(DbError::from)?;
+                    tx.commit().map_err(DbError::from)
+                }
             }
         })
         .await
@@ -12065,6 +12087,7 @@ impl Database {
         commit: StoreBatchCommit,
         commit_ref: StoreBatchCommitRef,
         serial_authorization: Option<SerialAuthorizationState>,
+        remote_object_ids: Vec<ObjectHash>,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -12083,6 +12106,11 @@ impl Database {
             if published == 1 {
                 return Ok(());
             }
+            Self::activate_store_operation_remote_objects_on(
+                &tx,
+                &commit_ref,
+                &remote_object_ids,
+            )?;
             match serial_authorization {
                 Some(authorization) => Self::record_materialized_serial_commit_on(
                     &tx,
@@ -12881,15 +12909,22 @@ impl Database {
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<(), DbError> {
+        let remotes = journal
+            .closed_remote_objects()
+            .map_err(|error| DbError::Message(error.to_string()))?;
         let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            for remote in &remotes {
+                persist_exact_remote_object_on(&tx, remote, "Circle candidate graph")?;
+            }
+            tx.execute(
                 "INSERT INTO circle_operations (operation_id, circle_id, payload)
                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![row.operation_id, row.circle_id, row.payload],
             )
-            .map(|_| ())
-            .map_err(DbError::from)
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -13271,6 +13306,19 @@ impl Database {
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<(), DbError> {
+        let uploaded_ids = journal
+            .operation()
+            .uploaded
+            .iter()
+            .filter_map(|step| journal.operation().prepared_objects.get(step))
+            .map(|prepared| remote_object_id(prepared.reference()))
+            .collect::<BTreeSet<_>>();
+        let uploaded = journal
+            .closed_remote_objects()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .into_iter()
+            .filter(|remote| uploaded_ids.contains(&remote.object_id()))
+            .collect::<Vec<_>>();
         let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -13291,6 +13339,9 @@ impl Database {
                 return Err(DbError::Message(
                     "circle operation disappeared during publication".to_string(),
                 ));
+            }
+            for remote in uploaded {
+                mark_remote_object_uploaded_on(&tx, remote)?;
             }
             tx.commit().map_err(DbError::from)
         })
@@ -13493,6 +13544,26 @@ impl Database {
                     (commit, activation.clone())
                 }
             };
+            let mut object_ids = candidate_graph_exact_objects(&commit)?
+                .iter()
+                .map(remote_object_id)
+                .collect::<Vec<_>>();
+            object_ids.push(remote_object_id(&operation.commit_ref.object));
+            if let crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent { .. } =
+                &operation.policy
+            {
+                let head = operation.prepared_objects.get("store-head").ok_or_else(|| {
+                    DbError::Message(
+                        "Merge Circle operation lacks its prepared Store head".to_string(),
+                    )
+                })?;
+                object_ids.push(remote_object_id(head.reference()));
+            }
+            Self::activate_store_operation_remote_objects_on(
+                &tx,
+                &operation.commit_ref,
+                &object_ids,
+            )?;
             Self::record_verified_circle_activations_on(
                 &tx,
                 &commit,
@@ -15620,10 +15691,9 @@ impl Database {
         let mut object_ids = std::collections::BTreeSet::new();
         object_ids.insert(remote_object_id(&commit_ref.object));
         object_ids.extend(
-            audiences
-                .packages
+            candidate_graph_exact_objects(commit)?
                 .iter()
-                .map(PreparedAudiencePackage::remote_object_id),
+                .map(remote_object_id),
         );
         object_ids.extend(
             audiences
@@ -15790,23 +15860,59 @@ impl Database {
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let write_id = write_id.clone();
         self.call(move |conn| {
+            let raw_prepared: String = conn
+                .query_row(
+                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                .map_err(|error| DbError::Message(format!("prepared remote graph: {error}")))?;
+            let commit = match &prepared {
+                PreparedStoreWriteState::MergeConcurrent { .. }
+                | PreparedStoreWriteState::MergeAbandonment { .. } => {
+                    parse_prepared_merge_candidate_on(conn, &prepared)?
+                        .ok_or_else(|| {
+                            DbError::Message("prepared Merge candidate graph is absent".to_string())
+                        })?
+                        .commit
+                }
+                PreparedStoreWriteState::Serial { .. } => {
+                    parse_prepared_serial_candidate(&raw_prepared)?
+                        .ok_or_else(|| {
+                            DbError::Message(
+                                "prepared Serial candidate graph is absent".to_string(),
+                            )
+                        })?
+                        .commit
+                }
+                PreparedStoreWriteState::SerialPreparing => {
+                    return Err(DbError::Message(
+                        "Serial write has no prepared candidate graph".to_string(),
+                    ));
+                }
+            };
+            let mut ids = candidate_graph_exact_objects(&commit)?
+                .iter()
+                .map(|object| (remote_object_id(object).to_string(), None))
+                .collect::<Vec<_>>();
             let mut statement = conn
                 .prepare(
-                    "SELECT remote_object_id, NULL AS spool_path
-                     FROM store_write_packages WHERE write_id = ?1
-                     UNION
-                     SELECT remote_object_id, spool_path
+                    "SELECT remote_object_id, spool_path
                      FROM store_write_blobs WHERE write_id = ?1
                      ORDER BY remote_object_id",
                 )
                 .map_err(DbError::from)?;
-            let ids = statement
+            let blobs = statement
                 .query_map([write_id.as_str()], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })
                 .map_err(DbError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from)?;
+            ids.extend(blobs);
+            ids.sort_by(|left, right| left.0.cmp(&right.0));
             ids.into_iter()
                 .map(|(encoded, spool_path)| {
                     let id = encoded.parse().map_err(|error| {
@@ -16698,20 +16804,23 @@ impl Database {
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?
                 .into_durable();
+                let mut object_ids = candidate_graph_exact_objects(commit)?
+                    .iter()
+                    .map(|object| remote_object_id(object).to_string())
+                    .collect::<Vec<_>>();
                 let mut object_statement = tx
                     .prepare(
-                        "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                         UNION
-                         SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
+                        "SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
                          ORDER BY remote_object_id",
                     )
                     .map_err(DbError::from)?;
-                let object_ids = object_statement
+                let indexed = object_statement
                     .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
                     .map_err(DbError::from)?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(DbError::from)?;
                 drop(object_statement);
+                object_ids.extend(indexed);
                 let mut manifest_cleanup = BTreeSet::new();
                 for encoded in object_ids {
                     let object_id: ObjectHash = encoded.parse().map_err(|error| {
@@ -16725,10 +16834,10 @@ impl Database {
                         manifest_cleanup.insert(object);
                     }
                 }
-                for object in candidate_manifest_exact_objects(commit) {
-                    if manifest_cleanup.remove(object) {
+                for object in candidate_graph_exact_objects(commit)? {
+                    if manifest_cleanup.remove(&object) {
                         exclusive_cleanup.push(CandidateCleanupObject {
-                            object: object.clone(),
+                            object,
                         });
                     }
                 }
@@ -20048,28 +20157,12 @@ enum RemoteStoredRepresentationRef<'a> {
     Blob,
 }
 
-fn candidate_manifest_exact_objects(commit: &StoreBatchCommit) -> Vec<&ExactObjectRef> {
-    let mut objects = Vec::new();
-    for candidate in &commit.candidate_objects.objects {
-        match candidate {
-            crate::sync::store_commit::CandidateExclusiveObjectRef::StorePackage(reference) => {
-                objects.push(&reference.object);
-            }
-            crate::sync::store_commit::CandidateExclusiveObjectRef::CirclePackage(reference) => {
-                objects.push(&reference.package.object);
-            }
-            crate::sync::store_commit::CandidateExclusiveObjectRef::CircleAccess {
-                access, ..
-            } => {
-                objects.push(&access.leaf.object);
-                objects.push(&access.envelope.object);
-            }
-            crate::sync::store_commit::CandidateExclusiveObjectRef::SelfRetirement(reference) => {
-                objects.push(&reference.object);
-            }
-        }
-    }
-    objects
+fn candidate_graph_exact_objects(
+    commit: &StoreBatchCommit,
+) -> Result<Vec<ExactObjectRef>, DbError> {
+    crate::sync::remote_object::CandidateObjectGraph::from_commit(commit)
+        .map(|graph| graph.exact_objects().cloned().collect())
+        .map_err(|error| DbError::Message(format!("closed candidate object graph: {error}")))
 }
 
 fn validate_remote_object_on(
@@ -20106,7 +20199,12 @@ fn load_remote_object_on(
             [object_id.to_string()],
             |row| row.get(0),
         )
-        .map_err(DbError::from)?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                DbError::Message(format!("prepared remote object {object_id} is absent"))
+            }
+            error => DbError::from(error),
+        })?;
     let remote: RemoteObjectRecord = serde_json::from_str(&state).map_err(|error| {
         DbError::Message(format!(
             "prepared remote object {object_id} has invalid closed state: {error}"
@@ -20506,6 +20604,70 @@ fn mark_remote_object_uploaded_on(
 ) -> Result<RemoteObjectRecord, DbError> {
     let object_id = expected.object_id();
     let current = load_remote_object_on(conn, object_id)?;
+    if let (
+        RemoteObjectRecord::SharedLiveSet(current_record),
+        RemoteObjectRecord::CandidateExclusive(expected_record),
+    ) = (&current, &expected)
+    {
+        let expected_owner = match &expected_record.state {
+            crate::sync::remote_object::CandidateObjectState::Prepared { ownership }
+            | crate::sync::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.iter().next()
+            }
+            crate::sync::remote_object::CandidateObjectState::CleanupPending { .. }
+            | crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
+        };
+        if expected_record.identity.domain.shared_destination()
+            == Some(current_record.identity.domain.clone())
+            && expected_record.identity.semantic_hash == current_record.identity.semantic_hash
+            && expected_record.identity.object == current_record.identity.object
+            && expected_record.bytes == current_record.bytes
+            && expected_owner.is_some_and(|owner| {
+                matches!(
+                    &current_record.state,
+                    crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership }
+                        if ownership.pending.contains(owner)
+                            || ownership.activated.contains(
+                                &crate::sync::remote_object::SharedObjectOwner::StoreCommit(
+                                    owner.clone(),
+                                ),
+                            )
+                )
+            })
+        {
+            return Ok(current);
+        }
+    }
+    if let (
+        RemoteObjectRecord::RetainedAuthority(current_record),
+        RemoteObjectRecord::CandidateExclusive(expected_record),
+    ) = (&current, &expected)
+    {
+        let expected_owner = match &expected_record.state {
+            crate::sync::remote_object::CandidateObjectState::Prepared { ownership }
+            | crate::sync::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.iter().next()
+            }
+            crate::sync::remote_object::CandidateObjectState::CleanupPending { .. }
+            | crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
+        };
+        if expected_record.identity.domain.retained_destination()
+            == Some(current_record.identity.domain.clone())
+            && expected_record.identity.semantic_hash == current_record.identity.semantic_hash
+            && expected_record.identity.object == current_record.identity.object
+            && expected_record.bytes == current_record.bytes
+            && expected_owner.is_some_and(|owner| {
+                matches!(
+                    &current_record.state,
+                    crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                        ownership
+                    } if ownership.pending.contains(owner) || ownership.activated.contains(owner)
+                )
+            })
+        {
+            return Ok(current);
+        }
+    }
     let mut uploaded = expected.clone();
     uploaded.mark_uploaded_verified().map_err(|error| {
         DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
@@ -20613,6 +20775,101 @@ fn merge_prepared_remote_object(
 
     if &existing == proposed {
         return Ok(existing);
+    }
+    if let (
+        RemoteObjectRecord::SharedLiveSet(existing_record),
+        RemoteObjectRecord::CandidateExclusive(proposed_record),
+    ) = (&existing, proposed)
+    {
+        let proposed_owner = match &proposed_record.state {
+            crate::sync::remote_object::CandidateObjectState::Prepared { ownership }
+            | crate::sync::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.contains(owner)
+            }
+            crate::sync::remote_object::CandidateObjectState::CleanupPending { .. }
+            | crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
+        };
+        if proposed_record.identity.domain.shared_destination()
+            != Some(existing_record.identity.domain.clone())
+            || proposed_record.identity.semantic_hash != existing_record.identity.semantic_hash
+            || proposed_record.identity.object != existing_record.identity.object
+            || proposed_record.bytes != existing_record.bytes
+            || !proposed_owner
+        {
+            return Err(DbError::Message(format!(
+                "shared candidate object {} already has different identity, bytes, or ownership",
+                proposed.object_id()
+            )));
+        }
+        let mut merged = existing.clone();
+        let RemoteObjectRecord::SharedLiveSet(record) = &mut merged else {
+            unreachable!("matched shared live-set object")
+        };
+        match &mut record.state {
+            OwnedObjectState::Prepared { ownership } => {
+                ownership.pending.insert(owner.clone());
+            }
+            OwnedObjectState::UploadedVerified { ownership } => {
+                ownership.pending.insert(owner.clone());
+            }
+            OwnedObjectState::RetirementPending { former_candidates } => {
+                record.state = OwnedObjectState::UploadedVerified {
+                    ownership: crate::sync::remote_object::SharedObjectOwnership {
+                        pending: BTreeSet::from([owner.clone()]),
+                        activated: BTreeSet::new(),
+                        nonactivated: former_candidates.clone(),
+                    },
+                };
+            }
+        }
+        merged.validate().map_err(|error| {
+            DbError::Message(format!(
+                "merge shared candidate object {}: {error}",
+                proposed.object_id()
+            ))
+        })?;
+        return Ok(merged);
+    }
+    if let (
+        RemoteObjectRecord::RetainedAuthority(existing_record),
+        RemoteObjectRecord::CandidateExclusive(proposed_record),
+    ) = (&existing, proposed)
+    {
+        if proposed_record.identity.domain.retained_destination()
+            != Some(existing_record.identity.domain.clone())
+            || proposed_record.identity.semantic_hash != existing_record.identity.semantic_hash
+            || proposed_record.identity.object != existing_record.identity.object
+            || proposed_record.bytes != existing_record.bytes
+        {
+            return Err(DbError::Message(format!(
+                "retained candidate object {} already has different identity or bytes",
+                proposed.object_id()
+            )));
+        }
+        let proposed_owner = match &proposed_record.state {
+            crate::sync::remote_object::CandidateObjectState::Prepared { ownership }
+            | crate::sync::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.contains(owner)
+            }
+            crate::sync::remote_object::CandidateObjectState::CleanupPending { .. }
+            | crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
+        };
+        if !proposed_owner {
+            return Err(DbError::Message(format!(
+                "retained candidate object {} does not name its preparing commit",
+                proposed.object_id()
+            )));
+        }
+        let mut merged = existing.clone();
+        merged
+            .add_retained_authority_candidate(owner.clone())
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "merge retained candidate object {}: {error}",
+                    proposed.object_id()
+                ))
+            })?;
+        return Ok(merged);
     }
     let (
         RemoteObjectRecord::SharedLiveSet(mut existing),
@@ -22606,7 +22863,15 @@ mod tests {
                 identity: crate::sync::remote_object::CandidateExclusiveTarget {
                     family: package.candidate_family(),
                     domain:
-                        crate::sync::remote_object::CandidateExclusiveObjectDomain::StorePackage,
+                        crate::sync::remote_object::CandidateExclusiveObjectDomain::StorePackage {
+                            reference: crate::sync::store_commit::StorePackageRef {
+                                candidate_family: package.candidate_family(),
+                                content_hash: ObjectHash::digest(&semantic),
+                                schema_version: package.schema_version(),
+                                changeset_size: semantic.len() as u64,
+                                object: package_object.clone(),
+                            },
+                        },
                     semantic_hash: ObjectHash::digest(&semantic),
                     object: package_object.clone(),
                 },
@@ -22624,6 +22889,58 @@ mod tests {
                 },
             },
         );
+        let mut activated_package = package_remote.clone();
+        activated_package
+            .mark_uploaded_verified()
+            .expect("mark first package owner uploaded");
+        let activated_package = activated_package
+            .into_activated(&owner)
+            .expect("activate first package owner");
+        let mut sibling = owner.clone();
+        sibling.commit_hash = ObjectHash::digest(b"sibling owner commit");
+        sibling.object = ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(format!(
+                "{}.json",
+                commit_semantic_prefix(
+                    test_candidate_family(),
+                    &stream_id.to_string(),
+                    1,
+                    sibling.commit_hash,
+                )
+            ))
+            .expect("sibling commit slot"),
+            1,
+            ObjectHash::digest(b"sibling owner stored commit"),
+        );
+        let mut sibling_proposal = package_remote.clone();
+        let crate::sync::remote_object::RemoteObjectRecord::CandidateExclusive(record) =
+            &mut sibling_proposal
+        else {
+            unreachable!("constructed candidate-exclusive package")
+        };
+        let crate::sync::remote_object::CandidateObjectState::Prepared { ownership } =
+            &mut record.state
+        else {
+            unreachable!("constructed prepared package")
+        };
+        ownership.pending = BTreeSet::from([sibling.clone()]);
+        let sibling_owned =
+            merge_prepared_remote_object(activated_package, &sibling_proposal, &sibling)
+                .expect("merge sibling package ownership");
+        assert!(matches!(
+            sibling_owned,
+            crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+                if matches!(
+                    &record.state,
+                    crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership }
+                        if ownership.pending == BTreeSet::from([sibling.clone()])
+                            && ownership.activated == BTreeSet::from([
+                                crate::sync::remote_object::SharedObjectOwner::StoreCommit(
+                                    owner.clone()
+                                )
+                            ])
+                )
+        ));
         let package_remote_id = package_remote.object_id();
         let prepared_package = PreparedAudiencePackage::new(
             package_remote_id,

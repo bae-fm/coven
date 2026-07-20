@@ -116,6 +116,103 @@ impl CircleOperationJournal {
         }
     }
 
+    pub(crate) fn closed_remote_objects(
+        &self,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, CircleOperationError> {
+        let operation = self.operation();
+        let commit: StoreBatchCommit = serde_json::from_slice(&operation.commit_bytes)
+            .map_err(|error| CircleOperationError::Journal(format!("Circle commit: {error}")))?;
+        operation
+            .commit_ref
+            .verify_commit(&commit)
+            .map_err(|error| CircleOperationError::Journal(error.to_string()))?;
+        let access_refs = commit
+            .circle_controls()
+            .iter()
+            .flat_map(|control| control.objects().access.iter())
+            .collect::<Vec<_>>();
+        if access_refs.len() != operation.creation.access.len() {
+            return Err(CircleOperationError::Journal(
+                "Circle access material does not cover the signed candidate graph".to_string(),
+            ));
+        }
+        let prepared_for = |object: &ExactObjectRef| {
+            operation
+                .prepared_objects
+                .values()
+                .find(|prepared| prepared.reference() == object)
+                .ok_or_else(|| {
+                    CircleOperationError::Journal(format!(
+                        "Circle candidate object {} has no prepared bytes",
+                        super::remote_object::remote_object_id(object)
+                    ))
+                })
+        };
+        let mut materials = Vec::with_capacity(access_refs.len() * 2);
+        for (access, reference) in operation.creation.access.iter().zip(access_refs) {
+            let leaf = prepared_for(&reference.leaf.object)?;
+            materials.push(super::remote_object::CandidateObjectMaterial {
+                object: reference.leaf.object.clone(),
+                canonical_semantic_bytes: serde_json::to_vec(&access.leaf.value).map_err(
+                    |error| CircleOperationError::Journal(format!("Circle access leaf: {error}")),
+                )?,
+                stored_bytes: leaf.stored_bytes().to_vec(),
+            });
+            let envelope = prepared_for(&reference.envelope.object)?;
+            materials.push(super::remote_object::CandidateObjectMaterial {
+                object: reference.envelope.object.clone(),
+                canonical_semantic_bytes: serde_json::to_vec(&access.envelope).map_err(
+                    |error| {
+                        CircleOperationError::Journal(format!("Circle access envelope: {error}"))
+                    },
+                )?,
+                stored_bytes: envelope.stored_bytes().to_vec(),
+            });
+        }
+        let mut remotes = super::remote_object::CandidateObjectGraph::from_commit(&commit)
+            .and_then(|graph| graph.close(&commit, &operation.commit_ref, materials))
+            .map_err(|error| CircleOperationError::Journal(error.to_string()))?;
+        let commit_prepared = operation
+            .prepared_objects
+            .get("store-commit")
+            .ok_or_else(|| {
+                CircleOperationError::Journal(
+                    "Circle operation lacks its prepared Store commit".to_string(),
+                )
+            })?;
+        remotes.push(
+            super::remote_object::RemoteObjectRecord::candidate_commit(
+                operation.commit_ref.clone(),
+                operation.commit_bytes.clone(),
+                commit_prepared.stored_bytes().to_vec(),
+            )
+            .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+        );
+        if let CircleOperationPolicy::MergeConcurrent { head } = &operation.policy {
+            let prepared = operation
+                .prepared_objects
+                .get("store-head")
+                .ok_or_else(|| {
+                    CircleOperationError::Journal(
+                        "Merge Circle operation lacks its prepared Store head".to_string(),
+                    )
+                })?;
+            remotes.push(
+                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                    super::store_commit::StoreDeviceHeadRef {
+                        head_hash: head.head_hash(),
+                        object: prepared.reference().clone(),
+                    },
+                    head.to_bytes(),
+                    prepared.stored_bytes().to_vec(),
+                    operation.commit_ref.clone(),
+                )
+                .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+            );
+        }
+        Ok(remotes)
+    }
+
     pub(crate) fn state(&self) -> CircleOperationState {
         match &self.progress {
             CircleOperationProgress::Ready(_) => CircleOperationState::Pending,
@@ -1188,7 +1285,14 @@ pub(crate) async fn create_circle(
     let circle_id = journal.circle_id();
     let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    publish_circle_operation(db, storage, coordination, &operation_id, signer).await?;
+    Box::pin(publish_circle_operation(
+        db,
+        storage,
+        coordination,
+        &operation_id,
+        signer,
+    ))
+    .await?;
     Ok(circle_id)
 }
 
@@ -1259,7 +1363,14 @@ pub(crate) async fn rename_circle(
     }
     let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    publish_circle_operation(db, storage, coordination, &operation_id, signer).await
+    Box::pin(publish_circle_operation(
+        db,
+        storage,
+        coordination,
+        &operation_id,
+        signer,
+    ))
+    .await
 }
 
 struct CircleRenameRequest {
@@ -1314,8 +1425,14 @@ pub(crate) async fn resume_circle_operations(
                 journal.circle_id()
             )));
         }
-        match publish_circle_operation(db, storage, coordination, &journal.operation_id, identity)
-            .await
+        match Box::pin(publish_circle_operation(
+            db,
+            storage,
+            coordination,
+            &journal.operation_id,
+            identity,
+        ))
+        .await
         {
             Ok(()) | Err(CircleOperationError::Blocked { .. }) => {}
             Err(error) => return Err(error),
@@ -2185,6 +2302,8 @@ async fn publish_circle_operation(
                 }
                 return Err(error.into());
             }
+            db.mark_candidate_commit_uploaded(journal.operation().commit_ref.clone())
+                .await?;
         }
     }
     db.activate_circle_operation(journal, verified).await?;
@@ -3351,9 +3470,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_activation_rejects_a_tampered_leaf_disposition() {
+    async fn uploaded_circle_candidate_fails_when_its_ownership_record_is_missing() {
         let db = open_test_db();
-        let (store, signer, mut journal) =
+        let (_store, _signer, mut journal) =
+            persist_merge_operation(&db, "circle-missing-candidate-ownership").await;
+        let step = "access-leaf-0";
+        let object_id = super::super::remote_object::remote_object_id(
+            journal
+                .operation()
+                .prepared_objects
+                .get(step)
+                .expect("operation carries its access leaf")
+                .reference(),
+        );
+        db.call(move |conn| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "expected candidate ownership record was absent before deletion".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .expect("remove candidate ownership record");
+        journal.operation_mut().uploaded.insert(step.to_string());
+
+        let error = db
+            .update_circle_operation(journal.clone())
+            .await
+            .expect_err("an uploaded candidate must retain its ownership record");
+        assert!(error.to_string().contains("remote object"), "{error}");
+        let persisted = db
+            .circle_operation(&journal.operation_id)
+            .await
+            .expect("read operation after rejected update")
+            .expect("operation remains durable after rejected update");
+        assert!(!persisted.operation().uploaded.contains(step));
+    }
+
+    #[tokio::test]
+    async fn journal_update_rejects_a_tampered_leaf_disposition() {
+        let db = open_test_db();
+        let (_store, signer, mut journal) =
             persist_merge_operation(&db, "circle-tampered-local-access").await;
         let author = keys::public_key_hex(&signer);
         let own_access = journal
@@ -3368,13 +3532,14 @@ mod tests {
             CircleAccessDisposition::Active { .. }
         ));
         own_access.leaf.value.disposition = CircleAccessDisposition::Inactive;
-        db.update_circle_operation(journal.clone())
+        let error = db
+            .update_circle_operation(journal.clone())
             .await
-            .expect("persist tampered journal");
-
-        resume_circle_operations(&db, &store.storage, None, &signer)
-            .await
-            .expect_err("local activation must verify journal access context");
+            .expect_err("journal update must verify its closed candidate graph");
+        assert!(
+            error.to_string().contains("stored reference differs"),
+            "{error}"
+        );
 
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
         assert!(db
@@ -4200,6 +4365,48 @@ mod tests {
             error
                 .to_string()
                 .contains("Active access recipient is absent"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_graph_rejects_partial_circle_access_ownership() {
+        let db = open_test_db();
+        let founder = UserKeypair::generate();
+        let store = TestStore::create(&db, "circle-partial-access-graph", founder.clone())
+            .await
+            .expect("create exact Circle test Store");
+        let device_id = local_device_id(&db).await;
+        let mut journal = prepare_circle_operation(
+            &db,
+            &store.storage,
+            None,
+            &device_id,
+            "0000000001000-0000-founder",
+            "Partial access graph",
+            &founder,
+        )
+        .await
+        .expect("prepare Circle operation");
+        let commit = journal.commit().expect("parse Circle commit");
+        let envelope_object = commit.circle_controls()[0].objects().access[0]
+            .envelope
+            .object
+            .clone();
+        let removed = journal
+            .operation_mut()
+            .prepared_objects
+            .iter()
+            .find(|(_, prepared)| prepared.reference() == &envelope_object)
+            .map(|(step, _)| step.clone())
+            .expect("find prepared access envelope");
+        journal.operation_mut().prepared_objects.remove(&removed);
+
+        let error = journal
+            .closed_remote_objects()
+            .expect_err("a leaf without its envelope must not acquire candidate ownership");
+        assert!(
+            error.to_string().contains("has no prepared bytes"),
             "{error}"
         );
     }

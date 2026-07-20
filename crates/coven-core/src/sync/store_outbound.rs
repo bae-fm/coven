@@ -552,7 +552,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             .prepare_protocol_object(&head_context, head_slot, &head_prefix, head.to_bytes())
             .map_err(StoreObjectError::from)?;
         let (remote_objects, audience_objects) =
-            close_prepared_packages(prepared_packages, &commit_ref)?;
+            close_prepared_packages(prepared_packages, &commit, &commit_ref)?;
         let local_cleanup =
             super::service::bind_local_cleanup(payload.local_cleanup, &audience_objects.blobs)
                 .map_err(StoreOutboundError::Preparation)?;
@@ -1132,6 +1132,7 @@ async fn materialize_previous_blob(
 
 fn close_prepared_packages(
     packages: Vec<PreparedPartitionPackage>,
+    commit: &StoreBatchCommit,
     owner: &StoreBatchCommitRef,
 ) -> Result<
     (
@@ -1140,59 +1141,31 @@ fn close_prepared_packages(
     ),
     StoreOutboundError,
 > {
-    let mut remote_objects = Vec::new();
+    let mut materials = Vec::with_capacity(packages.len());
     let mut indexed_packages = Vec::with_capacity(packages.len());
     let mut prepared_blobs = Vec::new();
     for package in packages {
         let object = package.prepared.reference().clone();
-        let domain = match package.audience {
-            super::circle::Audience::Store => {
-                super::remote_object::CandidateExclusiveObjectDomain::StorePackage
-            }
-            super::circle::Audience::Circle(circle_id) => {
-                super::remote_object::CandidateExclusiveObjectDomain::CirclePackage { circle_id }
-            }
-            super::circle::Audience::Local => unreachable!("Local partition was rejected"),
-        };
-        let remote = super::remote_object::RemoteObjectRecord::CandidateExclusive(
-            super::remote_object::CandidateObjectRecord {
-                identity: super::remote_object::CandidateExclusiveTarget {
-                    family: super::audience_package::AudiencePackage::parse(
-                        &package.semantic_bytes,
-                    )
-                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
-                    .candidate_family(),
-                    domain,
-                    semantic_hash: ObjectHash::digest(&package.semantic_bytes),
-                    object: object.clone(),
-                },
-                bytes: super::remote_object::RemoteObjectBytes::inline(
-                    package.semantic_bytes.clone(),
-                    package.prepared.stored_bytes().to_vec(),
-                    object.clone(),
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
-                state: super::remote_object::CandidateObjectState::Prepared {
-                    ownership: super::remote_object::PendingCandidateOwnership {
-                        pending: std::collections::BTreeSet::from([owner.clone()]),
-                        nonactivated: Vec::new(),
-                    },
-                },
-            },
-        );
-        let remote_object_id = remote.object_id();
+        let remote_object_id = super::remote_object::remote_object_id(&object);
         indexed_packages.push(
             PreparedAudiencePackage::new(
                 remote_object_id,
-                package.semantic_bytes,
+                package.semantic_bytes.clone(),
                 package.prepared.stored_bytes().to_vec(),
-                object,
+                object.clone(),
             )
             .map_err(StoreOutboundError::from)?,
         );
-        remote_objects.push(remote);
+        materials.push(super::remote_object::CandidateObjectMaterial {
+            object,
+            canonical_semantic_bytes: package.semantic_bytes,
+            stored_bytes: package.prepared.stored_bytes().to_vec(),
+        });
         prepared_blobs.extend(package.blobs);
     }
+    let mut remote_objects = super::remote_object::CandidateObjectGraph::from_commit(commit)
+        .and_then(|graph| graph.close(commit, owner, materials))
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let (blob_remotes, indexed_blobs) = close_prepared_blobs(prepared_blobs, owner)?;
     remote_objects.extend(blob_remotes);
     Ok((
@@ -2788,7 +2761,7 @@ async fn prepare_serial_store_branch(
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let (remote_objects, audiences) =
-                close_prepared_packages(prepared_packages, &commit_ref)?;
+                close_prepared_packages(prepared_packages, &commit, &commit_ref)?;
             let local_cleanup =
                 super::service::bind_local_cleanup(payload.local_cleanup, &audiences.blobs)
                     .map_err(StoreOutboundError::Preparation)?;
@@ -6786,8 +6759,10 @@ mod tests {
         assert!(matches!(
             remote,
             super::super::remote_object::RemoteObjectRecord::SharedLiveSet(record)
-                if record.identity.domain
-                    == super::super::remote_object::SharedLiveSetObjectDomain::StorePackage
+                if matches!(
+                    record.identity.domain,
+                    super::super::remote_object::SharedLiveSetObjectDomain::StorePackage { .. }
+                )
                     && matches!(
                         &record.state,
                         super::super::remote_object::OwnedObjectState::UploadedVerified {

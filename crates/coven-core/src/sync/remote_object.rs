@@ -367,8 +367,10 @@ impl RemoteObjectRecord {
         let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
         let expected_size = u64::try_from(record.bytes.canonical_semantic_bytes().len())
             .map_err(|_| RemoteObjectRecordError::InvalidReclaim)?;
-        if record.identity.domain != SharedLiveSetObjectDomain::StorePackage
-            || record.identity.semantic_hash != target.content_hash
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::StorePackage { reference } if reference == target
+        ) || record.identity.semantic_hash != target.content_hash
             || record.identity.object != target.object
             || package.candidate_family() != target.candidate_family
             || package.schema_version() != target.schema_version
@@ -428,27 +430,10 @@ impl RemoteObjectRecord {
                 }
             }
             Self::CandidateExclusive(record) => {
-                record
-                    .identity
-                    .validate_semantic(record.bytes.canonical_semantic_bytes())?;
-                let package = super::audience_package::AudiencePackage::parse(
+                validate_candidate_exclusive_identity(
+                    &record.identity,
                     record.bytes.canonical_semantic_bytes(),
-                )
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-                match (&record.identity.domain, package.audience()) {
-                    (
-                        CandidateExclusiveObjectDomain::StorePackage,
-                        super::audience_package::PackageAudience::Store,
-                    ) => {}
-                    (
-                        CandidateExclusiveObjectDomain::CirclePackage { circle_id },
-                        super::audience_package::PackageAudience::Circle {
-                            circle_id: package_circle,
-                            ..
-                        },
-                    ) if circle_id == package_circle => {}
-                    _ => return Err(RemoteObjectRecordError::DomainMismatch),
-                }
+                )?;
                 record.state.validate()?;
             }
             Self::RetainedAuthority(record) => {
@@ -483,7 +468,7 @@ impl RemoteObjectRecord {
                 record
                     .identity
                     .validate_semantic(record.bytes.canonical_semantic_bytes())?;
-                match record.identity.domain {
+                match &record.identity.domain {
                     SharedLiveSetObjectDomain::StoredBlob => {
                         let locator = crate::blob::locator::BlobLocator::parse(
                             record.bytes.canonical_semantic_bytes(),
@@ -499,33 +484,21 @@ impl RemoteObjectRecord {
                             RemoteObjectRecordError::InvalidDomain(error.to_string())
                         })?;
                     }
-                    SharedLiveSetObjectDomain::StorePackage => {
-                        let package = super::audience_package::AudiencePackage::parse(
+                    SharedLiveSetObjectDomain::StorePackage { reference } => {
+                        validate_package_reference(
+                            reference,
+                            None,
                             record.bytes.canonical_semantic_bytes(),
-                        )
-                        .map_err(|error| {
-                            RemoteObjectRecordError::InvalidDomain(error.to_string())
-                        })?;
-                        if !matches!(
-                            package.audience(),
-                            super::audience_package::PackageAudience::Store
-                        ) {
-                            return Err(RemoteObjectRecordError::DomainMismatch);
-                        }
+                            &record.identity.object,
+                        )?;
                     }
-                    SharedLiveSetObjectDomain::CirclePackage => {
-                        let package = super::audience_package::AudiencePackage::parse(
+                    SharedLiveSetObjectDomain::CirclePackage { reference } => {
+                        validate_package_reference(
+                            &reference.package,
+                            Some(reference),
                             record.bytes.canonical_semantic_bytes(),
-                        )
-                        .map_err(|error| {
-                            RemoteObjectRecordError::InvalidDomain(error.to_string())
-                        })?;
-                        if !matches!(
-                            package.audience(),
-                            super::audience_package::PackageAudience::Circle { .. }
-                        ) {
-                            return Err(RemoteObjectRecordError::DomainMismatch);
-                        }
+                            &record.identity.object,
+                        )?;
                     }
                 }
                 record.state.validate()?;
@@ -573,31 +546,43 @@ impl RemoteObjectRecord {
                 if ownership.pending.len() != 1 || !ownership.pending.contains(commit) {
                     return Err(RemoteObjectRecordError::InvalidActivation);
                 }
-                let domain = match record.identity.domain {
-                    CandidateExclusiveObjectDomain::StorePackage => {
-                        SharedLiveSetObjectDomain::StorePackage
-                    }
-                    CandidateExclusiveObjectDomain::CirclePackage { .. } => {
-                        SharedLiveSetObjectDomain::CirclePackage
-                    }
-                };
-                Self::SharedLiveSet(SharedObjectRecord {
-                    identity: SharedLiveSetObjectRef {
-                        domain,
-                        semantic_hash: record.identity.semantic_hash,
-                        object: record.identity.object,
-                    },
-                    bytes: record.bytes,
-                    state: OwnedObjectState::UploadedVerified {
-                        ownership: SharedObjectOwnership {
-                            pending: BTreeSet::new(),
-                            activated: BTreeSet::from([SharedObjectOwner::StoreCommit(
-                                commit.clone(),
-                            )]),
-                            nonactivated: Vec::new(),
+                if let Some(domain) = record.identity.domain.shared_destination() {
+                    Self::SharedLiveSet(SharedObjectRecord {
+                        identity: SharedLiveSetObjectRef {
+                            domain,
+                            semantic_hash: record.identity.semantic_hash,
+                            object: record.identity.object,
                         },
-                    },
-                })
+                        bytes: record.bytes,
+                        state: OwnedObjectState::UploadedVerified {
+                            ownership: SharedObjectOwnership {
+                                pending: BTreeSet::new(),
+                                activated: BTreeSet::from([SharedObjectOwner::StoreCommit(
+                                    commit.clone(),
+                                )]),
+                                nonactivated: Vec::new(),
+                            },
+                        },
+                    })
+                } else if let Some(domain) = record.identity.domain.retained_destination() {
+                    Self::RetainedAuthority(RetainedAuthorityRecord {
+                        identity: RetainedAuthorityObjectRef {
+                            domain,
+                            semantic_hash: record.identity.semantic_hash,
+                            object: record.identity.object,
+                        },
+                        bytes: record.bytes,
+                        state: RetainedAuthorityObjectState::UploadedVerified {
+                            ownership: CandidateOwnership {
+                                pending: BTreeSet::new(),
+                                activated: BTreeSet::from([commit.clone()]),
+                                nonactivated: Vec::new(),
+                            },
+                        },
+                    })
+                } else {
+                    return Err(RemoteObjectRecordError::DomainMismatch);
+                }
             }
             Self::RetainedAuthority(mut record) => {
                 let RetainedAuthorityObjectState::UploadedVerified { ownership } =
@@ -1304,8 +1289,431 @@ impl CandidateExclusiveTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CandidateExclusiveObjectDomain {
-    StorePackage,
-    CirclePackage { circle_id: CircleId },
+    StorePackage {
+        reference: super::store_commit::StorePackageRef,
+    },
+    CirclePackage {
+        reference: super::store_commit::CirclePackageRef,
+    },
+    CircleAccessLeaf {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::store_commit::CircleAccessLeafObjectRef,
+    },
+    CircleAccessEnvelope {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::store_commit::CircleAccessEnvelopeObjectRef,
+    },
+    SelfRetirement {
+        reference: super::store_commit::StoreDeviceSelfRetirementRef,
+    },
+}
+
+impl CandidateExclusiveObjectDomain {
+    fn family(&self) -> CandidateFamilyId {
+        match self {
+            Self::StorePackage { reference } => reference.candidate_family,
+            Self::CirclePackage { reference } => reference.package.candidate_family,
+            Self::CircleAccessLeaf { family, .. } | Self::CircleAccessEnvelope { family, .. } => {
+                *family
+            }
+            Self::SelfRetirement { reference } => reference.candidate_family,
+        }
+    }
+
+    fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::StorePackage { reference } => &reference.object,
+            Self::CirclePackage { reference } => &reference.package.object,
+            Self::CircleAccessLeaf { reference, .. } => &reference.object,
+            Self::CircleAccessEnvelope { reference, .. } => &reference.object,
+            Self::SelfRetirement { reference } => &reference.object,
+        }
+    }
+
+    pub(crate) fn shared_destination(&self) -> Option<SharedLiveSetObjectDomain> {
+        match self {
+            Self::StorePackage { reference } => Some(SharedLiveSetObjectDomain::StorePackage {
+                reference: reference.clone(),
+            }),
+            Self::CirclePackage { reference } => Some(SharedLiveSetObjectDomain::CirclePackage {
+                reference: reference.clone(),
+            }),
+            Self::CircleAccessLeaf { .. }
+            | Self::CircleAccessEnvelope { .. }
+            | Self::SelfRetirement { .. } => None,
+        }
+    }
+
+    pub(crate) fn retained_destination(&self) -> Option<RetainedAuthorityObjectDomain> {
+        match self {
+            Self::CircleAccessLeaf {
+                family,
+                circle_id,
+                reference,
+            } => Some(RetainedAuthorityObjectDomain::CircleAccessLeaf {
+                family: *family,
+                circle_id: *circle_id,
+                reference: reference.clone(),
+            }),
+            Self::CircleAccessEnvelope {
+                family,
+                circle_id,
+                reference,
+            } => Some(RetainedAuthorityObjectDomain::CircleAccessEnvelope {
+                family: *family,
+                circle_id: *circle_id,
+                reference: reference.clone(),
+            }),
+            Self::SelfRetirement { reference } => {
+                Some(RetainedAuthorityObjectDomain::SelfRetirement {
+                    reference: reference.clone(),
+                })
+            }
+            Self::StorePackage { .. } | Self::CirclePackage { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateObjectMaterial {
+    pub(crate) object: ExactObjectRef,
+    pub(crate) canonical_semantic_bytes: Vec<u8>,
+    pub(crate) stored_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateObjectGraph {
+    family: CandidateFamilyId,
+    objects: Vec<CandidateExclusiveObjectDomain>,
+}
+
+impl CandidateObjectGraph {
+    pub(crate) fn from_commit(
+        commit: &super::store_commit::StoreBatchCommit,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let manifest = commit
+            .verified_candidate_objects()
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let mut objects = Vec::new();
+        for candidate in &manifest.objects {
+            match candidate {
+                super::store_commit::CandidateExclusiveObjectRef::StorePackage(reference) => {
+                    objects.push(CandidateExclusiveObjectDomain::StorePackage {
+                        reference: reference.clone(),
+                    });
+                }
+                super::store_commit::CandidateExclusiveObjectRef::CirclePackage(reference) => {
+                    objects.push(CandidateExclusiveObjectDomain::CirclePackage {
+                        reference: reference.clone(),
+                    });
+                }
+                super::store_commit::CandidateExclusiveObjectRef::CircleAccess {
+                    circle_id,
+                    access,
+                } => {
+                    objects.push(CandidateExclusiveObjectDomain::CircleAccessLeaf {
+                        family: manifest.family,
+                        circle_id: *circle_id,
+                        reference: access.leaf.clone(),
+                    });
+                    objects.push(CandidateExclusiveObjectDomain::CircleAccessEnvelope {
+                        family: manifest.family,
+                        circle_id: *circle_id,
+                        reference: access.envelope.clone(),
+                    });
+                }
+                super::store_commit::CandidateExclusiveObjectRef::SelfRetirement(reference) => {
+                    objects.push(CandidateExclusiveObjectDomain::SelfRetirement {
+                        reference: reference.clone(),
+                    });
+                }
+            }
+        }
+        Ok(Self {
+            family: manifest.family,
+            objects,
+        })
+    }
+
+    pub(crate) fn exact_objects(&self) -> impl Iterator<Item = &ExactObjectRef> {
+        self.objects
+            .iter()
+            .map(CandidateExclusiveObjectDomain::object)
+    }
+
+    pub(crate) fn close(
+        self,
+        commit: &super::store_commit::StoreBatchCommit,
+        owner: &StoreBatchCommitRef,
+        materials: Vec<CandidateObjectMaterial>,
+    ) -> Result<Vec<RemoteObjectRecord>, RemoteObjectRecordError> {
+        owner
+            .verify_commit(commit)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        if self.family != commit.candidate_family() {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        }
+        let mut exact = std::collections::BTreeMap::new();
+        for material in materials {
+            if exact.insert(material.object.clone(), material).is_some() {
+                return Err(RemoteObjectRecordError::DuplicateCandidateObject);
+            }
+        }
+        validate_access_pairs(&self.objects, &exact)?;
+        let mut records = Vec::with_capacity(self.objects.len());
+        for domain in self.objects {
+            let object = domain.object().clone();
+            let material = exact
+                .remove(&object)
+                .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
+            let record = RemoteObjectRecord::CandidateExclusive(CandidateObjectRecord {
+                identity: CandidateExclusiveTarget {
+                    family: domain.family(),
+                    domain,
+                    semantic_hash: ObjectHash::digest(&material.canonical_semantic_bytes),
+                    object: object.clone(),
+                },
+                bytes: RemoteObjectBytes::inline(
+                    material.canonical_semantic_bytes,
+                    material.stored_bytes,
+                    object,
+                )?,
+                state: CandidateObjectState::Prepared {
+                    ownership: PendingCandidateOwnership {
+                        pending: BTreeSet::from([owner.clone()]),
+                        nonactivated: Vec::new(),
+                    },
+                },
+            });
+            record.validate()?;
+            records.push(record);
+        }
+        if !exact.is_empty() {
+            return Err(RemoteObjectRecordError::CandidateObjectInvented);
+        }
+        Ok(records)
+    }
+}
+
+fn validate_access_pairs(
+    objects: &[CandidateExclusiveObjectDomain],
+    materials: &std::collections::BTreeMap<ExactObjectRef, CandidateObjectMaterial>,
+) -> Result<(), RemoteObjectRecordError> {
+    let mut index = 0;
+    while index < objects.len() {
+        let CandidateExclusiveObjectDomain::CircleAccessLeaf {
+            family,
+            circle_id,
+            reference: leaf_ref,
+        } = &objects[index]
+        else {
+            index += 1;
+            continue;
+        };
+        let Some(CandidateExclusiveObjectDomain::CircleAccessEnvelope {
+            family: envelope_family,
+            circle_id: envelope_circle,
+            reference: envelope_ref,
+        }) = objects.get(index + 1)
+        else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        if family != envelope_family
+            || circle_id != envelope_circle
+            || leaf_ref.owner_pubkey != envelope_ref.owner_pubkey
+            || leaf_ref.recipient_slot != envelope_ref.recipient_slot
+            || leaf_ref.leaf_id != envelope_ref.leaf_id
+            || leaf_ref.leaf_hash != envelope_ref.leaf_hash
+        {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        }
+        let leaf_material = materials
+            .get(&leaf_ref.object)
+            .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
+        let envelope_material = materials
+            .get(&envelope_ref.object)
+            .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
+        let leaf: super::circle_control::CircleAccessLeaf =
+            serde_json::from_slice(&leaf_material.canonical_semantic_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let envelope: super::circle_control::AccessEnvelope =
+            serde_json::from_slice(&envelope_material.canonical_semantic_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let leaf_bytes = serde_json::to_vec(&leaf)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        if envelope.value_hash != ObjectHash::digest(&leaf_bytes)
+            || ObjectHash::digest(&leaf_material.stored_bytes) != leaf_ref.leaf_hash
+        {
+            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+        }
+        index += 2;
+    }
+    Ok(())
+}
+
+fn validate_candidate_exclusive_identity(
+    identity: &CandidateExclusiveTarget,
+    canonical_semantic_bytes: &[u8],
+) -> Result<(), RemoteObjectRecordError> {
+    identity.validate_semantic(canonical_semantic_bytes)?;
+    if identity.family != identity.domain.family() || identity.object != *identity.domain.object() {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    match &identity.domain {
+        CandidateExclusiveObjectDomain::StorePackage { reference } => {
+            validate_package_reference(reference, None, canonical_semantic_bytes, &identity.object)
+        }
+        CandidateExclusiveObjectDomain::CirclePackage { reference } => validate_package_reference(
+            &reference.package,
+            Some(reference),
+            canonical_semantic_bytes,
+            &identity.object,
+        ),
+        CandidateExclusiveObjectDomain::CircleAccessLeaf {
+            family,
+            circle_id,
+            reference,
+        } => validate_circle_access_leaf_identity(
+            *family,
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        ),
+        CandidateExclusiveObjectDomain::CircleAccessEnvelope {
+            family,
+            circle_id,
+            reference,
+        } => validate_circle_access_envelope_identity(
+            *family,
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        ),
+        CandidateExclusiveObjectDomain::SelfRetirement { reference } => {
+            validate_self_retirement_identity(reference, canonical_semantic_bytes, &identity.object)
+        }
+    }
+}
+
+fn validate_package_reference(
+    reference: &super::store_commit::StorePackageRef,
+    circle: Option<&super::store_commit::CirclePackageRef>,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let package = super::audience_package::AudiencePackage::parse(canonical_semantic_bytes)
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let size = u64::try_from(canonical_semantic_bytes.len())
+        .map_err(|_| RemoteObjectRecordError::DomainMismatch)?;
+    if reference.object != *object
+        || reference.content_hash != ObjectHash::digest(canonical_semantic_bytes)
+        || reference.schema_version != package.schema_version()
+        || reference.changeset_size != size
+        || reference.candidate_family != package.candidate_family()
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    match (circle, package.audience()) {
+        (None, super::audience_package::PackageAudience::Store) => Ok(()),
+        (
+            Some(reference),
+            super::audience_package::PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            },
+        ) if reference.circle_id == *circle_id
+            && reference.control == *control
+            && reference.key_fingerprint == *key_fingerprint =>
+        {
+            Ok(())
+        }
+        _ => Err(RemoteObjectRecordError::DomainMismatch),
+    }
+}
+
+fn validate_circle_access_leaf_identity(
+    family: CandidateFamilyId,
+    circle_id: CircleId,
+    reference: &super::store_commit::CircleAccessLeafObjectRef,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let leaf: super::circle_control::CircleAccessLeaf =
+        serde_json::from_slice(canonical_semantic_bytes)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let parsed_bytes = serde_json::to_vec(&leaf)
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    if parsed_bytes != canonical_semantic_bytes
+        || !leaf.verify_signature()
+        || leaf.candidate_family != family
+        || leaf.circle_id != circle_id
+        || leaf.owner_pubkey != reference.owner_pubkey
+        || leaf.epoch_id != reference.epoch_id
+        || leaf.recipient_slot != reference.recipient_slot
+        || leaf.leaf_id != reference.leaf_id
+        || reference.leaf_hash != reference.object.stored_hash()
+        || reference.object != *object
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(())
+}
+
+fn validate_circle_access_envelope_identity(
+    family: CandidateFamilyId,
+    circle_id: CircleId,
+    reference: &super::store_commit::CircleAccessEnvelopeObjectRef,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let envelope: super::circle_control::AccessEnvelope =
+        serde_json::from_slice(canonical_semantic_bytes)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let parsed_bytes = serde_json::to_vec(&envelope)
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    if parsed_bytes != canonical_semantic_bytes
+        || !crate::keys::verify_signature_hex(
+            &envelope.owner_pubkey,
+            &envelope.signature,
+            &envelope.canonical_bytes(),
+        )
+        || envelope.candidate_family != family
+        || envelope.circle_id != circle_id
+        || envelope.owner_pubkey != reference.owner_pubkey
+        || envelope.recipient_slot != reference.recipient_slot
+        || envelope.control_hash != reference.control_hash
+        || envelope.leaf_id != reference.leaf_id
+        || envelope.leaf_hash != reference.leaf_hash
+        || reference.object != *object
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(())
+}
+
+fn validate_self_retirement_identity(
+    reference: &super::store_commit::StoreDeviceSelfRetirementRef,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let retirement: super::store_commit::StoreDeviceSelfRetirement =
+        serde_json::from_slice(canonical_semantic_bytes)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    if retirement.to_bytes() != canonical_semantic_bytes
+        || retirement.candidate_family != reference.candidate_family
+        || retirement.target != reference.target
+        || retirement.retiring_cut != reference.retiring_cut
+        || retirement.retirement_hash() != reference.retirement_hash
+        || reference.object != *object
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1326,8 +1734,12 @@ impl SharedLiveSetObjectRef {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SharedLiveSetObjectDomain {
     StoredBlob,
-    StorePackage,
-    CirclePackage,
+    StorePackage {
+        reference: super::store_commit::StorePackageRef,
+    },
+    CirclePackage {
+        reference: super::store_commit::CirclePackageRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1411,6 +1823,19 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     },
     ReclaimReceipt {
         reference: super::store_reclaim::ReclaimReceiptRef,
+    },
+    CircleAccessLeaf {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::store_commit::CircleAccessLeafObjectRef,
+    },
+    CircleAccessEnvelope {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::store_commit::CircleAccessEnvelopeObjectRef,
+    },
+    SelfRetirement {
+        reference: super::store_commit::StoreDeviceSelfRetirementRef,
     },
 }
 
@@ -1505,6 +1930,35 @@ fn validate_retained_authority_identity(
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
+        }
+        RetainedAuthorityObjectDomain::CircleAccessLeaf {
+            family,
+            circle_id,
+            reference,
+        } => validate_circle_access_leaf_identity(
+            *family,
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        )?,
+        RetainedAuthorityObjectDomain::CircleAccessEnvelope {
+            family,
+            circle_id,
+            reference,
+        } => validate_circle_access_envelope_identity(
+            *family,
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        )?,
+        RetainedAuthorityObjectDomain::SelfRetirement { reference } => {
+            validate_self_retirement_identity(
+                reference,
+                canonical_semantic_bytes,
+                &identity.object,
+            )?;
         }
     }
     Ok(())
@@ -2019,6 +2473,12 @@ pub(crate) enum RemoteObjectRecordError {
     InvalidDomain(String),
     #[error("prepared canonical bytes disagree with their claimed domain")]
     DomainMismatch,
+    #[error("candidate object graph contains the same exact object more than once")]
+    DuplicateCandidateObject,
+    #[error("candidate object graph material is missing")]
+    CandidateObjectMissing,
+    #[error("candidate object material is outside the signed graph")]
+    CandidateObjectInvented,
     #[error("remote object is not uploaded for the exact activating commit")]
     InvalidActivation,
     #[error("remote object cannot return to uploaded state after cleanup began")]

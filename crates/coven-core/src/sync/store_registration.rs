@@ -67,6 +67,60 @@ enum RetirementPublication {
     },
 }
 
+impl DurableRetirement {
+    fn closed_remote_objects(
+        &self,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreRegistrationError> {
+        let commit: StoreBatchCommit = serde_json::from_slice(&self.commit_bytes)
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        self.commit_ref
+            .verify_commit(&commit)
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        let mut remotes = super::remote_object::CandidateObjectGraph::from_commit(&commit)
+            .and_then(|graph| {
+                graph.close(
+                    &commit,
+                    &self.commit_ref,
+                    vec![super::remote_object::CandidateObjectMaterial {
+                        object: self.retirement_prepared.reference().clone(),
+                        canonical_semantic_bytes: self.retirement_bytes.clone(),
+                        stored_bytes: self.retirement_prepared.stored_bytes().to_vec(),
+                    }],
+                )
+            })
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        remotes.push(
+            super::remote_object::RemoteObjectRecord::candidate_commit(
+                self.commit_ref.clone(),
+                self.commit_bytes.clone(),
+                self.commit_prepared.stored_bytes().to_vec(),
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
+        );
+        if let RetirementPublication::MergeConcurrent {
+            head_bytes,
+            head_prepared,
+        } = &self.publication
+        {
+            let head: StoreDeviceHead = serde_json::from_slice(head_bytes)
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            remotes.push(
+                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                    super::store_commit::StoreDeviceHeadRef {
+                        head_hash: head.head_hash(),
+                        object: head_prepared.reference().clone(),
+                    },
+                    head_bytes.clone(),
+                    head_prepared.stored_bytes().to_vec(),
+                    self.commit_ref.clone(),
+                )
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
+            );
+        }
+        Ok(remotes)
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn ensure_active_registration(
     db: &Database,
@@ -257,7 +311,8 @@ pub async fn retire_registration_with_coordination(
             prepare_self_retirement(db, storage, coordination, signer, membership).await?;
         let payload = serde_json::to_vec(&durable)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        db.stage_local_store_device_retirement(payload)
+        let remotes = durable.closed_remote_objects()?;
+        db.stage_local_store_device_retirement(payload, remotes)
             .await
             .map_err(database_error)?;
     }
@@ -607,6 +662,7 @@ async fn publish_self_retirement(
     }
     let durable: DurableRetirement = serde_json::from_slice(&payload)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let closed_remotes = durable.closed_remote_objects()?;
     let root = db
         .local_store_root_ref()
         .await
@@ -672,6 +728,18 @@ async fn publish_self_retirement(
             "retirement exact readback differs from its signed bytes".into(),
         ));
     }
+    let retirement_remote = closed_remotes
+        .iter()
+        .find(|remote| remote.object() == &retirement_ref.object)
+        .cloned()
+        .ok_or_else(|| {
+            StoreRegistrationError::Invalid(
+                "retirement object is absent from its closed candidate graph".to_string(),
+            )
+        })?;
+    db.mark_remote_object_uploaded(retirement_remote)
+        .await
+        .map_err(database_error)?;
     let serial_authorization = match &durable.publication {
         RetirementPublication::MergeConcurrent {
             head_bytes,
@@ -726,6 +794,24 @@ async fn publish_self_retirement(
                     "retirement commit or head exact readback differs".into(),
                 ));
             }
+            for object in [
+                durable.commit_prepared.reference(),
+                head_prepared.reference(),
+            ] {
+                let remote = closed_remotes
+                    .iter()
+                    .find(|remote| remote.object() == object)
+                    .cloned()
+                    .ok_or_else(|| {
+                        StoreRegistrationError::Invalid(
+                            "retirement publication object is absent from its closed graph"
+                                .to_string(),
+                        )
+                    })?;
+                db.mark_remote_object_uploaded(remote)
+                    .await
+                    .map_err(database_error)?;
+            }
             None
         }
         RetirementPublication::Serial {
@@ -751,6 +837,18 @@ async fn publish_self_retirement(
                 &head,
             )
             .await?;
+            let commit_remote = closed_remotes
+                .iter()
+                .find(|remote| remote.object() == durable.commit_prepared.reference())
+                .cloned()
+                .ok_or_else(|| {
+                    StoreRegistrationError::Invalid(
+                        "retirement commit is absent from its closed candidate graph".to_string(),
+                    )
+                })?;
+            db.mark_remote_object_uploaded(commit_remote)
+                .await
+                .map_err(database_error)?;
             Some(authorization_after.clone())
         }
     };
@@ -760,6 +858,10 @@ async fn publish_self_retirement(
         commit,
         durable.commit_ref,
         serial_authorization,
+        closed_remotes
+            .iter()
+            .map(|remote| remote.object_id())
+            .collect(),
     )
     .await
     .map_err(database_error)
