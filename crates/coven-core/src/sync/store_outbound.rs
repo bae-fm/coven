@@ -3753,11 +3753,17 @@ impl PreparedStoreOperationCommit {
         &self,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
-        let expected = self
-            .commit
-            .control()
-            .map(StoreControl::introduced_wrapped_keys)
-            .unwrap_or_default();
+        let control = self.commit.control().ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "membership-wrap ownership requires a signed Store control".to_string(),
+            )
+        })?;
+        let expected = control.introduced_wrapped_keys();
+        if expected.is_empty() {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "signed Store control introduces no membership wraps".to_string(),
+            ));
+        }
         if expected.len() != wraps.len()
             || expected
                 .iter()
