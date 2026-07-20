@@ -1175,7 +1175,7 @@ pub(crate) async fn create_circle(
         metadata_stamp,
     )
     .await?;
-    let journal = prepare_circle_operation(
+    let journal = Box::pin(prepare_circle_operation(
         db,
         storage,
         coordination,
@@ -1183,7 +1183,7 @@ pub(crate) async fn create_circle(
         metadata_stamp,
         name,
         signer,
-    )
+    ))
     .await?;
     let circle_id = journal.circle_id();
     let operation_id = journal.operation_id.clone();
@@ -1237,7 +1237,7 @@ pub(crate) async fn rename_circle(
                 "Circle {circle_id} current control is absent from its activating Store commit"
             ))
         })?;
-    let journal = prepare_circle_operation_request(
+    let journal = Box::pin(prepare_circle_operation_request(
         db,
         storage,
         coordination,
@@ -1250,7 +1250,7 @@ pub(crate) async fn rename_circle(
             previous_control: reference.clone(),
         })),
         signer,
-    )
+    ))
     .await?;
     if journal.circle_id() != circle_id {
         return Err(CircleOperationError::InvalidState(
@@ -1333,7 +1333,7 @@ async fn prepare_circle_operation(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
-    prepare_circle_operation_request(
+    Box::pin(prepare_circle_operation_request(
         db,
         storage,
         coordination,
@@ -1343,7 +1343,7 @@ async fn prepare_circle_operation(
             name: name.to_string(),
         },
         signer,
-    )
+    ))
     .await
 }
 
@@ -1481,7 +1481,7 @@ async fn prepare_circle_operation_request(
                 }
             };
             let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
-                prepare_circle_activation_objects(
+                Box::pin(prepare_circle_activation_objects(
                     storage,
                     &root,
                     creation,
@@ -1491,7 +1491,7 @@ async fn prepare_circle_operation_request(
                     &author,
                     signer,
                     &device_signer,
-                )
+                ))
                 .await?;
             let circle_reference = creation.control_ref(objects, control_head_object);
             let commit = signed_circle_commit(
@@ -1673,7 +1673,7 @@ async fn prepare_circle_operation_request(
                 }
             };
             let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
-                prepare_circle_activation_objects(
+                Box::pin(prepare_circle_activation_objects(
                     storage,
                     &root,
                     creation,
@@ -1683,7 +1683,7 @@ async fn prepare_circle_operation_request(
                     &author,
                     signer,
                     &device_signer,
-                )
+                ))
                 .await?;
             let circle_reference = creation.control_ref(objects, control_head_object);
             let commit = signed_circle_commit(

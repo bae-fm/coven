@@ -3750,7 +3750,8 @@ pub async fn load_serial_authorization_at_position(
     root: &StoreRootRef,
     reference: Option<StoreBatchCommitRef>,
 ) -> Result<SerialAuthorizationState, StorePullError> {
-    let (_, authorization) = load_authorized_serial_prefix(storage, root, reference).await?;
+    let (_, authorization) =
+        Box::pin(load_authorized_serial_prefix(storage, root, reference)).await?;
     Ok(authorization)
 }
 
@@ -3760,7 +3761,7 @@ pub(crate) async fn load_serial_snapshot_authorities_at_position(
     reference: Option<StoreBatchCommitRef>,
 ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
     let (authorized, authorization) =
-        load_authorized_serial_prefix(storage, root, reference).await?;
+        Box::pin(load_authorized_serial_prefix(storage, root, reference)).await?;
     let founder = load_founder_registration(storage, root).await?;
     let founder_ref =
         StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());

@@ -2019,7 +2019,7 @@ fn consume_store_creation_probes_on(
 
 fn load_local_store_founder_graph_on(
     conn: &Connection,
-) -> Result<Option<DurableFounderGraph>, DbError> {
+) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
     let owned_rows: i64 = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM local_store_protocol_root) \
@@ -2159,7 +2159,7 @@ fn load_local_store_founder_graph_on(
         registration_state,
     };
     validate_founder_graph(&graph)?;
-    Ok(Some(graph))
+    Ok(Some(Box::new(graph)))
 }
 
 /// The exact commit coordinate that first made a blob locator authoritative.
@@ -10693,13 +10693,13 @@ impl Database {
 
     pub(crate) async fn local_store_founder_graph(
         &self,
-    ) -> Result<Option<DurableFounderGraph>, DbError> {
+    ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
         self.call(load_local_store_founder_graph_on).await
     }
 
     pub(crate) async fn stage_store_founder_graph(
         &self,
-        graph: DurableFounderGraph,
+        graph: Box<DurableFounderGraph>,
     ) -> Result<(), DbError> {
         validate_founder_graph(&graph)?;
         self.call(move |conn| {
@@ -11033,15 +11033,16 @@ impl Database {
 
     pub(crate) async fn reset_store_founder_graph_publication(
         &self,
-        expected: DurableFounderGraph,
+        expected: &DurableFounderGraph,
     ) -> Result<(), DbError> {
-        validate_founder_graph(&expected)?;
+        validate_founder_graph(expected)?;
+        let expected_identity = founder_graph_identity(expected);
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let durable = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
                 DbError::Message("local Store founder graph is absent".to_string())
             })?;
-            if founder_graph_identity(&durable) != founder_graph_identity(&expected) {
+            if founder_graph_identity(&durable) != expected_identity {
                 return Err(DbError::Message(
                     "local Store founder graph changed before publication rollback".to_string(),
                 ));

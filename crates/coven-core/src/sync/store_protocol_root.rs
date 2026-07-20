@@ -595,7 +595,7 @@ async fn prepare_founder_graph(
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
-) -> Result<crate::database::DurableFounderGraph, StoreProtocolRootError> {
+) -> Result<Box<crate::database::DurableFounderGraph>, StoreProtocolRootError> {
     let reservation =
         durable_descriptor_reservation(db, storage, founder_timestamp, signer).await?;
     let authority = &reservation.membership.founder().root.authority;
@@ -910,7 +910,7 @@ async fn prepare_founder_graph(
             ))
         }
     };
-    Ok(crate::database::DurableFounderGraph {
+    Ok(Box::new(crate::database::DurableFounderGraph {
         root: crate::database::ExactProtocolObject {
             value: root_value,
             bytes: root_bytes,
@@ -932,7 +932,7 @@ async fn prepare_founder_graph(
         initial_ack_ref,
         membership,
         registration_state: crate::database::LocalDeviceRegistrationState::Prepared,
-    })
+    }))
 }
 
 async fn rollback_founder_exact_objects(
@@ -1064,7 +1064,7 @@ async fn rollback_founder_publication(
     if !failures.is_empty() {
         return Err(failures.join("; "));
     }
-    db.reset_store_founder_graph_publication(graph.clone())
+    db.reset_store_founder_graph_publication(graph)
         .await
         .map_err(|error| error.to_string())
 }
@@ -1136,7 +1136,7 @@ pub async fn create_store(
         storage,
         founder_timestamp,
         signer,
-        graph.clone(),
+        &graph,
     ))
     .await
     {
@@ -1159,7 +1159,7 @@ async fn publish_store_founder_graph(
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
-    graph: crate::database::DurableFounderGraph,
+    graph: &crate::database::DurableFounderGraph,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
     let write_policy = db.write_policy();
     let root_ref = StoreRootRef {
@@ -1337,7 +1337,7 @@ async fn publish_store_founder_graph(
     db.complete_store_founder_graph(
         root_ref,
         registration_ref,
-        graph.initial_ack_ref,
+        graph.initial_ack_ref.clone(),
         membership_refs,
     )
     .await

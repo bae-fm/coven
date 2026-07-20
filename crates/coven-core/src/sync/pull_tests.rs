@@ -3701,8 +3701,26 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     );
 }
 
-#[tokio::test]
-async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
+#[test]
+fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
+    std::thread::Builder::new()
+        .name("serial-circle-pull-stack".to_string())
+        // Linux test workers provide a 2 MiB stack. Keep the complete Store and
+        // Circle path below that limit with room for the test harness.
+        .stack_size(1_572_864)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build Serial Circle pull runtime")
+                .block_on(serial_circle_pull_scenario());
+        })
+        .expect("spawn constrained Serial Circle pull thread")
+        .join()
+        .expect("constrained Serial Circle pull thread joins");
+}
+
+async fn serial_circle_pull_scenario() {
     let owner = UserKeypair::generate();
     let databases = tempfile::tempdir().expect("create Serial database directory");
     let source = open_serial_scoped_circle_test_db_at(&databases.path().join("source.sqlite"));
