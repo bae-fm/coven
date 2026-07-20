@@ -1035,6 +1035,8 @@ pub enum CircleRosterError {
     NotAMember(String),
     #[error("Circle roster author stream contains a pruned suffix and cannot be extended")]
     PrunedAuthorStream,
+    #[error("Circle roster sequence {current} has no representable successor")]
+    SequenceExhausted { current: u64 },
     #[error("Circle roster resolution activation requires a fresh persisted author stream")]
     ResolutionActivationRequiresFreshStream,
     #[error("Circle roster has an unresolved semantic conflict")]
@@ -1827,7 +1829,15 @@ impl CircleRosterChain {
         {
             return Err(CircleRosterError::PrunedAuthorStream);
         }
-        Ok(effective_tip.map_or((1, None), |tip| (tip.seq + 1, Some(tip.entry_hash))))
+        match effective_tip {
+            Some(tip) => Ok((
+                tip.seq
+                    .checked_add(1)
+                    .ok_or(CircleRosterError::SequenceExhausted { current: tip.seq })?,
+                Some(tip.entry_hash),
+            )),
+            None => Ok((1, None)),
+        }
     }
 
     pub fn signed_set_member(
@@ -2267,6 +2277,43 @@ mod authority_tests {
         );
         let reference = CircleRosterHeadRef::from_stored_head(&head, object);
         (head, reference)
+    }
+
+    #[test]
+    fn roster_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
+        let owner = UserKeypair::generate();
+        let owner_pubkey = keys::public_key_hex(&owner);
+        let owner_grant = grant(b"sequence-exhaustion-owner-grant");
+        let store_root_hash = ObjectHash::digest(b"sequence-exhaustion-store");
+        let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &owner_grant);
+        let stream_id = AuthorStreamId::from_bytes([122; 32]);
+        let founder = CircleRosterEntry::founder(
+            store_root_hash,
+            circle_id,
+            "owner-device",
+            stream_id,
+            owner_grant,
+            &owner,
+        );
+        let mut terminal = founder.clone();
+        terminal.seq = u64::MAX;
+        terminal.previous_hash = Some(founder.entry_hash());
+        terminal.signature = keys::sign_hex(&owner, &terminal.canonical_bytes()).1;
+        let terminal_coord = terminal.coord();
+        let stream = terminal_coord.stream_key();
+        let mut chain = CircleRosterChain::from_entries(vec![founder]).expect("founder roster");
+        chain.entries.push(terminal);
+        chain
+            .reduced
+            .as_mut()
+            .expect("resolved founder roster")
+            .included
+            .insert(terminal_coord);
+
+        assert!(matches!(
+            chain.next_position(&stream),
+            Err(CircleRosterError::SequenceExhausted { current: u64::MAX })
+        ));
     }
 
     fn three_owner_cycle() -> (
