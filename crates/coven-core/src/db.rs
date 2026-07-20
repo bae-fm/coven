@@ -466,30 +466,6 @@ macro_rules! coven_tables {
     state BLOB NOT NULL
 "
         );
-        $visit!(
-            circle_snapshot_coverage,
-            "
-    circle_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    seq INTEGER NOT NULL CHECK (seq > 0),
-    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
-    snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
-    PRIMARY KEY (circle_id, device_id)
-"
-        );
-        $visit!(
-            circle_acks,
-            "
-    circle_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    ack_hash TEXT NOT NULL CHECK (length(ack_hash) = 64),
-    ack_bytes BLOB NOT NULL,
-    published INTEGER NOT NULL CHECK (published IN (0, 1)),
-    PRIMARY KEY (circle_id, device_id, revision),
-    UNIQUE (circle_id, ack_hash)
-"
-        );
     };
 }
 

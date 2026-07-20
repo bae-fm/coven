@@ -476,8 +476,6 @@ pub(crate) enum StreamAnchorDomain {
     StoreAnnouncements,
     StoreAcknowledgements,
     StoreSnapshots,
-    CircleAcknowledgements { circle_id: CircleId },
-    CircleSnapshots { circle_id: CircleId },
 }
 
 impl GrantStreamAnchor {
@@ -504,14 +502,6 @@ impl DeviceStreamAnchor {
             Self::StoreAnnouncements { .. } => StreamAnchorDomain::StoreAnnouncements,
             Self::StoreAcknowledgements { .. } => StreamAnchorDomain::StoreAcknowledgements,
             Self::StoreSnapshots { .. } => StreamAnchorDomain::StoreSnapshots,
-            Self::CircleAcknowledgements { circle_id, .. } => {
-                StreamAnchorDomain::CircleAcknowledgements {
-                    circle_id: *circle_id,
-                }
-            }
-            Self::CircleSnapshots { circle_id, .. } => StreamAnchorDomain::CircleSnapshots {
-                circle_id: *circle_id,
-            },
         }
     }
 }
@@ -5581,23 +5571,9 @@ impl StoreDeviceRegistrationOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceStreamAnchor {
-    StoreAnnouncements {
-        first_slot: ObjectSlot,
-    },
-    StoreAcknowledgements {
-        first_slot: ObjectSlot,
-    },
-    StoreSnapshots {
-        first_slot: ObjectSlot,
-    },
-    CircleAcknowledgements {
-        circle_id: CircleId,
-        first_slot: ObjectSlot,
-    },
-    CircleSnapshots {
-        circle_id: CircleId,
-        first_slot: ObjectSlot,
-    },
+    StoreAnnouncements { first_slot: ObjectSlot },
+    StoreAcknowledgements { first_slot: ObjectSlot },
+    StoreSnapshots { first_slot: ObjectSlot },
 }
 
 impl DeviceStreamAnchor {
@@ -5605,9 +5581,7 @@ impl DeviceStreamAnchor {
         match self {
             Self::StoreAnnouncements { first_slot }
             | Self::StoreAcknowledgements { first_slot }
-            | Self::StoreSnapshots { first_slot }
-            | Self::CircleAcknowledgements { first_slot, .. }
-            | Self::CircleSnapshots { first_slot, .. } => first_slot,
+            | Self::StoreSnapshots { first_slot } => first_slot,
         }
     }
 }
