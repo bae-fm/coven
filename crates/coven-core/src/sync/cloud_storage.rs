@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
-use tracing::warn;
 
 use super::storage::{
     CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef, PreparedExactObject,
@@ -292,10 +291,12 @@ pub async fn restore_pending_rotation(
     pending_rotation: &PendingRotation,
 ) -> Result<(), crate::database::DbError> {
     if let Some(value) = db.get_protocol_state(PENDING_ROTATION_STATE_KEY).await? {
-        match value.parse::<u64>() {
-            Ok(generation) => pending_rotation.mark_committed(generation),
-            Err(_) => warn!("ignoring malformed persisted pending-rotation generation {value:?}"),
-        }
+        let generation = value.parse::<u64>().map_err(|error| {
+            crate::database::DbError::Message(format!(
+                "persisted pending-rotation generation {value:?} is invalid: {error}"
+            ))
+        })?;
+        pending_rotation.mark_committed(generation);
     }
     Ok(())
 }
@@ -2808,6 +2809,79 @@ mod tests {
         assert!(matches!(
             storage.serial_coordination(),
             Err(CoordinationError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_durable_pending_rotation_blocks_session_reopen() {
+        let directory = tempfile::tempdir().expect("pending-rotation database directory");
+        let path = directory.path().join("store.sqlite3");
+        let open = || {
+            crate::database::Database::open(
+                &path,
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
+                "pending-rotation-reopen-device".to_string(),
+                &crate::sync::test_helpers::test_migrations(),
+            )
+            .expect("open pending-rotation database")
+            .0
+        };
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let encryption = EncryptionService::from_key([17; 32]);
+        let db = open();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(encryption.clone()),
+            BlobPathScheme::Hashed,
+            "pending-rotation-reopen",
+            signer.clone(),
+        )
+        .expect("construct pending-rotation storage");
+        let components = crate::sync::cycle::init_sync_over_storage(
+            &db,
+            storage,
+            crate::sync::cycle::StoreInitialization::CreateStore,
+            None,
+        )
+        .await
+        .expect("initialize pending-rotation Store");
+        let root = db
+            .local_store_root_ref()
+            .await
+            .expect("read pending-rotation Store root")
+            .expect("pending-rotation Store root exists");
+        db.set_protocol_state(PENDING_ROTATION_STATE_KEY, "not-a-generation")
+            .await
+            .expect("persist malformed pending rotation");
+        drop(components);
+        drop(db);
+
+        let reopened = open();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(encryption),
+            BlobPathScheme::Hashed,
+            "pending-rotation-reopen",
+            signer,
+        )
+        .expect("reconstruct pending-rotation storage");
+        let result = crate::sync::cycle::init_sync_over_storage(
+            &reopened,
+            storage,
+            crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_store_root: root,
+            },
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::sync::cycle::InitSyncError::PendingRotationRestore(_))
         ));
     }
 
