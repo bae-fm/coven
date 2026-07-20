@@ -5128,6 +5128,9 @@ impl Database {
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let mut facts = BTreeMap::new();
         for partition in partitions {
+            if partition.audience == crate::sync::circle::Audience::Local {
+                continue;
+            }
             for fact in
                 Self::capture_store_write_blob_facts_on(tx, &partition.changeset, blob_decls)?.blobs
             {
@@ -5233,7 +5236,11 @@ impl Database {
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
-        let affected_rows = if partitions.is_empty() {
+        let remote_partitions = partitions
+            .iter()
+            .filter(|partition| partition.audience != crate::sync::circle::Audience::Local)
+            .collect::<Vec<_>>();
+        let affected_rows = if remote_partitions.is_empty() {
             // A tripwire, not a routine event. An empty capture from a transaction
             // that also CHANGED NO ROWS is a pure read left on the write path —
             // warn so it gets moved to the journal-free read path
@@ -5244,7 +5251,7 @@ impl Database {
             // a conditional write to a synced table that no-op'd this cycle (an
             // idempotent INSERT OR IGNORE re-run) also changed no rows and warns;
             // legitimate but rare, tolerated.
-            if rows_changed == 0 {
+            if partitions.is_empty() && rows_changed == 0 {
                 warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
                 // Debug builds name the offender: the backtrace runs through the
                 // host's monomorphized closure, whose symbol carries the call
@@ -5258,7 +5265,7 @@ impl Database {
             Vec::new()
         } else {
             let mut affected = Vec::new();
-            for partition in partitions {
+            for partition in &remote_partitions {
                 affected.extend(
                     crate::changeset::walk(&partition.changeset)
                         .map_err(|error| {
@@ -5285,7 +5292,7 @@ impl Database {
             affected.dedup();
             affected
         };
-        let status = if partitions.is_empty() {
+        let status = if remote_partitions.is_empty() {
             WriteStatus::LocalOnly
         } else {
             WriteStatus::Pending
@@ -5299,7 +5306,7 @@ impl Database {
         let blob_facts_json = serde_json::to_string(blob_facts).map_err(|error| {
             DbError::Message(format!("serialize Store write blob facts: {error}"))
         })?;
-        let store_changeset = partitions
+        let store_changeset = remote_partitions
             .iter()
             .find(|partition| partition.audience == crate::sync::circle::Audience::Store)
             .map(|partition| partition.changeset.as_slice())
@@ -5322,11 +5329,7 @@ impl Database {
         for partition in partitions {
             let audience = match partition.audience {
                 crate::sync::circle::Audience::Store => "store".to_string(),
-                crate::sync::circle::Audience::Local => {
-                    return Err(DbError::Message(
-                        "Local audience must not enter the durable outbound journal".to_string(),
-                    ));
-                }
+                crate::sync::circle::Audience::Local => "local".to_string(),
                 crate::sync::circle::Audience::Circle(circle_id) => circle_id.to_string(),
             };
             let control = partition
@@ -5573,6 +5576,14 @@ impl Database {
                     control: None,
                     changeset,
                 });
+                continue;
+            }
+            if audience == "local" {
+                if control.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} Local partition carries a Circle control"
+                    )));
+                }
                 continue;
             }
             let circle_id = audience
@@ -25080,6 +25091,11 @@ mod tests {
                          VALUES ('circle-account', ?1, '0000000001001-0000-restart')",
                         [&capture_circle_id],
                     )?;
+                    tx.execute(
+                        "INSERT INTO accounts (id, audience, _updated_at)
+                         VALUES ('local-account', 'local', '0000000001002-0000-restart')",
+                        [],
+                    )?;
                     Ok::<_, DbError>(())
                 },
             )
@@ -25109,7 +25125,10 @@ mod tests {
             })
             .await
             .expect("read exact persisted audience partitions");
-        assert_eq!(expected.len(), 2);
+        assert_eq!(expected.len(), 3);
+        assert!(expected.iter().any(|(audience, control, changeset)| {
+            audience == "local" && control.is_none() && !changeset.is_empty()
+        }));
         drop(db);
 
         let (reopened, _) = Database::open(
@@ -25129,6 +25148,11 @@ mod tests {
         actual: &PreparedStoreWritePartitions,
         expected: &[(String, Option<String>, Vec<u8>)],
     ) {
+        let expected = expected
+            .iter()
+            .filter(|(audience, _, _)| audience != "local")
+            .cloned()
+            .collect::<Vec<_>>();
         let actual = actual
             .iter()
             .map(|partition| {
@@ -25179,5 +25203,92 @@ mod tests {
         assert_eq!(branch.writes.len(), 1);
 
         assert_prepared_partitions(&branch.writes[0].partitions, &expected);
+    }
+
+    async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
+        let (_temp, db, _) = capture_scoped_write_then_reopen(policy, name).await;
+        let tables =
+            vec![
+                SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
+                    .scoped_by("audience"),
+            ];
+        let gates = db.gates();
+        let blob_decls = db.blob_decls();
+        let write_id = db.new_write_id();
+        let routing =
+            (policy == WritePolicy::MergeConcurrent).then(|| EncryptionService::from_key([7; 32]));
+        let receipt = db
+            .call(move |conn| {
+                Database::run_store_write_transaction_on(
+                    conn,
+                    &tables,
+                    &gates,
+                    &blob_decls,
+                    policy,
+                    routing.as_ref(),
+                    write_id,
+                    |tx| {
+                        tx.execute(
+                            "INSERT INTO accounts (id, audience, _updated_at)
+                             VALUES ('second-local-account', 'local', '0000000002000-0000-local')",
+                            [],
+                        )?;
+                        Ok::<_, DbError>(())
+                    },
+                )
+            })
+            .await
+            .expect("capture local-only partition");
+
+        assert_eq!(receipt.status, WriteStatus::LocalOnly);
+        assert_eq!(receipt.pending_branch_id, None);
+        assert_eq!(
+            db.write_status(&receipt.write_id)
+                .await
+                .expect("reload local-only status"),
+            WriteStatus::LocalOnly
+        );
+        assert!(db
+            .pending_writes()
+            .await
+            .expect("list pending writes")
+            .iter()
+            .all(|write| write.write_id != receipt.write_id));
+        let stored_write_id = receipt.write_id.clone();
+        db.call(move |conn| {
+            let (affected_rows, store_changeset): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT affected_rows, changeset FROM store_writes WHERE write_id = ?1",
+                    [stored_write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            assert_eq!(affected_rows, "[]");
+            assert!(store_changeset.is_empty());
+            let partition: (String, Option<String>, Vec<u8>) = conn
+                .query_row(
+                    "SELECT audience, control_coord, changeset
+                     FROM store_write_partitions WHERE write_id = ?1",
+                    [stored_write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            assert_eq!(partition.0, "local");
+            assert_eq!(partition.1, None);
+            assert!(!partition.2.is_empty());
+            Ok(())
+        })
+        .await
+        .expect("verify durable local-only journal");
+    }
+
+    #[tokio::test]
+    async fn merge_local_only_scoped_write_is_not_pending() {
+        assert_local_only_scoped_write(WritePolicy::MergeConcurrent, "merge-local-only").await;
+    }
+
+    #[tokio::test]
+    async fn serial_local_only_scoped_write_is_not_pending() {
+        assert_local_only_scoped_write(WritePolicy::Serial, "serial-local-only").await;
     }
 }

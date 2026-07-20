@@ -588,7 +588,6 @@ unsafe fn partition_outbound_raw(
     })?;
     groups
         .into_iter()
-        .filter(|(audience, _)| *audience != Audience::Local)
         .map(|(audience, group)| {
             Ok(AudiencePartition {
                 audience,

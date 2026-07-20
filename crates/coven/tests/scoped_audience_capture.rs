@@ -299,10 +299,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
         "private routing tables must not appear in the public write receipt"
     );
 
-    assert_eq!(partitions.len(), 2);
-    assert!(partitions
-        .iter()
-        .all(|(audience, _, _)| audience != "local"));
+    assert_eq!(partitions.len(), 3);
     let partition = |audience: &str| {
         partitions
             .iter()
@@ -334,6 +331,24 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
             && change.op == coven_core::changeset::ChangeOp::Insert
             && change.pk() == Some(&circle_account_route)
     }));
+    let local = partition("local");
+    assert_eq!(local.1, None);
+    assert!(contains_bytes(&local.2, b"local-account"));
+    assert!(!contains_bytes(&local.2, b"store-account"));
+    assert!(!contains_bytes(&local.2, b"circle-account"));
+    let local_changes = coven_core::changeset::walk(&local.2).expect("walk Local partition");
+    assert!(has_change(
+        &local_changes,
+        "accounts",
+        coven_core::changeset::ChangeOp::Insert,
+        "local-account"
+    ));
+    assert!(has_change(
+        &local_changes,
+        "_coven_row_routes",
+        coven_core::changeset::ChangeOp::Insert,
+        &local_account_route
+    ));
 
     let routes = handle
         .sql_read(|conn| {
@@ -1026,10 +1041,7 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         })
         .await
         .expect("read Circle-to-Local transition");
-    assert_eq!(local_partitions.len(), 2);
-    assert!(local_partitions
-        .iter()
-        .all(|(audience, _)| audience != "local"));
+    assert_eq!(local_partitions.len(), 3);
     let local_partition = |audience: &str| {
         local_partitions
             .iter()
@@ -1050,6 +1062,19 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         coven_core::changeset::ChangeOp::Delete,
         "local-move-transaction"
     ));
+    let local_destination =
+        coven_core::changeset::walk(&local_partition("local").1).expect("walk Local destination");
+    for (table, row_id) in [
+        ("accounts", "local-move-account"),
+        ("transactions", "local-move-transaction"),
+    ] {
+        assert!(has_change(
+            &local_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            row_id
+        ));
+    }
     let store_mirror_retract =
         coven_core::changeset::walk(&local_partition("store").1).expect("walk Store mirror");
     for route in [&local_move_account_route, &local_move_transaction_route] {
@@ -1369,10 +1394,24 @@ async fn serial_routes_from_captured_audiences_without_merge_metadata() {
         .await
         .expect("read Serial insert partitions");
     assert_eq!(routing_table_count, 0, "Serial has no Merge routing tables");
-    assert_eq!(insert_partitions.len(), 2, "Local has no Serial package");
-    assert!(insert_partitions
+    assert_eq!(insert_partitions.len(), 3);
+    let local_insert = insert_partitions
         .iter()
-        .all(|(audience, _)| audience != "local"));
+        .find(|(audience, _)| audience == "local")
+        .expect("durable Serial Local partition");
+    let local_insert =
+        coven_core::changeset::walk(&local_insert.1).expect("walk Serial Local partition");
+    for (table, row_id) in [
+        ("accounts", "serial-local-account"),
+        ("transactions", "serial-local-child"),
+    ] {
+        assert!(has_change(
+            &local_insert,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            row_id
+        ));
+    }
 
     let before_failure = handle
         .sql_read(|conn| {
@@ -1547,14 +1586,17 @@ async fn serial_routes_from_captured_audiences_without_merge_metadata() {
         .await
         .expect("read Serial Circle-to-Local transition");
     assert_eq!(local_audience, "local");
-    assert_eq!(
-        to_local_partitions.len(),
-        1,
-        "Local has no destination package"
-    );
-    assert_eq!(to_local_partitions[0].0, circle_id);
+    assert_eq!(to_local_partitions.len(), 2);
+    let to_local_partition = |audience: &str| {
+        to_local_partitions
+            .iter()
+            .find(|(candidate, _)| candidate == audience)
+            .unwrap_or_else(|| panic!("missing {audience} Serial Circle-to-Local partition"))
+    };
     let circle_source =
-        coven_core::changeset::walk(&to_local_partitions[0].1).expect("walk Circle source");
+        coven_core::changeset::walk(&to_local_partition(&circle_id).1).expect("walk Circle source");
+    let local_destination = coven_core::changeset::walk(&to_local_partition("local").1)
+        .expect("walk Local destination");
     for (table, row_id) in [
         ("accounts", "serial-moving-account"),
         ("transactions", "serial-moving-child"),
@@ -1563,6 +1605,12 @@ async fn serial_routes_from_captured_audiences_without_merge_metadata() {
             &circle_source,
             table,
             coven_core::changeset::ChangeOp::Delete,
+            row_id
+        ));
+        assert!(has_change(
+            &local_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
             row_id
         ));
     }
@@ -1600,10 +1648,17 @@ async fn serial_routes_from_captured_audiences_without_merge_metadata() {
         .await
         .expect("read Serial Local-to-Store transition");
     assert_eq!(store_audience, None);
-    assert_eq!(to_store_partitions.len(), 1, "Local has no source package");
-    assert_eq!(to_store_partitions[0].0, "store");
-    let store_destination =
-        coven_core::changeset::walk(&to_store_partitions[0].1).expect("walk Store destination");
+    assert_eq!(to_store_partitions.len(), 2);
+    let to_store_partition = |audience: &str| {
+        to_store_partitions
+            .iter()
+            .find(|(candidate, _)| candidate == audience)
+            .unwrap_or_else(|| panic!("missing {audience} Serial Local-to-Store partition"))
+    };
+    let local_source =
+        coven_core::changeset::walk(&to_store_partition("local").1).expect("walk Local source");
+    let store_destination = coven_core::changeset::walk(&to_store_partition("store").1)
+        .expect("walk Store destination");
     for (table, row_id) in [
         ("accounts", "serial-moving-account"),
         ("transactions", "serial-moving-child"),
@@ -1612,6 +1667,12 @@ async fn serial_routes_from_captured_audiences_without_merge_metadata() {
             &store_destination,
             table,
             coven_core::changeset::ChangeOp::Insert,
+            row_id
+        ));
+        assert!(has_change(
+            &local_source,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
             row_id
         ));
     }
@@ -2297,9 +2358,6 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
             1
         )
     );
-    assert!(local_partitions
-        .iter()
-        .all(|(audience, _)| audience != "local"));
     let local_source = local_partitions
         .iter()
         .find(|(audience, _)| audience == &circle_id)
@@ -2314,6 +2372,23 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
             &local_source,
             table,
             coven_core::changeset::ChangeOp::Delete,
+            id
+        ));
+    }
+    let local_destination = local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .expect("Local reparent destination");
+    let local_destination =
+        coven_core::changeset::walk(&local_destination.1).expect("walk Local reparent destination");
+    for (table, id) in [
+        ("transactions", "to-local-transaction"),
+        ("line_items", "to-local-transaction-line"),
+    ] {
+        assert!(has_change(
+            &local_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -2588,16 +2663,33 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
     let seed_write_id = seeded.write_id.to_string();
     let local_only_partitions = handle
         .sql_read(move |conn| {
-            conn.query_row(
-                "SELECT count(*) FROM store_write_partitions WHERE write_id = ?1",
-                [seed_write_id],
-                |row| row.get::<_, i64>(0),
-            )
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1",
+            )?
+            .query_map([seed_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
         })
         .await
         .expect("read Local-only ancestor journal");
-    assert_eq!(local_only_partitions, 0);
+    assert_eq!(local_only_partitions.len(), 1);
+    assert_eq!(local_only_partitions[0].0, "local");
+    let local_seed =
+        coven_core::changeset::walk(&local_only_partitions[0].1).expect("walk Local-only journal");
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &local_seed,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
 
     let destination_circle_id = circle_id.clone();
     let moved = handle
@@ -2642,6 +2734,8 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
     ));
     let circle = coven_core::changeset::walk(&partition(&circle_id).1)
         .expect("walk Circle descendant partition");
+    let local = coven_core::changeset::walk(&partition("local").1)
+        .expect("walk Local descendant source partition");
     for (table, id) in [
         ("documents", "moving-document"),
         ("details", "moving-detail"),
@@ -2650,6 +2744,12 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
             &circle,
             table,
             coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+        assert!(has_change(
+            &local,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
             id
         ));
     }
@@ -2755,9 +2855,6 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
         })
         .await
         .expect("read Circle A to Local move");
-    assert!(local_partitions
-        .iter()
-        .all(|(audience, _)| audience != "local"));
     let circle_source = local_partitions
         .iter()
         .find(|(audience, _)| audience == &circle_id)
@@ -2772,6 +2869,23 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
             &circle_source,
             table,
             coven_core::changeset::ChangeOp::Delete,
+            id
+        ));
+    }
+    let local_destination = local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .expect("Local descendant destination partition");
+    let local_destination = coven_core::changeset::walk(&local_destination.1)
+        .expect("walk Local descendant destination partition");
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &local_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -2885,6 +2999,23 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
             id
         ));
     }
+    let local_destination = sibling_local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .expect("final Local descendant destination partition");
+    let local_destination = coven_core::changeset::walk(&local_destination.1)
+        .expect("walk final Local descendant destination partition");
+    for (table, id) in [
+        ("documents", "sibling-document"),
+        ("details", "sibling-detail"),
+    ] {
+        assert!(has_change(
+            &local_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
 
     let moved_store = handle
         .sql(|sql| {
@@ -2916,6 +3047,12 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("Store descendant destination partition");
+    let local_source = store_partitions
+        .iter()
+        .find(|(audience, _)| audience == "local")
+        .expect("Local descendant source partition");
+    let local_source = coven_core::changeset::walk(&local_source.1)
+        .expect("walk Local descendant source partition");
     let store_destination = coven_core::changeset::walk(&store_destination.1)
         .expect("walk Store descendant destination");
     for (table, id) in [
@@ -2927,6 +3064,17 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
             &store_destination,
             table,
             coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &local_source,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
             id
         ));
     }

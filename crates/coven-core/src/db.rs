@@ -166,7 +166,7 @@ macro_rules! coven_tables {
     PRIMARY KEY (write_id, audience),
     FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE,
     CHECK (
-        (audience = 'store' AND control_coord IS NULL)
+        (audience IN ('store', 'local') AND control_coord IS NULL)
         OR
         (audience NOT IN ('store', 'local') AND json_valid(control_coord))
     )
