@@ -868,7 +868,7 @@ async fn exact_membership_registration(
                 storage.root.store_root_hash,
                 ProtocolObjectDomain::StoreSnapshotMeta,
             ),
-            &crate::sync::store_commit::snapshot_slot_prefix(&device_id.to_string(), 1),
+            &crate::sync::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
             ".json",
         )
         .await

@@ -244,7 +244,7 @@ impl RetainedReplaySnapshotAuthority {
     pub(crate) fn validate(&self) -> Result<(), DbError> {
         let metadata_bytes = self.metadata.to_bytes();
         if self.metadata.store_root_hash != self.store_root.store_root_hash
-            || self.metadata.sequence != self.snapshot.sequence
+            || self.metadata.generation != self.snapshot.generation
             || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
             || self.snapshot.object.verify(&metadata_bytes).is_err()
             || self.snapshot_cut.frontier() != self.metadata.coverage
@@ -347,8 +347,7 @@ impl RetainedReplaySnapshotAuthority {
                     acknowledged.author_registration == self.metadata.author_registration
                         && acknowledged.snapshot == self.snapshot
                 })
-                || parsed_ack.device_state.state_hash() != self.metadata.state.devices.state_hash()
-                || parsed_ack.device_state.recovery() != self.metadata.state.devices.recovery()
+                || parsed_ack.device_state != self.metadata.state.devices
                 || !parsed_ack
                     .store_cut
                     .frontier()

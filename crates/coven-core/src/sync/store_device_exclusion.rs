@@ -2919,7 +2919,7 @@ mod tests {
                         .store_snapshot_activation(&target)
                         .expect("derive shared blob snapshot activation")
                         .activation_id(),
-                    sequence: 1,
+                    generation: 0,
                 },
             );
             let records = vec![

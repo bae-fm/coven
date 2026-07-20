@@ -504,7 +504,7 @@ async fn durable_founder_graph_reservation(
                             root.store_root_hash,
                             ProtocolObjectDomain::StoreSnapshotMeta,
                         ),
-                        &super::store_commit::snapshot_slot_prefix(&device, 1),
+                        &super::store_commit::snapshot_slot_prefix(&device, 0),
                         ".json",
                     )
                     .await

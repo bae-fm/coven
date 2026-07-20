@@ -184,6 +184,12 @@ pub enum StorePullError {
     Object(#[from] StoreObjectError),
     #[error("database: {0}")]
     Database(String),
+    #[error("active Store device {device_id} for member {member:?} has no activated acknowledgement for the selected snapshot")]
+    SnapshotNotStable { member: String, device_id: String },
+    #[error("Store snapshot author is inactive in its exact covered device state")]
+    SnapshotAuthorInactive,
+    #[error("Store snapshot author is not an Owner in its exact membership state")]
+    SnapshotAuthorNotOwner,
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("Serial Store: {0}")]
@@ -4009,15 +4015,9 @@ async fn verify_store_snapshot_authority(
         .active_registrations
         .get(&snapshot.meta.author_registration.device_id)
         .filter(|(reference, _)| reference == &snapshot.meta.author_registration)
-        .ok_or_else(|| {
-            StorePullError::Database(
-                "Store snapshot author is inactive in its exact covered device state".to_string(),
-            )
-        })?;
+        .ok_or(StorePullError::SnapshotAuthorInactive)?;
     if !snapshot_state.is_owner(&snapshot_author.author_pubkey) {
-        return Err(StorePullError::Database(
-            "Store snapshot author is not an Owner in its exact membership state".to_string(),
-        ));
+        return Err(StorePullError::SnapshotAuthorNotOwner);
     }
     Ok(snapshot_state)
 }
@@ -4054,7 +4054,7 @@ pub(crate) async fn verify_store_snapshot_stability(
         activated_acknowledgements_through_cut(storage, serial_coordination, root, &accepted_cut)
             .await?;
     let mut acknowledgements = BTreeMap::new();
-    for (device_id, (registration_ref, _)) in &snapshot_state.active_registrations {
+    for (device_id, (registration_ref, registration)) in &snapshot_state.active_registrations {
         let matching = accepted_acknowledgements
             .iter()
             .filter(|ack| {
@@ -4063,10 +4063,7 @@ pub(crate) async fn verify_store_snapshot_stability(
                         acknowledged.author_registration == snapshot.meta.author_registration
                             && acknowledged.snapshot == snapshot.reference
                     })
-                    && ack.value.device_state.state_hash()
-                        == snapshot.meta.state.devices.state_hash()
-                    && ack.value.device_state.recovery()
-                        == snapshot.meta.state.devices.recovery()
+                    && ack.value.device_state == snapshot.meta.state.devices
                     && ack
                         .value
                         .store_cut
@@ -4074,10 +4071,9 @@ pub(crate) async fn verify_store_snapshot_stability(
                         .covers(&snapshot.meta.coverage)
             })
             .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
-            .ok_or_else(|| {
-                StorePullError::Database(format!(
-                    "active Store device {device_id} has no activated acknowledgement for the selected snapshot"
-                ))
+            .ok_or_else(|| StorePullError::SnapshotNotStable {
+                member: registration.author_pubkey.clone(),
+                device_id: device_id.to_string(),
             })?;
         acknowledgements.insert(
             *device_id,

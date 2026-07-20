@@ -12192,7 +12192,7 @@ impl Database {
                 ));
             }
             let reference = StoreSnapshotRef {
-                sequence: meta.sequence,
+                generation: meta.generation,
                 snapshot_hash: meta.snapshot_hash(),
                 object: meta_prepared.reference().clone(),
             };
@@ -12211,32 +12211,33 @@ impl Database {
                 ));
             }
             let previous = load_published_store_snapshot_on(&tx)?;
-            let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
+            let (expected_generation, expected_predecessor, expected_slot) = match &previous {
                 Some(previous) => (
-                    previous.reference.sequence.checked_add(1).ok_or_else(|| {
-                        DbError::Message("Store snapshot sequence overflow".to_string())
-                    })?,
+                    previous
+                        .reference
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            DbError::Message("Store snapshot generation overflow".to_string())
+                        })?,
                     Some(previous.reference.clone()),
                     previous.successor_slot.clone(),
                 ),
-                None => (1, None, store_snapshot_first_slot(&registration)?.clone()),
+                None => (0, None, store_snapshot_first_slot(&registration)?.clone()),
             };
-            if meta.sequence != expected_sequence
+            if meta.generation != expected_generation
                 || meta.predecessor != expected_predecessor
                 || meta_prepared.reference().slot() != &expected_slot
                 || meta.successor.predecessor
-                    != previous
-                        .as_ref()
-                        .map(|value| value.reference.object.clone())
+                    != previous.as_ref().map(|value| value.reference.clone())
             {
                 return Err(DbError::Message(
                     "Store snapshot does not extend the exact local stream".to_string(),
                 ));
             }
-            let next_sequence = meta
-                .sequence
-                .checked_add(1)
-                .ok_or_else(|| DbError::Message("Store snapshot sequence overflow".to_string()))?;
+            let next_generation = meta.generation.checked_add(1).ok_or_else(|| {
+                DbError::Message("Store snapshot generation overflow".to_string())
+            })?;
             if meta.successor.activation
                 != registration
                     .store_snapshot_activation(&registration_ref)
@@ -12245,7 +12246,7 @@ impl Database {
                 || meta.successor.next_slot.logical_key()
                     != format!(
                         "{}.json",
-                        snapshot_slot_prefix(&registration.device_id.to_string(), next_sequence)
+                        snapshot_slot_prefix(&registration.device_id.to_string(), next_generation)
                     )
             {
                 return Err(DbError::Message(
@@ -12317,6 +12318,18 @@ impl Database {
                     .map_err(DbError::from)?;
                 }
             }
+            let snapshot_owner = crate::sync::remote_object::SnapshotObjectOwner {
+                activation: outbound.meta.value.successor.activation,
+                generation: outbound.meta.value.generation,
+            };
+            let image = RemoteObjectRecord::snapshot_activated_image(
+                &outbound.meta.value.image,
+                snapshot_owner,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("Store snapshot image ownership: {error}"))
+            })?;
+            persist_exact_remote_object_on(&tx, &image, "Store snapshot image")?;
             let deleted = tx
                 .execute(
                     "DELETE FROM outbound_store_snapshot \
@@ -12331,14 +12344,14 @@ impl Database {
                     "outbound snapshot ownership row is absent or changed".to_string(),
                 ));
             }
+            let accepted_generation = i64::try_from(accepted.generation).map_err(|_| {
+                DbError::Message("Store snapshot generation exceeds SQLite INTEGER".to_string())
+            })?;
             tx.execute(
                 "INSERT INTO published_store_snapshot \
-                 (singleton, snapshot_ref, successor_slot, meta_bytes) VALUES (1, ?1, ?2, ?3) \
-                 ON CONFLICT(singleton) DO UPDATE SET \
-                   snapshot_ref = excluded.snapshot_ref, \
-                   successor_slot = excluded.successor_slot, \
-                   meta_bytes = excluded.meta_bytes",
+                 (generation, snapshot_ref, successor_slot, meta_bytes) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![
+                    accepted_generation,
                     serde_json::to_string(&accepted).map_err(|error| DbError::Message(format!(
                         "serialize published Store snapshot ref: {error}"
                     )))?,
@@ -13107,11 +13120,7 @@ impl Database {
                     row.get(0)
                 })
                 .map_err(DbError::from)?;
-            let existing_snapshot: i64 = tx
-                .query_row("SELECT COUNT(*) FROM published_store_snapshot", [], |row| {
-                    row.get(0)
-                })
-                .map_err(DbError::from)?;
+            let existing_snapshot = load_published_store_snapshot_on(&tx)?;
             let existing_device: Option<String> = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -13235,13 +13244,20 @@ impl Database {
                 }
             }
             match (existing_snapshot, latest_snapshot.as_ref()) {
-                (0, None) => {}
-                (0, Some((reference, meta))) => {
+                (None, None) => {}
+                (None, Some((reference, meta))) => {
+                    let generation = i64::try_from(reference.generation).map_err(|_| {
+                        DbError::Message(
+                            "continued Store snapshot generation exceeds SQLite INTEGER"
+                                .to_string(),
+                        )
+                    })?;
                     tx.execute(
                         "INSERT INTO published_store_snapshot \
-                         (singleton, snapshot_ref, successor_slot, meta_bytes) \
-                         VALUES (1, ?1, ?2, ?3)",
+                         (generation, snapshot_ref, successor_slot, meta_bytes) \
+                         VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![
+                            generation,
                             serde_json::to_string(reference).map_err(|error| {
                                 DbError::Message(format!(
                                     "serialize continued Store snapshot ref: {error}"
@@ -13257,42 +13273,19 @@ impl Database {
                     )
                     .map_err(DbError::from)?;
                 }
-                (1, Some((reference, meta))) => {
-                    let actual: (String, String, Vec<u8>) = tx
-                        .query_row(
-                            "SELECT snapshot_ref, successor_slot, meta_bytes \
-                             FROM published_store_snapshot WHERE singleton = 1",
-                            [],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
-                        .map_err(DbError::from)?;
-                    let expected = (
-                        serde_json::to_string(reference).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize continued Store snapshot ref: {error}"
-                            ))
-                        })?,
-                        serde_json::to_string(&meta.successor.next_slot).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize continued Store snapshot successor: {error}"
-                            ))
-                        })?,
-                        meta.to_bytes(),
-                    );
-                    if actual != expected {
+                (Some(actual), Some((reference, meta))) => {
+                    if actual.reference != *reference
+                        || actual.successor_slot != meta.successor.next_slot
+                        || actual.meta != *meta
+                    {
                         return Err(DbError::Message(
                             "restored local snapshot stream differs from continuation".into(),
                         ));
                     }
                 }
-                (1, None) => {
+                (Some(_), None) => {
                     return Err(DbError::Message(
                         "restored database carries a snapshot outside the continuation".into(),
-                    ));
-                }
-                _ => {
-                    return Err(DbError::Message(
-                        "restored database carries multiple local snapshots".into(),
                     ));
                 }
             }
@@ -22566,7 +22559,7 @@ fn validate_snapshot_object_owners_on(
             .store_snapshot_activation(&meta.author_registration)
             .map_err(|error| DbError::Message(error.to_string()))?
             .activation_id(),
-        sequence: meta.sequence,
+        generation: meta.generation,
     };
     if meta.successor.activation != expected.activation {
         return Err(DbError::Message(
@@ -22595,9 +22588,9 @@ fn validate_snapshot_object_owner_records_on(
         })?;
         let remote = load_remote_object_on(conn, parsed)?;
         for owner in remote.snapshot_owners() {
-            if owner != expected {
+            if owner.activation != expected.activation || owner.generation > expected.generation {
                 return Err(DbError::Message(format!(
-                    "snapshot remote object {object_id} belongs to a different snapshot stream activation or sequence"
+                    "snapshot remote object {object_id} belongs to another stream or a later generation"
                 )));
             }
         }
@@ -22617,7 +22610,7 @@ fn validate_snapshot_blob_plan_on(
         .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
     let expected_owner = crate::sync::remote_object::SnapshotObjectOwner {
         activation: meta.successor.activation,
-        sequence: meta.sequence,
+        generation: meta.generation,
     };
     let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
     if owners != [&expected_owner] {
@@ -23834,22 +23827,32 @@ fn load_published_store_snapshot_on(
     conn: &Connection,
 ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
     conn.query_row(
-        "SELECT snapshot_ref, successor_slot, meta_bytes \
-         FROM published_store_snapshot WHERE singleton = 1",
+        "SELECT generation, snapshot_ref, successor_slot, meta_bytes \
+         FROM published_store_snapshot ORDER BY generation DESC LIMIT 1",
         [],
         |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(reference, successor_slot, bytes)| {
+    .map(|(generation, reference, successor_slot, bytes)| {
+        let generation = u64::try_from(generation).map_err(|_| {
+            DbError::Message("published Store snapshot generation is negative".to_string())
+        })?;
         let reference: StoreSnapshotRef = serde_json::from_str(&reference)
             .map_err(|error| DbError::Message(format!("published Store snapshot ref: {error}")))?;
+        if reference.generation != generation {
+            return Err(DbError::Message(
+                "published Store snapshot generation differs from its indexed generation"
+                    .to_string(),
+            ));
+        }
         let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
             DbError::Message(format!("published Store snapshot successor slot: {error}"))
         })?;
@@ -25873,7 +25876,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_blob_owner_rejects_other_activation_and_sequence() {
+    fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
         let conn = Connection::open_in_memory().expect("open snapshot owner database");
         apply_coven_schema(&conn).expect("apply snapshot owner schema");
         let binding = exact_blob_binding(
@@ -25883,7 +25886,7 @@ mod tests {
         );
         let expected = crate::sync::remote_object::SnapshotObjectOwner {
             activation: snapshot_activation("verified"),
-            sequence: 7,
+            generation: 7,
         };
         let install = |owner: crate::sync::remote_object::SnapshotObjectOwner| {
             conn.execute("DELETE FROM remote_objects", [])
@@ -25905,14 +25908,21 @@ mod tests {
             .expect("verified snapshot owner matches");
 
         install(crate::sync::remote_object::SnapshotObjectOwner {
+            activation: expected.activation,
+            generation: expected.generation - 1,
+        });
+        validate_snapshot_object_owner_records_on(&conn, &expected)
+            .expect("an earlier generation remains valid snapshot ownership");
+
+        install(crate::sync::remote_object::SnapshotObjectOwner {
             activation: snapshot_activation("other"),
-            sequence: expected.sequence,
+            generation: expected.generation,
         });
         assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
 
         install(crate::sync::remote_object::SnapshotObjectOwner {
             activation: expected.activation,
-            sequence: expected.sequence + 1,
+            generation: expected.generation + 1,
         });
         assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
     }

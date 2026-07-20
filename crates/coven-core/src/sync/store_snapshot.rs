@@ -5,9 +5,9 @@ use super::snapshot::{CreatedSnapshot, SnapshotError};
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
-    ObjectHash, SnapshotImageRef, SnapshotMeta, StoreHistoryCut, StoreProtocolError, StoreRootRef,
-    StoreSerialPredecessor, StoreSnapshotLocator, StoreSnapshotRef, StoreSnapshotState,
-    SuccessorLink,
+    ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotLocator,
+    StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::keys::UserKeypair;
 
@@ -157,15 +157,21 @@ pub(crate) async fn push_store_snapshot(
         .latest_local_store_snapshot()
         .await
         .map_err(publication_error)?;
-    let (sequence, predecessor, current_slot) = match previous {
+    let (generation, predecessor, current_slot) = match previous {
         Some(previous) => (
-            previous.reference.sequence.checked_add(1).ok_or_else(|| {
-                SnapshotError::PublicationState("Store snapshot sequence overflow".to_string())
-            })?,
+            previous
+                .reference
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SnapshotError::PublicationState(
+                        "Store snapshot generation overflow".to_string(),
+                    )
+                })?,
             Some(previous.reference),
             previous.successor_slot,
         ),
-        None => (1, None, snapshot_first_slot(&registration)?.clone()),
+        None => (0, None, snapshot_first_slot(&registration)?.clone()),
     };
 
     let snapshot_owner = super::remote_object::SnapshotObjectOwner {
@@ -173,7 +179,7 @@ pub(crate) async fn push_store_snapshot(
             .store_snapshot_activation(&registration_ref)
             .map_err(|error| SnapshotError::Parse(error.to_string()))?
             .activation_id(),
-        sequence,
+        generation,
     };
     let (image_bytes, snapshot_blobs) = prepare_snapshot_blobs(
         db,
@@ -211,14 +217,16 @@ pub(crate) async fn push_store_snapshot(
         store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
-    let semantic_prefix = snapshot_slot_prefix(&device_id, sequence);
+    let semantic_prefix = snapshot_slot_prefix(&device_id, generation);
     let next_slot = storage
         .allocate_protocol_slot(
             &meta_context,
             &snapshot_slot_prefix(
                 &device_id,
-                sequence.checked_add(1).ok_or_else(|| {
-                    SnapshotError::PublicationState("Store snapshot sequence overflow".to_string())
+                generation.checked_add(1).ok_or_else(|| {
+                    SnapshotError::PublicationState(
+                        "Store snapshot generation overflow".to_string(),
+                    )
                 })?,
             ),
             ".json",
@@ -232,16 +240,16 @@ pub(crate) async fn push_store_snapshot(
     let meta = SnapshotMeta::signed(
         store_root_hash,
         registration_ref.clone(),
-        sequence,
+        generation,
         predecessor.clone(),
         image,
         coverage,
         state,
         schema_version,
         created_at,
-        SuccessorLink {
+        SnapshotSuccessorLink {
             activation,
-            predecessor: predecessor.map(|reference| reference.object),
+            predecessor,
             next_slot,
         },
         &device_signer,
@@ -537,7 +545,7 @@ async fn publish_durable_snapshot(
         meta.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
-    let meta_prefix = snapshot_slot_prefix(&device_id, pending.reference.sequence);
+    let meta_prefix = snapshot_slot_prefix(&device_id, pending.reference.generation);
     storage
         .create_protocol_object(&pending.meta.prepared)
         .await
@@ -601,7 +609,7 @@ pub async fn load_store_snapshot_ref(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
-    let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), reference.sequence);
+    let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), reference.generation);
     let bytes = storage
         .read_protocol_object(&context, &reference.object, &prefix)
         .await
@@ -638,14 +646,11 @@ pub(crate) fn verify_store_snapshot_bytes(
 ) -> Result<SnapshotMeta, SnapshotError> {
     let meta = SnapshotMeta::parse_at(bytes, root.store_root_hash, reference, registration)
         .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-    let expected_predecessor = meta
-        .predecessor
-        .as_ref()
-        .map(|predecessor| predecessor.object.clone());
-    let next_sequence = reference
-        .sequence
+    let expected_predecessor = meta.predecessor.clone();
+    let next_generation = reference
+        .generation
         .checked_add(1)
-        .ok_or_else(|| SnapshotError::Parse("Store snapshot sequence overflow".to_string()))?;
+        .ok_or_else(|| SnapshotError::Parse("Store snapshot generation overflow".to_string()))?;
     let activation = registration
         .store_snapshot_activation(registration_ref)
         .map_err(|error| SnapshotError::Parse(error.to_string()))?
@@ -656,7 +661,7 @@ pub(crate) fn verify_store_snapshot_bytes(
         || meta.successor.next_slot.logical_key()
             != format!(
                 "{}.json",
-                snapshot_slot_prefix(&registration.device_id.to_string(), next_sequence)
+                snapshot_slot_prefix(&registration.device_id.to_string(), next_generation)
             )
     {
         return Err(SnapshotError::Parse(
@@ -666,7 +671,7 @@ pub(crate) fn verify_store_snapshot_bytes(
     Ok(meta)
 }
 
-async fn load_store_snapshot_stream(
+pub(crate) async fn load_store_snapshot_stream(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
@@ -677,11 +682,11 @@ async fn load_store_snapshot_stream(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
-    let mut sequence = 1_u64;
+    let mut generation = 0_u64;
     let mut predecessor = None;
     let mut snapshots = Vec::new();
     loop {
-        let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), sequence);
+        let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), generation);
         let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
             Ok(value) => value,
             Err(super::storage::StorageError::NotFound(_)) => break,
@@ -698,7 +703,7 @@ async fn load_store_snapshot_stream(
                 let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
                 let reference = StoreSnapshotRef {
-                    sequence,
+                    generation,
                     snapshot_hash: semantic_hash,
                     object: verify_object,
                 };
@@ -728,14 +733,14 @@ async fn load_store_snapshot_stream(
             successor_slot,
             meta,
         });
-        sequence = sequence
-            .checked_add(1)
-            .ok_or_else(|| SnapshotError::Parse("Store snapshot sequence overflow".to_string()))?;
+        generation = generation.checked_add(1).ok_or_else(|| {
+            SnapshotError::Parse("Store snapshot generation overflow".to_string())
+        })?;
     }
     Ok(snapshots)
 }
 
-fn select_maximal_store_snapshot(
+pub(crate) fn select_maximal_store_snapshot(
     mut candidates: Vec<crate::database::PublishedStoreSnapshot>,
 ) -> Option<crate::database::PublishedStoreSnapshot> {
     let all = candidates.clone();
@@ -1215,7 +1220,7 @@ mod tests {
         .expect("load exact continued snapshot");
 
         let mut wrong_reference = published.reference.clone();
-        wrong_reference.sequence += 1;
+        wrong_reference.generation += 1;
         assert!(load_store_snapshot_ref(
             &storage,
             &root,
@@ -1399,6 +1404,32 @@ mod tests {
         )
         .await
         .expect("publish first snapshot");
+        assert_eq!(first.generation, 0);
+        let image_object_id = super::super::remote_object::remote_object_id(&first.image.object);
+        let image_ownership = db
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT state FROM remote_objects WHERE object_id = ?1",
+                        [image_object_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("load published snapshot image ownership");
+        let image_ownership: super::super::remote_object::RemoteObjectRecord =
+            serde_json::from_str(&image_ownership).expect("parse snapshot image ownership");
+        assert!(matches!(
+            image_ownership,
+            super::super::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::SharedLiveSetObjectDomain::StoreSnapshotImage {
+                        reference
+                    } if reference == &first.image
+                )
+        ));
         let first_published = db
             .latest_local_store_snapshot()
             .await
@@ -1428,9 +1459,24 @@ mod tests {
         );
         assert_eq!(
             second.meta.value.successor.predecessor,
-            Some(first_published.reference.object.clone())
+            Some(first_published.reference.clone())
         );
         assert_eq!(second.reference.object.slot(), &first.successor.next_slot);
-        assert_eq!(second.reference.sequence, first.sequence + 1);
+        assert_eq!(second.reference.generation, first.generation + 1);
+        drain_outbound_store_snapshot(&storage, &db)
+            .await
+            .expect("resume second snapshot publication")
+            .expect("publish staged second snapshot");
+        let published_generations = db
+            .call(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM published_store_snapshot", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("count published Store snapshot generations");
+        assert_eq!(published_generations, 2);
     }
 }

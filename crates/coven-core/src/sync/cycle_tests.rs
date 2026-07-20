@@ -2875,7 +2875,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
                 .store_snapshot_activation(&registration_ref)
                 .expect("derive exact Store snapshot activation")
                 .activation_id(),
-            sequence: 1,
+            generation: 0,
         },
     )
     .expect("activate exact user blob for the initial snapshot");
@@ -5870,8 +5870,8 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 .expect("read latest Store snapshot")
                 .expect("count cadence publishes a Store snapshot")
                 .reference
-                .sequence,
-            2,
+                .generation,
+            1,
         );
     })
     .await

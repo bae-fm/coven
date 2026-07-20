@@ -2175,7 +2175,7 @@ pub async fn prepare_device_registration_request(
     let first_snapshot = storage
         .allocate_protocol_slot(
             &snapshot_context,
-            &crate::sync::store_commit::snapshot_slot_prefix(&device_id.to_string(), 1),
+            &crate::sync::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
             ".json",
         )
         .await?;

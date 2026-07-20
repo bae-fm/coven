@@ -329,7 +329,7 @@ macro_rules! coven_tables {
         $visit!(
             published_store_snapshot,
             "
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    generation INTEGER PRIMARY KEY CHECK (generation >= 0),
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
     meta_bytes BLOB NOT NULL

@@ -6745,14 +6745,14 @@ pub struct SnapshotMeta {
     pub version: u32,
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
-    pub sequence: u64,
+    pub generation: u64,
     pub predecessor: Option<StoreSnapshotRef>,
     pub image: SnapshotImageRef,
     pub coverage: CommitFrontier,
     pub state: StoreSnapshotState,
     pub schema_version: u32,
     pub created_at: String,
-    pub successor: SuccessorLink,
+    pub successor: SnapshotSuccessorLink,
     pub signature: String,
 }
 
@@ -6766,9 +6766,17 @@ pub struct SnapshotImageRef {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSnapshotRef {
-    pub sequence: u64,
+    pub generation: u64,
     pub snapshot_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotSuccessorLink {
+    pub activation: StreamActivationId,
+    pub predecessor: Option<StoreSnapshotRef>,
+    pub next_slot: ObjectSlot,
 }
 
 #[derive(Serialize)]
@@ -6776,41 +6784,38 @@ struct SnapshotSignedFields<'a> {
     version: u32,
     store_root_hash: ObjectHash,
     author_registration: &'a StoreDeviceRegistrationRef,
-    sequence: u64,
+    generation: u64,
     predecessor: Option<&'a StoreSnapshotRef>,
     image: &'a SnapshotImageRef,
     coverage: &'a CommitFrontier,
     state: &'a StoreSnapshotState,
     schema_version: u32,
     created_at: &'a str,
-    successor: &'a SuccessorLink,
+    successor: &'a SnapshotSuccessorLink,
 }
 
 impl SnapshotMeta {
     pub fn signed(
         store_root_hash: ObjectHash,
         author_registration: StoreDeviceRegistrationRef,
-        sequence: u64,
+        generation: u64,
         predecessor: Option<StoreSnapshotRef>,
         image: SnapshotImageRef,
         coverage: CommitFrontier,
         state: StoreSnapshotState,
         schema_version: u32,
         created_at: String,
-        successor: SuccessorLink,
+        successor: SnapshotSuccessorLink,
         device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        validate_chained_revision(
-            sequence,
-            predecessor.as_ref().map(|value| value.snapshot_hash),
-        )?;
+        validate_snapshot_generation(generation, predecessor.as_ref())?;
         validate_commit_frontier(&coverage)?;
         state.validate(store_root_hash, &coverage)?;
         let mut meta = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
             author_registration,
-            sequence,
+            generation,
             predecessor,
             image,
             coverage,
@@ -6832,7 +6837,7 @@ impl SnapshotMeta {
                 version: self.version,
                 store_root_hash: self.store_root_hash,
                 author_registration: &self.author_registration,
-                sequence: self.sequence,
+                generation: self.generation,
                 predecessor: self.predecessor.as_ref(),
                 image: &self.image,
                 coverage: &self.coverage,
@@ -6874,7 +6879,7 @@ impl SnapshotMeta {
             });
         }
         meta.author_registration.verify_registration(author)?;
-        if meta.sequence != expected.sequence {
+        if meta.generation != expected.generation {
             return Err(StoreProtocolError::RelocatedSlot {
                 expected: snapshot_semantic_prefix(
                     &author.device_id.to_string(),
@@ -6886,10 +6891,7 @@ impl SnapshotMeta {
                 ),
             });
         }
-        validate_chained_revision(
-            meta.sequence,
-            meta.predecessor.as_ref().map(|value| value.snapshot_hash),
-        )?;
+        validate_snapshot_generation(meta.generation, meta.predecessor.as_ref())?;
         validate_commit_frontier(&meta.coverage)?;
         meta.state
             .validate(expected_store_root_hash, &meta.coverage)?;
@@ -6908,6 +6910,29 @@ impl SnapshotMeta {
             });
         }
         Ok(meta)
+    }
+}
+
+fn validate_snapshot_generation(
+    generation: u64,
+    predecessor: Option<&StoreSnapshotRef>,
+) -> Result<(), StoreProtocolError> {
+    match (generation, predecessor) {
+        (0, None) => Ok(()),
+        (0, Some(_)) | (_, None) => Err(StoreProtocolError::Malformed(
+            "Store snapshot generation and predecessor disagree".to_string(),
+        )),
+        (generation, Some(predecessor)) => {
+            let expected = predecessor.generation.checked_add(1).ok_or_else(|| {
+                StoreProtocolError::Malformed("Store snapshot generation overflow".to_string())
+            })?;
+            if generation != expected {
+                return Err(StoreProtocolError::Malformed(
+                    "Store snapshot generation does not follow its predecessor".to_string(),
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -7532,19 +7557,6 @@ fn require_version(version: u32) -> Result<(), StoreProtocolError> {
         Ok(())
     } else {
         Err(StoreProtocolError::UnsupportedVersion(version))
-    }
-}
-
-fn validate_chained_revision(
-    revision: u64,
-    previous_hash: Option<ObjectHash>,
-) -> Result<(), StoreProtocolError> {
-    match (revision, previous_hash) {
-        (0, _) => Err(StoreProtocolError::InvalidRevision(0)),
-        (1, None) => Ok(()),
-        (1, Some(_)) => Err(StoreProtocolError::UnexpectedControlPredecessor),
-        (_, Some(_)) => Ok(()),
-        (_, None) => Err(StoreProtocolError::MissingControlPredecessor),
     }
 }
 

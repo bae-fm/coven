@@ -2071,7 +2071,8 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     let published_snapshot_bytes = db_owner
         .call(|conn| {
             conn.query_row(
-                "SELECT meta_bytes FROM published_store_snapshot WHERE singleton = 1",
+                "SELECT meta_bytes FROM published_store_snapshot \
+                 ORDER BY generation DESC LIMIT 1",
                 [],
                 |row| row.get::<_, Vec<u8>>(0),
             )

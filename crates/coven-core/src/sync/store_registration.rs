@@ -1573,7 +1573,7 @@ pub async fn recover_owner_device_merge(
         let first_snapshot = storage
             .allocate_protocol_slot(
                 &snapshot_context,
-                &snapshot_slot_prefix(&device_id.to_string(), 1),
+                &snapshot_slot_prefix(&device_id.to_string(), 0),
                 ".json",
             )
             .await
@@ -2029,7 +2029,7 @@ pub async fn recover_owner_device_serial(
     let first_snapshot = storage
         .allocate_protocol_slot(
             &snapshot_context,
-            &snapshot_slot_prefix(&device_id.to_string(), 1),
+            &snapshot_slot_prefix(&device_id.to_string(), 0),
             ".json",
         )
         .await

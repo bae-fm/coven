@@ -5,17 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::circle_control::StoreMembershipStateRef;
-use super::membership::{MemberRole, MembershipChain, MembershipGrantId, SerialMembershipState};
+use super::membership::{MembershipChain, MembershipGrantId, SerialMembershipState};
 use super::storage::{
     CoordinationStorage, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     SyncStorage,
 };
 use super::store_commit::{
-    ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
-    ObjectHash, SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StorePackageRef,
-    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotRef,
-    STORE_PROTOCOL_VERSION,
+    snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
+    StoreCommitCoord, StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef,
+    StoreProtocolError, StoreRootRef, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
 };
 use super::store_objects::StoreObjectError;
 use crate::keys::{self, UserKeypair};
@@ -35,7 +33,7 @@ pub struct StorePackageReclaimTarget {
 #[serde(deny_unknown_fields)]
 pub struct StorePackageReclaimClaim {
     pub target: StorePackageReclaimTarget,
-    pub covering_snapshot: StoreSnapshotRef,
+    pub covering_snapshot: StoreSnapshotLocator,
     pub acknowledgements: Vec<StoreAckRef>,
 }
 
@@ -67,7 +65,7 @@ impl StorePackageReclaimClaim {
             ));
         }
         if self.target.package.object == self.target.activation.object
-            || self.target.package.object == self.covering_snapshot.object
+            || self.target.package.object == self.covering_snapshot.snapshot.object
             || self
                 .acknowledgements
                 .iter()
@@ -565,13 +563,6 @@ impl ReclaimMembership<'_> {
             Self::Serial(membership) => membership.is_owner(pubkey),
         }
     }
-
-    fn current_members(self) -> Vec<(String, MemberRole)> {
-        match self {
-            Self::MergeConcurrent { membership, .. } => membership.current_members(),
-            Self::Serial(membership) => membership.current_members(),
-        }
-    }
 }
 
 pub async fn reclaim_store_packages(
@@ -612,19 +603,16 @@ pub async fn reclaim_store_packages(
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    let snapshot = Box::pin(choose_snapshot(storage, &root, membership, &registrations)).await?;
-    let acknowledgements = load_latest_acknowledgements(storage, &root, &registrations).await?;
-    require_registered_device_acks(
+    let snapshot = Box::pin(choose_snapshot(
         storage,
+        coordination,
         &root,
         membership,
-        &snapshot,
         &registrations,
-        &acknowledgements,
-    )
+    ))
     .await?;
 
-    let targets = exact_package_targets(storage, &root, &snapshot.meta.coverage).await?;
+    let targets = exact_package_targets(storage, &root, &snapshot.snapshot.meta.coverage).await?;
     for (commit, package) in targets {
         if reclaim_target_is_recorded(db, &package).await? {
             continue;
@@ -635,8 +623,6 @@ pub async fn reclaim_store_packages(
         {
             continue;
         }
-        let acknowledgements =
-            active_acknowledgement_refs(membership, &registrations, &acknowledgements);
         Box::pin(prepare_reclaim_authorization(
             db,
             storage,
@@ -650,8 +636,11 @@ pub async fn reclaim_store_packages(
                     package,
                     activation: commit,
                 },
-                covering_snapshot: snapshot.reference.clone(),
-                acknowledgements,
+                covering_snapshot: StoreSnapshotLocator {
+                    author_registration: snapshot.snapshot.meta.author_registration.clone(),
+                    snapshot: snapshot.snapshot.reference.clone(),
+                },
+                acknowledgements: snapshot.acknowledgements.clone(),
             },
         ))
         .await?;
@@ -675,29 +664,6 @@ pub async fn reclaim_store_packages(
         packages_deleted,
         physical_copies_deleted: packages_deleted,
     })
-}
-
-fn active_acknowledgement_refs(
-    membership: ReclaimMembership<'_>,
-    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-    acknowledgements: &BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>,
-) -> Vec<StoreAckRef> {
-    let active = membership
-        .current_members()
-        .into_iter()
-        .map(|(pubkey, _)| pubkey)
-        .collect::<BTreeSet<_>>();
-    let mut refs = registrations
-        .iter()
-        .filter(|(_, registration)| active.contains(&registration.author_pubkey))
-        .filter_map(|(_, registration)| {
-            acknowledgements
-                .get(&registration.device_id)
-                .map(|(reference, _)| reference.clone())
-        })
-        .collect::<Vec<_>>();
-    refs.sort();
-    refs
 }
 
 async fn reclaim_target_is_recorded(
@@ -741,6 +707,7 @@ async fn prepare_reclaim_authorization(
     })?;
     let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, identity_signer)
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    verify_store_package_reclaim_evidence(storage, coordination, root, &evidence).await?;
     let evidence_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreReclaimEvidence,
@@ -858,7 +825,13 @@ async fn resume_store_reclaim_operations(
                     progressed = true;
                 }
                 super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized { .. } => {
-                    Box::pin(execute_reclaim_delete(db, storage, operation)).await?;
+                    Box::pin(execute_reclaim_delete(
+                        db,
+                        storage,
+                        coordination,
+                        operation,
+                    ))
+                    .await?;
                     completed = completed.checked_add(1).ok_or_else(|| {
                         StoreReclaimError::Authorization(
                             "reclaimed package count exceeded u64".to_string(),
@@ -893,6 +866,7 @@ async fn resume_store_reclaim_operations(
 async fn execute_reclaim_delete(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
     operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
     let super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
@@ -910,12 +884,12 @@ async fn execute_reclaim_delete(
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
     let opened =
         super::store_objects::load_reclaim_authorization_ref(storage, &root, authorization).await?;
-    let target = opened.authorization.value.target.clone();
+    let verified =
+        verify_store_package_reclaim_evidence(storage, coordination, &root, &opened.evidence.value)
+            .await?;
+    let target = verified.target;
     if db
-        .store_package_is_retained_for_replay(
-            target.clone(),
-            opened.evidence.value.claim.target.activation.clone(),
-        )
+        .store_package_is_retained_for_replay(target.package.clone(), target.activation.clone())
         .await?
     {
         return Err(StoreReclaimError::Authorization(
@@ -923,16 +897,125 @@ async fn execute_reclaim_delete(
         ));
     }
     storage
-        .delete_protocol_object(&target.object)
+        .delete_protocol_object(&target.package.object)
         .await
         .map_err(|source| StoreReclaimError::Delete {
             commit_hash: opened.evidence.value.claim.target.activation.commit_hash,
             source,
         })?;
     verify_reclaim_target_absent(storage, &root, &opened).await?;
-    db.mark_store_reclaim_target_absent(operation, target)
+    db.mark_store_reclaim_target_absent(operation, target.package)
         .await?;
     Ok(())
+}
+
+struct VerifiedStorePackageReclaimEvidence {
+    target: StorePackageReclaimTarget,
+}
+
+async fn verify_store_package_reclaim_evidence(
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    evidence: &ReclaimEvidence,
+) -> Result<VerifiedStorePackageReclaimEvidence, StoreReclaimError> {
+    evidence
+        .verify()
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    if evidence.store_root_hash != root.store_root_hash {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim evidence belongs to another Store root".to_string(),
+        ));
+    }
+    let claim = &evidence.claim;
+    let author = super::store_objects::load_registration_ref(
+        storage,
+        root,
+        &claim.covering_snapshot.author_registration,
+    )
+    .await?;
+    let (reference, metadata) = super::store_snapshot::load_store_snapshot_ref(
+        storage,
+        root,
+        &claim.covering_snapshot.author_registration,
+        &author.value,
+        &claim.covering_snapshot.snapshot,
+    )
+    .await
+    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let snapshot = crate::database::PublishedStoreSnapshot {
+        reference,
+        successor_slot: metadata.successor.next_slot.clone(),
+        meta: metadata,
+    };
+    let authority = match super::store_pull::verify_store_snapshot_stability(
+        storage,
+        coordination,
+        root,
+        &snapshot,
+    )
+    .await
+    {
+        Ok(stability) => stability.into_authority(),
+        Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+            return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
+        }
+        Err(
+            super::store_pull::StorePullError::SnapshotAuthorInactive
+            | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
+        ) => return Err(StoreReclaimError::NoSnapshot),
+        Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
+    };
+    let mut expected_acknowledgements = authority
+        .acknowledgements
+        .values()
+        .map(|acknowledgement| acknowledgement.reference.clone())
+        .collect::<Vec<_>>();
+    expected_acknowledgements.sort();
+    if claim.acknowledgements != expected_acknowledgements {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim evidence acknowledgements differ from the activated snapshot stability proof"
+                .to_string(),
+        ));
+    }
+    let (commit, _) =
+        super::store_pull::load_commit_with_author(storage, root, &claim.target.activation).await?;
+    if commit.store_package() != Some(&claim.target.package)
+        || !snapshot_covers_target(
+            storage,
+            root,
+            &snapshot.meta.coverage,
+            &claim.target.activation,
+        )
+        .await?
+    {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim target is not the exact Store package covered by its snapshot".to_string(),
+        ));
+    }
+    Ok(VerifiedStorePackageReclaimEvidence {
+        target: claim.target.clone(),
+    })
+}
+
+async fn snapshot_covers_target(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    coverage: &CommitFrontier,
+    target: &StoreBatchCommitRef,
+) -> Result<bool, StoreReclaimError> {
+    let covering = match (coverage, &target.coord) {
+        (
+            CommitFrontier::MergeConcurrent(frontier),
+            StoreCommitCoord::MergeConcurrent { stream_id, .. },
+        ) => frontier.get(stream_id),
+        (CommitFrontier::Serial(covering), StoreCommitCoord::Serial { .. }) => covering.as_ref(),
+        _ => None,
+    };
+    match covering {
+        Some(covering) => position_covers(storage, root, covering, target).await,
+        None => Ok(false),
+    }
 }
 
 async fn drive_reclaim_candidate(
@@ -1214,20 +1297,29 @@ async fn verify_reclaim_target_absent(
     }
 }
 
-struct ExactSnapshot {
-    reference: StoreSnapshotRef,
-    meta: SnapshotMeta,
+struct VerifiedReclaimSnapshot {
+    snapshot: crate::database::PublishedStoreSnapshot,
+    acknowledgements: Vec<StoreAckRef>,
 }
 
 async fn choose_snapshot(
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
     membership: ReclaimMembership<'_>,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-) -> Result<ExactSnapshot, StoreReclaimError> {
+) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
-        for snapshot in load_snapshot_stream(storage, root, registration_ref, registration).await? {
+        for snapshot in super::store_snapshot::load_store_snapshot_stream(
+            storage,
+            root,
+            registration_ref,
+            registration,
+        )
+        .await
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+        {
             if snapshot.meta.coverage.policy() != membership.write_policy() {
                 return Err(StoreReclaimError::PolicyMismatch(format!(
                     "snapshot coverage uses {:?}, Store uses {:?}",
@@ -1252,269 +1344,58 @@ async fn choose_snapshot(
                 }
             };
             if owner {
-                let context = ProtocolObjectContext::store_encrypted(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::StoreSnapshotImage,
-                );
-                let bytes = storage
-                    .read_protocol_object(
-                        &context,
-                        &snapshot.meta.image.object,
-                        &snapshot_image_semantic_prefix(
-                            &registration.device_id.to_string(),
-                            snapshot.meta.image.image_hash,
-                        ),
-                    )
-                    .await
-                    .map_err(StoreObjectError::from)?;
-                if ObjectHash::digest(&bytes) != snapshot.meta.image.image_hash {
-                    return Err(StoreReclaimError::Authorization(
-                        "snapshot image differs from its signed exact reference".to_string(),
-                    ));
-                }
                 authorized.push(snapshot);
             }
         }
     }
-    authorized
-        .into_iter()
-        .max_by_key(|snapshot| snapshot.reference.snapshot_hash)
-        .ok_or(StoreReclaimError::NoSnapshot)
-}
-
-async fn load_snapshot_stream(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registration_ref: &StoreDeviceRegistrationRef,
-    registration: &StoreDeviceRegistration,
-) -> Result<Vec<ExactSnapshot>, StoreReclaimError> {
-    let mut slot = match &registration.snapshots {
-        super::store_commit::DeviceStreamAnchor::StoreSnapshots { first_slot } => {
-            first_slot.clone()
+    let snapshot = super::store_snapshot::select_maximal_store_snapshot(authorized)
+        .ok_or(StoreReclaimError::NoSnapshot)?;
+    let image = storage
+        .read_protocol_object(
+            &ProtocolObjectContext::store_encrypted(
+                root.store_root_hash,
+                ProtocolObjectDomain::StoreSnapshotImage,
+            ),
+            &snapshot.meta.image.object,
+            &snapshot_image_semantic_prefix(
+                &snapshot.meta.author_registration.device_id.to_string(),
+                snapshot.meta.image.image_hash,
+            ),
+        )
+        .await
+        .map_err(StoreObjectError::from)?;
+    if ObjectHash::digest(&image) != snapshot.meta.image.image_hash {
+        return Err(StoreReclaimError::Authorization(
+            "snapshot image differs from its signed exact reference".to_string(),
+        ));
+    }
+    let authority = match super::store_pull::verify_store_snapshot_stability(
+        storage,
+        coordination,
+        root,
+        &snapshot,
+    )
+    .await
+    {
+        Ok(stability) => stability.into_authority(),
+        Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+            return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
         }
-        _ => {
-            return Err(StoreReclaimError::Authorization(
-                "activated registration lacks a Store snapshot anchor".to_string(),
-            ))
-        }
+        Err(
+            super::store_pull::StorePullError::SnapshotAuthorInactive
+            | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
+        ) => return Err(StoreReclaimError::NoSnapshot),
+        Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
     };
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreSnapshotMeta,
-    );
-    let mut sequence = 1_u64;
-    let mut predecessor = None;
-    let mut snapshots = Vec::new();
-    loop {
-        let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), sequence);
-        let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
-            Ok(value) => value,
-            Err(StorageError::NotFound(_)) => break,
-            Err(error) => return Err(StoreObjectError::from(error).into()),
-        };
-        let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        let reference = StoreSnapshotRef {
-            sequence,
-            snapshot_hash: semantic_hash,
-            object,
-        };
-        let meta = SnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, registration)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        if meta.author_registration != *registration_ref
-            || meta.predecessor != predecessor
-            || meta.successor.predecessor
-                != predecessor
-                    .as_ref()
-                    .map(|value: &StoreSnapshotRef| value.object.clone())
-        {
-            return Err(StoreReclaimError::Authorization(
-                "Store snapshot stream has an invalid exact link".to_string(),
-            ));
-        }
-        slot = meta.successor.next_slot.clone();
-        predecessor = Some(reference.clone());
-        snapshots.push(ExactSnapshot { reference, meta });
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            StoreReclaimError::Authorization("snapshot sequence overflow".to_string())
-        })?;
-    }
-    Ok(snapshots)
-}
-
-async fn load_latest_acknowledgements(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-) -> Result<BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>, StoreReclaimError>
-{
-    let mut latest = BTreeMap::new();
-    for (registration_ref, registration) in registrations {
-        if let Some(ack) = load_ack_stream(storage, root, registration_ref, registration)
-            .await?
-            .pop()
-        {
-            latest.insert(registration.device_id, ack);
-        }
-    }
-    Ok(latest)
-}
-
-async fn load_ack_stream(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registration_ref: &StoreDeviceRegistrationRef,
-    registration: &StoreDeviceRegistration,
-) -> Result<Vec<(StoreAckRef, StoreAck)>, StoreReclaimError> {
-    let mut slot = match &registration.acknowledgements {
-        super::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
-            first_slot.clone()
-        }
-        _ => {
-            return Err(StoreReclaimError::Authorization(
-                "activated registration lacks a Store acknowledgement anchor".to_string(),
-            ))
-        }
-    };
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreAck,
-    );
-    let mut sequence = 1_u64;
-    let mut predecessor = None;
-    let mut acknowledgements = Vec::new();
-    loop {
-        let prefix = ack_slot_prefix(&registration.device_id.to_string(), sequence);
-        let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
-            Ok(value) => value,
-            Err(StorageError::NotFound(_)) => break,
-            Err(error) => return Err(StoreObjectError::from(error).into()),
-        };
-        let semantic_hash = StoreAck::semantic_hash_from_bytes(&bytes)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        let reference = StoreAckRef {
-            registration: registration_ref.clone(),
-            sequence,
-            ack_hash: semantic_hash,
-            object,
-        };
-        let ack = StoreAck::parse_at(&bytes, root, &reference, registration)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        if ack.registration != *registration_ref
-            || ack.successor.predecessor
-                != predecessor
-                    .as_ref()
-                    .map(|value: &StoreAckRef| value.object.clone())
-        {
-            return Err(StoreReclaimError::Authorization(
-                "Store acknowledgement stream has an invalid exact link".to_string(),
-            ));
-        }
-        slot = ack.successor.next_slot.clone();
-        predecessor = Some(reference.clone());
-        acknowledgements.push((reference, ack));
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            StoreReclaimError::Authorization("acknowledgement sequence overflow".to_string())
-        })?;
-    }
-    Ok(acknowledgements)
-}
-
-async fn require_registered_device_acks(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    membership: ReclaimMembership<'_>,
-    snapshot: &ExactSnapshot,
-    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-    latest: &BTreeMap<super::store_commit::StoreDeviceId, (StoreAckRef, StoreAck)>,
-) -> Result<(), StoreReclaimError> {
-    let active = membership
-        .current_members()
-        .into_iter()
-        .map(|(pubkey, _)| pubkey)
-        .collect::<BTreeSet<_>>();
-    let active_registrations = registrations
-        .iter()
-        .filter(|(_, registration)| active.contains(&registration.author_pubkey))
+    let mut acknowledgements = authority
+        .acknowledgements
+        .values()
+        .map(|acknowledgement| acknowledgement.reference.clone())
         .collect::<Vec<_>>();
-    for member in &active {
-        if !active_registrations
-            .iter()
-            .any(|(_, registration)| &registration.author_pubkey == member)
-        {
-            return Err(StoreReclaimError::MissingRegisteredDevice {
-                member: member.clone(),
-            });
-        }
-    }
-    for (_, registration) in active_registrations {
-        let device_id = registration.device_id;
-        let (_, ack) =
-            latest
-                .get(&device_id)
-                .ok_or_else(|| StoreReclaimError::MissingAcknowledgement {
-                    member: registration.author_pubkey.clone(),
-                    device_id: device_id.to_string(),
-                })?;
-        if ack.registration.device_id != device_id {
-            return Err(StoreReclaimError::AckAuthorMismatch {
-                device_id: device_id.to_string(),
-            });
-        }
-        if ack.store_cut.policy() != membership.write_policy() {
-            return Err(StoreReclaimError::PolicyMismatch(
-                "snapshot and acknowledgement use different Store policies".to_string(),
-            ));
-        }
-        match (&snapshot.meta.coverage, &ack.store_cut) {
-            (
-                CommitFrontier::MergeConcurrent(snapshot_commits),
-                StoreHistoryCut::MergeConcurrent(ack_commits),
-            ) => {
-                for (stream_id, snapshot_commit) in snapshot_commits {
-                    let covered = match ack_commits.get(stream_id) {
-                        Some(ack_commit) => {
-                            position_covers(storage, root, ack_commit, snapshot_commit).await?
-                        }
-                        None => false,
-                    };
-                    require_covered(covered, registration, device_id, snapshot_commit)?;
-                }
-            }
-            (CommitFrontier::Serial(snapshot_commit), StoreHistoryCut::Serial(ack_cut)) => {
-                if let Some(snapshot_commit) = snapshot_commit {
-                    let covered = match ack_cut {
-                        StoreSerialPredecessor::Commit(ack_commit) => {
-                            position_covers(storage, root, ack_commit, snapshot_commit).await?
-                        }
-                        StoreSerialPredecessor::Genesis { .. } => false,
-                    };
-                    require_covered(covered, registration, device_id, snapshot_commit)?;
-                }
-            }
-            _ => {
-                return Err(StoreReclaimError::PolicyMismatch(
-                    "snapshot and acknowledgement use different Store policies".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn require_covered(
-    covered: bool,
-    registration: &StoreDeviceRegistration,
-    device_id: super::store_commit::StoreDeviceId,
-    snapshot_commit: &StoreBatchCommitRef,
-) -> Result<(), StoreReclaimError> {
-    if covered {
-        return Ok(());
-    }
-    Err(StoreReclaimError::StaleAcknowledgement {
-        member: registration.author_pubkey.clone(),
-        ack_device_id: device_id.to_string(),
-        snapshot_commit: snapshot_commit.commit_hash,
+    acknowledgements.sort();
+    Ok(VerifiedReclaimSnapshot {
+        snapshot,
+        acknowledgements,
     })
 }
 
@@ -1653,10 +1534,13 @@ mod tests {
                     package: package.clone(),
                     activation,
                 },
-                covering_snapshot: StoreSnapshotRef {
-                    sequence: 1,
-                    snapshot_hash: ObjectHash::digest(b"covering snapshot"),
-                    object: proof_object("store-v1/snapshots/founder/covering"),
+                covering_snapshot: StoreSnapshotLocator {
+                    author_registration: founder_ref.clone(),
+                    snapshot: super::super::store_commit::StoreSnapshotRef {
+                        generation: 0,
+                        snapshot_hash: ObjectHash::digest(b"covering snapshot"),
+                        object: proof_object("store-v1/snapshots/founder/covering"),
+                    },
                 },
                 acknowledgements: vec![StoreAckRef {
                     registration: founder_ref.clone(),
@@ -1818,5 +1702,59 @@ mod tests {
             reassigned.verify(&founder),
             Err(StoreProtocolError::InvalidSignature)
         ));
+
+        db.call(|connection| {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(
+                &transaction,
+            )?;
+            transaction.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("release retained replay package ownership");
+        let mut authorization_activation = opened.evidence.value.claim.target.activation.clone();
+        authorization_activation.coord = StoreCommitCoord::MergeConcurrent {
+            stream_id: match &authorization_activation.coord {
+                StoreCommitCoord::MergeConcurrent { stream_id, .. } => *stream_id,
+                StoreCommitCoord::Serial { .. } => unreachable!("fixture uses Merge"),
+            },
+            sequence: authorization_activation.coord.sequence() + 1,
+        };
+        authorization_activation.commit_hash = ObjectHash::digest(b"reclaim authorization commit");
+        authorization_activation.object =
+            proof_object("store-v1/commits/reclaim-authorization.json");
+        let operation =
+            super::super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
+                authorization: receipt.authorization.clone(),
+                activation: authorization_activation,
+            };
+        let deletion = execute_reclaim_delete(&db, &store.storage, None, operation).await;
+        assert!(
+            deletion.is_err(),
+            "nonexistent snapshot and acknowledgement refs must not authorize deletion"
+        );
+        let target = &opened.evidence.value.claim.target;
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = target.activation.coord else {
+            unreachable!("fixture uses Merge")
+        };
+        store
+            .storage
+            .read_protocol_object(
+                &ProtocolObjectContext::store_encrypted(
+                    store.root.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
+                &target.package.object,
+                &super::super::store_commit::package_semantic_prefix(
+                    target.package.candidate_family,
+                    &stream_id.to_string(),
+                    target.activation.coord.sequence(),
+                    target.package.content_hash,
+                ),
+            )
+            .await
+            .expect("unverified reclaim proof must leave its target readable");
     }
 }

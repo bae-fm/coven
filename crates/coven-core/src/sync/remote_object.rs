@@ -223,6 +223,31 @@ impl RemoteObjectRecord {
         Ok(record)
     }
 
+    pub(crate) fn snapshot_activated_image(
+        image: &super::store_commit::SnapshotImageRef,
+        owner: SnapshotObjectOwner,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let record = Self::SharedLiveSet(SharedObjectRecord {
+            identity: SharedLiveSetObjectRef {
+                domain: SharedLiveSetObjectDomain::StoreSnapshotImage {
+                    reference: image.clone(),
+                },
+                semantic_hash: image.image_hash,
+                object: image.object.clone(),
+            },
+            bytes: RemoteObjectBytes::external_exact(Vec::new(), image.object.clone())?,
+            state: OwnedObjectState::UploadedVerified {
+                ownership: SharedObjectOwnership {
+                    pending: BTreeSet::new(),
+                    activated: BTreeSet::from([SharedObjectOwner::Snapshot(owner)]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
     pub(crate) fn activated_external_package(
         domain: SharedLiveSetObjectDomain,
         package: &super::audience_package::AudiencePackage,
@@ -413,6 +438,7 @@ impl RemoteObjectRecord {
                 },
             )),
             SharedLiveSetObjectDomain::StoredBlob => None,
+            SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => None,
         };
         if let Some((family, domain)) = package_domain {
             let identity = CandidateExclusiveTarget {
@@ -658,7 +684,11 @@ impl RemoteObjectRecord {
     pub(crate) fn snapshot_owners(&self) -> impl Iterator<Item = &SnapshotObjectOwner> {
         let owners = match self {
             Self::SharedLiveSet(record)
-                if record.identity.domain == SharedLiveSetObjectDomain::StoredBlob =>
+                if matches!(
+                    record.identity.domain,
+                    SharedLiveSetObjectDomain::StoredBlob
+                        | SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                ) =>
             {
                 match &record.state {
                     OwnedObjectState::UploadedVerified { ownership } => Some(&ownership.activated),
@@ -771,6 +801,7 @@ impl RemoteObjectRecord {
                             RemoteObjectRecordError::InvalidDomain(error.to_string())
                         })?;
                     }
+                    SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => {}
                     SharedLiveSetObjectDomain::StorePackage { reference } => {
                         validate_package_reference(
                             reference,
@@ -1861,7 +1892,7 @@ impl RetainedReplayOwner {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SnapshotObjectOwner {
     pub(crate) activation: StreamActivationId,
-    pub(crate) sequence: u64,
+    pub(crate) generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1972,7 +2003,9 @@ impl CandidateExclusiveObjectDomain {
 impl SharedLiveSetObjectDomain {
     fn package_object(&self) -> Result<&ExactObjectRef, RemoteObjectRecordError> {
         match self {
-            Self::StoredBlob => Err(RemoteObjectRecordError::DomainMismatch),
+            Self::StoredBlob | Self::StoreSnapshotImage { .. } => {
+                Err(RemoteObjectRecordError::DomainMismatch)
+            }
             Self::StorePackage { reference } => Ok(&reference.object),
             Self::CirclePackage { reference } => Ok(&reference.package.object),
         }
@@ -2329,7 +2362,19 @@ pub(crate) struct SharedLiveSetObjectRef {
 
 impl SharedLiveSetObjectRef {
     fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
-        validate_semantic_hash(self.semantic_hash, bytes)
+        match &self.domain {
+            SharedLiveSetObjectDomain::StoreSnapshotImage { reference }
+                if bytes.is_empty()
+                    && self.semantic_hash == reference.image_hash
+                    && self.object == reference.object =>
+            {
+                Ok(())
+            }
+            SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => {
+                Err(RemoteObjectRecordError::StoredReferenceMismatch)
+            }
+            _ => validate_semantic_hash(self.semantic_hash, bytes),
+        }
     }
 }
 
@@ -2337,6 +2382,9 @@ impl SharedLiveSetObjectRef {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SharedLiveSetObjectDomain {
     StoredBlob,
+    StoreSnapshotImage {
+        reference: super::store_commit::SnapshotImageRef,
+    },
     StorePackage {
         reference: super::store_commit::StorePackageRef,
     },
