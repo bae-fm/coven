@@ -6,9 +6,10 @@ use rusqlite::{types::Value, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::store_commit::{
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotMeta, StoreAck, StoreAckRef,
-    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
+    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
+    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef,
+    StoreSnapshotRef,
 };
 use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
@@ -214,22 +215,6 @@ pub(crate) struct RetainedReplayGenesisAuthority {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RetainedReplayRegistration {
-    pub(crate) reference: StoreDeviceRegistrationRef,
-    pub(crate) value: StoreDeviceRegistration,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RetainedReplayActivatedAck {
-    pub(crate) reference: StoreAckRef,
-    pub(crate) value: StoreAck,
-    pub(crate) activating_commit: StoreBatchCommitRef,
-    pub(crate) activating_commit_value: StoreBatchCommit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RetainedReplaySnapshotAuthority {
     pub(crate) store_root: StoreRootRef,
     pub(crate) founder_registration: StoreDeviceRegistrationRef,
@@ -239,9 +224,9 @@ pub(crate) struct RetainedReplaySnapshotAuthority {
     pub(crate) accepted_cut: StoreHistoryCut,
     pub(crate) device_state: ResolvedStoreDeviceState,
     pub(crate) active_registrations:
-        BTreeMap<super::store_commit::StoreDeviceId, RetainedReplayRegistration>,
+        BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
     pub(crate) acknowledgements:
-        BTreeMap<super::store_commit::StoreDeviceId, RetainedReplayActivatedAck>,
+        BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +239,22 @@ pub(crate) enum RetainedReplayAuthority {
 impl RetainedReplaySnapshotAuthority {
     pub(crate) fn validate(&self) -> Result<(), DbError> {
         let metadata_bytes = self.metadata.to_bytes();
+        let author = self
+            .active_registrations
+            .get(&self.metadata.author_registration.device_id)
+            .filter(|registration| registration.reference == self.metadata.author_registration)
+            .ok_or_else(|| {
+                DbError::Message(
+                    "retained snapshot author is absent from its active registrations".to_string(),
+                )
+            })?;
+        let parsed = SnapshotMeta::parse_at(
+            &metadata_bytes,
+            self.store_root.store_root_hash,
+            &self.snapshot,
+            &author.value,
+        )
+        .map_err(|error| DbError::Message(format!("retained snapshot metadata: {error}")))?;
         if self.metadata.store_root_hash != self.store_root.store_root_hash
             || self.metadata.generation != self.snapshot.generation
             || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
@@ -264,6 +265,7 @@ impl RetainedReplaySnapshotAuthority {
                 .accepted_cut
                 .frontier()
                 .covers(&self.snapshot_cut.frontier())
+            || parsed != self.metadata
             || self.device_state.state_hash != self.metadata.state.devices.state_hash()
             || self.device_state.recovery != self.metadata.state.devices.recovery()
         {
@@ -320,19 +322,15 @@ impl RetainedReplaySnapshotAuthority {
                     "retained snapshot active device has no acknowledgement".to_string(),
                 )
             })?;
-            let ack_bytes = acknowledgement.value.to_bytes();
             acknowledgement
-                .reference
-                .object
-                .verify(&ack_bytes)
+                .validate_chain(&self.store_root, registration)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            let parsed_ack = StoreAck::parse_at(
-                &ack_bytes,
-                &self.store_root,
-                &acknowledgement.reference,
-                &registration.value,
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            let (acknowledgement_ref, acknowledgement_value) =
+                acknowledgement.latest().ok_or_else(|| {
+                    DbError::Message(
+                        "retained snapshot acknowledgement proof chain is empty".to_string(),
+                    )
+                })?;
             let commit_bytes = acknowledgement.activating_commit_value.to_bytes();
             acknowledgement
                 .activating_commit
@@ -346,20 +344,22 @@ impl RetainedReplaySnapshotAuthority {
                 &registration.value,
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
-            if parsed_ack != acknowledgement.value
-                || parsed_commit != acknowledgement.activating_commit_value
+            if parsed_commit != acknowledgement.activating_commit_value
                 || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
-                || parsed_commit.acknowledgement() != Some(&acknowledgement.reference)
+                || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
                 || !history_cut_covers_commit(
                     &self.accepted_cut,
                     &acknowledgement.activating_commit,
                 )
-                || !parsed_ack.snapshot.as_ref().is_some_and(|acknowledged| {
-                    acknowledged.author_registration == self.metadata.author_registration
-                        && acknowledged.snapshot == self.snapshot
-                })
-                || parsed_ack.device_state != self.metadata.state.devices
-                || !parsed_ack
+                || !acknowledgement_value
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|acknowledged| {
+                        acknowledged.author_registration == self.metadata.author_registration
+                            && acknowledged.snapshot == self.snapshot
+                    })
+                || acknowledgement_value.device_state != self.metadata.state.devices
+                || !acknowledgement_value
                     .store_cut
                     .frontier()
                     .covers(&self.metadata.coverage)
@@ -819,23 +819,17 @@ fn validate_snapshot_replay_image(
         ));
     }
     validate_must_be_empty_replay_tables(image, "snapshot replay baseline")?;
-    for table in ["materialized_commits", "retained_merge_materializations"] {
-        let count: i64 = image
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {}",
-                    super::session::quote_ident(table)
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if count != 0 {
-            return Err(DbError::Message(format!(
-                "snapshot replay baseline contains {table} rows"
-            )));
-        }
+    let materialized_commits: i64 = image
+        .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
+            row.get(0)
+        })
+        .map_err(DbError::from)?;
+    if materialized_commits != 0 {
+        return Err(DbError::Message(
+            "snapshot replay baseline contains materialized_commits rows".to_string(),
+        ));
     }
+    crate::database::Database::validate_snapshot_author_exclusion_activations_on(image)?;
     validate_replay_image_foreign_keys(image)
 }
 

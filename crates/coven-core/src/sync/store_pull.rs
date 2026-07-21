@@ -29,16 +29,17 @@ use super::storage::{
 use super::store_commit::{
     head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CirclePackageRef,
     CommitFrontier, DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody,
-    DeviceStreamAnchor, ObjectHash, OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef,
-    OwnerRecoveryPosition, ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
-    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreDeviceExclusionOutcome,
-    StoreDeviceExclusionProof, StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceProposalState,
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, StoreSerialHead, StoreSerialHeadState,
-    StoreSerialPredecessor, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    DeviceStreamAnchor, ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor,
+    OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition, ResolvedStoreDeviceState,
+    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
+    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
+    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
+    StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
+    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
+    StoreSerialHeadState, StoreSerialPredecessor, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
@@ -46,7 +47,7 @@ use super::store_objects::{
     load_founder_registration_with_root, load_owner_recovery_node_ref,
     load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
     load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
-    load_store_ack_ref, load_store_package, load_store_protocol_root,
+    load_store_ack_predecessor, load_store_ack_ref, load_store_package, load_store_protocol_root,
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::blob::decl::BlobDecls;
@@ -236,6 +237,24 @@ struct MergeCandidate {
     candidate: Candidate,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
+    predecessor_membership: MembershipChain,
+}
+
+struct LoadedMergePredecessorMemberships {
+    by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
+}
+
+impl LoadedMergePredecessorMemberships {
+    fn membership_for(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<&MembershipChain, StorePullError> {
+        self.by_commit.get(reference).ok_or_else(|| {
+            StorePullError::Database(format!(
+                "retained Merge commit {reference:?} has no loaded predecessor membership"
+            ))
+        })
+    }
 }
 
 struct SerialApplicationCandidate {
@@ -578,6 +597,7 @@ struct AuthorizedSerialCommit {
     author: StoreDeviceRegistration,
     registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
     device_operations: VerifiedStoreDeviceOperations,
+    device_state_before: ResolvedStoreDeviceState,
     device_state_after: ResolvedStoreDeviceState,
     acknowledgement: Option<(
         super::store_commit::StoreAckRef,
@@ -592,7 +612,22 @@ pub(crate) enum RegistrationLoadError {
     Invalid(String),
 }
 
-struct VerifiedAcceptedPredecessor;
+enum VerifiedAcceptedPredecessor<'a> {
+    Exact,
+    SerialHistory {
+        commits: &'a [AuthorizedSerialCommit],
+    },
+    MergeHistory {
+        commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+        frontier: Vec<StoreBatchCommitRef>,
+    },
+}
+
+struct VerifiedCommitJoinOutcome {
+    attempt: DeviceJoinAttempt,
+    owner: StoreDeviceRegistration,
+    outcome: super::store_commit::DeviceJoinOutcome,
+}
 
 fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
     match error {
@@ -799,7 +834,7 @@ async fn load_merge_predecessor_membership_impl(
         .await
         .map_err(RegistrationLoadError::Object)?
         .value;
-    match verified_activations {
+    let membership = match verified_activations {
         Some(verified_activations) => Box::pin(
             super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
                 storage,
@@ -825,7 +860,8 @@ async fn load_merge_predecessor_membership_impl(
         )
         .await,
     }
-    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    Ok(membership)
 }
 
 fn verify_merge_membership_state_ref(
@@ -873,7 +909,7 @@ pub(crate) fn load_device_join_authorization<'a>(
     Box::pin(async move {
         match state {
             StoreMembershipStateRef::MergeConcurrent(_) => {
-                let chain = load_merge_predecessor_membership(storage, root, state)
+                let chain = Box::pin(load_merge_predecessor_membership(storage, root, state))
                     .await
                     .map_err(|error| match error {
                         RegistrationLoadError::Object(error) => StorePullError::Object(error),
@@ -891,8 +927,10 @@ pub(crate) fn load_device_join_authorization<'a>(
                         Some(reference.clone())
                     }
                 };
-                let authorization =
-                    load_serial_authorization_at_position(storage, root, reference).await?;
+                let authorization = Box::pin(load_serial_authorization_at_position(
+                    storage, root, reference,
+                ))
+                .await?;
                 let expected = StoreMembershipStateRef::serial(
                     state_ref.position.clone(),
                     state_ref.recovery.clone(),
@@ -1024,6 +1062,87 @@ async fn validate_commit_acknowledgement(
     Ok(Some((reference.clone(), ack)))
 }
 
+async fn load_acknowledgement_proof_chain(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    latest_ref: super::store_commit::StoreAckRef,
+    latest: super::store_commit::StoreAck,
+    registration: &StoreDeviceRegistration,
+) -> Result<
+    BTreeMap<
+        u64,
+        (
+            super::store_commit::StoreAckRef,
+            super::store_commit::StoreAck,
+        ),
+    >,
+    RegistrationLoadError,
+> {
+    let mut chain = BTreeMap::new();
+    let mut current_ref = latest_ref;
+    let mut current = latest;
+    loop {
+        if chain
+            .insert(current_ref.sequence, (current_ref.clone(), current.clone()))
+            .is_some()
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement proof chain repeats a sequence".to_string(),
+            ));
+        }
+        let Some((predecessor_ref, predecessor)) =
+            load_store_ack_predecessor(storage, root, &current_ref, &current, registration)
+                .await
+                .map_err(RegistrationLoadError::Object)?
+        else {
+            break;
+        };
+        current_ref = predecessor_ref;
+        current = predecessor.value;
+    }
+    if chain.first_key_value().map(|(sequence, _)| *sequence) != Some(1)
+        || chain.last_key_value().map(|(sequence, _)| *sequence) != Some(chain.len() as u64)
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "Store acknowledgement proof chain is not contiguous from sequence one".to_string(),
+        ));
+    }
+    Ok(chain)
+}
+
+pub(crate) async fn retain_activated_acknowledgement(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    activating_commit: &StoreBatchCommitRef,
+    activating_commit_value: &StoreBatchCommit,
+    registration: &StoreDeviceRegistration,
+    reference: super::store_commit::StoreAckRef,
+    value: super::store_commit::StoreAck,
+) -> Result<super::store_commit::RetainedVerifiedActivatedAck, StorePullError> {
+    if activating_commit_value.acknowledgement() != Some(&reference)
+        || activating_commit_value.author_registration != reference.registration
+        || value.registration != reference.registration
+    {
+        return Err(StorePullError::Database(
+            "Store acknowledgement differs from its activating commit".to_string(),
+        ));
+    }
+    activating_commit
+        .verify_commit(activating_commit_value)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let chain = load_acknowledgement_proof_chain(storage, root, reference, value, registration)
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+    Ok(super::store_commit::RetainedVerifiedActivatedAck {
+        chain,
+        activating_commit: activating_commit.clone(),
+        activating_commit_value: activating_commit_value.clone(),
+    })
+}
+
 async fn validate_commit_reclaim_authorization(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1145,7 +1264,7 @@ async fn load_commit_registrations(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     let root_value = load_store_protocol_root(storage, root)
@@ -1171,7 +1290,7 @@ async fn load_commit_registrations_with_root(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     if commit.acknowledgement().is_some() {
@@ -1222,7 +1341,9 @@ async fn load_commit_registrations_with_root(
         ))
         .await?;
     }
-    if !commit.device_join_outcomes().is_empty() {
+    let verified_join_outcomes = if commit.device_join_outcomes().is_empty() {
+        BTreeMap::new()
+    } else {
         Box::pin(validate_commit_join_outcomes(
             storage,
             root,
@@ -1232,8 +1353,8 @@ async fn load_commit_registrations_with_root(
             predecessor,
             accepted_predecessor,
         ))
-        .await?;
-    }
+        .await?
+    };
     let has_join_abandonment = commit
         .device_join_attempt_decisions()
         .iter()
@@ -1279,14 +1400,12 @@ async fn load_commit_registrations_with_root(
         let authority = Box::pin(registration_activation(
             storage,
             root,
-            root_value,
             activated,
             &registration,
             activating_author,
-            &commit.order,
             commit.serial_recovery_activation(),
             predecessor,
-            accepted_predecessor,
+            &verified_join_outcomes,
         ))
         .await?;
         registrations.push((registration, authority));
@@ -1848,6 +1967,50 @@ pub(crate) async fn load_local_commit_device_operations(
             history: SerialAuthorizationHistory::ExactPredecessor,
         },
     };
+    load_local_commit_device_operations_with_authority(db, storage, root, commit, state, &authority)
+        .await
+}
+
+pub(crate) async fn load_local_commit_device_operations_with_merge_membership(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    membership: &MembershipChain,
+    state_ref: &StoreDeviceStateRef,
+    state: ResolvedStoreDeviceState,
+) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
+    if commit.device_exclusion_proposals().is_empty()
+        && commit.device_exclusion_outcomes().is_empty()
+    {
+        return VerifiedStoreDeviceOperations::without_exclusions(commit)
+            .map_err(|error| StorePullError::Database(error.to_string()));
+    }
+    if commit.policy() != crate::WritePolicy::MergeConcurrent {
+        return Err(StorePullError::Database(
+            "retained Merge membership authority received a Serial commit".to_string(),
+        ));
+    }
+    if state_ref != &commit.device_state {
+        return Err(StorePullError::Database(
+            "local exclusion commit differs from its materialized predecessor device state"
+                .to_string(),
+        ));
+    }
+    verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
+    let authority = RegistrationPredecessorAuthority::MergeConcurrent(membership);
+    load_local_commit_device_operations_with_authority(db, storage, root, commit, state, &authority)
+        .await
+}
+
+async fn load_local_commit_device_operations_with_authority(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    state: ResolvedStoreDeviceState,
+    authority: &RegistrationPredecessorAuthority<'_>,
+) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
     let resolver = DeviceStateResolver::Database(db);
     Box::pin(load_commit_device_operations(
         Some(&resolver),
@@ -1855,13 +2018,42 @@ pub(crate) async fn load_local_commit_device_operations(
         root,
         commit,
         &state,
-        Some(&authority),
+        Some(authority),
     ))
     .await
     .map_err(|error| match error {
         RegistrationLoadError::Object(error) => StorePullError::Object(error),
         RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
     })
+}
+
+pub(crate) async fn derive_local_merge_post_device_state(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    predecessor_state: ResolvedStoreDeviceState,
+    registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+    device_operations: VerifiedStoreDeviceOperations,
+) -> Result<ResolvedStoreDeviceState, StorePullError> {
+    let (authorized_predecessor, recovery_author) =
+        predecessor_with_recovery_author(predecessor_state, commit, registrations)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
+        storage, root, commit, None,
+    ))
+    .await?;
+    device_operations
+        .apply_to(authorized_predecessor, &commit.device_state)
+        .and_then(|state| {
+            apply_verified_device_lifecycle(
+                state,
+                commit,
+                registrations,
+                recovery_author.as_ref(),
+                owner_recovery,
+            )
+        })
+        .map_err(|error| StorePullError::Database(error.to_string()))
 }
 
 async fn validate_commit_join_abandonments(
@@ -1924,10 +2116,16 @@ async fn load_commit_device_join_attempt(
     root: &StoreRootRef,
     reference: &super::store_commit::DeviceJoinAttemptRef,
     owner: &StoreDeviceRegistration,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<DeviceJoinAttempt, RegistrationLoadError> {
     let attempt = match accepted_predecessor {
-        Some(_) => load_verified_device_join_attempt_evidence_ref(storage, root, reference, owner),
+        Some(accepted_predecessor) => load_verified_device_join_attempt_evidence_ref(
+            storage,
+            root,
+            reference,
+            owner,
+            Some(accepted_predecessor),
+        ),
         None => load_verified_device_join_attempt_ref(storage, root, reference, owner),
     }
     .await
@@ -1942,7 +2140,7 @@ async fn validate_commit_join_cleanup_receipts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<Vec<super::device_join::DeviceJoinCleanupReceiptObject>, RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -2085,8 +2283,11 @@ async fn validate_commit_join_outcomes(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
-) -> Result<(), RegistrationLoadError> {
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+) -> Result<
+    BTreeMap<super::store_commit::DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
+    RegistrationLoadError,
+> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
             "device join outcome activation has no exact predecessor authority".to_string(),
@@ -2098,6 +2299,7 @@ async fn validate_commit_join_outcomes(
                 .to_string(),
         ));
     }
+    let mut verified = BTreeMap::new();
     for outcome_ref in commit.device_join_outcomes() {
         if !Box::pin(predecessor_contains_join_attempt(
             storage,
@@ -2167,14 +2369,30 @@ async fn validate_commit_join_outcomes(
                     if outcome == outcome_ref
             )
         });
-        if matches!(outcome.body, DeviceJoinOutcomeBody::Activated { .. }) != activation.is_some() {
+        if matches!(&outcome.body, DeviceJoinOutcomeBody::Activated { .. }) != activation.is_some()
+        {
             return Err(RegistrationLoadError::Invalid(
                 "device join outcome and registration activation are not one closed operation"
                     .to_string(),
             ));
         }
+        if verified
+            .insert(
+                outcome_ref.clone(),
+                VerifiedCommitJoinOutcome {
+                    attempt,
+                    owner,
+                    outcome,
+                },
+            )
+            .is_some()
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "device join outcome is duplicated in one commit".to_string(),
+            ));
+        }
     }
-    Ok(())
+    Ok(verified)
 }
 
 async fn validate_commit_join_attempts(
@@ -2183,7 +2401,7 @@ async fn validate_commit_join_attempts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -2238,14 +2456,15 @@ async fn validate_commit_join_attempts(
 async fn registration_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     activated: &ActivatedStoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     activating_author: &StoreDeviceRegistration,
-    activating_order: &super::store_commit::StoreCommitOrder,
     serial_recovery_activation: Option<&super::store_commit::SerialRecoveryActivation>,
     predecessor: &RegistrationPredecessorAuthority<'_>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor>,
+    verified_join_outcomes: &BTreeMap<
+        super::store_commit::DeviceJoinOutcomeRef,
+        VerifiedCommitJoinOutcome,
+    >,
 ) -> Result<StoreDeviceRegistrationActivation, RegistrationLoadError> {
     if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
@@ -2265,50 +2484,14 @@ async fn registration_activation(
                 outcome,
             },
         ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
-            let attempt_context = ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::DeviceJoinAttempt,
-            );
-            let attempt_prefix =
-                super::store_commit::device_join_attempt_semantic_prefix(*attempt_id);
-            let attempt_bytes = storage
-                .read_protocol_object(&attempt_context, &outcome.attempt().object, &attempt_prefix)
-                .await
-                .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
-            let parse_bytes = attempt_bytes.clone();
-            let unverified_attempt = run_blocking_object_verification(
-                &attempt_prefix,
-                &outcome.attempt().object,
-                Box::new(move || DeviceJoinAttempt::parse_unverified(&parse_bytes)),
-            )
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-            let owner = Box::pin(load_registration_ref_with_root(
-                storage,
-                root,
-                root_value,
-                unverified_attempt.owner_registration(),
-            ))
-            .await
-            .map_err(RegistrationLoadError::Object)?
-            .value;
-            let attempt = Box::pin(load_commit_device_join_attempt(
-                storage,
-                root,
-                outcome.attempt(),
-                &owner,
-                accepted_predecessor,
-            ))
-            .await?;
-            if !Box::pin(predecessor_contains_join_attempt(
-                storage,
-                root,
-                root_value,
-                activating_order,
-                outcome.attempt(),
-            ))
-            .await?
-                || attempt.expected_registration != *registration
+            let verified = verified_join_outcomes.get(outcome).ok_or_else(|| {
+                RegistrationLoadError::Invalid(
+                    "registration activation has no verified join outcome".to_string(),
+                )
+            })?;
+            let attempt = &verified.attempt;
+            let owner = &verified.owner;
+            if attempt.expected_registration != *registration
                 || attempt.registration_slot != *activated.registration.object.slot()
                 || !predecessor.verifies_owner_at_ancestor(
                     &attempt.membership,
@@ -2320,10 +2503,7 @@ async fn registration_activation(
                     "activated registration differs from its exact join attempt".to_string(),
                 ));
             }
-            let outcome_value = load_device_join_outcome_ref(storage, root, outcome, &owner)
-                .await
-                .map_err(RegistrationLoadError::Object)?
-                .value;
+            let outcome_value = &verified.outcome;
             if outcome_value.owner_registration != attempt.owner_registration
                 || outcome_value.owner_grant != attempt.owner_grant
             {
@@ -2344,7 +2524,7 @@ async fn registration_activation(
             readiness
                 .verify(
                     outcome.attempt(),
-                    &attempt,
+                    attempt,
                     registration,
                     &readiness.initial_ack,
                     &initial_ack,
@@ -2675,185 +2855,177 @@ pub async fn pull_store_commits_with_coordination(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn pull_store_commits_with_identity(
-    db: &Database,
-    tables: &[SyncedTable],
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn CoordinationStorage>,
+pub fn pull_store_commits_with_identity<'a>(
+    db: &'a Database,
+    tables: &'a [SyncedTable],
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
     store_root_hash: ObjectHash,
-    store_dir: &StoreDir,
-    membership: Option<&MembershipChain>,
-    identity: Option<&crate::keys::UserKeypair>,
-) -> Result<StorePullResult, StorePullError> {
-    let root = db
-        .local_store_root_ref()
-        .await
-        .map_err(|error| StorePullError::Database(format!("load exact Store root: {error}")))?
-        .ok_or_else(|| {
-            StorePullError::Database("Store root exact reference is absent".to_string())
-        })?;
-    if root.store_root_hash != store_root_hash {
-        return Err(StorePullError::Database(
-            "requested Store root differs from the durable exact root reference".to_string(),
-        ));
-    }
-    let verified_root = load_store_protocol_root(storage, &root).await?.value;
-    if db.write_policy() == crate::WritePolicy::Serial {
-        let serial_pull: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-            Box::pin(pull_serial_store_commits(
-                db,
-                tables,
-                storage,
-                serial_coordination.ok_or_else(|| {
-                    StorePullError::Serial("coordination capability is absent".to_string())
-                })?,
-                &root,
-                verified_root,
-                store_dir,
-                identity,
+    store_dir: &'a StoreDir,
+    membership: Option<&'a MembershipChain>,
+    identity: Option<&'a crate::keys::UserKeypair>,
+) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
+    Box::pin(async move {
+        let root = db
+            .local_store_root_ref()
+            .await
+            .map_err(|error| StorePullError::Database(format!("load exact Store root: {error}")))?
+            .ok_or_else(|| {
+                StorePullError::Database("Store root exact reference is absent".to_string())
+            })?;
+        if root.store_root_hash != store_root_hash {
+            return Err(StorePullError::Database(
+                "requested Store root differs from the durable exact root reference".to_string(),
             ));
-        return serial_pull.await;
-    }
-    if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
-        return Err(StorePullError::Database(
-            "durable write policy differs from the signed Store root".to_string(),
-        ));
-    }
-    resume_merge_retraction_cleanups(db, storage, &root).await?;
-
-    let local_frontier = db.materialized_frontier().await.map_err(|error| {
-        StorePullError::Database(format!("load discovery device-state frontier: {error}"))
-    })?;
-    let local_frontier = local_frontier
-        .into_values()
-        .map(|reference| match reference.coord {
-            StoreCommitCoord::MergeConcurrent { stream_id, .. } => Ok((stream_id, reference)),
-            StoreCommitCoord::Serial { .. } => Err(StorePullError::Database(
-                "Merge discovery frontier contains a Serial commit".to_string(),
-            )),
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (_, discovery_device_state) = db
-        .store_device_state_for_history_cut(&StoreHistoryCut::MergeConcurrent(local_frontier))
-        .await?;
-
-    let mut active = load_active_merge_registrations(db, storage, &root)
-        .await
-        .map_err(|error| {
-            StorePullError::Database(format!("load active Merge registrations: {error}"))
-        })?;
-    if let Some(membership) = membership {
-        for recovered in
-            discover_merge_owner_recoveries(storage, &root, &verified_root, membership).await?
-        {
-            if active
-                .iter()
-                .all(|(reference, _)| reference != &recovered.0)
-            {
-                active.push(recovered);
-            }
         }
-    }
-    let mut candidates = BTreeMap::new();
-    let mut visible_heads = Vec::new();
-    let mut held = Vec::new();
-    for (registration_ref, registration) in active {
-        let inactive_cut = match discovery_device_state
-            .devices
-            .get(&registration_ref.device_id)
-        {
-            Some(record) if record.registration != registration_ref => {
-                return Err(StorePullError::Database(format!(
-                    "discovery device state names another registration for {}",
-                    registration_ref.device_id
-                )));
-            }
-            Some(record) => match &record.status {
-                StoreDeviceStatus::Active => None,
-                StoreDeviceStatus::Inactive { accepted_cut, .. } => Some(accepted_cut),
-            },
-            None => None,
-        };
-        let discovered = discover_merge_stream(
-            storage,
-            &root,
-            &registration_ref,
-            &registration,
-            inactive_cut,
-        )
-        .await
-        .map_err(|error| {
-            StorePullError::Database(format!(
-                "discover Merge stream for {}: {error}",
-                registration.device_id
-            ))
-        })?;
-        if let Some(head) = discovered.latest_head {
-            visible_heads.push(VerifiedStoreDeviceHead {
-                head,
-                author: registration.clone(),
-            });
-        }
-        if let Some(block) = discovered.block {
-            held.push(block.into_position());
-        }
-        for (activation_head_ref, activation_head, commit_ref, commit) in discovered.commits {
-            if commit_ref.coord.sequence() != commit.seq() {
-                held.push(held_commit(
-                    &commit_ref,
-                    HeldStorePositionReason::InvalidObject(
-                        "exact commit coordinate differs from signed sequence".to_string(),
-                    ),
+        let verified_root = load_store_protocol_root(storage, &root).await?.value;
+        if db.write_policy() == crate::WritePolicy::Serial {
+            let serial_pull: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+                Box::pin(pull_serial_store_commits(
+                    db,
+                    tables,
+                    storage,
+                    serial_coordination.ok_or_else(|| {
+                        StorePullError::Serial("coordination capability is absent".to_string())
+                    })?,
+                    &root,
+                    verified_root,
+                    store_dir,
+                    identity,
                 ));
-                continue;
-            }
-            let stream_id = commit_stream_id(&commit_ref.coord);
-            if let Some(materialized) = db
-                .exact_materialized_ref(&stream_id, commit_ref.coord.sequence())
-                .await?
+            return serial_pull.await;
+        }
+        if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
+            return Err(StorePullError::Database(
+                "durable write policy differs from the signed Store root".to_string(),
+            ));
+        }
+        resume_merge_retraction_cleanups(db, storage, &root).await?;
+
+        let local_frontier = db.materialized_frontier().await.map_err(|error| {
+            StorePullError::Database(format!("load discovery device-state frontier: {error}"))
+        })?;
+        let local_frontier = local_frontier
+            .into_values()
+            .map(|reference| match reference.coord {
+                StoreCommitCoord::MergeConcurrent { stream_id, .. } => Ok((stream_id, reference)),
+                StoreCommitCoord::Serial { .. } => Err(StorePullError::Database(
+                    "Merge discovery frontier contains a Serial commit".to_string(),
+                )),
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let (_, discovery_device_state) = db
+            .store_device_state_for_history_cut(&StoreHistoryCut::MergeConcurrent(local_frontier))
+            .await?;
+
+        let mut active = load_active_merge_registrations(db, storage, &root)
+            .await
+            .map_err(|error| {
+                StorePullError::Database(format!("load active Merge registrations: {error}"))
+            })?;
+        if let Some(membership) = membership {
+            for recovered in
+                discover_merge_owner_recoveries(storage, &root, &verified_root, membership).await?
             {
-                if materialized == commit_ref {
+                if active
+                    .iter()
+                    .all(|(reference, _)| reference != &recovered.0)
+                {
+                    active.push(recovered);
+                }
+            }
+        }
+        let mut candidates = BTreeMap::new();
+        let mut visible_heads = Vec::new();
+        let mut held = Vec::new();
+        for (registration_ref, registration) in active {
+            let inactive_cut = match discovery_device_state
+                .devices
+                .get(&registration_ref.device_id)
+            {
+                Some(record) if record.registration != registration_ref => {
+                    return Err(StorePullError::Database(format!(
+                        "discovery device state names another registration for {}",
+                        registration_ref.device_id
+                    )));
+                }
+                Some(record) => match &record.status {
+                    StoreDeviceStatus::Active => None,
+                    StoreDeviceStatus::Inactive { accepted_cut, .. } => Some(accepted_cut),
+                },
+                None => None,
+            };
+            let discovered = discover_merge_stream(
+                storage,
+                &root,
+                &registration_ref,
+                &registration,
+                inactive_cut,
+            )
+            .await
+            .map_err(|error| {
+                StorePullError::Database(format!(
+                    "discover Merge stream for {}: {error}",
+                    registration.device_id
+                ))
+            })?;
+            if let Some(head) = discovered.latest_head {
+                visible_heads.push(VerifiedStoreDeviceHead {
+                    head,
+                    author: registration.clone(),
+                });
+            }
+            if let Some(block) = discovered.block {
+                held.push(block.into_position());
+            }
+            for (activation_head_ref, activation_head, commit_ref, commit) in discovered.commits {
+                if commit_ref.coord.sequence() != commit.seq() {
+                    held.push(held_commit(
+                        &commit_ref,
+                        HeldStorePositionReason::InvalidObject(
+                            "exact commit coordinate differs from signed sequence".to_string(),
+                        ),
+                    ));
                     continue;
                 }
-                held.push(held_commit(
-                    &commit_ref,
-                    HeldStorePositionReason::HashMismatch {
-                        referenced_device_id: stream_id,
-                        referenced_commit: commit_ref.clone(),
-                        materialized_hash: materialized.commit_hash,
-                    },
-                ));
-                continue;
-            }
-            if commit
-                .store_package()
-                .as_ref()
-                .is_some_and(|package| package.schema_version > db.schema_version())
-            {
-                let required = commit
-                    .store_package()
-                    .as_ref()
-                    .expect("checked Store package")
-                    .schema_version;
-                held.push(held_commit(
-                    &commit_ref,
-                    HeldStorePositionReason::NewerSchema {
-                        local: db.schema_version(),
-                        required,
-                    },
-                ));
-                continue;
-            }
-            let predecessor_membership = if commit.operations().is_none()
-                && commit.reclaim_authorization().is_none()
-                && commit.reclaim_receipt().is_none()
-            {
-                None
-            } else {
-                match load_merge_predecessor_membership(storage, &root, &commit.membership_state)
-                    .await
+                let stream_id = commit_stream_id(&commit_ref.coord);
+                if let Some(materialized) = db
+                    .exact_materialized_ref(&stream_id, commit_ref.coord.sequence())
+                    .await?
                 {
-                    Ok(membership) => Some(membership),
+                    if materialized == commit_ref {
+                        continue;
+                    }
+                    held.push(held_commit(
+                        &commit_ref,
+                        HeldStorePositionReason::HashMismatch {
+                            referenced_device_id: stream_id,
+                            referenced_commit: commit_ref.clone(),
+                            materialized_hash: materialized.commit_hash,
+                        },
+                    ));
+                    continue;
+                }
+                if let Some(package) = commit.store_package() {
+                    if package.schema_version > db.schema_version() {
+                        held.push(held_commit(
+                            &commit_ref,
+                            HeldStorePositionReason::NewerSchema {
+                                local: db.schema_version(),
+                                required: package.schema_version,
+                            },
+                        ));
+                        continue;
+                    }
+                }
+                let predecessor_membership = match load_merge_predecessor_membership(
+                    storage,
+                    &root,
+                    &commit.membership_state,
+                )
+                .await
+                {
+                    Ok(membership) => membership,
                     Err(RegistrationLoadError::Object(error)) => {
                         held.push(held_commit(&commit_ref, held_object_error(error)));
                         continue;
@@ -2865,227 +3037,300 @@ pub async fn pull_store_commits_with_identity(
                         ));
                         continue;
                     }
-                }
-            };
-            let predecessor_authority = predecessor_membership
-                .as_ref()
-                .map(RegistrationPredecessorAuthority::MergeConcurrent);
-            let registrations = match load_commit_registrations(
-                storage,
-                &root,
-                &commit,
-                &registration,
-                predecessor_authority.as_ref(),
-                None,
-            )
-            .await
-            {
-                Ok(registrations) => registrations,
-                Err(RegistrationLoadError::Object(error)) => {
-                    held.push(held_commit(&commit_ref, held_object_error(error)));
-                    continue;
-                }
-                Err(RegistrationLoadError::Invalid(error)) => {
+                };
+                let predecessor_authority =
+                    RegistrationPredecessorAuthority::MergeConcurrent(&predecessor_membership);
+                let requires_accepted_predecessor = commit
+                    .device_join_attempt_decisions()
+                    .iter()
+                    .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)))
+                    || !commit.device_join_outcomes().is_empty()
+                    || !commit.device_join_cleanup_receipts().is_empty()
+                    || commit.device_registrations().iter().any(|activation| {
+                        matches!(
+                            activation.authority,
+                            StoreDeviceRegistrationActivationRef::Join { .. }
+                        )
+                    });
+                let verified_accepted_predecessor = if requires_accepted_predecessor {
+                    let predecessor_cut = commit
+                        .order
+                        .predecessor_cut()
+                        .map_err(|error| StorePullError::Database(error.to_string()))?;
+                    Some(
+                        Box::pin(verify_store_history_state(
+                            storage,
+                            None,
+                            &root,
+                            &predecessor_cut,
+                            &commit.membership_state,
+                        ))
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let accepted_predecessor = verified_accepted_predecessor
+                    .as_ref()
+                    .map(|_| VerifiedAcceptedPredecessor::Exact);
+                let registrations = match Box::pin(load_commit_registrations(
+                    storage,
+                    &root,
+                    &commit,
+                    &registration,
+                    Some(&predecessor_authority),
+                    accepted_predecessor.as_ref(),
+                ))
+                .await
+                {
+                    Ok(registrations) => registrations,
+                    Err(RegistrationLoadError::Object(error)) => {
+                        held.push(held_commit(&commit_ref, held_object_error(error)));
+                        continue;
+                    }
+                    Err(RegistrationLoadError::Invalid(error)) => {
+                        held.push(held_commit(
+                            &commit_ref,
+                            HeldStorePositionReason::InvalidObject(error),
+                        ));
+                        continue;
+                    }
+                };
+                if !membership_authorizes(Some(&predecessor_membership), &commit, &registration) {
                     held.push(held_commit(
                         &commit_ref,
-                        HeldStorePositionReason::InvalidObject(error),
+                        HeldStorePositionReason::Unauthorized,
                     ));
                     continue;
                 }
-            };
-            if !membership_authorizes(predecessor_membership.as_ref(), &commit, &registration) {
-                held.push(held_commit(
-                    &commit_ref,
-                    HeldStorePositionReason::Unauthorized,
-                ));
+                let package = match load_store_package(storage, &commit_ref, &commit).await {
+                    Ok(package) => package.map(|package| package.value),
+                    Err(error) => {
+                        held.push(held_package(&commit_ref, &commit, held_object_error(error)));
+                        continue;
+                    }
+                };
+                let key = (
+                    commit_stream_id(&commit_ref.coord),
+                    commit_ref.coord.sequence(),
+                );
+                let device_operations = if commit.device_exclusion_proposals().is_empty()
+                    && commit.device_exclusion_outcomes().is_empty()
+                {
+                    CandidateDeviceOperations::Verified(
+                        VerifiedStoreDeviceOperations::without_exclusions(&commit)
+                            .map_err(|error| StorePullError::Database(error.to_string()))?,
+                    )
+                } else {
+                    CandidateDeviceOperations::MergePending {
+                        predecessor_membership: predecessor_membership.clone(),
+                    }
+                };
+                candidates.insert(
+                    key,
+                    MergeCandidate {
+                        activation_head,
+                        activation_head_object: activation_head_ref.object,
+                        candidate: Candidate {
+                            commit_ref,
+                            commit,
+                            author: registration.clone(),
+                            package,
+                            registrations,
+                            device_operations,
+                        },
+                        predecessor_membership,
+                    },
+                );
+            }
+        }
+
+        let retained = Box::pin(db.retained_merge_replay_inputs()).await?;
+        let mut loaded_predecessor_memberships = BTreeMap::new();
+        for materialization in retained {
+            if materialization.commit().membership_authority.is_none() {
                 continue;
             }
-            let package = match load_store_package(storage, &commit_ref, &commit).await {
-                Ok(package) => package.map(|package| package.value),
-                Err(error) => {
-                    held.push(held_package(&commit_ref, &commit, held_object_error(error)));
-                    continue;
-                }
-            };
-            let key = (
-                commit_stream_id(&commit_ref.coord),
-                commit_ref.coord.sequence(),
-            );
-            let device_operations = if commit.device_exclusion_proposals().is_empty()
-                && commit.device_exclusion_outcomes().is_empty()
-            {
-                CandidateDeviceOperations::Verified(
-                    VerifiedStoreDeviceOperations::without_exclusions(&commit)
-                        .map_err(|error| StorePullError::Database(error.to_string()))?,
-                )
-            } else {
-                CandidateDeviceOperations::MergePending {
-                    predecessor_membership: predecessor_membership.clone().ok_or_else(|| {
-                        StorePullError::Database(
-                            "device exclusion commit has no predecessor membership authority"
-                                .to_string(),
-                        )
-                    })?,
-                }
-            };
-            candidates.insert(
-                key,
-                MergeCandidate {
-                    activation_head,
-                    activation_head_object: activation_head_ref.object,
-                    candidate: Candidate {
-                        commit_ref,
-                        commit,
-                        author: registration.clone(),
-                        package,
-                        registrations,
-                        device_operations,
-                    },
-                },
-            );
-        }
-    }
-
-    let schema: Arc<TableSchema> = {
-        let tables = tables.to_vec();
-        let gates = db.gates();
-        Arc::new(
-            db.call(move |conn| {
-                TableSchema::for_apply(conn, &tables, &gates, crate::WritePolicy::MergeConcurrent)
-            })
-            .await
-            .map_err(|error| {
-                StorePullError::Database(format!("load synced table schema: {error}"))
-            })?,
-        )
-    };
-    let coverage = db.snapshot_coverage_frontier().await.map_err(|error| {
-        StorePullError::Database(format!("load snapshot coverage frontier: {error}"))
-    })?;
-    let mut frontier = db.materialized_frontier().await.map_err(|error| {
-        StorePullError::Database(format!("load materialized frontier: {error}"))
-    })?;
-    let mut applied_devices = BTreeSet::new();
-    let mut row_changes = Vec::new();
-    let mut changesets_applied = 0_u64;
-    let mut asset_downloads_failed = false;
-    let mut blocked = BTreeMap::new();
-
-    loop {
-        let mut progressed = false;
-        let keys = candidates.keys().cloned().collect::<Vec<_>>();
-        for key in keys {
-            let candidate = candidates
-                .get(&key)
-                .expect("candidate key came from the same map");
-            let exclusion_freezes = db.store_device_exclusion_freezes().await?;
-            let current_frontier =
-                CommitFrontier::from_refs(crate::WritePolicy::MergeConcurrent, frontier.clone())
-                    .map_err(|error| StorePullError::Database(error.to_string()))?;
-            let CommitFrontier::MergeConcurrent(current_frontier) = current_frontier else {
-                return Err(StorePullError::Database(
-                    "Merge pull produced a Serial materialized frontier".to_string(),
-                ));
-            };
-            let (_, current_device_state) = db
-                .store_device_state_for_history_cut(&StoreHistoryCut::MergeConcurrent(
-                    current_frontier,
-                ))
-                .await?;
-            match readiness(
-                db,
+            let membership = Box::pin(load_merge_predecessor_membership(
                 storage,
                 &root,
-                &coverage,
-                &frontier,
-                &current_device_state,
-                &exclusion_freezes,
-                &candidate.candidate.commit_ref,
-                &candidate.candidate.commit,
-            )
+                &materialization.commit().membership_state,
+            ))
             .await
-            .map_err(|error| {
-                StorePullError::Database(format!(
-                    "evaluate Store commit readiness for {}/{}: {error}",
-                    key.0, key.1
-                ))
-            })? {
-                Readiness::AlreadyMaterialized => {
-                    candidates.remove(&key);
-                    blocked.remove(&key);
-                    progressed = true;
-                }
-                Readiness::Held(held_position) => {
-                    blocked.insert(key, held_position);
-                }
-                Readiness::Ready => {
-                    let candidate = candidates
-                        .remove(&key)
-                        .expect("ready candidate remains present");
-                    match Box::pin(apply_candidate(
-                        db,
-                        storage,
-                        &root,
-                        store_dir,
-                        schema.clone(),
-                        &candidate,
-                        identity,
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+            loaded_predecessor_memberships.insert(materialization.commit_ref().clone(), membership);
+        }
+        for candidate in candidates.values() {
+            loaded_predecessor_memberships.insert(
+                candidate.candidate.commit_ref.clone(),
+                candidate.predecessor_membership.clone(),
+            );
+        }
+        let loaded_predecessor_memberships = LoadedMergePredecessorMemberships {
+            by_commit: loaded_predecessor_memberships,
+        };
+
+        let schema: Arc<TableSchema> = {
+            let tables = tables.to_vec();
+            let gates = db.gates();
+            Arc::new(
+                db.call(move |conn| {
+                    TableSchema::for_apply(
+                        conn,
+                        &tables,
+                        &gates,
+                        crate::WritePolicy::MergeConcurrent,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    StorePullError::Database(format!("load synced table schema: {error}"))
+                })?,
+            )
+        };
+        let coverage = db.snapshot_coverage_frontier().await.map_err(|error| {
+            StorePullError::Database(format!("load snapshot coverage frontier: {error}"))
+        })?;
+        let mut frontier = db.materialized_frontier().await.map_err(|error| {
+            StorePullError::Database(format!("load materialized frontier: {error}"))
+        })?;
+        let mut applied_devices = BTreeSet::new();
+        let mut row_changes = Vec::new();
+        let mut changesets_applied = 0_u64;
+        let mut asset_downloads_failed = false;
+        let mut blocked = BTreeMap::new();
+
+        loop {
+            let mut progressed = false;
+            let keys = candidates.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                let candidate = candidates.get(&key).ok_or_else(|| {
+                    StorePullError::Database(
+                        "Merge candidate disappeared while evaluating readiness".to_string(),
+                    )
+                })?;
+                let exclusion_freezes = db.store_device_exclusion_freezes().await?;
+                let current_frontier = CommitFrontier::from_refs(
+                    crate::WritePolicy::MergeConcurrent,
+                    frontier.clone(),
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                let CommitFrontier::MergeConcurrent(current_frontier) = current_frontier else {
+                    return Err(StorePullError::Database(
+                        "Merge pull produced a Serial materialized frontier".to_string(),
+                    ));
+                };
+                let (_, current_device_state) = db
+                    .store_device_state_for_history_cut(&StoreHistoryCut::MergeConcurrent(
+                        current_frontier,
                     ))
-                    .await?
-                    {
-                        ApplyOutcome::Applied(changes) => {
-                            let stream_id = commit_stream_id(&candidate.candidate.commit_ref.coord);
-                            frontier
-                                .insert(stream_id.clone(), candidate.candidate.commit_ref.clone());
-                            applied_devices.insert(stream_id);
-                            row_changes.extend(changes);
-                            changesets_applied =
-                                changesets_applied.checked_add(1).ok_or_else(|| {
-                                    StorePullError::Database(
-                                        "Store apply count exceeded u64".to_string(),
-                                    )
-                                })?;
-                            blocked.remove(&key);
-                            progressed = true;
-                        }
-                        ApplyOutcome::Held(reason) => {
-                            if matches!(reason, HeldStorePositionReason::BlobDownloadFailed) {
-                                asset_downloads_failed = true;
+                    .await?;
+                match readiness(
+                    db,
+                    storage,
+                    &root,
+                    &coverage,
+                    &frontier,
+                    &current_device_state,
+                    &exclusion_freezes,
+                    &candidate.candidate.commit_ref,
+                    &candidate.candidate.commit,
+                )
+                .await
+                .map_err(|error| {
+                    StorePullError::Database(format!(
+                        "evaluate Store commit readiness for {}/{}: {error}",
+                        key.0, key.1
+                    ))
+                })? {
+                    Readiness::AlreadyMaterialized => {
+                        candidates.remove(&key);
+                        blocked.remove(&key);
+                        progressed = true;
+                    }
+                    Readiness::Held(held_position) => {
+                        blocked.insert(key, held_position);
+                    }
+                    Readiness::Ready => {
+                        let candidate = candidates.remove(&key).ok_or_else(|| {
+                            StorePullError::Database(
+                                "ready Merge candidate disappeared before apply".to_string(),
+                            )
+                        })?;
+                        match Box::pin(apply_candidate(
+                            db,
+                            storage,
+                            &root,
+                            store_dir,
+                            schema.clone(),
+                            &candidate,
+                            &loaded_predecessor_memberships,
+                            identity,
+                        ))
+                        .await?
+                        {
+                            ApplyOutcome::Applied(changes) => {
+                                let stream_id =
+                                    commit_stream_id(&candidate.candidate.commit_ref.coord);
+                                frontier.insert(
+                                    stream_id.clone(),
+                                    candidate.candidate.commit_ref.clone(),
+                                );
+                                applied_devices.insert(stream_id);
+                                row_changes.extend(changes);
+                                changesets_applied =
+                                    changesets_applied.checked_add(1).ok_or_else(|| {
+                                        StorePullError::Database(
+                                            "Store apply count exceeded u64".to_string(),
+                                        )
+                                    })?;
+                                blocked.remove(&key);
+                                progressed = true;
                             }
-                            let held_position =
-                                held_commit(&candidate.candidate.commit_ref, reason);
-                            candidates.insert(key.clone(), candidate);
-                            blocked.insert(key, held_position);
+                            ApplyOutcome::Held(reason) => {
+                                if matches!(reason, HeldStorePositionReason::BlobDownloadFailed) {
+                                    asset_downloads_failed = true;
+                                }
+                                let held_position =
+                                    held_commit(&candidate.candidate.commit_ref, reason);
+                                candidates.insert(key.clone(), candidate);
+                                blocked.insert(key, held_position);
+                            }
                         }
                     }
                 }
             }
+            if !progressed {
+                break;
+            }
         }
-        if !progressed {
-            break;
-        }
-    }
 
-    held.extend(blocked.into_values());
-    held.sort_by(|left, right| {
-        (left.coordinate.device_id(), left.coordinate.seq())
-            .cmp(&(right.coordinate.device_id(), right.coordinate.seq()))
-    });
-    let local_blob_cleanup_pending =
-        local_cleanup::drain(db, store_dir).await.map_err(|error| {
-            StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
-        })?;
+        held.extend(blocked.into_values());
+        held.sort_by(|left, right| {
+            (left.coordinate.device_id(), left.coordinate.seq())
+                .cmp(&(right.coordinate.device_id(), right.coordinate.seq()))
+        });
+        let local_blob_cleanup_pending =
+            local_cleanup::drain(db, store_dir).await.map_err(|error| {
+                StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
+            })?;
+        let devices_pulled = u64::try_from(applied_devices.len())
+            .map_err(|_| StorePullError::Database("pulled device count exceeds u64".to_string()))?;
 
-    Ok(StorePullResult {
-        changesets_applied,
-        devices_pulled: u64::try_from(applied_devices.len()).expect("device count fits in u64"),
-        held_positions: held,
-        visible_heads,
-        serial_head: None,
-        row_changes,
-        asset_downloads_failed,
-        local_blob_cleanup_pending,
-        frontier,
+        Ok(StorePullResult {
+            changesets_applied,
+            devices_pulled,
+            held_positions: held,
+            visible_heads,
+            serial_head: None,
+            row_changes,
+            asset_downloads_failed,
+            local_blob_cleanup_pending,
+            frontier,
+        })
     })
 }
 
@@ -3529,6 +3774,7 @@ fn verify_provider_access_evidence<'a>(
     access: &'a super::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &'a super::provider::ProviderAdminGrantRecord,
     administrator: &'a StoreDeviceRegistration,
+    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
 ) -> StorePullFuture<'a, StoreBatchCommit> {
     Box::pin(verify_provider_access_evidence_impl(
         storage,
@@ -3537,6 +3783,7 @@ fn verify_provider_access_evidence<'a>(
         access,
         provider_admin,
         administrator,
+        accepted_predecessor,
     ))
 }
 
@@ -3547,6 +3794,7 @@ async fn verify_provider_access_evidence_impl(
     access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<StoreBatchCommit, StorePullError> {
     let grant = super::store_objects::load_provider_access_grant_ref_with_root(
         storage,
@@ -3561,6 +3809,65 @@ async fn verify_provider_access_evidence_impl(
             "device provider approval embeds a different access grant than its exact reference"
                 .to_string(),
         ));
+    }
+    if let Some(verified) = accepted_predecessor
+        .map(|predecessor| predecessor.serial_history_commit(&access.activation))
+        .transpose()?
+        .flatten()
+    {
+        let activation = &verified.commit;
+        if activation.provider_access_grants() != std::slice::from_ref(&access.grant_ref)
+            || activation.author_registration != access.grant.administrator
+            || verified.author != *administrator
+        {
+            return Err(StorePullError::Database(
+                "device provider approval activation is not the administrator's exact sole access grant"
+                    .to_string(),
+            ));
+        }
+        let provider_admin_state = &verified.authorization_before.provider_admin;
+        if !provider_admin_state.authorizes(
+            &access.grant.administrator_grant,
+            &activation.author_registration,
+        ) || provider_admin_state
+            .records()
+            .get(&access.grant.administrator_grant)
+            != Some(provider_admin)
+        {
+            return Err(StorePullError::Database(
+                "device provider approval activation lacks exact predecessor provider-administrator authority"
+                    .to_string(),
+            ));
+        }
+        return Ok(activation.clone());
+    }
+    if let Some(verified) = accepted_predecessor
+        .map(|predecessor| predecessor.merge_history_commit(&access.activation))
+        .transpose()?
+        .flatten()
+    {
+        let activation = &verified.commit;
+        if activation.provider_access_grants() != std::slice::from_ref(&access.grant_ref)
+            || activation.author_registration != access.grant.administrator
+        {
+            return Err(StorePullError::Database(
+                "device provider approval activation is not the administrator's exact sole access grant"
+                    .to_string(),
+            ));
+        }
+        let authority =
+            RegistrationPredecessorAuthority::MergeConcurrent(&verified.predecessor_membership);
+        if !authority.verifies_provider_administrator(
+            &access.grant.administrator_grant,
+            &activation.author_registration,
+            provider_admin,
+        ) {
+            return Err(StorePullError::Database(
+                "device provider approval activation lacks exact predecessor provider-administrator authority"
+                    .to_string(),
+            ));
+        }
+        return Ok(activation.clone());
     }
     let (activation, author) =
         load_commit_with_author_at_root(storage, root, verified_root, &access.activation).await?;
@@ -3607,6 +3914,7 @@ fn load_verified_device_join_attempt_evidence_ref<'a>(
     root: &'a StoreRootRef,
     reference: &'a super::store_commit::DeviceJoinAttemptRef,
     owner: &'a StoreDeviceRegistration,
+    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
 ) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
         let attempt =
@@ -3634,6 +3942,7 @@ fn load_verified_device_join_attempt_evidence_ref<'a>(
             &attempt.value.provider_approval.access_grant,
             &offer.provider_admin,
             &administrator,
+            accepted_predecessor,
         )
         .await?;
         if !history_cut_covers(
@@ -3661,16 +3970,17 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
 ) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
         let attempt =
-            load_verified_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
+            load_verified_device_join_attempt_evidence_ref(storage, root, reference, owner, None)
+                .await?;
         match &attempt.value.bootstrap_cut {
             StoreHistoryCut::MergeConcurrent(_) => {
-                verify_store_history_state(
+                Box::pin(verify_store_history_state(
                     storage,
                     None,
                     root,
                     &attempt.value.bootstrap_cut,
                     &attempt.value.membership,
-                )
+                ))
                 .await?;
             }
             StoreHistoryCut::Serial(cut_position) => {
@@ -3711,6 +4021,7 @@ pub(crate) async fn verify_accepted_provider_access_activation(
         access,
         provider_admin,
         administrator,
+        None,
     )
     .await?;
     let accepted = match root_value.value.descriptor.write_policy {
@@ -3925,30 +4236,41 @@ async fn load_commit_with_author_at_root_impl(
         .read_protocol_object(&context, &reference.object, &semantic_prefix)
         .await
         .map_err(StoreObjectError::Storage)?;
+    #[derive(serde::Deserialize)]
+    struct StoreCommitAuthorProjection {
+        author_registration: StoreDeviceRegistrationRef,
+    }
+
     let parse_bytes = bytes.clone();
-    let unverified = run_blocking_object_verification(
+    let author_reference = run_blocking_object_verification(
         &semantic_prefix,
         &reference.object,
         Box::new(move || {
-            serde_json::from_slice::<StoreBatchCommit>(&parse_bytes)
+            serde_json::from_slice::<StoreCommitAuthorProjection>(&parse_bytes)
+                .map(|projection| projection.author_registration)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
         }),
     )
     .await?;
-    let author =
-        load_registration_ref_with_root(storage, root, root_value, &unverified.author_registration)
-            .await?
-            .value;
+    let author = load_registration_ref_with_root(storage, root, root_value, &author_reference)
+        .await?
+        .value;
     let expected_reference = reference.clone();
     let expected_author = author.clone();
     let store_root_hash = root.store_root_hash;
+    let verify_bytes = bytes;
     let commit = run_blocking_object_verification(
         &semantic_prefix,
         &reference.object,
         Box::new(move || {
-            unverified.verify_at(store_root_hash, &expected_reference.coord, &expected_author)?;
-            expected_reference.verify_commit(&unverified)?;
-            Ok(unverified)
+            let commit = StoreBatchCommit::parse_at(
+                &verify_bytes,
+                store_root_hash,
+                &expected_reference.coord,
+                &expected_author,
+            )?;
+            expected_reference.verify_commit(&commit)?;
+            Ok(commit)
         }),
     )
     .await?;
@@ -3967,6 +4289,7 @@ pub(crate) enum DeviceJoinBootstrapActivation {
     MergeConcurrent {
         head: StoreDeviceHead,
         object: ExactObjectRef,
+        history_summary: RetainedVerifiedMergeHistorySummary,
     },
     Serial,
 }
@@ -4317,9 +4640,60 @@ struct VerifiedMergeHistoryCommit {
         super::store_commit::StoreAck,
     )>,
     membership_control: Option<VerifiedMergeMembershipControl>,
+    history: OpenedRetainedMergeHistorySummary,
 }
 
-#[derive(Clone)]
+impl VerifiedAcceptedPredecessor<'_> {
+    fn serial_history_commit(
+        &self,
+        target: &StoreBatchCommitRef,
+    ) -> Result<Option<&AuthorizedSerialCommit>, StorePullError> {
+        let Self::SerialHistory { commits } = self else {
+            return Ok(None);
+        };
+        commits
+            .iter()
+            .find(|accepted| &accepted.commit_ref == target)
+            .map(Some)
+            .ok_or_else(|| {
+                StorePullError::Serial(
+                    "provider-access activation is outside the accepted Serial predecessor history"
+                        .to_string(),
+                )
+            })
+    }
+
+    fn merge_history_commit(
+        &self,
+        target: &StoreBatchCommitRef,
+    ) -> Result<Option<&VerifiedMergeHistoryCommit>, StorePullError> {
+        let Self::MergeHistory { commits, frontier } = self else {
+            return Ok(None);
+        };
+        let mut pending = frontier.clone();
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            let commit = commits.get(&reference).ok_or_else(|| {
+                StorePullError::Database(
+                    "accepted Merge predecessor graph is missing an exact commit".to_string(),
+                )
+            })?;
+            if &reference == target {
+                return Ok(Some(commit));
+            }
+            pending.extend(commit_predecessor_references(&commit.commit));
+        }
+        Err(StorePullError::Database(
+            "provider-access activation is outside the accepted Merge predecessor graph"
+                .to_string(),
+        ))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMergeMembershipHeadActivation {
     commit: StoreBatchCommitRef,
     transition: super::membership::MergeMembershipHeadTransition,
@@ -4342,7 +4716,7 @@ struct VerifiedMergeMembershipControl {
     conflict_resolution: Option<VerifiedMergeConflictResolutionActivation>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMergeConflictResolutionActivation {
     reference: super::membership::StoreMembershipConflictResolutionRef,
 }
@@ -4674,26 +5048,868 @@ pub(crate) struct MergeOutboundAuthorization {
     pub(crate) membership: MembershipChain,
     pub(crate) membership_state: StoreMembershipStateRef,
     pub(crate) device_state_ref: StoreDeviceStateRef,
+    pub(crate) device_state: ResolvedStoreDeviceState,
 }
 
-struct MergeOutboundPredecessor {
-    membership: MembershipChain,
-    device_state: ResolvedStoreDeviceState,
-    frontier: BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
+pub(crate) struct PreparedMergeHistorySuccessor {
+    pub(crate) summary: RetainedVerifiedMergeHistorySummary,
+    pub(crate) head_slot: crate::storage::cloud::ObjectSlot,
+    pub(crate) predecessor_head: Option<super::store_commit::StoreDeviceHeadRef>,
+}
+
+pub(crate) struct MergeHistorySuccessorEvidence {
+    pub(crate) registrations: Vec<RetainedVerifiedRegistration>,
+    pub(crate) acknowledgement: Option<super::store_commit::RetainedVerifiedActivatedAck>,
+    pub(crate) membership_proof: Option<super::store_commit::RetainedMergeMembershipProof>,
+}
+
+impl MergeHistorySuccessorEvidence {
+    pub(crate) fn none() -> Self {
+        Self {
+            registrations: Vec::new(),
+            acknowledgement: None,
+            membership_proof: None,
+        }
+    }
+}
+
+fn insert_exact<K, V>(
+    target: &mut BTreeMap<K, V>,
+    key: K,
+    value: V,
+    conflict: &str,
+) -> Result<(), StorePullError>
+where
+    K: Ord,
+    V: PartialEq,
+{
+    match target.entry(key) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => Ok(()),
+        std::collections::btree_map::Entry::Occupied(_) => {
+            Err(StorePullError::Database(conflict.to_string()))
+        }
+    }
+}
+
+fn insert_latest_acknowledgement(
+    target: &mut BTreeMap<
+        super::store_commit::StoreDeviceId,
+        super::store_commit::RetainedVerifiedActivatedAck,
+    >,
+    device_id: super::store_commit::StoreDeviceId,
+    value: super::store_commit::RetainedVerifiedActivatedAck,
+) -> Result<(), StorePullError> {
+    match target.entry(device_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => Ok(()),
+        std::collections::btree_map::Entry::Occupied(mut entry)
+            if value.exactly_extends(entry.get()) =>
+        {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(entry)
+            if entry.get().exactly_extends(&value) =>
+        {
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::Database(
+            "Merge predecessor checkpoints contain forked acknowledgement proof chains".to_string(),
+        )),
+    }
+}
+
+fn insert_latest_announcement(
+    target: &mut BTreeMap<
+        super::membership::AuthorStreamId,
+        super::store_commit::RetainedAcceptedStoreAnnouncement,
+    >,
+    stream_id: super::membership::AuthorStreamId,
+    value: super::store_commit::RetainedAcceptedStoreAnnouncement,
+) -> Result<(), StorePullError> {
+    match target.entry(stream_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => Ok(()),
+        std::collections::btree_map::Entry::Occupied(mut entry)
+            if entry.get().value.commit.coord.sequence() < value.value.commit.coord.sequence() =>
+        {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(entry)
+            if entry.get().value.commit.coord.sequence() > value.value.commit.coord.sequence() =>
+        {
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::Database(
+            "Merge predecessor checkpoints contain conflicting announcement heads at one sequence"
+                .to_string(),
+        )),
+    }
+}
+
+fn insert_membership_proof(
+    target: &mut BTreeMap<StoreBatchCommitRef, super::store_commit::RetainedMergeMembershipProof>,
+    reference: StoreBatchCommitRef,
+    value: super::store_commit::RetainedMergeMembershipProof,
+) -> Result<(), StorePullError> {
+    if target
+        .keys()
+        .any(|existing| existing.coord == reference.coord && existing != &reference)
+    {
+        return Err(StorePullError::Database(
+            "Merge predecessor checkpoints contain conflicting membership proofs at one Store coordinate"
+                .to_string(),
+        ));
+    }
+    insert_exact(
+        target,
+        reference,
+        value,
+        "Merge predecessor checkpoints disagree on a membership proof",
+    )
+}
+
+pub(crate) async fn prepare_merge_history_successor(
+    db: &Database,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    commit_ref: &StoreBatchCommitRef,
+    membership: &MembershipChain,
+    author: &StoreDeviceRegistration,
+    recovery_author: Option<&StoreDeviceRegistrationRef>,
+    state_after: ResolvedStoreDeviceState,
+    evidence: MergeHistorySuccessorEvidence,
+) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
+    commit_ref
+        .verify_commit(commit)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    state_after.validate_canonical().map_err(|error| {
+        StorePullError::Database(format!("validate Merge successor post-state: {error}"))
+    })?;
+    let predecessor_refs = commit_predecessor_references(commit);
+    let predecessors = db
+        .retained_merge_history_frontier(predecessor_refs.clone())
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if predecessors.len() != predecessor_refs.len() {
+        return Err(StorePullError::Database(
+            "Merge successor is missing a retained direct predecessor".to_string(),
+        ));
+    }
+    let (expected_predecessor_ref, predecessor_state) = db
+        .store_device_state_for_order(&commit.order)
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if commit.device_state != expected_predecessor_ref {
+        return Err(StorePullError::Database(
+            "Merge successor names another predecessor device state".to_string(),
+        ));
+    }
+    if let Some(recovery_author) = recovery_author {
+        let retained_recovery_registration = evidence.registrations.iter().any(|registration| {
+            registration.reference == *recovery_author
+                && matches!(
+                    &registration.value.origin,
+                    super::store_commit::StoreDeviceRegistrationOrigin::Recovery { .. }
+                )
+        });
+        let recovery_activation = commit.device_registrations().iter().any(|activation| {
+            activation.registration == *recovery_author
+                && matches!(
+                    &activation.authority,
+                    super::store_commit::StoreDeviceRegistrationActivationRef::Recovery { .. }
+                )
+        });
+        if recovery_author != &commit.author_registration
+            || !retained_recovery_registration
+            || !recovery_activation
+        {
+            return Err(StorePullError::Database(
+                "Merge successor recovery author lacks its exact retained activation".to_string(),
+            ));
+        }
+    }
+    if !device_state_has_active_registration(&predecessor_state, &commit.author_registration)
+        && recovery_author != Some(&commit.author_registration)
+    {
+        return Err(StorePullError::Database(
+            "Merge successor author is inactive at its exact predecessor cut".to_string(),
+        ));
+    }
+    verify_merge_membership_state_ref(&commit.membership_state, membership, &predecessor_state)?;
+
+    compose_merge_history_successor(
+        root,
+        commit,
+        commit_ref,
+        membership,
+        author,
+        state_after,
+        predecessors,
+        evidence,
+    )
+}
+
+struct MergedRetainedMergeHistory {
+    causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
+    registrations: BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
+    acknowledgements: BTreeMap<
+        super::store_commit::StoreDeviceId,
+        super::store_commit::RetainedVerifiedActivatedAck,
+    >,
+    membership_proofs:
+        BTreeMap<StoreBatchCommitRef, super::store_commit::RetainedMergeMembershipProof>,
+    announcement_frontier: BTreeMap<
+        super::membership::AuthorStreamId,
+        super::store_commit::RetainedAcceptedStoreAnnouncement,
+    >,
+}
+
+fn merge_retained_merge_history(
+    root: &StoreRootRef,
+    membership: &MembershipChain,
+    predecessors: Vec<OpenedRetainedMergeHistorySummary>,
+) -> Result<MergedRetainedMergeHistory, StorePullError> {
+    let mut causal_cut = BTreeMap::new();
+    let mut registrations = BTreeMap::new();
+    let mut acknowledgements = BTreeMap::new();
+    let mut membership_proofs = BTreeMap::new();
+    let mut announcement_frontier = BTreeMap::new();
+    for predecessor in predecessors {
+        let predecessor_cut = predecessor.summary.causal_cut.clone();
+        if predecessor.summary.store_root_hash != root.store_root_hash
+            || predecessor.summary.policy != crate::WritePolicy::MergeConcurrent
+        {
+            return Err(StorePullError::Database(
+                "Merge predecessor checkpoint belongs to another Store or policy".to_string(),
+            ));
+        }
+        if predecessor
+            .summary
+            .membership_floor
+            .effective_coordinates
+            .iter()
+            .any(|coordinate| !membership.effectively_contains_coord(coordinate))
+            || predecessor
+                .summary
+                .membership_floor
+                .resolutions
+                .iter()
+                .any(|reference| {
+                    membership
+                        .resolution_refs()
+                        .binary_search(reference)
+                        .is_err()
+                })
+        {
+            return Err(StorePullError::Database(
+                "Merge successor membership omits its retained causal floor".to_string(),
+            ));
+        }
+        for (key, value) in predecessor.summary.causal_cut {
+            insert_exact(
+                &mut causal_cut,
+                key,
+                value,
+                "Merge predecessor checkpoints disagree on a Store coordinate",
+            )?;
+        }
+        for (key, value) in predecessor.summary.registrations {
+            insert_exact(
+                &mut registrations,
+                key,
+                value,
+                "Merge predecessor checkpoints disagree on a device registration",
+            )?;
+        }
+        for (key, value) in predecessor.summary.acknowledgements {
+            insert_latest_acknowledgement(&mut acknowledgements, key, value)?;
+        }
+        for (key, mut value) in predecessor.summary.membership_proofs {
+            if predecessor_cut.get(&value.commit.coord) == Some(&value.commit)
+                && value.announcement.is_none()
+            {
+                let StoreCommitCoord::MergeConcurrent { stream_id, .. } = value.commit.coord else {
+                    return Err(StorePullError::Database(
+                        "Merge membership proof contains a Serial commit".to_string(),
+                    ));
+                };
+                value.announcement = predecessor
+                    .announcement_frontier
+                    .get(&stream_id)
+                    .filter(|announcement| announcement.value.commit == value.commit)
+                    .cloned();
+            }
+            insert_membership_proof(&mut membership_proofs, key, value)?;
+        }
+        for (key, value) in predecessor.announcement_frontier {
+            insert_latest_announcement(&mut announcement_frontier, key, value)?;
+        }
+    }
+    Ok(MergedRetainedMergeHistory {
+        causal_cut,
+        registrations,
+        acknowledgements,
+        membership_proofs,
+        announcement_frontier,
+    })
+}
+
+fn compose_merge_history_successor(
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    commit_ref: &StoreBatchCommitRef,
+    membership: &MembershipChain,
+    author: &StoreDeviceRegistration,
+    state_after: ResolvedStoreDeviceState,
+    predecessors: Vec<OpenedRetainedMergeHistorySummary>,
+    evidence: MergeHistorySuccessorEvidence,
+) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
+    let MergedRetainedMergeHistory {
+        mut causal_cut,
+        mut registrations,
+        mut acknowledgements,
+        mut membership_proofs,
+        announcement_frontier,
+    } = merge_retained_merge_history(root, membership, predecessors)?;
+    let mut membership_floor =
+        super::store_commit::MembershipCausalFloor::from_membership(membership);
+    insert_exact(
+        &mut causal_cut,
+        commit_ref.coord.clone(),
+        commit_ref.clone(),
+        "Merge successor conflicts at its Store coordinate",
+    )?;
+    for registration in evidence.registrations {
+        if !commit
+            .device_registrations()
+            .iter()
+            .any(|activation| activation.registration == registration.reference)
+        {
+            return Err(StorePullError::Database(
+                "Merge history registration is absent from its activating commit".to_string(),
+            ));
+        }
+        insert_exact(
+            &mut registrations,
+            registration.reference.device_id,
+            registration,
+            "Merge successor registration conflicts with retained authority",
+        )?;
+    }
+    if let Some(retained) = evidence.acknowledgement {
+        let (reference, _) = retained.latest().ok_or_else(|| {
+            StorePullError::Database(
+                "Merge history acknowledgement proof chain is empty".to_string(),
+            )
+        })?;
+        if commit.acknowledgement() != Some(reference)
+            || retained.activating_commit != *commit_ref
+            || retained.activating_commit_value != *commit
+        {
+            return Err(StorePullError::Database(
+                "Merge history acknowledgement differs from its activating commit".to_string(),
+            ));
+        }
+        insert_latest_acknowledgement(
+            &mut acknowledgements,
+            reference.registration.device_id,
+            retained,
+        )?;
+    }
+    if let Some(proof) = evidence.membership_proof {
+        if proof.commit != *commit_ref {
+            return Err(StorePullError::Database(
+                "Merge membership proof names another activating commit".to_string(),
+            ));
+        }
+        membership_floor
+            .advance(
+                proof.entry.coord.clone(),
+                &proof.head_value.body.resolutions,
+            )
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        insert_membership_proof(&mut membership_proofs, commit_ref.clone(), proof)?;
+    }
+    let author_ref = commit.author_registration.clone();
+    author_ref
+        .verify_registration(author)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    insert_exact(
+        &mut registrations,
+        author_ref.device_id,
+        RetainedVerifiedRegistration {
+            reference: author_ref.clone(),
+            value: author.clone(),
+        },
+        "Merge successor author registration conflicts with retained authority",
+    )?;
+    let mut post_frontier = BTreeMap::new();
+    for reference in causal_cut.values() {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = reference.coord
+        else {
+            return Err(StorePullError::Database(
+                "Merge causal cut contains a Serial coordinate".to_string(),
+            ));
+        };
+        match post_frontier.entry(stream_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(reference.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if sequence > entry.get().coord.sequence() =>
+            {
+                entry.insert(reference.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+    let summary = RetainedVerifiedMergeHistorySummary {
+        version: super::store_commit::STORE_PROTOCOL_VERSION,
+        store_root_hash: root.store_root_hash,
+        policy: crate::WritePolicy::MergeConcurrent,
+        causal_cut,
+        post_state: StoreDeviceStateRef::merge_concurrent(
+            CommitFrontier::MergeConcurrent(post_frontier),
+            &state_after,
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?,
+        membership_floor,
+        registrations,
+        acknowledgements,
+        membership_proofs,
+        announcement_frontier,
+    };
+    summary
+        .validate_shape()
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence,
+    } = commit_ref.coord
+    else {
+        return Err(StorePullError::Database(
+            "Merge successor carries a Serial coordinate".to_string(),
+        ));
+    };
+    let predecessor_head = summary
+        .announcement_frontier
+        .get(&stream_id)
+        .map(|accepted| accepted.reference.clone());
+    let head_slot = match summary.announcement_frontier.get(&stream_id) {
+        Some(accepted) => accepted.value.successor.next_slot.clone(),
+        None => match &author.store_commits {
+            StoreCommitAnchor::MergeConcurrent {
+                announcements: DeviceStreamAnchor::StoreAnnouncements { first_slot },
+            } if sequence == 1 => first_slot.clone(),
+            StoreCommitAnchor::MergeConcurrent { .. } | StoreCommitAnchor::Serial => {
+                return Err(StorePullError::Database(
+                    "Merge successor has no exact retained announcement predecessor".to_string(),
+                ));
+            }
+        },
+    };
+    Ok(PreparedMergeHistorySuccessor {
+        summary,
+        head_slot,
+        predecessor_head,
+    })
+}
+
+pub(crate) async fn prepare_merge_snapshot_history_summary(
+    db: &Database,
+    root: &StoreRootRef,
+    coverage: &CommitFrontier,
+    membership: &MembershipChain,
+    state: &ResolvedStoreDeviceState,
+    author_ref: &super::store_commit::StoreDeviceRegistrationRef,
+    author: &StoreDeviceRegistration,
+) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
+    let CommitFrontier::MergeConcurrent(frontier) = coverage else {
+        return Err(StorePullError::Database(
+            "Merge snapshot history received Serial coverage".to_string(),
+        ));
+    };
+    let predecessors = db
+        .retained_merge_history_frontier(frontier.values().cloned().collect())
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if predecessors.len() != frontier.len() {
+        return Err(StorePullError::Database(
+            "Merge snapshot is missing a retained checkpoint at its coverage frontier".to_string(),
+        ));
+    }
+    compose_merge_snapshot_history_summary(
+        root,
+        coverage,
+        membership,
+        state,
+        author_ref,
+        author,
+        predecessors,
+    )
+}
+
+fn compose_merge_snapshot_history_summary(
+    root: &StoreRootRef,
+    coverage: &CommitFrontier,
+    membership: &MembershipChain,
+    state: &ResolvedStoreDeviceState,
+    author_ref: &StoreDeviceRegistrationRef,
+    author: &StoreDeviceRegistration,
+    predecessors: Vec<OpenedRetainedMergeHistorySummary>,
+) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
+    let CommitFrontier::MergeConcurrent(frontier) = coverage else {
+        return Err(StorePullError::Database(
+            "Merge snapshot history received Serial coverage".to_string(),
+        ));
+    };
+    let MergedRetainedMergeHistory {
+        causal_cut,
+        mut registrations,
+        acknowledgements,
+        membership_proofs,
+        announcement_frontier,
+    } = merge_retained_merge_history(root, membership, predecessors)?;
+    author_ref
+        .verify_registration(author)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    insert_exact(
+        &mut registrations,
+        author_ref.device_id,
+        RetainedVerifiedRegistration {
+            reference: author_ref.clone(),
+            value: author.clone(),
+        },
+        "Merge snapshot author registration conflicts with retained authority",
+    )?;
+    let summary = RetainedVerifiedMergeHistorySummary {
+        version: super::store_commit::STORE_PROTOCOL_VERSION,
+        store_root_hash: root.store_root_hash,
+        policy: crate::WritePolicy::MergeConcurrent,
+        causal_cut,
+        post_state: StoreDeviceStateRef::merge_concurrent(coverage.clone(), state)
+            .map_err(|error| StorePullError::Database(error.to_string()))?,
+        membership_floor: super::store_commit::MembershipCausalFloor::from_membership(membership),
+        registrations,
+        acknowledgements,
+        membership_proofs,
+        announcement_frontier,
+    };
+    summary
+        .validate_snapshot_baseline()
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if summary
+        .frontier()
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+        != *frontier
+    {
+        return Err(StorePullError::Database(
+            "Merge snapshot history does not exactly cover its signed frontier".to_string(),
+        ));
+    }
+    Ok(summary)
+}
+
+pub(crate) fn prepare_merge_abandonment_history_summary(
+    candidate_summary: &RetainedVerifiedMergeHistorySummary,
+    candidate: &StoreBatchCommitRef,
+    candidate_value: &StoreBatchCommit,
+    abandonment: &StoreBatchCommitRef,
+    abandonment_value: &StoreBatchCommit,
+) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
+    candidate_summary
+        .validate_shape()
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    candidate
+        .verify_commit(candidate_value)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    abandonment
+        .verify_commit(abandonment_value)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if candidate.coord != abandonment.coord
+        || candidate_value.order != abandonment_value.order
+        || candidate_value.membership_state != abandonment_value.membership_state
+        || candidate_value.device_state != abandonment_value.device_state
+        || candidate_summary.causal_cut.get(&candidate.coord) != Some(candidate)
+        || candidate_summary.membership_proofs.contains_key(candidate)
+    {
+        return Err(StorePullError::Database(
+            "Merge abandonment differs from its retained candidate history".to_string(),
+        ));
+    }
+    let mut summary = candidate_summary.clone();
+    summary
+        .causal_cut
+        .insert(abandonment.coord.clone(), abandonment.clone());
+    let frontier = CommitFrontier::MergeConcurrent(
+        summary
+            .frontier()
+            .map_err(|error| StorePullError::Database(error.to_string()))?,
+    );
+    let StoreDeviceStateRef::MergeConcurrent {
+        frontier: post_state_frontier,
+        ..
+    } = &mut summary.post_state
+    else {
+        return Err(StorePullError::Database(
+            "Merge abandonment retained a Serial post-state".to_string(),
+        ));
+    };
+    *post_state_frontier = frontier;
+    summary
+        .validate_shape()
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    Ok(summary)
 }
 
 pub(crate) struct MergeConflictResolutionAuthorization {
     pub(crate) membership: MembershipChain,
     pub(crate) device_state_ref: StoreDeviceStateRef,
+    pub(crate) device_state: ResolvedStoreDeviceState,
 }
 
-async fn load_merge_outbound_predecessor(
+fn retained_merge_membership_prefix(
+    checkpoints: &[OpenedRetainedMergeHistorySummary],
+) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
+    let mut prefix = VerifiedMergeMembershipPrefix::default();
+    for checkpoint in checkpoints {
+        for reference in checkpoint.summary.causal_cut.values() {
+            prefix.commits.insert(reference.clone());
+        }
+        for proof in checkpoint.summary.membership_proofs.values() {
+            let Some(super::store_commit::StoreControl::MergeMembership { transition }) =
+                proof.commit_value.control()
+            else {
+                return Err(StorePullError::Database(
+                    "retained Merge membership proof has no membership control".to_string(),
+                ));
+            };
+            let activation = VerifiedMergeMembershipHeadActivation {
+                commit: proof.commit.clone(),
+                transition: transition.clone(),
+            };
+            match prefix.head_activations.entry(proof.commit.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(activation);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() == &activation => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(StorePullError::Database(
+                        "retained checkpoints disagree on a membership activation".to_string(),
+                    ));
+                }
+            }
+            if let Some(reference) = &proof.resolution {
+                let activation = VerifiedMergeConflictResolutionActivation {
+                    reference: reference.clone(),
+                };
+                match prefix.conflict_resolutions.entry(reference.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(activation);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if entry.get() == &activation => {}
+                    std::collections::btree_map::Entry::Occupied(_) => {
+                        return Err(StorePullError::Database(
+                            "retained checkpoints disagree on a conflict resolution".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(prefix)
+}
+
+fn validate_retained_membership_floors(
+    checkpoints: &[OpenedRetainedMergeHistorySummary],
+    membership: &MembershipChain,
+) -> Result<(), StorePullError> {
+    if checkpoints.iter().any(|checkpoint| {
+        !retained_membership_floor_is_included(&checkpoint.summary.membership_floor, membership)
+    }) {
+        return Err(StorePullError::Database(
+            "Merge membership omits retained effective predecessor authority".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn retained_membership_floor_is_included(
+    floor: &super::store_commit::MembershipCausalFloor,
+    membership: &MembershipChain,
+) -> bool {
+    floor
+        .effective_coordinates
+        .iter()
+        .all(|coordinate| membership.effectively_contains_coord(coordinate))
+        && floor.resolutions.iter().all(|reference| {
+            membership
+                .resolution_refs()
+                .binary_search(reference)
+                .is_ok()
+        })
+}
+
+async fn retained_merge_device_state(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
+    checkpoints: &[OpenedRetainedMergeHistorySummary],
+) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), StorePullError> {
+    let state = if checkpoints.is_empty() {
+        let founder = load_founder_registration_with_root(storage, root, root_value).await?;
+        let founder_ref =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        ResolvedStoreDeviceState::founder(
+            root,
+            founder_ref,
+            &root_value.descriptor.founder_pubkey,
+            root_value.descriptor.founder_grant.clone(),
+            &root_value.descriptor.founder_recovery,
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+    } else {
+        ResolvedStoreDeviceState::merge(
+            checkpoints
+                .iter()
+                .map(|checkpoint| checkpoint.post_state.clone()),
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+    };
+    let reference = StoreDeviceStateRef::merge_concurrent(
+        CommitFrontier::MergeConcurrent(frontier.clone()),
+        &state,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    Ok((reference, state))
+}
+
+pub(crate) async fn retained_merge_device_state_for_order(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    order: &super::store_commit::StoreCommitOrder,
+) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), StorePullError> {
+    let StoreHistoryCut::MergeConcurrent(frontier) = order
+        .predecessor_cut()
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+    else {
+        return Err(StorePullError::Database(
+            "Merge device-state authority received a Serial predecessor".to_string(),
+        ));
+    };
+    let checkpoints = db
+        .retained_merge_history_frontier(frontier.values().cloned().collect())
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if checkpoints.len() != frontier.len()
+        || checkpoints.iter().any(|checkpoint| {
+            checkpoint.summary.store_root_hash != root.store_root_hash
+                || checkpoint.summary.policy != crate::WritePolicy::MergeConcurrent
+        })
+    {
+        return Err(StorePullError::Database(
+            "Merge device-state authority is missing a retained predecessor checkpoint".to_string(),
+        ));
+    }
+    let root_value = load_store_protocol_root(storage, root).await?.value;
+    retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await
+}
+
+pub(crate) async fn load_merge_conflict_resolution_authorization(
+    db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
     candidate_membership_heads: &[super::membership::MembershipHeadRef],
     author_registration: &StoreDeviceRegistrationRef,
-) -> Result<MergeOutboundPredecessor, StorePullError> {
+    resolver_pubkey: &str,
+) -> Result<MergeConflictResolutionAuthorization, StorePullError> {
+    let StoreHistoryCut::MergeConcurrent(frontier) = order
+        .predecessor_cut()
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+    else {
+        return Err(StorePullError::Database(
+            "Merge conflict resolution received a Serial predecessor".to_string(),
+        ));
+    };
+    let checkpoints = db
+        .retained_merge_history_frontier(frontier.values().cloned().collect())
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if checkpoints.len() != frontier.len()
+        || checkpoints.iter().any(|checkpoint| {
+            checkpoint.summary.store_root_hash != root.store_root_hash
+                || checkpoint.summary.policy != crate::WritePolicy::MergeConcurrent
+        })
+    {
+        return Err(StorePullError::Database(
+            "Merge conflict resolution is missing its retained predecessor authority".to_string(),
+        ));
+    }
+    let root_value = load_store_protocol_root(storage, root).await?.value;
+    let prefix = retained_merge_membership_prefix(&checkpoints)?;
+    let membership = super::membership_ops::project_anchored_chain_to_verified_store_prefix(
+        storage,
+        root,
+        &root_value.descriptor.founder_pubkey,
+        candidate_membership_heads,
+        &prefix,
+    )
+    .await
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    validate_retained_membership_floors(&checkpoints, &membership)?;
+    prefix
+        .validate_complete_membership(&membership)
+        .map_err(StorePullError::Database)?;
+    let (device_state_ref, device_state) =
+        retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await?;
+    if !device_state_has_active_registration(&device_state, author_registration) {
+        return Err(StorePullError::Database(
+            "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),
+        ));
+    }
+    verify_canonical_owner_registration(
+        storage,
+        root,
+        &device_state,
+        resolver_pubkey,
+        author_registration,
+    )
+    .await?;
+    Ok(MergeConflictResolutionAuthorization {
+        membership,
+        device_state_ref,
+        device_state,
+    })
+}
+
+pub(crate) async fn load_retained_merge_outbound_authorization(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    order: &super::store_commit::StoreCommitOrder,
+    candidate_membership_heads: &[super::membership::MembershipHeadRef],
+    author_registration: &StoreDeviceRegistrationRef,
+) -> Result<MergeOutboundAuthorization, StorePullError> {
     let StoreHistoryCut::MergeConcurrent(frontier) = order
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
@@ -4702,40 +5918,21 @@ async fn load_merge_outbound_predecessor(
             "Merge outbound authorization received a Serial predecessor".to_string(),
         ));
     };
-    let history = verify_merge_history_refs(
-        storage,
-        root,
-        frontier.values().cloned().collect::<Vec<_>>(),
-    )
-    .await?;
-    let device_state = if frontier.is_empty() {
-        history.genesis.clone()
-    } else {
-        ResolvedStoreDeviceState::merge(
-            frontier
-                .values()
-                .map(|reference| {
-                    history
-                        .commits
-                        .get(reference)
-                        .map(|verified| verified.state_after.clone())
-                        .ok_or_else(|| {
-                            StorePullError::Database(
-                                "Merge outbound frontier is absent from its verified history"
-                                    .to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?
-    };
-    if !device_state_has_active_registration(&device_state, author_registration) {
+    let checkpoints = db
+        .retained_merge_history_frontier(frontier.values().cloned().collect())
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if checkpoints.len() != frontier.len()
+        || checkpoints.iter().any(|checkpoint| {
+            checkpoint.summary.store_root_hash != root.store_root_hash
+                || checkpoint.summary.policy != crate::WritePolicy::MergeConcurrent
+        })
+    {
         return Err(StorePullError::Database(
-            "Merge outbound author is inactive at its exact predecessor cut".to_string(),
+            "Merge outbound authorization is missing retained predecessor authority".to_string(),
         ));
     }
-    let prefix = verified_merge_membership_prefix(&history.commits, frontier.values().cloned())?;
+    let prefix = retained_merge_membership_prefix(&checkpoints)?;
     let root_value = load_store_protocol_root(storage, root).await?.value;
     let membership = super::membership_ops::project_anchored_chain_to_verified_store_prefix(
         storage,
@@ -4746,87 +5943,34 @@ async fn load_merge_outbound_predecessor(
     )
     .await
     .map_err(|error| StorePullError::Database(error.to_string()))?;
+    validate_retained_membership_floors(&checkpoints, &membership)?;
     prefix
         .validate_complete_membership(&membership)
         .map_err(StorePullError::Database)?;
-    Ok(MergeOutboundPredecessor {
-        membership,
-        device_state,
-        frontier,
-    })
-}
-
-pub(crate) async fn load_merge_conflict_resolution_authorization(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    order: &super::store_commit::StoreCommitOrder,
-    candidate_membership_heads: &[super::membership::MembershipHeadRef],
-    author_registration: &StoreDeviceRegistrationRef,
-    resolver_pubkey: &str,
-) -> Result<MergeConflictResolutionAuthorization, StorePullError> {
-    let predecessor = load_merge_outbound_predecessor(
-        storage,
-        root,
-        order,
-        candidate_membership_heads,
-        author_registration,
-    )
-    .await?;
-    verify_canonical_owner_registration(
-        storage,
-        root,
-        &predecessor.device_state,
-        resolver_pubkey,
-        author_registration,
-    )
-    .await?;
-    let device_state_ref = StoreDeviceStateRef::merge_concurrent(
-        CommitFrontier::MergeConcurrent(predecessor.frontier),
-        &predecessor.device_state,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    Ok(MergeConflictResolutionAuthorization {
-        membership: predecessor.membership,
-        device_state_ref,
-    })
-}
-
-pub(crate) async fn load_merge_outbound_authorization(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    order: &super::store_commit::StoreCommitOrder,
-    candidate_membership_heads: &[super::membership::MembershipHeadRef],
-    author_registration: &StoreDeviceRegistrationRef,
-) -> Result<MergeOutboundAuthorization, StorePullError> {
-    let predecessor = load_merge_outbound_predecessor(
-        storage,
-        root,
-        order,
-        candidate_membership_heads,
-        author_registration,
-    )
-    .await?;
-    let MembershipStatus::Resolved(resolved) = predecessor.membership.status() else {
+    let (device_state_ref, device_state) =
+        retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await?;
+    if !device_state_has_active_registration(&device_state, author_registration) {
+        return Err(StorePullError::Database(
+            "Merge outbound author is inactive at its exact predecessor cut".to_string(),
+        ));
+    }
+    let MembershipStatus::Resolved(resolved) = membership.status() else {
         return Err(StorePullError::Database(
             "Merge outbound predecessor membership is conflicted".to_string(),
         ));
     };
     let membership_state = StoreMembershipStateRef::merge_concurrent(
-        predecessor.membership.head_refs().to_vec(),
-        predecessor.membership.resolution_refs().to_vec(),
-        predecessor.device_state.recovery.clone(),
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        device_state.recovery.clone(),
         resolved.state_hash,
     )
     .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let device_state_ref = StoreDeviceStateRef::merge_concurrent(
-        CommitFrontier::MergeConcurrent(predecessor.frontier),
-        &predecessor.device_state,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
     Ok(MergeOutboundAuthorization {
-        membership: predecessor.membership,
+        membership,
         membership_state,
         device_state_ref,
+        device_state,
     })
 }
 
@@ -4844,7 +5988,9 @@ async fn verify_merge_history_refs_impl(
     root: &StoreRootRef,
     mut pending: Vec<StoreBatchCommitRef>,
 ) -> Result<VerifiedMergeHistory, StorePullError> {
-    let verified_root = load_store_protocol_root(storage, root).await?.value;
+    let verified_root = Box::pin(load_store_protocol_root(storage, root))
+        .await?
+        .value;
     if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
         return Err(StorePullError::Database(
             "Merge history belongs to a non-Merge Store".to_string(),
@@ -4878,8 +6024,13 @@ async fn verify_merge_history_refs_impl(
                 "Merge history contains a Serial commit".to_string(),
             ));
         }
-        let (commit, author) =
-            load_commit_with_author_at_root(storage, root, &verified_root, &reference).await?;
+        let (commit, author) = Box::pin(load_commit_with_author_at_root(
+            storage,
+            root,
+            &verified_root,
+            &reference,
+        ))
+        .await?;
         pending.extend(commit_predecessor_references(&commit));
         loaded.insert(reference, (commit, author));
     }
@@ -4898,19 +6049,24 @@ async fn verify_merge_history_refs_impl(
                 "Merge history is cyclic or has an unresolved predecessor".to_string(),
             ));
         };
-        let (commit, author) = loaded
-            .remove(&reference)
-            .expect("selected exclusion-history commit remains loaded");
-        let (_, accepted_head) = Box::pin(super::store_outbound::exact_next_announcement_slot(
-            storage,
-            root,
-            &commit.author_registration,
-            &author,
-            Some(&reference),
-        ))
+        let (commit, author) = loaded.remove(&reference).ok_or_else(|| {
+            StorePullError::Database(
+                "selected exclusion-history commit disappeared before verification".to_string(),
+            )
+        })?;
+        let (_, accepted_head) = Box::pin(
+            super::store_outbound::exact_next_announcement_slot_for_verified_commit(
+                storage,
+                root,
+                &commit.author_registration,
+                &author,
+                &reference,
+                &commit,
+            ),
+        )
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let _activation_head = accepted_head.ok_or_else(|| {
+        let activation_head_ref = accepted_head.ok_or_else(|| {
             StorePullError::Database(
                 "Merge history commit has no accepted announcement head".to_string(),
             )
@@ -4918,10 +6074,11 @@ async fn verify_merge_history_refs_impl(
         let predecessor_state = verified_merge_predecessor_state(&genesis, &states, &commit)?;
         let verified_membership_prefix =
             verified_merge_membership_prefix(&verified, commit_predecessor_references(&commit))?;
-        let pending_resolution = verify_merge_resolution_activation_acceptance_with_history(
-            storage, root, &commit, &genesis, &verified,
-        )
-        .await?;
+        let pending_resolution =
+            Box::pin(verify_merge_resolution_activation_acceptance_with_history(
+                storage, root, &commit, &genesis, &verified,
+            ))
+            .await?;
         let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
             storage,
             root,
@@ -4948,7 +6105,10 @@ async fn verify_merge_history_refs_impl(
             ));
         }
         let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
-        let accepted_predecessor = VerifiedAcceptedPredecessor;
+        let accepted_predecessor = VerifiedAcceptedPredecessor::MergeHistory {
+            commits: &verified,
+            frontier: commit_predecessor_references(&commit),
+        };
         let registrations = Box::pin(load_commit_registrations_with_root(
             storage,
             root,
@@ -5027,8 +6187,10 @@ async fn verify_merge_history_refs_impl(
             } else {
                 None
             };
-        let owner_recovery =
-            verify_commit_owner_recovery_activation(storage, root, &commit, None).await?;
+        let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
+            storage, root, &commit, None,
+        ))
+        .await?;
         let state = operations
             .apply_to(authorized_predecessor, &commit.device_state)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -5040,6 +6202,79 @@ async fn verify_merge_history_refs_impl(
             owner_recovery,
         )
         .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let predecessor_histories = commit_predecessor_references(&commit)
+            .iter()
+            .map(|predecessor| {
+                verified
+                    .get(predecessor)
+                    .map(|verified: &VerifiedMergeHistoryCommit| verified.history.clone())
+                    .ok_or_else(|| {
+                        StorePullError::Database(
+                            "Merge history summary has an unresolved predecessor".to_string(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let membership_closure = Box::pin(verified_merge_membership_objects(
+            storage, root, &reference, &commit,
+        ))
+        .await?;
+        let retained_registrations = commit
+            .device_registrations()
+            .iter()
+            .zip(&registrations)
+            .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+                reference: activation.registration.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        let retained_acknowledgement = match acknowledgement.clone() {
+            Some((acknowledgement_ref, acknowledgement_value)) => Some(
+                retain_activated_acknowledgement(
+                    storage,
+                    root,
+                    &reference,
+                    &commit,
+                    &author,
+                    acknowledgement_ref,
+                    acknowledgement_value,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        let successor = compose_merge_history_successor(
+            root,
+            &commit,
+            &reference,
+            &membership,
+            &author,
+            state.clone(),
+            predecessor_histories,
+            MergeHistorySuccessorEvidence {
+                registrations: retained_registrations,
+                acknowledgement: retained_acknowledgement,
+                membership_proof: membership_closure.map(|closure| closure.proof),
+            },
+        )?;
+        let activation_head = Box::pin(super::store_objects::load_head_ref(
+            storage,
+            root.store_root_hash,
+            &activation_head_ref,
+            &author,
+            &reference,
+        ))
+        .await?;
+        let history = successor
+            .summary
+            .open(
+                &commit,
+                &reference,
+                &activation_head.value,
+                &activation_head_ref,
+                &state,
+            )
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         states.insert(reference.clone(), state.clone());
         verified.insert(
             reference,
@@ -5051,6 +6286,7 @@ async fn verify_merge_history_refs_impl(
                 operations,
                 acknowledgement,
                 membership_control,
+                history,
             },
         );
     }
@@ -5093,12 +6329,22 @@ async fn replay_merge_device_history(
 pub(crate) struct VerifiedActivatedStoreAck {
     reference: super::store_commit::StoreAckRef,
     value: super::store_commit::StoreAck,
+    chain: BTreeMap<
+        u64,
+        (
+            super::store_commit::StoreAckRef,
+            super::store_commit::StoreAck,
+        ),
+    >,
     activating_commit: StoreBatchCommitRef,
     activating_commit_value: StoreBatchCommit,
 }
 
 enum VerifiedStoreMembership {
-    MergeConcurrent(MembershipChain),
+    MergeConcurrent {
+        membership: MembershipChain,
+        checkpoints: Vec<OpenedRetainedMergeHistorySummary>,
+    },
     Serial(SerialAuthorizationState),
 }
 
@@ -5117,7 +6363,9 @@ pub(crate) struct VerifiedStoreHistoryState {
 impl VerifiedStoreHistoryState {
     fn is_owner(&self, author: &str) -> bool {
         match &self.membership {
-            VerifiedStoreMembership::MergeConcurrent(membership) => membership.is_owner_now(author),
+            VerifiedStoreMembership::MergeConcurrent { membership, .. } => {
+                membership.is_owner_now(author)
+            }
             VerifiedStoreMembership::Serial(authorization) => {
                 authorization.membership.is_owner(author)
             }
@@ -5188,11 +6436,11 @@ async fn verify_store_history_state_impl(
                     "Merge history verification received Serial coordination".to_string(),
                 ));
             }
-            let history = verify_merge_history_refs(
+            let history = Box::pin(verify_merge_history_refs(
                 storage,
                 root,
                 frontier.values().cloned().collect::<Vec<_>>(),
-            )
+            ))
             .await?;
             let device_state = if frontier.is_empty() {
                 history.genesis.clone()
@@ -5223,13 +6471,13 @@ async fn verify_store_history_state_impl(
             .map_err(|error| StorePullError::Database(error.to_string()))?;
             let verified_membership_activations =
                 verified_merge_membership_prefix(&history.commits, frontier.values().cloned())?;
-            let membership = load_merge_predecessor_membership_with_verified_activations(
+            let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
                 storage,
                 root,
                 membership_ref,
                 &verified_membership_activations,
                 None,
-            )
+            ))
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
@@ -5239,12 +6487,34 @@ async fn verify_store_history_state_impl(
                 .validate_complete_membership(&membership)
                 .map_err(StorePullError::Database)?;
             verify_merge_membership_state_ref(membership_ref, &membership, &device_state)?;
-            let active_registrations =
-                load_active_history_registrations(storage, root, &device_state).await?;
+            let active_registrations = Box::pin(load_active_history_registrations(
+                storage,
+                root,
+                &device_state,
+            ))
+            .await?;
+            let checkpoints = frontier
+                .values()
+                .map(|reference| {
+                    history
+                        .commits
+                        .get(reference)
+                        .map(|commit| commit.history.clone())
+                        .ok_or_else(|| {
+                            StorePullError::Database(
+                                "Merge snapshot frontier is absent from its verified history"
+                                    .to_string(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(VerifiedStoreHistoryState {
                 cut: cut.clone(),
                 membership_ref: membership_ref.clone(),
-                membership: VerifiedStoreMembership::MergeConcurrent(membership),
+                membership: VerifiedStoreMembership::MergeConcurrent {
+                    membership,
+                    checkpoints,
+                },
                 device_state_ref,
                 device_state,
                 active_registrations,
@@ -5464,20 +6734,32 @@ async fn activated_acknowledgements_through_cut_impl(
                 frontier.values().cloned().collect::<Vec<_>>(),
             )
             .await?;
-            Ok(history
-                .commits
-                .into_iter()
-                .filter_map(|(activating_commit, commit)| {
-                    commit
-                        .acknowledgement
-                        .map(|(reference, value)| VerifiedActivatedStoreAck {
-                            reference,
-                            value,
-                            activating_commit,
-                            activating_commit_value: commit.commit,
-                        })
-                })
-                .collect())
+            let mut acknowledgements = Vec::new();
+            for (activating_commit, commit) in history.commits {
+                let Some((reference, value)) = commit.acknowledgement else {
+                    continue;
+                };
+                let chain = commit
+                    .history
+                    .summary
+                    .acknowledgements
+                    .get(&reference.registration.device_id)
+                    .ok_or_else(|| {
+                        StorePullError::Database(
+                            "verified acknowledgement history lacks its exact chain".to_string(),
+                        )
+                    })?
+                    .chain
+                    .clone();
+                acknowledgements.push(VerifiedActivatedStoreAck {
+                    reference,
+                    value,
+                    chain,
+                    activating_commit,
+                    activating_commit_value: commit.commit,
+                });
+            }
+            Ok(acknowledgements)
         }
         StoreHistoryCut::Serial(position) => {
             let coordination = serial_coordination.ok_or_else(|| {
@@ -5518,19 +6800,32 @@ async fn activated_acknowledgements_through_cut_impl(
                     &accepted[..=index]
                 }
             };
-            Ok(prefix
-                .iter()
-                .filter_map(|accepted| {
-                    accepted.acknowledgement.as_ref().map(|(reference, value)| {
-                        VerifiedActivatedStoreAck {
-                            reference: reference.clone(),
-                            value: value.clone(),
-                            activating_commit: accepted.commit_ref.clone(),
-                            activating_commit_value: accepted.commit.clone(),
-                        }
-                    })
-                })
-                .collect())
+            let mut acknowledgements = Vec::new();
+            for accepted in prefix {
+                let Some((reference, value)) = &accepted.acknowledgement else {
+                    continue;
+                };
+                let chain = load_acknowledgement_proof_chain(
+                    storage,
+                    root,
+                    reference.clone(),
+                    value.clone(),
+                    &accepted.author,
+                )
+                .await
+                .map_err(|error| match error {
+                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                    RegistrationLoadError::Invalid(error) => StorePullError::Serial(error),
+                })?;
+                acknowledgements.push(VerifiedActivatedStoreAck {
+                    reference: reference.clone(),
+                    value: value.clone(),
+                    chain,
+                    activating_commit: accepted.commit_ref.clone(),
+                    activating_commit_value: accepted.commit.clone(),
+                });
+            }
+            Ok(acknowledgements)
         }
     }
 }
@@ -5578,6 +6873,40 @@ async fn verify_store_snapshot_authority_impl(
         .ok_or(StorePullError::SnapshotAuthorInactive)?;
     if !snapshot_state.is_owner(&snapshot_author.author_pubkey) {
         return Err(StorePullError::SnapshotAuthorNotOwner);
+    }
+    match (&snapshot_state.membership, &snapshot.meta.history_summary) {
+        (
+            VerifiedStoreMembership::MergeConcurrent {
+                membership,
+                checkpoints,
+            },
+            super::store_commit::StoreSnapshotHistorySummary::MergeConcurrent(summary),
+        ) => {
+            let canonical = compose_merge_snapshot_history_summary(
+                root,
+                &snapshot.meta.coverage,
+                membership,
+                &snapshot_state.device_state,
+                &snapshot.meta.author_registration,
+                snapshot_author,
+                checkpoints.clone(),
+            )?;
+            if summary != &canonical {
+                return Err(StorePullError::Database(
+                    "Store snapshot history summary differs from its exact verified cut"
+                        .to_string(),
+                ));
+            }
+        }
+        (
+            VerifiedStoreMembership::Serial(_),
+            super::store_commit::StoreSnapshotHistorySummary::Serial,
+        ) => {}
+        _ => {
+            return Err(StorePullError::Database(
+                "Store snapshot history summary uses another write policy".to_string(),
+            ));
+        }
     }
     Ok(snapshot_state)
 }
@@ -5651,9 +6980,8 @@ async fn verify_store_snapshot_stability_impl(
             })?;
         acknowledgements.insert(
             *device_id,
-            super::retained_replay::RetainedReplayActivatedAck {
-                reference: matching.reference.clone(),
-                value: matching.value.clone(),
+            super::store_commit::RetainedVerifiedActivatedAck {
+                chain: matching.chain.clone(),
                 activating_commit: matching.activating_commit.clone(),
                 activating_commit_value: matching.activating_commit_value.clone(),
             },
@@ -5677,7 +7005,7 @@ async fn verify_store_snapshot_stability_impl(
             .map(|(device_id, (reference, value))| {
                 (
                     device_id,
-                    super::retained_replay::RetainedReplayRegistration { reference, value },
+                    super::store_commit::RetainedVerifiedRegistration { reference, value },
                 )
             })
             .collect(),
@@ -5848,19 +7176,23 @@ async fn verify_merge_owner_promotion_acceptance_with_history(
     Ok(())
 }
 
+pub(crate) enum VerifiedOwnerPromotionAcceptance {
+    MergeConcurrent,
+    Serial(super::store_outbound::SerialAuthorizationSnapshot),
+}
+
 pub(crate) async fn verify_owner_promotion_acceptance(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
-) -> Result<(), StorePullError> {
+) -> Result<VerifiedOwnerPromotionAcceptance, StorePullError> {
     match &acceptance.activation {
         super::store_commit::OwnerPromotionRequestActivation::MergeConcurrent { .. } => {
-            verify_merge_owner_promotion_acceptance(storage, root, acceptance).await
+            verify_merge_owner_promotion_acceptance(storage, root, acceptance).await?;
+            Ok(VerifiedOwnerPromotionAcceptance::MergeConcurrent)
         }
-        super::store_commit::OwnerPromotionRequestActivation::Serial {
-            commit: activation_commit,
-        } => {
+        super::store_commit::OwnerPromotionRequestActivation::Serial { .. } => {
             let coordination = serial_coordination.ok_or_else(|| {
                 StorePullError::Serial(
                     "Serial Owner-promotion verification requires coordination".to_string(),
@@ -5877,22 +7209,30 @@ pub(crate) async fn verify_owner_promotion_acceptance(
             acceptance
                 .verify(&candidate.value)
                 .map_err(|error| StorePullError::Serial(error.to_string()))?;
-            let discovered =
-                find_owner_promotion_request_activation(storage, Some(coordination), root, request)
-                    .await?;
+            let verified_head = read_serial_head(storage, coordination, root).await?;
+            let accepted = load_authorized_serial_chain(storage, root, &verified_head.head).await?;
+            let mut matches = accepted
+                .iter()
+                .filter(|candidate| candidate.commit.owner_promotion_request() == Some(request));
+            let Some(activated) = matches.next() else {
+                return Err(StorePullError::Serial(
+                    "Owner-promotion request has no accepted Serial activation".to_string(),
+                ));
+            };
+            if matches.next().is_some() {
+                return Err(StorePullError::Serial(
+                    "Owner-promotion request has more than one Serial activation".to_string(),
+                ));
+            }
+            let discovered = super::store_commit::OwnerPromotionRequestActivation::Serial {
+                commit: activated.commit_ref.clone(),
+            };
             if discovered != acceptance.activation {
                 return Err(StorePullError::Serial(
                     "Serial Owner-promotion acceptance names another activation".to_string(),
                 ));
             }
-            let loaded = load_commit_ref(
-                storage,
-                root.store_root_hash,
-                activation_commit,
-                &promoter.value,
-            )
-            .await?;
-            let commit = loaded.value;
+            let commit = &activated.commit;
             if commit.owner_promotion_request() != Some(request)
                 || commit.membership_state != request.predecessor_membership
                 || commit.device_state != request.predecessor_devices
@@ -5903,50 +7243,31 @@ pub(crate) async fn verify_owner_promotion_acceptance(
                         .to_string(),
                 ));
             }
-            let predecessor_cut = commit
-                .order
-                .predecessor_cut()
-                .map_err(|error| StorePullError::Serial(error.to_string()))?;
-            let verified = verify_store_history_state(
-                storage,
-                Some(coordination),
-                root,
-                &predecessor_cut,
-                &request.predecessor_membership,
-            )
-            .await?;
-            if verified.device_state_ref != request.predecessor_devices
-                || verified
-                    .active_registrations
-                    .get(&request.promoter_registration.device_id)
-                    .map(|(reference, _)| reference)
-                    != Some(&request.promoter_registration)
-                || verified
-                    .active_registrations
-                    .get(&request.member_registration.device_id)
-                    .map(|(reference, _)| reference)
-                    != Some(&request.member_registration)
-            {
+            if !device_state_has_active_registration(
+                &activated.device_state_before,
+                &request.promoter_registration,
+            ) || !device_state_has_active_registration(
+                &activated.device_state_before,
+                &request.member_registration,
+            ) {
                 return Err(StorePullError::Serial(
                     "Serial Owner-promotion registrations are not active at its predecessor"
                         .to_string(),
                 ));
             }
-            let VerifiedStoreMembership::Serial(authorization) = &verified.membership else {
-                return Err(StorePullError::Serial(
-                    "Serial Owner promotion resolved Merge membership".to_string(),
-                ));
-            };
-            if authorization
+            if activated
+                .authorization_before
                 .membership
                 .active_owner_grant(&promoter.value.author_pubkey)
                 .as_ref()
                 != Some(&request.promoter_owner_grant)
-                || authorization
+                || activated
+                    .authorization_before
                     .membership
                     .active_grant_ids(&request.member_pubkey)
                     != BTreeSet::from([request.member_grant.clone()])
-                || !authorization
+                || !activated
+                    .authorization_before
                     .membership
                     .is_member_grant(&request.member_pubkey, &request.member_grant)
                 || candidate.value.author_pubkey != request.member_pubkey
@@ -5956,7 +7277,26 @@ pub(crate) async fn verify_owner_promotion_acceptance(
                         .to_string(),
                 ));
             }
-            Ok(())
+            let authorization = accepted
+                .last()
+                .ok_or_else(|| {
+                    StorePullError::Serial(
+                        "Serial Owner-promotion activation has no accepted commit".to_string(),
+                    )
+                })?
+                .authorization_after
+                .clone();
+            let base = match &verified_head.head.state {
+                StoreSerialHeadState::Genesis { .. } => None,
+                StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
+            };
+            Ok(VerifiedOwnerPromotionAcceptance::Serial(
+                super::store_outbound::SerialAuthorizationSnapshot {
+                    base,
+                    base_head: verified_head.object,
+                    authorization,
+                },
+            ))
         }
     }
 }
@@ -6086,106 +7426,44 @@ async fn verify_terminal_candidate_head(
     }
 }
 
-pub(crate) async fn verify_author_exclusion_activation(
+#[allow(clippy::too_many_arguments)]
+async fn verify_author_exclusion_activation_with_verified_operation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     locator: &crate::database::AuthorExclusionActivationLocator,
+    activation_head: &StoreDeviceHead,
+    activation_head_object: &ExactObjectRef,
+    activation_commit_ref: &StoreBatchCommitRef,
+    activation_commit: &StoreBatchCommit,
+    activation_predecessor_state: &ResolvedStoreDeviceState,
+    operations: &VerifiedStoreDeviceOperations,
     candidate: &StoreBatchCommitRef,
     candidate_commit: &StoreBatchCommit,
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
 ) -> Result<VerifiedAuthorExclusionActivation, StorePullError> {
-    let prefix = super::store_commit::semantic_prefix_from_exact_object(
-        &locator.activation_head().object,
-        ".json",
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let bytes = storage
-        .read_protocol_object(&context, &locator.activation_head().object, &prefix)
-        .await?;
-    locator.activation_head().object.verify(&bytes)?;
-    let unverified: StoreDeviceHead = serde_json::from_slice(&bytes)
-        .map_err(|error| StorePullError::Database(format!("author exclusion head: {error}")))?;
-    if unverified.head_hash() != locator.activation_head().head_hash {
-        return Err(StorePullError::Database(
-            "author exclusion head differs from its durable exact hash".to_string(),
-        ));
-    }
-    let author = Box::pin(load_registration_ref(
-        storage,
-        root,
-        &unverified.author_registration,
-    ))
-    .await?;
-    let opened = Box::pin(super::store_objects::load_head_ref(
-        storage,
-        root.store_root_hash,
-        locator.activation_head(),
-        &author.value,
-        &unverified.commit,
-    ))
-    .await?;
-    let (_, exact_head) = Box::pin(super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &unverified.author_registration,
-        &author.value,
-        Some(&unverified.commit),
-    ))
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    if exact_head.as_ref() != Some(locator.activation_head()) || opened.value != unverified {
-        return Err(StorePullError::Database(
-            "author exclusion head is not the exact activated stream position".to_string(),
-        ));
-    }
-    let (predecessor_state, operations, commit, _) = Box::pin(replay_merge_device_history(
-        storage,
-        root,
-        &unverified.commit,
-    ))
-    .await?;
-    let target_registration = Box::pin(load_registration_ref(
-        storage,
-        root,
-        &locator.exclusion().proposal.target,
-    ))
-    .await?;
-    if candidate_head.commit != *candidate
-        || candidate_head.author_registration != locator.exclusion().proposal.target
-        || candidate_commit.author_registration != candidate_head.author_registration
+    let verified_activation_head = super::store_commit::StoreDeviceHeadRef {
+        head_hash: activation_head.head_hash(),
+        object: activation_head_object.clone(),
+    };
+    activation_commit_ref
+        .verify_commit(activation_commit)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if activation_head.commit != *activation_commit_ref
+        || locator.activation_head() != &verified_activation_head
+        || !activation_commit.device_exclusion_outcomes().contains(
+            &super::store_commit::StoreDeviceExclusionOutcomeRef::Excluded(
+                locator.exclusion().clone(),
+            ),
+        )
+        || !device_state_has_active_registration(
+            activation_predecessor_state,
+            &locator.exclusion().proposal.target,
+        )
     {
         return Err(StorePullError::Database(
-            "candidate head differs from the excluded author and exact candidate".to_string(),
-        ));
-    }
-    let verified_candidate_head = verify_terminal_candidate_head(
-        storage,
-        root,
-        candidate,
-        candidate_commit,
-        candidate_head,
-        candidate_head_object,
-        &target_registration.value,
-    )
-    .await?;
-    if !commit.device_exclusion_outcomes().contains(
-        &super::store_commit::StoreDeviceExclusionOutcomeRef::Excluded(locator.exclusion().clone()),
-    ) {
-        return Err(StorePullError::Database(
-            "author exclusion activation commit does not carry the exact outcome".to_string(),
-        ));
-    }
-    if !device_state_has_active_registration(
-        &predecessor_state,
-        &locator.exclusion().proposal.target,
-    ) {
-        return Err(StorePullError::Database(
-            "author exclusion target is not active at the exact activation predecessor".to_string(),
+            "author exclusion activation differs from its verified commit and predecessor"
+                .to_string(),
         ));
     }
     let exact_cut = operations
@@ -6200,16 +7478,72 @@ pub(crate) async fn verify_author_exclusion_activation(
             "author exclusion locator differs from the verified outcome cutoff".to_string(),
         ));
     }
+    let target_registration = Box::pin(load_registration_ref(
+        storage,
+        root,
+        &locator.exclusion().proposal.target,
+    ))
+    .await?;
+    if candidate_head.commit != *candidate
+        || candidate_head.author_registration != locator.exclusion().proposal.target
+        || candidate_commit.author_registration != candidate_head.author_registration
+    {
+        return Err(StorePullError::Database(
+            "candidate head differs from the excluded author and exact candidate".to_string(),
+        ));
+    }
+    let verified_candidate_head = Box::pin(verify_terminal_candidate_head(
+        storage,
+        root,
+        candidate,
+        candidate_commit,
+        candidate_head,
+        candidate_head_object,
+        &target_registration.value,
+    ))
+    .await?;
     Ok(VerifiedAuthorExclusionActivation {
         store_root_hash: root.store_root_hash,
         target: locator.exclusion().proposal.target.clone(),
         target_registration: target_registration.value,
         exclusion: locator.exclusion().clone(),
         accepted_cut: locator.accepted_cut().clone(),
-        activation_head: locator.activation_head().clone(),
+        activation_head: verified_activation_head,
         candidate: candidate.clone(),
         candidate_head: verified_candidate_head,
     })
+}
+
+pub(crate) async fn verify_author_exclusion_activation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    locator: &crate::database::AuthorExclusionActivationLocator,
+    candidate: &StoreBatchCommitRef,
+    candidate_commit: &StoreBatchCommit,
+    candidate_head: &StoreDeviceHead,
+    candidate_head_object: &ExactObjectRef,
+) -> Result<VerifiedAuthorExclusionActivation, StorePullError> {
+    let retained =
+        Box::pin(db.retained_merge_materialization(locator.activation_commit().clone())).await?;
+    let (_, predecessor_state) =
+        Box::pin(db.store_device_state_for_order(&retained.commit().order)).await?;
+    Box::pin(verify_author_exclusion_activation_with_verified_operation(
+        storage,
+        root,
+        locator,
+        retained.activation_head(),
+        retained.activation_head_object(),
+        retained.commit_ref(),
+        retained.commit(),
+        &predecessor_state,
+        retained.device_operations(),
+        candidate,
+        candidate_commit,
+        candidate_head,
+        candidate_head_object,
+    ))
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6549,7 +7883,10 @@ pub(crate) async fn prepare_device_join_bootstrap(
         let authority = RegistrationPredecessorAuthority::MergeConcurrent(
             &verified_commit.predecessor_membership,
         );
-        let accepted_predecessor = VerifiedAcceptedPredecessor;
+        let accepted_predecessor = VerifiedAcceptedPredecessor::MergeHistory {
+            commits: &verified_history.commits,
+            frontier: commit_predecessor_references(&commit),
+        };
         let registrations = Box::pin(load_commit_registrations(
             storage,
             root,
@@ -6628,6 +7965,7 @@ pub(crate) async fn prepare_device_join_bootstrap(
                 DeviceJoinBootstrapActivation::MergeConcurrent {
                     head: head.value,
                     object: head.object,
+                    history_summary: verified_commit.history.summary.clone(),
                 }
             }
             super::store_commit::StoreCommitOrder::Serial { .. } => {
@@ -6815,13 +8153,14 @@ pub(crate) async fn materialize_device_join_activation(
             history: SerialAuthorizationHistory::ExactPredecessor,
         },
     };
+    let accepted_predecessor = VerifiedAcceptedPredecessor::Exact;
     let registrations = Box::pin(load_commit_registrations(
         storage,
         root,
         &commit,
         &author,
         Some(&authority),
-        None,
+        Some(&accepted_predecessor),
     ))
     .await
     .map_err(|error| match error {
@@ -6846,13 +8185,14 @@ pub(crate) async fn materialize_device_join_activation(
         MergeConcurrent {
             head: StoreDeviceHead,
             object: ExactObjectRef,
+            history_summary: RetainedVerifiedMergeHistorySummary,
         },
         Serial(SerialAuthorizationState),
     }
     let activation = match (&reference.coord, authorization) {
         (
             StoreCommitCoord::MergeConcurrent { .. },
-            DeviceJoinBootstrapAuthorization::MergeConcurrent { .. },
+            DeviceJoinBootstrapAuthorization::MergeConcurrent { chain, .. },
         ) => {
             let (_, head_ref) = super::store_outbound::exact_next_announcement_slot(
                 storage,
@@ -6876,9 +8216,56 @@ pub(crate) async fn materialize_device_join_activation(
                 reference,
             )
             .await?;
+            let (_, predecessor_state) = db.store_device_state_for_order(&commit.order).await?;
+            let (authorized_predecessor, recovery_author) =
+                predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
+                    .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let state_after = device_operations
+                .apply_to(authorized_predecessor, &commit.device_state)
+                .and_then(|state| {
+                    apply_verified_device_lifecycle(
+                        state,
+                        &commit,
+                        &registrations,
+                        recovery_author.as_ref(),
+                        None,
+                    )
+                })
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let history = prepare_merge_history_successor(
+                db,
+                root,
+                &commit,
+                reference,
+                chain,
+                &author,
+                recovery_author.as_ref(),
+                state_after.clone(),
+                MergeHistorySuccessorEvidence {
+                    registrations: commit
+                        .device_registrations()
+                        .iter()
+                        .zip(&registrations)
+                        .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+                            reference: activation.registration.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                    acknowledgement: None,
+                    membership_proof: None,
+                },
+            )
+            .await?;
+            history
+                .summary
+                .open(&commit, reference, &head.value, &head_ref, &state_after)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
             Materialization::MergeConcurrent {
                 head: head.value,
                 object: head.object,
+                history_summary: history.summary,
             }
         }
         (
@@ -6915,7 +8302,11 @@ pub(crate) async fn materialize_device_join_activation(
             &registrations,
         )?;
         match activation {
-            Materialization::MergeConcurrent { head, object } => {
+            Materialization::MergeConcurrent {
+                head,
+                object,
+                history_summary,
+            } => {
                 Database::record_materialized_merge_commit_on(
                     &tx,
                     &root,
@@ -6924,6 +8315,7 @@ pub(crate) async fn materialize_device_join_activation(
                     &registrations,
                     &head,
                     &object,
+                    &history_summary,
                     &[],
                     None,
                 )?;
@@ -7091,7 +8483,9 @@ async fn load_authorized_serial_prefix(
                 commits: &authorized,
             },
         };
-        let accepted_predecessor = VerifiedAcceptedPredecessor;
+        let accepted_predecessor = VerifiedAcceptedPredecessor::SerialHistory {
+            commits: &authorized,
+        };
         let registrations = load_commit_registrations(
             storage,
             root,
@@ -7111,6 +8505,7 @@ async fn load_authorized_serial_prefix(
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Serial(error),
             })?;
+        let device_state_before = device_state.clone();
         let (authorized_device_state, recovery_author) =
             predecessor_with_recovery_author(device_state, &commit, &registrations)
                 .map_err(|error| StorePullError::Serial(error.to_string()))?;
@@ -7174,6 +8569,7 @@ async fn load_authorized_serial_prefix(
             author,
             registrations,
             device_operations,
+            device_state_before,
             device_state_after: device_state.clone(),
             acknowledgement,
             authorization_before,
@@ -7534,7 +8930,7 @@ async fn pull_serial_store_commits(
     }
     let local = db.materialized_frontier().await?.remove(SERIAL_STREAM_ID);
     let head = read_serial_head(storage, coordination, root).await?.head;
-    let authorized_chain = load_authorized_serial_chain(storage, root, &head).await?;
+    let authorized_chain = Box::pin(load_authorized_serial_chain(storage, root, &head)).await?;
     let tip = match &head.state {
         StoreSerialHeadState::Genesis { .. } => None,
         StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
@@ -7879,7 +9275,7 @@ pub async fn cleanup_merge_candidate(
         .await?
     {
         let nonactivation =
-            verify_terminal_cleanup_candidate(storage, &root, &verification).await?;
+            verify_terminal_cleanup_candidate(db, storage, &root, &verification).await?;
         db.reconcile_merge_candidate_terminal_head(write_id.clone(), nonactivation)
             .await?;
     }
@@ -7892,6 +9288,7 @@ pub async fn cleanup_merge_candidate(
 }
 
 async fn verify_terminal_cleanup_candidate(
+    db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     verification: &crate::database::TerminalCandidateCleanupVerification,
@@ -7905,6 +9302,7 @@ async fn verify_terminal_cleanup_candidate(
     match &verification.authority {
         crate::database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
             let activation = Box::pin(verify_author_exclusion_activation(
+                db,
                 storage,
                 root,
                 locator,
@@ -7945,6 +9343,23 @@ async fn verify_terminal_cleanup_candidate(
             )
             .map_err(|error| StorePullError::Database(error.to_string()))
         }
+        crate::database::TerminalCandidateAuthority::DependencyRetraction(authority) => {
+            let author = load_registration_ref(
+                storage,
+                root,
+                &verification.candidate.commit.value.author_registration,
+            )
+            .await
+            .map_err(StorePullError::Object)?
+            .value;
+            super::remote_object::VerifiedCandidateNonactivation::from_verified_dependency_retraction_authority(
+                authority.clone(),
+                target,
+                &author,
+                verification.candidate.head.object.clone(),
+            )
+            .map_err(|error| StorePullError::Database(error.to_string()))
+        }
     }
 }
 
@@ -7957,7 +9372,7 @@ async fn resume_merge_retraction_cleanups(
         let verification = db
             .merge_retraction_cleanup_verification(candidate.clone())
             .await?;
-        let verified = verify_terminal_cleanup_candidate(storage, root, &verification).await?;
+        let verified = verify_terminal_cleanup_candidate(db, storage, root, &verification).await?;
         db.confirm_merge_retraction_cleanup_nonactivation(candidate.clone(), verified)
             .await?;
         for target in db
@@ -9386,6 +10801,7 @@ async fn apply_candidate(
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     merge_candidate: &MergeCandidate,
+    loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
     identity: Option<&crate::keys::UserKeypair>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let candidate = &merge_candidate.candidate;
@@ -9488,6 +10904,7 @@ async fn apply_candidate(
         packages,
         device_operations,
         verified_circle_activations,
+        loaded_predecessor_memberships,
     ))
     .await?;
     #[cfg(any(test, feature = "test-utils"))]
@@ -9584,6 +11001,7 @@ struct PreparedMergeMaterialization {
     commit_ref: StoreBatchCommitRef,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
+    history_summary: RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
     registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
@@ -9613,6 +11031,7 @@ fn apply_prepared_merge_materialization_on(
         commit_ref,
         activation_head,
         activation_head_object,
+        history_summary,
         membership_objects,
         membership_remote_objects,
         registrations,
@@ -9760,6 +11179,7 @@ fn apply_prepared_merge_materialization_on(
         &circle_activations,
         &activation_head,
         &activation_head_object,
+        &history_summary,
         membership_objects.as_ref(),
         &retained_packages,
         package_application,
@@ -9785,10 +11205,13 @@ async fn verified_terminal_merge_retractions(
     activation_head_object: &ExactObjectRef,
     activation_commit_ref: &StoreBatchCommitRef,
     activation_commit: &StoreBatchCommit,
+    activation_predecessor_state: &ResolvedStoreDeviceState,
+    activation_predecessor_membership: &MembershipChain,
     device_operations: &VerifiedStoreDeviceOperations,
+    loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
 ) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StorePullError> {
-    let retained = db.retained_merge_replay_inputs().await?;
-    let activation_head = super::store_commit::StoreDeviceHeadRef {
+    let retained = Box::pin(db.retained_merge_replay_inputs()).await?;
+    let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
         head_hash: activation_head.head_hash(),
         object: activation_head_object.clone(),
     };
@@ -9799,26 +11222,19 @@ async fn verified_terminal_merge_retractions(
             "Merge terminal retraction witness carries Serial membership".to_string(),
         ));
     };
-    let current_membership =
-        load_merge_predecessor_membership(storage, root, &activation_commit.membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
-    let MembershipStatus::Resolved(current_resolved) = current_membership.status() else {
+    let MembershipStatus::Resolved(current_resolved) = activation_predecessor_membership.status()
+    else {
         return Err(StorePullError::Database(
             "Merge terminal retraction witness membership is conflicted".to_string(),
         ));
     };
     let mut retractions = Vec::new();
-    for materialization in retained {
-        let mut locator = db
-            .author_exclusion_activation_for_candidate(
-                materialization.commit_ref().clone(),
-                materialization.commit().author_registration.clone(),
-            )
-            .await?;
+    for materialization in &retained {
+        let mut locator = Box::pin(db.author_exclusion_activation_for_candidate(
+            materialization.commit_ref().clone(),
+            materialization.commit().author_registration.clone(),
+        ))
+        .await?;
         if locator.is_none() {
             let expected_stream =
                 super::store_commit::StreamActivation::device_authorized_stream_id(
@@ -9842,7 +11258,8 @@ async fn verified_terminal_merge_retractions(
                     locator = Some(crate::database::AuthorExclusionActivationLocator::verified(
                         exclusion.clone(),
                         accepted_cut.clone(),
-                        activation_head.clone(),
+                        activation_commit_ref.clone(),
+                        activation_head_ref.clone(),
                     ));
                     break;
                 }
@@ -9852,16 +11269,8 @@ async fn verified_terminal_merge_retractions(
             let Some(authority) = materialization.commit().membership_authority.as_ref() else {
                 continue;
             };
-            let predecessor_membership = load_merge_predecessor_membership(
-                storage,
-                root,
-                &materialization.commit().membership_state,
-            )
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+            let predecessor_membership =
+                loaded_predecessor_memberships.membership_for(materialization.commit_ref())?;
             let MembershipStatus::Resolved(predecessor_resolved) = predecessor_membership.status()
             else {
                 return Err(StorePullError::Database(
@@ -9894,7 +11303,7 @@ async fn verified_terminal_merge_retractions(
                 grant_id,
                 current_membership_ref,
                 activation_commit_ref,
-                &activation_head,
+                &activation_head_ref,
                 materialization.commit_ref(),
                 materialization.commit(),
                 materialization.activation_head(),
@@ -9914,10 +11323,16 @@ async fn verified_terminal_merge_retractions(
             );
             continue;
         };
-        let activation = Box::pin(verify_author_exclusion_activation(
+        let activation = Box::pin(verify_author_exclusion_activation_with_verified_operation(
             storage,
             root,
             &locator,
+            activation_head,
+            activation_head_object,
+            activation_commit_ref,
+            activation_commit,
+            activation_predecessor_state,
+            device_operations,
             materialization.commit_ref(),
             materialization.commit(),
             materialization.activation_head(),
@@ -9936,7 +11351,78 @@ async fn verified_terminal_merge_retractions(
             .map_err(|error| StorePullError::Database(error.to_string()))?,
         );
     }
-    Ok(retractions)
+    let mut verified_by_reference = retractions
+        .into_iter()
+        .map(|verified| {
+            let reference = verified
+                .candidate_reference()
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            Ok((reference, verified))
+        })
+        .collect::<Result<BTreeMap<_, _>, StorePullError>>()?;
+    loop {
+        let mut additions = Vec::new();
+        for materialization in &retained {
+            if verified_by_reference.contains_key(materialization.commit_ref()) {
+                continue;
+            }
+            let dependency = commit_predecessor_references(materialization.commit())
+                .into_iter()
+                .filter_map(|reference| {
+                    verified_by_reference
+                        .get(&reference)
+                        .map(|verified| (reference, verified))
+                })
+                .next();
+            let Some((_dependency_reference, dependency)) = dependency else {
+                continue;
+            };
+            let author = Box::pin(db.activated_store_device_registration(
+                materialization.commit().author_registration.clone(),
+            ))
+            .await?;
+            let verified =
+                super::remote_object::VerifiedCandidateNonactivation::dependency_retraction(
+                    dependency,
+                    super::store_commit::StoreBatchCommitDeletionTarget {
+                        coord: materialization.commit_ref().coord.clone(),
+                        object: materialization.commit_ref().object.clone(),
+                        canonical_signed_bytes: materialization.commit().to_bytes(),
+                    },
+                    &author,
+                    materialization.activation_head_object().clone(),
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            additions.push((materialization.commit_ref().clone(), verified));
+        }
+        if additions.is_empty() {
+            break;
+        }
+        for (reference, verified) in additions {
+            if verified_by_reference.insert(reference, verified).is_some() {
+                return Err(StorePullError::Database(
+                    "transitive Merge retraction constructed duplicate proof".to_string(),
+                ));
+            }
+        }
+    }
+    let removed = verified_by_reference
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if retained.iter().any(|materialization| {
+        !removed.contains(materialization.commit_ref())
+            && materialization
+                .history_summary()
+                .causal_cut
+                .values()
+                .any(|reference| removed.contains(reference))
+    }) {
+        return Err(StorePullError::Database(
+            "surviving retained Merge summary contains a retracted dependency".to_string(),
+        ));
+    }
+    Ok(verified_by_reference.into_values().collect())
 }
 
 fn replay_retained_merge_projection_on(
@@ -10088,6 +11574,7 @@ fn replay_retained_merge_projection_on(
                 commit_ref: materialization.commit_ref().clone(),
                 activation_head: materialization.activation_head().clone(),
                 activation_head_object: materialization.activation_head_object().clone(),
+                history_summary: materialization.history_summary().clone(),
                 membership_objects: materialization.membership_objects().cloned(),
                 membership_remote_objects: Vec::new(),
                 registrations: materialization.registrations().to_vec(),
@@ -10290,7 +11777,7 @@ async fn verified_merge_membership_objects(
     remote_objects.push(activate_pulled_merge_membership_authority(
         super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
             family,
-            head_ref,
+            head_ref.clone(),
             head_bytes.clone(),
             head_bytes,
             commit_ref.clone(),
@@ -10298,9 +11785,13 @@ async fn verified_merge_membership_objects(
         .map_err(|error| StorePullError::Database(error.to_string()))?,
         commit_ref,
     )?);
-    if let super::membership::MembershipChange::ResolutionActivation { resolution } =
-        &entry.value.change
-    {
+    let resolution = match &entry.value.change {
+        super::membership::MembershipChange::ResolutionActivation { resolution } => {
+            Some(resolution.clone())
+        }
+        _ => None,
+    };
+    let resolution_value = if let Some(resolution) = &resolution {
         let loaded = super::store_objects::load_membership_resolution_ref(
             storage,
             root.store_root_hash,
@@ -10318,16 +11809,32 @@ async fn verified_merge_membership_objects(
             .map_err(|error| StorePullError::Database(error.to_string()))?,
             commit_ref,
         )?);
-    }
+        Some(loaded.value)
+    } else {
+        None
+    };
+    let proof = super::store_commit::RetainedMergeMembershipProof {
+        commit: commit_ref.clone(),
+        commit_value: commit.clone(),
+        announcement: None,
+        entry: transition.body.entry.clone(),
+        entry_value: entry.value,
+        head: head_ref,
+        head_value: head,
+        resolution,
+        resolution_value,
+    };
     Ok(Some(VerifiedMergeMembershipClosure {
         objects,
         remote_objects,
+        proof,
     }))
 }
 
 struct VerifiedMergeMembershipClosure {
     objects: crate::database::VerifiedMergeMembershipObjects,
     remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
+    proof: super::store_commit::RetainedMergeMembershipProof,
 }
 
 fn activate_pulled_merge_membership_authority(
@@ -10350,8 +11857,108 @@ async fn commit_candidate(
     packages: Vec<PreparedMergeMaterializationPackage>,
     device_operations: VerifiedStoreDeviceOperations,
     verified_circle_activations: VerifiedCircleActivations,
+    loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
 ) -> Result<ApplyOutcome, StorePullError> {
     let candidate = &merge_candidate.candidate;
+    let predecessor_membership = &merge_candidate.predecessor_membership;
+    let (_, predecessor_state) = db
+        .store_device_state_for_order(&candidate.commit.order)
+        .await?;
+    verify_merge_membership_state_ref(
+        &candidate.commit.membership_state,
+        predecessor_membership,
+        &predecessor_state,
+    )?;
+    let (authorized_predecessor, recovery_author) = predecessor_with_recovery_author(
+        predecessor_state,
+        &candidate.commit,
+        &candidate.registrations,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let owner_recovery =
+        verify_commit_owner_recovery_activation(storage, root, &candidate.commit, None).await?;
+    let state_after = device_operations
+        .apply_to(
+            authorized_predecessor.clone(),
+            &candidate.commit.device_state,
+        )
+        .and_then(|state| {
+            apply_verified_device_lifecycle(
+                state,
+                &candidate.commit,
+                &candidate.registrations,
+                recovery_author.as_ref(),
+                owner_recovery,
+            )
+        })
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let acknowledgement =
+        validate_commit_acknowledgement(storage, root, &candidate.commit, &candidate.author)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+    let retained_acknowledgement = match acknowledgement {
+        Some((acknowledgement_ref, acknowledgement_value)) => Some(
+            retain_activated_acknowledgement(
+                storage,
+                root,
+                &candidate.commit_ref,
+                &candidate.commit,
+                &candidate.author,
+                acknowledgement_ref,
+                acknowledgement_value,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let membership =
+        verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
+            .await?;
+    let registrations = candidate
+        .commit
+        .device_registrations()
+        .iter()
+        .zip(&candidate.registrations)
+        .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+            reference: activation.registration.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    let history = prepare_merge_history_successor(
+        db,
+        root,
+        &candidate.commit,
+        &candidate.commit_ref,
+        predecessor_membership,
+        &candidate.author,
+        recovery_author.as_ref(),
+        state_after.clone(),
+        MergeHistorySuccessorEvidence {
+            registrations,
+            acknowledgement: retained_acknowledgement,
+            membership_proof: membership.as_ref().map(|closure| closure.proof.clone()),
+        },
+    )
+    .await?;
+    let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
+        head_hash: merge_candidate.activation_head.head_hash(),
+        object: merge_candidate.activation_head_object.clone(),
+    };
+    history
+        .summary
+        .open(
+            &candidate.commit,
+            &candidate.commit_ref,
+            &merge_candidate.activation_head,
+            &activation_head_ref,
+            &state_after,
+        )
+        .map_err(|error| {
+            StorePullError::Database(format!("open prepared Merge history summary: {error}"))
+        })?;
     let retractions = Box::pin(verified_terminal_merge_retractions(
         db,
         storage,
@@ -10360,19 +11967,20 @@ async fn commit_candidate(
         &merge_candidate.activation_head_object,
         &candidate.commit_ref,
         &candidate.commit,
+        &authorized_predecessor,
+        predecessor_membership,
         &device_operations,
+        loaded_predecessor_memberships,
     ))
     .await?;
     let receiver_wall_ms = db.receive_wall_ms();
-    let membership =
-        verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
-            .await?;
     let materialization = PreparedMergeMaterialization {
         root: root.clone(),
         commit: candidate.commit.clone(),
         commit_ref: candidate.commit_ref.clone(),
         activation_head: merge_candidate.activation_head.clone(),
         activation_head_object: merge_candidate.activation_head_object.clone(),
+        history_summary: history.summary,
         membership_objects: membership.as_ref().map(|closure| closure.objects.clone()),
         membership_remote_objects: membership
             .map(|closure| closure.remote_objects)
@@ -10387,6 +11995,8 @@ async fn commit_candidate(
     let blob_decls = db.blob_decls();
     let gates = db.gates();
     let synced_tables = db.synced_tables().to_vec();
+    #[cfg(any(test, feature = "test-utils"))]
+    let materialization_failure = db.merge_materialization_failure_injection();
     let applied = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -10399,6 +12009,14 @@ async fn commit_candidate(
                 materialization,
             )?;
             if matches!(applied.outcome, ApplyOutcome::Applied(_)) {
+                #[cfg(any(test, feature = "test-utils"))]
+                if materialization_failure.reach(
+                    crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
+                )? {
+                    return Err(DbError::Message(
+                        "injected failure after Merge summary materialization".to_string(),
+                    ));
+                }
                 if !retractions.is_empty() {
                     let retracted = retractions
                         .iter()
@@ -10410,6 +12028,14 @@ async fn commit_candidate(
                         .collect::<Result<BTreeSet<_>, _>>()?;
                     applied.write_status_notifications =
                         Database::retract_verified_merge_materializations_on(&tx, retractions)?;
+                    #[cfg(any(test, feature = "test-utils"))]
+                    if materialization_failure.reach(
+                        crate::database::MergeMaterializationFailurePoint::RetractionDeletion,
+                    )? {
+                        return Err(DbError::Message(
+                            "injected failure after Merge retraction deletion".to_string(),
+                        ));
+                    }
                     let replay = replay_retained_merge_projection_on(
                         &tx,
                         &blob_decls,
@@ -10423,7 +12049,15 @@ async fn commit_candidate(
                         &synced_tables,
                         gates.has_scoped_graph(),
                     )?;
-                    Database::reconcile_store_device_exclusion_freezes_after_replay_on(&tx)?;
+                    #[cfg(any(test, feature = "test-utils"))]
+                    if materialization_failure.reach(
+                        crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+                    )? {
+                        return Err(DbError::Message(
+                            "injected failure after Merge projection replacement".to_string(),
+                        ));
+                    }
+                    Database::replace_store_device_exclusion_freezes_from_replay_on(&tx)?;
                     let old_projection = crate::changeset::walk_old(&projection_changeset)
                         .map_err(DbError::Message)?;
                     let new_projection =
@@ -10511,6 +12145,168 @@ fn commit_stream_id(coord: &StoreCommitCoord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn one_retained_checkpoint() -> (
+        Database,
+        crate::sync::test_helpers::TestStore,
+        MembershipChain,
+        OpenedRetainedMergeHistorySummary,
+    ) {
+        let db = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "retained-checkpoint-conflict",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create retained-checkpoint Store");
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load checkpoint membership")
+            .chain
+            .expect("Merge Store has membership");
+        crate::sync::test_helpers::host_exec(
+            &db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('checkpoint-conflict', 'checkpoint', NULL, 1, \
+                     '0000000001000-0000-checkpoint', '2026-07-21')",
+        )
+        .await;
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load checkpoint device id")
+            .expect("checkpoint device id exists");
+        let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        assert!(super::super::store_outbound::prepare_pending_store_write(
+            &db,
+            &store.storage,
+            &device_id,
+            "2026-07-21T00:00:00Z",
+            &store.signer,
+            &store_dir,
+            Some(&membership),
+        )
+        .await
+        .expect("prepare checkpoint commit"));
+        assert_eq!(
+            super::super::store_outbound::drain_store_writes(&db, &store.storage)
+                .await
+                .expect("publish checkpoint commit"),
+            1,
+        );
+        let reference = db
+            .latest_local_store_position()
+            .await
+            .expect("load checkpoint position")
+            .expect("checkpoint position exists");
+        let mut retained = db
+            .retained_merge_history_frontier(vec![reference])
+            .await
+            .expect("open retained checkpoint");
+        assert_eq!(retained.len(), 1);
+        (db, store, membership, retained.remove(0))
+    }
+
+    #[tokio::test]
+    async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
+        let (_db, store, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+
+        let mut conflicting_commit = checkpoint.clone();
+        let (coordinate, reference) = conflicting_commit
+            .summary
+            .causal_cut
+            .first_key_value()
+            .map(|(coordinate, reference)| (coordinate.clone(), reference.clone()))
+            .expect("checkpoint causal cut is nonempty");
+        let mut replacement = reference;
+        replacement.commit_hash = ObjectHash::digest(b"same-coordinate competing commit");
+        conflicting_commit
+            .summary
+            .causal_cut
+            .insert(coordinate, replacement);
+        assert!(merge_retained_merge_history(
+            &store.root,
+            &membership,
+            vec![checkpoint.clone(), conflicting_commit],
+        )
+        .is_err());
+
+        let mut conflicting_head = checkpoint.clone();
+        let announcement = conflicting_head
+            .announcement_frontier
+            .values_mut()
+            .next()
+            .expect("opened checkpoint has an announcement frontier");
+        announcement.reference.head_hash = ObjectHash::digest(b"same-stream competing head");
+        assert!(merge_retained_merge_history(
+            &store.root,
+            &membership,
+            vec![checkpoint, conflicting_head],
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
+        let (db, store, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+        let coverage = CommitFrontier::from_refs(
+            crate::WritePolicy::MergeConcurrent,
+            db.materialized_frontier()
+                .await
+                .expect("load acknowledgement coverage"),
+        )
+        .expect("derive acknowledgement coverage");
+        crate::sync::test_helpers::publish_store_ack_fixture(
+            &db,
+            &store.storage,
+            None,
+            coverage,
+            &store.signer,
+            Some(&membership),
+        )
+        .await
+        .expect("publish retained acknowledgement");
+        let acknowledgement_commit = db
+            .latest_local_store_position()
+            .await
+            .expect("load acknowledgement commit")
+            .expect("acknowledgement commit exists");
+        let mut retained = db
+            .retained_merge_history_frontier(vec![acknowledgement_commit])
+            .await
+            .expect("open acknowledgement checkpoint");
+        let acknowledgement = retained
+            .remove(0)
+            .summary
+            .acknowledgements
+            .into_values()
+            .next()
+            .expect("checkpoint retains its acknowledgement");
+        let mut forged_higher_fork = acknowledgement.clone();
+        let (latest_ref, latest_value) = acknowledgement
+            .latest()
+            .expect("acknowledgement proof chain has a latest entry");
+        let device_id = latest_ref.registration.device_id;
+        let mut forked_at_same_sequence = (latest_ref.clone(), latest_value.clone());
+        forked_at_same_sequence.0.ack_hash = ObjectHash::digest(b"forked acknowledgement");
+        forged_higher_fork
+            .chain
+            .insert(latest_ref.sequence, forked_at_same_sequence.clone());
+        let higher_sequence = latest_ref.sequence + 1;
+        forked_at_same_sequence.0.sequence = higher_sequence;
+        forked_at_same_sequence.1.sequence = higher_sequence;
+        forged_higher_fork
+            .chain
+            .insert(higher_sequence, forked_at_same_sequence);
+
+        let mut merged = checkpoint.summary.acknowledgements;
+        insert_latest_acknowledgement(&mut merged, device_id, acknowledgement)
+            .expect("first acknowledgement establishes the retained stream");
+        assert!(
+            insert_latest_acknowledgement(&mut merged, device_id, forged_higher_fork,).is_err()
+        );
+    }
 
     #[test]
     fn recovery_cursor_requires_the_exact_origin_activation_pair() {

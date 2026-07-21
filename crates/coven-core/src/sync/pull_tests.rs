@@ -1170,6 +1170,40 @@ async fn replace_exact_commit_bytes(
     head_registration: crate::sync::store_commit::StoreDeviceRegistrationRef,
     head_signer: &UserKeypair,
 ) -> crate::sync::store_commit::StoreBatchCommitRef {
+    let replacement_commit: crate::sync::store_commit::StoreBatchCommit =
+        serde_json::from_slice(&commit_bytes).expect("parse replacement exact Store commit");
+    let candidate_summary = storage
+        .retained_merge_history_summary(&graph.registration.device_id, graph.reference.clone())
+        .await
+        .expect("load replacement candidate history summary");
+    let reference =
+        publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
+    let history_summary = crate::sync::store_pull::prepare_merge_abandonment_history_summary(
+        &candidate_summary,
+        &graph.reference,
+        &graph.commit,
+        &reference,
+        &replacement_commit,
+    )
+    .expect("prepare replacement exact Store history summary");
+    replace_exact_commit_head(
+        storage,
+        graph,
+        reference.clone(),
+        history_summary.digest(),
+        head_registration,
+        head_signer,
+    )
+    .await;
+    reference
+}
+
+async fn publish_replacement_exact_commit(
+    storage: &TestStore,
+    graph: &ExactPublishedCommit,
+    commit_bytes: Vec<u8>,
+    commit_hash: crate::sync::store_commit::ObjectHash,
+) -> crate::sync::store_commit::StoreBatchCommitRef {
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
     let stream_id = commit_stream_id(&graph.reference);
@@ -1194,11 +1228,22 @@ async fn replace_exact_commit_bytes(
         crate::sync::store_objects::create_exact_object(&storage.storage, &commit_prepared)
             .await
             .expect("publish replacement exact Store commit");
-    let reference = crate::sync::store_commit::StoreBatchCommitRef {
+    crate::sync::store_commit::StoreBatchCommitRef {
         coord: graph.reference.coord.clone(),
         commit_hash,
         object: commit_object,
-    };
+    }
+}
+
+async fn replace_exact_commit_head(
+    storage: &TestStore,
+    graph: &ExactPublishedCommit,
+    reference: crate::sync::store_commit::StoreBatchCommitRef,
+    history_summary: crate::sync::store_commit::ObjectHash,
+    head_registration: crate::sync::store_commit::StoreDeviceRegistrationRef,
+    head_signer: &UserKeypair,
+) {
+    use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
     let head_context = ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
@@ -1212,6 +1257,7 @@ async fn replace_exact_commit_bytes(
         storage.root.store_root_hash,
         head_registration,
         reference.clone(),
+        history_summary,
         graph.head.successor.clone(),
         head_signer,
     )
@@ -1231,6 +1277,27 @@ async fn replace_exact_commit_bytes(
     crate::sync::store_objects::create_exact_object(&storage.storage, &head_prepared)
         .await
         .expect("publish replacement exact Store head");
+}
+
+async fn replace_exact_commit_bytes_before_commit_validation(
+    storage: &TestStore,
+    graph: &ExactPublishedCommit,
+    commit_bytes: Vec<u8>,
+    commit_hash: crate::sync::store_commit::ObjectHash,
+    head_registration: crate::sync::store_commit::StoreDeviceRegistrationRef,
+    head_signer: &UserKeypair,
+) -> crate::sync::store_commit::StoreBatchCommitRef {
+    let reference =
+        publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
+    replace_exact_commit_head(
+        storage,
+        graph,
+        reference.clone(),
+        graph.head.history_summary,
+        head_registration,
+        head_signer,
+    )
+    .await;
     reference
 }
 
@@ -1255,6 +1322,7 @@ async fn replace_exact_head(
         storage.root.store_root_hash,
         author_registration,
         commit,
+        graph.head.history_summary,
         graph.head.successor.clone(),
         signer,
     )
@@ -2107,6 +2175,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
             "activation",
             "activation_head",
             "commit",
+            "history_summary",
             "membership_objects",
             "packages",
         ]
@@ -2904,7 +2973,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     .await;
     let mut forged: serde_json::Value = serde_json::from_slice(&commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
-    let commit_ref = replace_exact_commit_bytes(
+    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
         &storage,
         &graph,
         serde_json::to_vec(&forged).unwrap(),
@@ -6610,7 +6679,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         .as_object_mut()
         .expect("Store commit is a JSON object")
         .remove("signature");
-    let commit_ref = replace_exact_commit_bytes(
+    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
         &storage,
         &graph,
         serde_json::to_vec(&unsigned).unwrap(),
@@ -7470,7 +7539,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let graph = load_exact_published_commit(&storage, reference).await;
     let mut forged: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
-    let commit_ref = replace_exact_commit_bytes(
+    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
         &storage,
         &graph,
         serde_json::to_vec(&forged).unwrap(),

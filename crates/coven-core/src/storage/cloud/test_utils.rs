@@ -71,6 +71,7 @@ pub struct InMemoryCloudHome {
     probe_pause: Arc<Mutex<Option<ProbePause>>>,
     exact_full_read_count: Arc<AtomicUsize>,
     exact_stream_read_count: Arc<AtomicUsize>,
+    exact_reads: Arc<Mutex<Vec<ObjectSlot>>>,
     exact_stream_read_inflight: Arc<AtomicUsize>,
     exact_stream_read_max_inflight: Arc<AtomicUsize>,
     exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
@@ -117,6 +118,7 @@ impl InMemoryCloudHome {
             probe_pause: Arc::new(Mutex::new(None)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_count: Arc::new(AtomicUsize::new(0)),
+            exact_reads: Arc::new(Mutex::new(Vec::new())),
             exact_stream_read_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_max_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_barrier: Arc::new(Mutex::new(None)),
@@ -224,6 +226,14 @@ impl InMemoryCloudHome {
 
     pub fn exact_stream_read_count(&self) -> usize {
         self.exact_stream_read_count.load(Ordering::SeqCst)
+    }
+
+    pub fn exact_reads(&self) -> Vec<ObjectSlot> {
+        self.exact_reads.lock().unwrap().clone()
+    }
+
+    pub fn clear_exact_reads(&self) {
+        self.exact_reads.lock().unwrap().clear();
     }
 
     pub fn arm_exact_stream_read_concurrency_probe(&self, width: usize) {
@@ -586,6 +596,7 @@ impl InMemoryCloudHome {
     async fn read_exact(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.exact_full_read_count.fetch_add(1, Ordering::SeqCst);
         let key = Self::exact_storage_key(slot)?;
+        self.exact_reads.lock().unwrap().push(slot.clone());
         self.writes
             .lock()
             .unwrap()
@@ -600,6 +611,7 @@ impl InMemoryCloudHome {
         destination: &std::path::Path,
     ) -> Result<(), CloudFileReadError> {
         self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);
+        self.exact_reads.lock().unwrap().push(slot.clone());
         let inflight = self
             .exact_stream_read_inflight
             .fetch_add(1, Ordering::SeqCst)

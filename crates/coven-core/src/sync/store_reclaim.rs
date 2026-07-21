@@ -1083,8 +1083,17 @@ async fn verify_store_package_reclaim_evidence(
     let mut expected_acknowledgements = authority
         .acknowledgements
         .values()
-        .map(|acknowledgement| acknowledgement.reference.clone())
-        .collect::<Vec<_>>();
+        .map(|acknowledgement| {
+            acknowledgement
+                .latest()
+                .map(|(reference, _)| reference.clone())
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "snapshot stability acknowledgement proof chain is empty".to_string(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     expected_acknowledgements.sort();
     if claim.acknowledgements != expected_acknowledgements {
         return Err(StoreReclaimError::Authorization(
@@ -1486,8 +1495,17 @@ async fn choose_snapshot(
     let mut acknowledgements = authority
         .acknowledgements
         .values()
-        .map(|acknowledgement| acknowledgement.reference.clone())
-        .collect::<Vec<_>>();
+        .map(|acknowledgement| {
+            acknowledgement
+                .latest()
+                .map(|(reference, _)| reference.clone())
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "snapshot stability acknowledgement proof chain is empty".to_string(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     acknowledgements.sort();
     Ok(VerifiedReclaimSnapshot {
         snapshot,

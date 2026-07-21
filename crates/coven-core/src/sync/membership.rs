@@ -2655,6 +2655,10 @@ impl MembershipChain {
         self.coords.iter().any(|coord| coord == expected)
     }
 
+    pub(crate) fn effectively_contains_coord(&self, expected: &MembershipCoord) -> bool {
+        self.included.contains(expected)
+    }
+
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
         let mut members = BTreeMap::new();
         for state in self.state.grants.values() {
@@ -6663,6 +6667,14 @@ mod tests {
                 &first_owner,
             )
             .expect("branch Owner resolves the conflict");
+        let mut forged_resolution = resolution_value.clone();
+        forged_resolution.signature =
+            keys::sign_hex(&second_owner, &forged_resolution.canonical_bytes()).1;
+        assert!(!forged_resolution.verify_signature());
+        assert!(!forged_resolution.verify_against(
+            store_root_hash,
+            conflicted.conflict().expect("cycle conflict"),
+        ));
         let second_membership = membership_anchor("second-cycle-resolution");
         let second_acceptance = conflict_acceptance(
             &conflicted,
@@ -6850,6 +6862,22 @@ mod tests {
         assert!(accepted_controls
             .iter()
             .any(|coord| !resumed.included.contains(coord)));
+        let raw_losing_control = accepted_controls
+            .iter()
+            .find(|coord| !resumed.included.contains(*coord))
+            .expect("resolved history retains one raw losing control")
+            .clone();
+        let checkpoint_floor = crate::sync::store_commit::MembershipCausalFloor {
+            effective_coordinates: vec![raw_losing_control],
+            resolutions: resumed.resolution_refs().to_vec(),
+        };
+        assert!(
+            !crate::sync::store_pull::retained_membership_floor_is_included(
+                &checkpoint_floor,
+                &resumed,
+            ),
+            "a coordinate present only in the raw losing branch cannot satisfy a retained effective checkpoint floor",
+        );
         assert_eq!(
             resumed.effective_frontier(),
             resolver_branch_state.effective_frontier

@@ -871,41 +871,45 @@ pub async fn load_owner_recovery_node_ref(
     .await
 }
 
-pub async fn load_commit_ref(
-    storage: &dyn SyncStorage,
+pub fn load_commit_ref<'a>(
+    storage: &'a dyn SyncStorage,
     store_root_hash: ObjectHash,
-    reference: &StoreBatchCommitRef,
-    author: &StoreDeviceRegistration,
-) -> Result<VerifiedObject<StoreBatchCommit>, StoreObjectError> {
-    let semantic_prefix =
-        super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
-            .map_err(|source| StoreObjectError::InvalidObject {
-                semantic_prefix: "Store candidate commit".to_string(),
-                key: reference.object.slot().logical_key().to_string(),
-                source: Box::new(source),
-            })?;
-    let context =
-        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
-    let expected_reference = reference.clone();
-    let expected_author = author.clone();
-    load_exact_object(
-        storage,
-        &context,
-        &reference.object,
-        &semantic_prefix,
-        reference.commit_hash,
-        move |bytes| {
-            let commit = StoreBatchCommit::parse_at(
-                bytes,
-                store_root_hash,
-                &expected_reference.coord,
-                &expected_author,
-            )?;
-            expected_reference.verify_commit(&commit)?;
-            Ok(commit)
-        },
-    )
-    .await
+    reference: &'a StoreBatchCommitRef,
+    author: &'a StoreDeviceRegistration,
+) -> StoreObjectFuture<'a, VerifiedObject<StoreBatchCommit>> {
+    Box::pin(async move {
+        let semantic_prefix =
+            super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
+                .map_err(|source| StoreObjectError::InvalidObject {
+                    semantic_prefix: "Store candidate commit".to_string(),
+                    key: reference.object.slot().logical_key().to_string(),
+                    source: Box::new(source),
+                })?;
+        let context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let expected_reference = reference.clone();
+        let expected_author = author.clone();
+        Box::pin(load_exact_object(
+            storage,
+            &context,
+            &reference.object,
+            &semantic_prefix,
+            reference.commit_hash,
+            move |bytes| {
+                let commit = StoreBatchCommit::parse_at(
+                    bytes,
+                    store_root_hash,
+                    &expected_reference.coord,
+                    &expected_author,
+                )?;
+                expected_reference.verify_commit(&commit)?;
+                Ok(commit)
+            },
+        ))
+        .await
+    })
 }
 
 pub async fn load_head_ref(

@@ -601,9 +601,13 @@ async fn prepare_proposal(
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
     let authorization = Box::new(
-        super::device_join::load_current_device_join_authorization(db, storage, coordination)
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
+        Box::pin(super::device_join::load_current_device_join_authorization(
+            db,
+            storage,
+            coordination,
+        ))
+        .await
+        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
     );
     let plan = Box::new(
         Box::pin(super::store_outbound::prepare_store_operation_commit(
@@ -671,11 +675,17 @@ async fn prepare_proposal(
     )?;
     let reference =
         StoreDeviceExclusionProposalRef::from_proposal(&proposal, prepared.reference().clone())?;
+    let retained = super::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
+        reference.clone(),
+        &proposal,
+        &target_registration,
+        plan.registration(),
+    )?;
     let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
         db,
         storage,
         *plan,
-        StoreOperationBatch::DeviceExclusionProposal(reference.clone()),
+        StoreOperationBatch::DeviceExclusionProposal(retained),
     ))
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
@@ -693,13 +703,20 @@ async fn prepare_proposal(
     Ok(durable)
 }
 
-pub async fn cancel_device_exclusion(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
-    identity_signer: &UserKeypair,
-    proposal: &StoreDeviceExclusionProposalRef,
-) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+pub fn cancel_device_exclusion<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
+    identity_signer: &'a UserKeypair,
+    proposal: &'a StoreDeviceExclusionProposalRef,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<StoreDeviceExclusionResult, StoreDeviceExclusionError>,
+            > + Send
+            + 'a,
+    >,
+> {
     publish_outcome(
         db,
         storage,
@@ -708,16 +725,22 @@ pub async fn cancel_device_exclusion(
         proposal,
         OutcomeIntent::Cancel,
     )
-    .await
 }
 
-pub async fn finalize_device_exclusion(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
-    identity_signer: &UserKeypair,
-    proposal: &StoreDeviceExclusionProposalRef,
-) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+pub fn finalize_device_exclusion<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
+    identity_signer: &'a UserKeypair,
+    proposal: &'a StoreDeviceExclusionProposalRef,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<StoreDeviceExclusionResult, StoreDeviceExclusionError>,
+            > + Send
+            + 'a,
+    >,
+> {
     publish_outcome(
         db,
         storage,
@@ -726,7 +749,6 @@ pub async fn finalize_device_exclusion(
         proposal,
         OutcomeIntent::Exclude,
     )
-    .await
 }
 
 pub async fn resume_device_exclusion(
@@ -777,33 +799,50 @@ enum OutcomeIntent {
     Cancel,
 }
 
-async fn publish_outcome(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
-    identity_signer: &UserKeypair,
-    proposal_ref: &StoreDeviceExclusionProposalRef,
+fn publish_outcome<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
+    identity_signer: &'a UserKeypair,
+    proposal_ref: &'a StoreDeviceExclusionProposalRef,
     intent: OutcomeIntent,
-) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-    let _lock = db.lock_store_device_exclusion().await;
-    reject_active_operation(db).await?;
-    let durable = Box::pin(prepare_outcome(
-        db,
-        storage,
-        coordination,
-        identity_signer,
-        proposal_ref,
-        intent,
-    ))
-    .await?;
-    drive_device_exclusion(
-        db,
-        storage,
-        coordination,
-        identity_signer,
-        Box::new(durable),
-    )
-    .await
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<StoreDeviceExclusionResult, StoreDeviceExclusionError>,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let _lock = db.lock_store_device_exclusion().await;
+        reject_active_operation(db).await?;
+        let authorization = Box::pin(super::device_join::load_current_device_join_authorization(
+            db,
+            storage,
+            coordination,
+        ))
+        .await
+        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+        let durable = Box::pin(prepare_outcome(
+            db,
+            storage,
+            coordination,
+            identity_signer,
+            proposal_ref,
+            intent,
+            authorization,
+        ))
+        .await?;
+        drive_device_exclusion(
+            db,
+            storage,
+            coordination,
+            identity_signer,
+            Box::new(durable),
+        )
+        .await
+    })
 }
 
 async fn prepare_outcome(
@@ -813,20 +852,17 @@ async fn prepare_outcome(
     identity_signer: &UserKeypair,
     proposal_ref: &StoreDeviceExclusionProposalRef,
     intent: OutcomeIntent,
+    authorization: super::device_join::DeviceJoinAuthorization,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
-    let authorization =
-        super::device_join::load_current_device_join_authorization(db, storage, coordination)
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-    let plan = super::store_outbound::prepare_store_operation_commit(
+    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
         &device_id,
         identity_signer,
         authorization.merge_chain(),
-    )
+    ))
     .await?;
     let owner_grant = plan
         .owner_grant()
@@ -892,12 +928,20 @@ async fn prepare_outcome(
         &proposal.object.value,
         prepared.reference().clone(),
     )?;
-    let candidate = super::store_outbound::prepare_store_operation_candidate(
+    let retained_proposal =
+        super::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(&proposal);
+    let retained = super::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
+        &reference,
+        retained_proposal,
+        &outcome,
+        plan.registration(),
+    )?;
+    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
         db,
         storage,
         plan,
-        StoreOperationBatch::DeviceExclusionOutcome(reference.clone()),
-    )
+        StoreOperationBatch::DeviceExclusionOutcome(retained),
+    ))
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
         DurableStoreDeviceExclusionObject::Outcome {
@@ -907,7 +951,7 @@ async fn prepare_outcome(
         },
         candidate,
     )?;
-    let durable = db.begin_outbound_store_device_exclusion(operation).await?;
+    let durable = Box::pin(db.begin_outbound_store_device_exclusion(operation)).await?;
     #[cfg(any(test, feature = "test-utils"))]
     db.reach_test_point(crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged)
         .await;
@@ -943,14 +987,14 @@ fn drive_device_exclusion<'a>(
             {
                 return Ok(result);
             }
-            match Box::pin(publish_device_exclusion_candidate(
+            let progress = Box::pin(publish_device_exclusion_candidate(
                 db,
                 storage,
                 coordination,
                 &mut operation,
             ))
-            .await?
-            {
+            .await?;
+            match progress {
                 DeviceExclusionPublicationProgress::Completed(result) => return Ok(result),
                 DeviceExclusionPublicationProgress::Continue => {}
                 DeviceExclusionPublicationProgress::ReplacementRequired(proof) => {
@@ -1168,7 +1212,10 @@ async fn prepare_replacement_candidate(
     identity_signer: &UserKeypair,
     object: &DurableStoreDeviceExclusionObject,
 ) -> Result<PreparedStoreOperationCommit, StoreDeviceExclusionError> {
-    let DurableStoreDeviceExclusionObject::Outcome { reference, .. } = object else {
+    let DurableStoreDeviceExclusionObject::Outcome {
+        reference, value, ..
+    } = object
+    else {
         return Err(StoreDeviceExclusionError::InvalidState(
             "only an exclusion outcome can acquire a replacement candidate".to_string(),
         ));
@@ -1189,12 +1236,24 @@ async fn prepare_replacement_candidate(
     .await?;
     let state = db.resolved_store_device_state(plan.device_state()).await?;
     require_pending_proposal(&state, reference.proposal())?;
-    super::store_outbound::prepare_store_operation_candidate(
+    let proposal = super::store_objects::load_device_exclusion_proposal_ref(
+        storage,
+        plan.root(),
+        reference.proposal(),
+    )
+    .await?;
+    let retained = super::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
+        reference,
+        super::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(&proposal),
+        value,
+        plan.registration(),
+    )?;
+    Box::pin(super::store_outbound::prepare_store_operation_candidate(
         db,
         storage,
         plan,
-        StoreOperationBatch::DeviceExclusionOutcome(reference.clone()),
-    )
+        StoreOperationBatch::DeviceExclusionOutcome(retained),
+    ))
     .await
     .map_err(StoreDeviceExclusionError::from)
 }
@@ -1261,16 +1320,15 @@ async fn resolve_exclusion_object_collision(
             "occupied exclusion outcome changed during exact verification".to_string(),
         ));
     }
-    let completed = db
-        .complete_outbound_store_device_exclusion_slot_loss(
-            operation,
-            DurableStoreDeviceExclusionObject::Outcome {
-                reference: winner_ref,
-                value: unverified,
-                prepared,
-            },
-        )
-        .await?;
+    let completed = Box::pin(db.complete_outbound_store_device_exclusion_slot_loss(
+        operation,
+        DurableStoreDeviceExclusionObject::Outcome {
+            reference: winner_ref,
+            value: unverified,
+            prepared,
+        },
+    ))
+    .await?;
     Ok(Some(completed))
 }
 
@@ -1582,6 +1640,10 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_preserves_author_exclusion_activation_evidence() {
+        run_snapshot_preserves_author_exclusion_activation_evidence().await;
+    }
+
+    async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         let signer = UserKeypair::generate();
         let owner_db = open_test_db();
         let store = Arc::new(
@@ -1632,7 +1694,7 @@ mod tests {
             .call(|connection| {
                 connection
                     .query_row(
-                        "SELECT exclusion_ref, accepted_cut, activation_head
+                        "SELECT exclusion_ref, accepted_cut, activation_commit, activation_head
                          FROM store_author_exclusion_activations",
                         [],
                         |row| {
@@ -1640,6 +1702,7 @@ mod tests {
                                 row.get::<_, String>(0)?,
                                 row.get::<_, String>(1)?,
                                 row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
                             ))
                         },
                     )
@@ -1691,12 +1754,12 @@ mod tests {
         std::fs::write(&image_path, &image).expect("write author exclusion snapshot image");
         let image =
             rusqlite::Connection::open(&image_path).expect("open author exclusion snapshot image");
-        let stored: (String, String, String) = image
+        let stored: (String, String, String, String) = image
             .query_row(
-                "SELECT exclusion_ref, accepted_cut, activation_head
+                "SELECT exclusion_ref, accepted_cut, activation_commit, activation_head
                  FROM store_author_exclusion_activations",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("snapshot carries author exclusion evidence");
         assert_eq!(stored, live_evidence);
@@ -1711,6 +1774,7 @@ mod tests {
             AuthorExclusionLocatorTamper::Missing,
             AuthorExclusionLocatorTamper::ExclusionReference,
             AuthorExclusionLocatorTamper::AcceptedCut,
+            AuthorExclusionLocatorTamper::ActivationCommit,
             AuthorExclusionLocatorTamper::ActivationHead,
         ] {
             let (_restored_directory, restored) = Box::pin(open_published_exclusion_snapshot(
@@ -1829,15 +1893,9 @@ mod tests {
             .await
             .expect("open bootstrap exclusion Store");
         let peer_db = open_test_db();
-        Box::pin(install_active_device_fixture(
-            &store,
-            &owner_db,
-            &peer_db,
-            &signer,
-            "2026-07-18T00:00:00Z",
-        ))
-        .await
-        .expect("activate bootstrap exclusion peer");
+        install_active_device_fixture(&store, &owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
+            .await
+            .expect("activate bootstrap exclusion peer");
         let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
             prepare_transfer_candidate(&peer_db, &store, &signer, "bootstrap-excluded-candidate"),
         )
@@ -2168,7 +2226,7 @@ mod tests {
         store: Arc<TestStore>,
         signer: &UserKeypair,
         target: &StoreDeviceRegistrationRef,
-    ) {
+    ) -> StoreDeviceExclusionRef {
         let owner_db = owner_db.clone();
         let signer = signer.clone();
         let target = target.clone();
@@ -2182,7 +2240,7 @@ mod tests {
             .await
         })
         .await
-        .expect("join peer exclusion finalization");
+        .expect("join peer exclusion finalization")
     }
 
     #[tokio::test]
@@ -2206,6 +2264,7 @@ mod tests {
             PreparedAbandonmentHeadPublication::Absent,
             true,
             false,
+            None,
         ))
         .await;
     }
@@ -2274,6 +2333,69 @@ mod tests {
             PreparedAbandonmentHeadPublication::Absent,
             false,
             true,
+            None,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn summary_materialization_failure_rolls_back_terminal_merge_transaction() {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            ExcludedCandidateHeadPublication::AfterHeadReadBack,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+            false,
+            true,
+            Some(TerminalMergeTransactionFailure::Injected(
+                crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
+            )),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retraction_deletion_failure_rolls_back_terminal_merge_transaction() {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            ExcludedCandidateHeadPublication::AfterHeadReadBack,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+            false,
+            true,
+            Some(TerminalMergeTransactionFailure::Injected(
+                crate::database::MergeMaterializationFailurePoint::RetractionDeletion,
+            )),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn projection_replacement_failure_rolls_back_terminal_merge_transaction() {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            ExcludedCandidateHeadPublication::AfterHeadReadBack,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+            false,
+            true,
+            Some(TerminalMergeTransactionFailure::Injected(
+                crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+            )),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn missing_retracted_device_state_rolls_back_terminal_merge_transaction() {
+        Box::pin(run_excluded_author_candidate_cleanup_case(
+            ExcludedCandidateHeadPublication::AfterHeadReadBack,
+            false,
+            false,
+            PreparedAbandonmentHeadPublication::Absent,
+            false,
+            true,
+            Some(TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction),
         ))
         .await;
     }
@@ -2416,6 +2538,7 @@ mod tests {
             prepared_head_publication,
             false,
             false,
+            None,
         ))
         .await;
     }
@@ -2478,6 +2601,119 @@ mod tests {
         .expect("materialize surviving owner commit on excluded peer");
     }
 
+    #[derive(Clone, Copy)]
+    enum TerminalMergeTransactionFailure {
+        Injected(crate::database::MergeMaterializationFailurePoint),
+        DeleteDeviceStateDuringRetraction,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn assert_terminal_merge_transaction_rollback(
+        peer_db: &Database,
+        store: &TestStore,
+        store_dir: &StoreDir,
+        write_id: &crate::WriteId,
+        original: &crate::PublishedPosition,
+        activation_commit: &StoreBatchCommitRef,
+        failure: TerminalMergeTransactionFailure,
+    ) {
+        match failure {
+            TerminalMergeTransactionFailure::Injected(point) => {
+                peer_db.fail_next_merge_materialization_at(point);
+            }
+            TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
+                peer_db
+                    .call(|connection| {
+                        connection
+                            .execute_batch(
+                                "CREATE TRIGGER delete_retracted_device_state_early
+                                 AFTER DELETE ON materialized_commits
+                                 BEGIN
+                                   DELETE FROM store_device_state_snapshots
+                                   WHERE commit_ref = OLD.commit_ref;
+                                 END;",
+                            )
+                            .map_err(crate::database::DbError::from)?;
+                        Ok(())
+                    })
+                    .await
+                    .expect("install early device-state deletion trigger");
+            }
+        }
+        let membership = Box::pin(super::super::pull::load_cycle_membership(
+            &store.storage,
+            peer_db,
+        ))
+        .await
+        .expect("load excluded peer membership for injected failure");
+        let error = Box::pin(super::super::store_pull::pull_store_commits(
+            peer_db,
+            peer_db.synced_tables(),
+            &store.storage,
+            store.root.store_root_hash,
+            store_dir,
+            membership.chain.as_ref(),
+        ))
+        .await
+        .expect_err("injected terminal Merge transaction failure");
+        let expected = match failure {
+            TerminalMergeTransactionFailure::Injected(_) => "injected failure",
+            TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
+                "retracted Merge device state disappeared"
+            }
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected terminal transaction error: {error:?}"
+        );
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &activation_commit.coord
+        else {
+            panic!("author exclusion activation is not Merge")
+        };
+        assert!(peer_db
+            .exact_materialized_ref(&stream_id.to_string(), *sequence)
+            .await
+            .expect("reload rolled-back activation coordinate")
+            .is_none());
+        peer_db
+            .retained_merge_materialization(original.commit().clone())
+            .await
+            .expect("rolled-back retraction retains the original materialization");
+        assert!(matches!(
+            peer_db
+                .write_status(write_id)
+                .await
+                .expect("reload rolled-back write status"),
+            crate::WriteStatus::Published(position) if position.as_ref() == original
+        ));
+        assert_eq!(
+            peer_db
+                .call(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM notes WHERE id IN (
+                                 'excluded-peer-note',
+                                 'excluded-peer-local-note',
+                                 'surviving-owner-note'
+                             )",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(crate::database::DbError::from)
+                })
+                .await
+                .expect("count rows after transaction rollback"),
+            3,
+        );
+        assert!(!peer_db
+            .merge_candidate_cleanup_pending(write_id)
+            .await
+            .expect("rolled-back transaction created no cleanup"));
+    }
+
     async fn run_excluded_author_candidate_cleanup_case(
         head_publication: ExcludedCandidateHeadPublication,
         sabotage_activation_head: bool,
@@ -2485,6 +2721,7 @@ mod tests {
         prepared_head_publication: PreparedAbandonmentHeadPublication,
         index_shared_blobs: bool,
         materialize_before_exclusion: bool,
+        transaction_failure: Option<TerminalMergeTransactionFailure>,
     ) {
         let signer = UserKeypair::generate();
         let owner_db = open_test_db();
@@ -2665,6 +2902,31 @@ mod tests {
             assert_eq!(local_partitions, 1);
             assert!(local_changeset_bytes > 0);
             finalize_peer_exclusion_detached(&owner_db, store.clone(), &signer, &target).await;
+            let activation_commit = owner_db
+                .author_exclusion_activation_for_candidate(candidate_ref.clone(), target.clone())
+                .await
+                .expect("load terminal transaction activation")
+                .expect("owner exclusion covers the accepted candidate")
+                .activation_commit()
+                .clone();
+            if let Some(failure) = transaction_failure {
+                Box::pin(assert_terminal_merge_transaction_rollback(
+                    &peer_db,
+                    store.as_ref(),
+                    &store_dir,
+                    &write_id,
+                    &original,
+                    &activation_commit,
+                    failure,
+                ))
+                .await;
+                if matches!(
+                    failure,
+                    TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction
+                ) {
+                    return;
+                }
+            }
             store.home.fail_exact_delete_on_call(1);
             let membership = Box::pin(super::super::pull::load_cycle_membership(
                 &store.storage,
@@ -3591,6 +3853,7 @@ mod tests {
             store.root.store_root_hash,
             candidate.commit.value.author_registration.clone(),
             third_ref,
+            candidate.head.value.history_summary,
             candidate.head.value.successor.clone(),
             &device_signer,
         )
@@ -3810,6 +4073,7 @@ mod tests {
         Missing,
         ExclusionReference,
         AcceptedCut,
+        ActivationCommit,
         ActivationHead,
     }
 
@@ -3905,7 +4169,7 @@ mod tests {
                             crate::sync::causal_grants::AuthorStreamId::from_digest(
                                 ObjectHash::digest(b"wrong exclusion accepted-cut stream"),
                             ),
-                            candidate,
+                            candidate.clone(),
                         );
                         let wrong = serde_json::to_string(&cut).map_err(|error| {
                             crate::database::DbError::Message(format!(
@@ -3915,6 +4179,18 @@ mod tests {
                         connection.execute(
                             "UPDATE store_author_exclusion_activations
                              SET accepted_cut = ?1 WHERE exclusion_ref = ?2",
+                            (&wrong, &exact),
+                        )
+                    }
+                    AuthorExclusionLocatorTamper::ActivationCommit => {
+                        let wrong = serde_json::to_string(&candidate).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "serialize wrong exclusion activation commit: {error}"
+                            ))
+                        })?;
+                        connection.execute(
+                            "UPDATE store_author_exclusion_activations
+                             SET activation_commit = ?1 WHERE exclusion_ref = ?2",
                             (&wrong, &exact),
                         )
                     }
@@ -4284,11 +4560,19 @@ mod tests {
         let reference =
             StoreDeviceExclusionProposalRef::from_proposal(&proposal, prepared.reference().clone())
                 .expect("reference exclusion proposal");
+        let retained =
+            super::super::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
+                reference.clone(),
+                &proposal,
+                plan.registration(),
+                plan.registration(),
+            )
+            .expect("retain prepared exclusion proposal");
         let candidate = super::super::store_outbound::prepare_store_operation_candidate(
             db,
             storage,
             plan,
-            StoreOperationBatch::DeviceExclusionProposal(reference.clone()),
+            StoreOperationBatch::DeviceExclusionProposal(retained),
         )
         .await
         .expect("prepare exclusion activation candidate");

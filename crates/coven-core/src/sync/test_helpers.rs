@@ -1517,10 +1517,12 @@ pub fn install_active_device_fixture<'a>(
             ),
         };
         let authorization = Box::new(
-            crate::sync::device_join::load_current_device_join_authorization(
-                observer_db,
-                &store.storage,
-                coordination,
+            Box::pin(
+                crate::sync::device_join::load_current_device_join_authorization(
+                    observer_db,
+                    &store.storage,
+                    coordination,
+                ),
             )
             .await
             .map_err(|error| error.to_string())?,
@@ -2274,6 +2276,30 @@ impl TestStore {
             .device_signer(&self.signer)
             .map_err(|error| error.to_string())?;
         Ok((reference, registration, device_signer))
+    }
+
+    #[cfg(test)]
+    pub async fn retained_merge_history_summary(
+        &self,
+        device_id: &crate::sync::store_commit::StoreDeviceId,
+        reference: crate::sync::store_commit::StoreBatchCommitRef,
+    ) -> Result<crate::sync::store_commit::RetainedVerifiedMergeHistorySummary, String> {
+        let db = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .values()
+                .chain(producers.unassigned.iter())
+                .find(|producer| producer.device_id == device_id.to_string())
+                .map(|producer| producer.db.clone())
+                .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
+        };
+        Ok(db
+            .retained_merge_materialization(reference)
+            .await
+            .map_err(|error| error.to_string())?
+            .history_summary()
+            .clone())
     }
 
     #[cfg(test)]

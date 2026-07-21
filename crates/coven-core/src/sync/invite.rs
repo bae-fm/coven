@@ -1421,7 +1421,7 @@ async fn build_revoke_mutation(
             owner_keypair,
         )
         .await?;
-        let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+        let mut candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
             db,
             storage,
             operation,
@@ -1443,6 +1443,9 @@ async fn build_revoke_mutation(
             owner_keypair,
         )
         .await?;
+        candidate
+            .attach_merge_membership_proof(storage, &head, None, owner_keypair)
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
         RevokeMembershipPublication::StoreActivated {
             transition: Box::new(transition),
             candidate: Box::new(candidate),
@@ -1934,7 +1937,7 @@ async fn build_resolution_mutation(
         ),
     ];
     stream_activations.sort();
-    let candidate = super::store_outbound::prepare_store_operation_candidate(
+    let mut candidate = super::store_outbound::prepare_store_operation_candidate(
         db,
         storage,
         operation,
@@ -1956,6 +1959,9 @@ async fn build_resolution_mutation(
         signer,
     )
     .await?;
+    candidate
+        .attach_merge_membership_proof(storage, &publication, Some(&resolution), signer)
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     let plan = ResolveMutationPlan {
         resolution,
         reference,
@@ -2312,7 +2318,7 @@ async fn execute_revoke_mutation(
                             .collect::<Vec<_>>(),
                     )
                     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-                let outcome = publish_prepared_merge_membership_activation(
+                let outcome = Box::pin(publish_prepared_merge_membership_activation(
                     persistence.db,
                     storage,
                     None,
@@ -2331,7 +2337,7 @@ async fn execute_revoke_mutation(
                         generation: keyring.current_generation(),
                         remote_objects: current_remotes.clone(),
                     },
-                )
+                ))
                 .await?;
                 match outcome {
                     super::store_outbound::StoreOperationPublicationOutcome::Activated(reference) => {

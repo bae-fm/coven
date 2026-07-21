@@ -88,12 +88,6 @@ enum OwnerPromotionJournalState {
         wrapped_key: PreparedWrappedStoreKey,
         transition: Box<PreparedMembershipTransition>,
     },
-    MergeCommitPrepared {
-        acceptance: OwnerPromotionAcceptance,
-        wrapped_key: PreparedWrappedStoreKey,
-        transition: Box<PreparedMembershipTransition>,
-        candidate: Box<PreparedStoreOperationCommit>,
-    },
     MergeHeadPrepared {
         acceptance: OwnerPromotionAcceptance,
         wrapped_key: PreparedWrappedStoreKey,
@@ -693,7 +687,6 @@ impl OwnerPromotionJournal {
                 }
             }
             OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
-            | OwnerPromotionJournalState::MergeCommitPrepared { acceptance, .. }
             | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
             | OwnerPromotionJournalState::SerialCommitPrepared { acceptance, .. } => {
                 OwnerPromotionStatus::FinalizationPending {
@@ -759,21 +752,6 @@ impl OwnerPromotionJournal {
                         &wrapped_key.reference,
                         acceptance,
                     )
-            }
-            OwnerPromotionJournalState::MergeCommitPrepared {
-                acceptance,
-                wrapped_key,
-                transition,
-                candidate,
-            } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
-                    && wrapped_key_matches_acceptance(wrapped_key, acceptance)
-                    && transition_matches_acceptance(
-                        transition,
-                        &wrapped_key.reference,
-                        acceptance,
-                    )
-                    && merge_candidate_matches_finalization(candidate, transition, acceptance)
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
@@ -1046,31 +1024,12 @@ impl OwnerPromotionJournal {
                     wrapped_key,
                     transition,
                 },
-                OwnerPromotionJournalState::MergeCommitPrepared {
-                    acceptance: successor,
-                    wrapped_key: successor_key,
-                    transition: successor_transition,
-                    ..
-                },
-            ) => {
-                acceptance == successor
-                    && wrapped_key.reference == successor_key.reference
-                    && transition.entry_ref == successor_transition.entry_ref
-                    && transition.transition == successor_transition.transition
-            }
-            (
-                OwnerPromotionJournalState::MergeCommitPrepared {
-                    acceptance,
-                    wrapped_key,
-                    transition,
-                    candidate,
-                },
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance: successor,
                     wrapped_key: successor_key,
                     transition: successor_transition,
                     publication,
-                    candidate: successor_candidate,
+                    candidate,
                 },
             ) => {
                 acceptance == successor
@@ -1079,7 +1038,7 @@ impl OwnerPromotionJournal {
                     && transition.entry_ref == publication.entry_ref
                     && transition.entry_ref == successor_transition.entry_ref
                     && transition.transition == successor_transition.transition
-                    && candidate.has_same_durable_activation_as(successor_candidate)
+                    && merge_candidate_matches_finalization(candidate, transition, acceptance)
                     && transition
                         .transition
                         .matches_head(&publication.head, &publication.head_ref)
@@ -1501,7 +1460,6 @@ async fn resume_request_publication_state(
             | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
             OwnerPromotionJournalState::AcceptanceReady { acceptance }
             | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
-            | OwnerPromotionJournalState::MergeCommitPrepared { acceptance, .. }
             | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
             | OwnerPromotionJournalState::SerialCommitPrepared { acceptance, .. }
             | OwnerPromotionJournalState::Finalized { acceptance, .. }
@@ -1662,7 +1620,6 @@ pub async fn accept_owner_promotion(
     {
         if let OwnerPromotionJournalState::AcceptanceReady { acceptance }
         | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
-        | OwnerPromotionJournalState::MergeCommitPrepared { acceptance, .. }
         | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
         | OwnerPromotionJournalState::SerialCommitPrepared { acceptance, .. }
         | OwnerPromotionJournalState::Finalized { acceptance, .. }
@@ -1887,7 +1844,7 @@ pub fn finalize_owner_promotion<'a>(
             .local_store_root_ref()
             .await?
             .ok_or_else(|| OwnerPromotionError::Protocol("Store root is absent".to_string()))?;
-        Box::pin(super::store_pull::verify_owner_promotion_acceptance(
+        let verified_acceptance = Box::pin(super::store_pull::verify_owner_promotion_acceptance(
             storage,
             coordination,
             &root,
@@ -1911,6 +1868,7 @@ pub fn finalize_owner_promotion<'a>(
                 encryption,
                 root.clone(),
                 acceptance.clone(),
+                &verified_acceptance,
             )
             .await?;
             match resumed {
@@ -2003,6 +1961,7 @@ fn prepare_owner_promotion_finalization<'a>(
     root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionPreparation, OwnerPromotionError>>
@@ -2035,6 +1994,7 @@ fn prepare_owner_promotion_finalization<'a>(
             root,
             journal,
             acceptance,
+            verified_acceptance,
         ),
     }
 }
@@ -2147,6 +2107,7 @@ fn prepare_serial_owner_promotion_finalization<'a>(
     root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionPreparation, OwnerPromotionError>>
@@ -2157,17 +2118,32 @@ fn prepare_serial_owner_promotion_finalization<'a>(
     Box::pin(async move {
         let promoter =
             load_owner_promotion_promoter(db, device_id, identity, root, &acceptance).await?;
-        let coordination = coordination.ok_or_else(|| {
-            OwnerPromotionError::Protocol(
+        if coordination.is_none() {
+            return Err(OwnerPromotionError::Protocol(
                 "Serial promotion finalization requires coordination".to_string(),
+            ));
+        }
+        let super::store_pull::VerifiedOwnerPromotionAcceptance::Serial(snapshot) =
+            verified_acceptance
+        else {
+            return Err(OwnerPromotionError::Protocol(
+                "Serial promotion carries Merge acceptance authority".to_string(),
+            ));
+        };
+        let operation = Box::pin(
+            super::store_outbound::prepare_store_operation_commit_from_serial_snapshot(
+                db,
+                device_id,
+                identity,
+                snapshot.clone(),
+            ),
+        )
+        .await?;
+        let authorization = operation.serial_authorization().cloned().ok_or_else(|| {
+            OwnerPromotionError::Protocol(
+                "Serial promotion operation carries Merge authorization".to_string(),
             )
         })?;
-        let authorization = Box::pin(super::store_outbound::current_serial_authorization(
-            db,
-            storage,
-            coordination,
-        ))
-        .await?;
         if authorization.key_generation != encryption.current_generation() {
             return Err(OwnerPromotionError::Protocol(
                 "Serial promotion keyring differs from accepted authorization".to_string(),
@@ -2203,15 +2179,6 @@ fn prepare_serial_owner_promotion_finalization<'a>(
                 db.hlc().now().to_string(),
             )
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let operation = Box::pin(super::store_outbound::prepare_store_operation_commit(
-            db,
-            storage,
-            Some(coordination),
-            device_id,
-            identity,
-            None,
-        ))
-        .await?;
         let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
             db,
             storage,
@@ -2320,7 +2287,7 @@ fn prepare_merge_store_candidate<'a>(
             ),
         ];
         stream_activations.sort();
-        let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+        let mut candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
             db,
             storage,
             plan,
@@ -2330,13 +2297,29 @@ fn prepare_merge_store_candidate<'a>(
             },
         ))
         .await?;
+        let publication = super::invite::finish_membership_transition(
+            storage,
+            db,
+            root.store_root_hash,
+            transition.as_ref().clone(),
+            super::membership::MembershipHeadActivation::StoreCommit {
+                commit: candidate.reference.clone(),
+            },
+            identity,
+        )
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        candidate
+            .attach_merge_membership_proof(storage, &publication, None, identity)
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let next = OwnerPromotionJournal {
             promotion_id: journal.promotion_id,
             target: journal.target.clone(),
-            state: OwnerPromotionJournalState::MergeCommitPrepared {
+            state: OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,
                 wrapped_key,
                 transition,
+                publication: Box::new(publication),
                 candidate: Box::new(candidate),
             },
         };
@@ -2711,6 +2694,7 @@ fn resume_owner_promotion_finalization<'a>(
     encryption: &'a EncryptionService,
     root: StoreRootRef,
     acceptance: OwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionResumeOutcome, OwnerPromotionError>>
@@ -2747,10 +2731,6 @@ fn resume_owner_promotion_finalization<'a>(
                 acceptance: persisted,
             }
             | OwnerPromotionJournalState::MergeMembershipPrepared {
-                acceptance: persisted,
-                ..
-            }
-            | OwnerPromotionJournalState::MergeCommitPrepared {
                 acceptance: persisted,
                 ..
             }
@@ -2805,6 +2785,7 @@ fn resume_owner_promotion_finalization<'a>(
                         &root,
                         &previous,
                         acceptance,
+                        verified_acceptance,
                     )
                     .await?;
                     match preparation {
@@ -2841,41 +2822,6 @@ fn resume_owner_promotion_finalization<'a>(
                     .await?;
                     (previous, state) = advance_owner_promotion_journal(db, previous, next).await?;
                 }
-                OwnerPromotionJournalState::MergeCommitPrepared {
-                    acceptance,
-                    wrapped_key,
-                    transition,
-                    candidate,
-                } => {
-                    super::store_outbound::upload_prepared_merge_store_operation_commit(
-                        storage, &candidate,
-                    )
-                    .await?;
-                    let publication = super::invite::finish_membership_transition(
-                        storage,
-                        db,
-                        root.store_root_hash,
-                        transition.as_ref().clone(),
-                        super::membership::MembershipHeadActivation::StoreCommit {
-                            commit: candidate.reference.clone(),
-                        },
-                        identity,
-                    )
-                    .await
-                    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-                    let next = OwnerPromotionJournal {
-                        promotion_id: previous.promotion_id,
-                        target: previous.target.clone(),
-                        state: OwnerPromotionJournalState::MergeHeadPrepared {
-                            acceptance,
-                            wrapped_key,
-                            transition,
-                            publication: Box::new(publication),
-                            candidate,
-                        },
-                    };
-                    (previous, state) = advance_owner_promotion_journal(db, previous, next).await?;
-                }
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
                     wrapped_key,
@@ -2897,7 +2843,7 @@ fn resume_owner_promotion_finalization<'a>(
                     wrapped_key,
                     candidate,
                 } => {
-                    match publish_owner_promotion_serial_candidate(
+                    let publication = publish_owner_promotion_serial_candidate(
                         db,
                         storage,
                         coordination,
@@ -2907,8 +2853,8 @@ fn resume_owner_promotion_finalization<'a>(
                         wrapped_key,
                         candidate,
                     )
-                    .await?
-                    {
+                    .await?;
+                    match publication {
                         MergeHeadPublication::Continue(next) => {
                             (previous, state) =
                                 advance_owner_promotion_journal(db, previous, next).await?;

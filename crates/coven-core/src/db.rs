@@ -482,6 +482,7 @@ macro_rules! coven_tables {
             "
     exclusion_ref TEXT PRIMARY KEY CHECK (json_valid(exclusion_ref)),
     accepted_cut TEXT NOT NULL CHECK (json_valid(accepted_cut)),
+    activation_commit TEXT NOT NULL CHECK (json_valid(activation_commit)),
     activation_head TEXT NOT NULL CHECK (json_valid(activation_head))
 "
         );
@@ -1048,6 +1049,7 @@ mod tests {
             [
                 ("exclusion_ref".to_string(), 1),
                 ("accepted_cut".to_string(), 0),
+                ("activation_commit".to_string(), 0),
                 ("activation_head".to_string(), 0),
             ]
         );

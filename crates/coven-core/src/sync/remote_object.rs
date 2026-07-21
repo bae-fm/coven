@@ -3115,6 +3115,23 @@ impl CandidateNonactivation {
         value.validate()
     }
 
+    pub(crate) fn from_durable_parts(
+        candidate: &StoreBatchCommitRef,
+        commit: &super::store_commit::StoreBatchCommit,
+        proof: CandidateNonactivationProof,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let value = Self {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: candidate.coord.clone(),
+                object: candidate.object.clone(),
+                canonical_signed_bytes: commit.to_bytes(),
+            },
+            proof,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         let commit: super::store_commit::StoreBatchCommit =
             serde_json::from_slice(&self.candidate.canonical_signed_bytes)
@@ -3153,6 +3170,28 @@ pub(crate) struct VerifiedCandidateNonactivation {
     evidence: Box<VerifiedCandidateNonactivationEvidence>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedDependencyRetractionAuthority {
+    durable: CandidateNonactivation,
+}
+
+impl VerifiedDependencyRetractionAuthority {
+    pub(crate) fn after_live_authority_check(
+        durable: CandidateNonactivation,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        durable.validate()?;
+        if !matches!(
+            durable.proof(),
+            CandidateNonactivationProof::MergeDependencyRetraction { .. }
+        ) {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "dependent retraction authority carries another proof family".to_string(),
+            ));
+        }
+        Ok(Self { durable })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VerifiedCandidateNonactivationEvidence {
     Merge {
@@ -3167,6 +3206,10 @@ enum VerifiedCandidateNonactivationEvidence {
         head_nonactivation: VerifiedCandidateHeadNonactivation,
     },
     MembershipGrantRevocation {
+        durable: CandidateNonactivation,
+        head_nonactivation: VerifiedCandidateHeadNonactivation,
+    },
+    DependencyRetraction {
         durable: CandidateNonactivation,
         head_nonactivation: VerifiedCandidateHeadNonactivation,
     },
@@ -3361,6 +3404,92 @@ impl VerifiedCandidateNonactivation {
         Ok(value)
     }
 
+    pub(crate) fn dependency_retraction(
+        dependency: &Self,
+        candidate: StoreBatchCommitDeletionTarget,
+        author: &super::store_commit::StoreDeviceRegistration,
+        activation_head_object: ExactObjectRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        if !matches!(
+            dependency.evidence.as_ref(),
+            VerifiedCandidateNonactivationEvidence::AuthorExclusion { .. }
+                | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation { .. }
+                | VerifiedCandidateNonactivationEvidence::DependencyRetraction { .. }
+        ) {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "dependent retraction does not descend from terminal evidence".to_string(),
+            ));
+        }
+        let commit = candidate
+            .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let dependency_reference = dependency.candidate_reference()?;
+        let value = Self {
+            evidence: Box::new(
+                VerifiedCandidateNonactivationEvidence::DependencyRetraction {
+                    durable: CandidateNonactivation {
+                        candidate,
+                        proof: CandidateNonactivationProof::MergeDependencyRetraction {
+                            dependency: dependency_reference,
+                            dependency_nonactivation: Box::new(dependency.durable().clone()),
+                        },
+                    },
+                    head_nonactivation: VerifiedCandidateHeadNonactivation {
+                        candidate: candidate_reference,
+                        head: VerifiedCandidateHead::ExactLateCandidate {
+                            object: activation_head_object,
+                        },
+                    },
+                },
+            ),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn from_verified_dependency_retraction_authority(
+        authority: VerifiedDependencyRetractionAuthority,
+        candidate: StoreBatchCommitDeletionTarget,
+        author: &super::store_commit::StoreDeviceRegistration,
+        activation_head_object: ExactObjectRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let commit = candidate
+            .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        if authority.durable.candidate != candidate {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "verified dependent retraction authority names another candidate".to_string(),
+            ));
+        }
+        let value = Self {
+            evidence: Box::new(
+                VerifiedCandidateNonactivationEvidence::DependencyRetraction {
+                    durable: authority.durable,
+                    head_nonactivation: VerifiedCandidateHeadNonactivation {
+                        candidate: candidate_reference,
+                        head: VerifiedCandidateHead::ExactLateCandidate {
+                            object: activation_head_object,
+                        },
+                    },
+                },
+            ),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
     pub(crate) fn candidate_reference(
         &self,
     ) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
@@ -3393,6 +3522,11 @@ impl VerifiedCandidateNonactivation {
                     "membership-grant revocation has no Merge slot winner".to_string(),
                 ))
             }
+            VerifiedCandidateNonactivationEvidence::DependencyRetraction { .. } => {
+                Err(RemoteObjectRecordError::InvalidProof(
+                    "dependent retraction has no Merge slot winner".to_string(),
+                ))
+            }
         }
     }
 
@@ -3403,7 +3537,10 @@ impl VerifiedCandidateNonactivation {
             | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
             | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
                 durable, ..
-            } => durable,
+            }
+            | VerifiedCandidateNonactivationEvidence::DependencyRetraction { durable, .. } => {
+                durable
+            }
         }
     }
 
@@ -3417,6 +3554,10 @@ impl VerifiedCandidateNonactivation {
                 head_nonactivation,
             } => Ok((durable, head_nonactivation)),
             VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
+                durable,
+                head_nonactivation,
+            } => Ok((durable, head_nonactivation)),
+            VerifiedCandidateNonactivationEvidence::DependencyRetraction {
                 durable,
                 head_nonactivation,
             } => Ok((durable, head_nonactivation)),
@@ -3437,7 +3578,10 @@ impl VerifiedCandidateNonactivation {
             | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
             | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
                 durable, ..
-            } => durable,
+            }
+            | VerifiedCandidateNonactivationEvidence::DependencyRetraction { durable, .. } => {
+                durable
+            }
         }
     }
 }
@@ -3462,6 +3606,10 @@ pub(crate) enum CandidateNonactivationProof {
         membership: super::circle_control::MergeStoreMembershipStateRef,
         activation_commit: StoreBatchCommitRef,
         activation_head: super::store_commit::StoreDeviceHeadRef,
+    },
+    MergeDependencyRetraction {
+        dependency: StoreBatchCommitRef,
+        dependency_nonactivation: Box<CandidateNonactivation>,
     },
 }
 
@@ -3497,6 +3645,20 @@ impl CandidateNonactivationProof {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "membership-grant revocation names a noncanonical membership state"
                             .to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::MergeDependencyRetraction {
+                dependency,
+                dependency_nonactivation,
+            } => {
+                dependency_nonactivation.validate()?;
+                if dependency.coord.policy() != crate::WritePolicy::MergeConcurrent
+                    || dependency_nonactivation.reference()? != *dependency
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "dependent retraction names another exact dependency".to_string(),
                     ));
                 }
                 Ok(())
@@ -3579,6 +3741,28 @@ impl CandidateNonactivationProof {
                 if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "membership-grant revocation names a non-Merge candidate".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::MergeDependencyRetraction { dependency, .. } => {
+                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "dependent retraction names a non-Merge candidate".to_string(),
+                    ));
+                }
+                let mut direct = commit
+                    .order
+                    .dependencies()
+                    .into_iter()
+                    .flat_map(|dependencies| dependencies.values())
+                    .collect::<BTreeSet<_>>();
+                if let Some(predecessor) = commit.order.predecessor() {
+                    direct.insert(predecessor);
+                }
+                if !direct.contains(dependency) {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "dependent retraction proof is not an exact direct dependency".to_string(),
                     ));
                 }
                 Ok(())
@@ -4437,6 +4621,7 @@ mod tests {
             store_root_hash: resolution.store_root_hash,
             author_registration: resolution.replacement_acceptance.owner_registration.clone(),
             commit: candidate.clone(),
+            history_summary: super::super::store_commit::ObjectHash::digest(&resolution_bytes),
             successor: super::super::store_commit::SuccessorLink {
                 activation: super::super::store_commit::StreamActivation::grant_authorized(
                     resolution.store_root_hash,

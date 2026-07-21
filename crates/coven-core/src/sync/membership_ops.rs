@@ -1610,7 +1610,7 @@ pub async fn remove_member_with_coordination(
     if db.write_policy() == crate::WritePolicy::Serial {
         let serial =
             serial.ok_or(super::store_outbound::StoreOutboundError::MissingSerialCoordination)?;
-        let removal = remove_serial_member(
+        let removal = Box::pin(remove_serial_member(
             storage,
             cloud_home,
             serial.coordination,
@@ -1623,7 +1623,7 @@ pub async fn remove_member_with_coordination(
             crate::encryption::generate_random_key(),
             pending_rotation,
             db,
-        )
+        ))
         .await?;
         let removal = match removal {
             SerialRemovalResult::Activated(removal) => removal,
@@ -2210,56 +2210,61 @@ pub(crate) async fn load_exact_membership_head(
     .await
 }
 
-async fn load_exact_membership_head_with_root(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    reference: &MembershipHeadRef,
-) -> Result<AuthorHead, AnchoredChainError> {
-    let coord = &reference.coord;
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreMembershipHead,
-    );
-    let semantic_prefix = reference
-        .object
-        .slot()
-        .logical_key()
-        .strip_suffix(".json")
-        .ok_or_else(|| {
-            AnchoredChainError::LoadFailed(
-                "membership head exact slot has no .json suffix".to_string(),
-            )
-        })?;
-    let bytes = storage
-        .read_protocol_object(&context, &reference.object, semantic_prefix)
+type ExactMembershipHeadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AuthorHead, AnchoredChainError>> + Send + 'a>>;
+
+fn load_exact_membership_head_with_root<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    reference: &'a MembershipHeadRef,
+) -> ExactMembershipHeadFuture<'a> {
+    Box::pin(async move {
+        let coord = &reference.coord;
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let semantic_prefix = reference
+            .object
+            .slot()
+            .logical_key()
+            .strip_suffix(".json")
+            .ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "membership head exact slot has no .json suffix".to_string(),
+                )
+            })?;
+        let bytes = storage
+            .read_protocol_object(&context, &reference.object, semantic_prefix)
+            .await
+            .map_err(|source| AnchoredChainError::StorageUnavailable {
+                operation: format!("read exact membership head {coord:?}"),
+                source,
+            })?;
+        let head: AuthorHead = serde_json::from_slice(&bytes)
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        if head.entry_coord() != *coord || head.head_hash() != reference.head_hash {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head differs from its exact reference".to_string(),
+            ));
+        }
+        let registration = Box::pin(super::store_objects::load_registration_ref_with_root(
+            storage,
+            root,
+            root_value,
+            &head.body.author_registration,
+        ))
         .await
-        .map_err(|source| AnchoredChainError::StorageUnavailable {
-            operation: format!("read exact membership head {coord:?}"),
-            source,
-        })?;
-    let head: AuthorHead = serde_json::from_slice(&bytes)
-        .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    if head.entry_coord() != *coord || head.head_hash() != reference.head_hash {
-        return Err(AnchoredChainError::LoadFailed(
-            "membership head differs from its exact reference".to_string(),
-        ));
-    }
-    let registration = Box::pin(super::store_objects::load_registration_ref_with_root(
-        storage,
-        root,
-        root_value,
-        &head.body.author_registration,
-    ))
-    .await
-    .map_err(map_membership_object_error)?
-    .value;
-    if registration.author_pubkey != coord.author_pubkey || !head.verify(&registration) {
-        return Err(AnchoredChainError::LoadFailed(
-            "membership head is not signed by its exact certified device".to_string(),
-        ));
-    }
-    Ok(head)
+        .map_err(map_membership_object_error)?
+        .value;
+        if registration.author_pubkey != coord.author_pubkey || !head.verify(&registration) {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head is not signed by its exact certified device".to_string(),
+            ));
+        }
+        Ok(head)
+    })
 }
 
 pub(crate) async fn load_anchored_chain_at_exact_heads(
@@ -2360,32 +2365,36 @@ impl LoadedExactMembershipGraph {
     }
 }
 
-async fn load_exact_membership_head_node(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    reference: &MembershipHeadRef,
-) -> Result<LoadedExactMembershipHead, AnchoredChainError> {
-    let head = Box::pin(load_exact_membership_head_with_root(
-        storage, root, root_value, reference,
-    ))
-    .await?;
-    let loaded_entry = Box::pin(super::store_objects::load_membership_entry_ref(
-        storage,
-        root.store_root_hash,
-        &head.body.entry,
-    ))
-    .await
-    .map_err(map_membership_object_error)?;
-    if loaded_entry.value.resolution_dependencies != head.body.resolutions {
-        return Err(AnchoredChainError::LoadFailed(
-            "membership head and selected entry carry different resolution cuts".to_string(),
-        ));
-    }
-    Ok(LoadedExactMembershipHead {
-        reference: reference.clone(),
-        head,
-        entry: loaded_entry.value,
+type LoadedMembershipHeadFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<LoadedExactMembershipHead, AnchoredChainError>> + Send + 'a>,
+>;
+
+fn load_exact_membership_head_node<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    reference: &'a MembershipHeadRef,
+) -> LoadedMembershipHeadFuture<'a> {
+    Box::pin(async move {
+        let head =
+            load_exact_membership_head_with_root(storage, root, root_value, reference).await?;
+        let loaded_entry = Box::pin(super::store_objects::load_membership_entry_ref(
+            storage,
+            root.store_root_hash,
+            &head.body.entry,
+        ))
+        .await
+        .map_err(map_membership_object_error)?;
+        if loaded_entry.value.resolution_dependencies != head.body.resolutions {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head and selected entry carry different resolution cuts".to_string(),
+            ));
+        }
+        Ok(LoadedExactMembershipHead {
+            reference: reference.clone(),
+            head,
+            entry: loaded_entry.value,
+        })
     })
 }
 
@@ -2767,104 +2776,114 @@ pub(crate) async fn project_anchored_chain_to_verified_store_prefix(
     Ok(projected)
 }
 
-async fn load_exact_membership_graph(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    exact_heads: &[MembershipHeadRef],
-    verified_activations: Option<&super::store_pull::VerifiedMergeMembershipPrefix>,
-) -> Result<LoadedExactMembershipGraph, AnchoredChainError> {
-    let graph = load_exact_membership_graph_objects(storage, root, root_value, exact_heads).await?;
-    for node in graph.path_heads.values() {
-        if !Box::pin(validate_membership_head_activation(
+type LoadedMembershipGraphFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<LoadedExactMembershipGraph, AnchoredChainError>> + Send + 'a>,
+>;
+
+fn load_exact_membership_graph<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    exact_heads: &'a [MembershipHeadRef],
+    verified_activations: Option<&'a super::store_pull::VerifiedMergeMembershipPrefix>,
+) -> LoadedMembershipGraphFuture<'a> {
+    Box::pin(async move {
+        let graph =
+            load_exact_membership_graph_objects(storage, root, root_value, exact_heads).await?;
+        for node in graph.path_heads.values() {
+            if !Box::pin(validate_membership_head_activation(
+                storage,
+                root,
+                &node.reference,
+                &node.head,
+                &node.entry,
+                verified_activations,
+            ))
+            .await?
+            {
+                return Err(AnchoredChainError::LoadFailed(
+                    "exact membership state names an unactivated Store-bound head".to_string(),
+                ));
+            }
+        }
+        let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
+        Box::pin(validate_provider_admin_records(
             storage,
             root,
-            &node.reference,
-            &node.head,
-            &node.entry,
-            verified_activations,
+            root_value,
+            &entry_values,
         ))
-        .await?
-        {
-            return Err(AnchoredChainError::LoadFailed(
-                "exact membership state names an unactivated Store-bound head".to_string(),
-            ));
-        }
-    }
-    let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
-    Box::pin(validate_provider_admin_records(
-        storage,
-        root,
-        root_value,
-        &entry_values,
-    ))
-    .await?;
-    validate_owner_grant_records(root_value, &entry_values)?;
-    Ok(graph)
+        .await?;
+        validate_owner_grant_records(root_value, &entry_values)?;
+        Ok(graph)
+    })
 }
 
-async fn load_exact_membership_graph_objects(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    exact_heads: &[MembershipHeadRef],
-) -> Result<LoadedExactMembershipGraph, AnchoredChainError> {
-    let mut entries = BTreeMap::new();
-    let mut heads = Vec::with_capacity(exact_heads.len());
-    let mut path_heads = BTreeMap::<MembershipCoord, LoadedExactMembershipHead>::new();
-    for requested in exact_heads {
-        let mut current = Some(requested.clone());
-        let mut requested_head = None;
-        while let Some(reference) = current {
-            let node = Box::pin(load_exact_membership_head_node(
-                storage, root, root_value, &reference,
-            ))
-            .await?;
-            if reference == *requested {
-                requested_head = Some((reference.clone(), node.head.clone()));
-            }
-            match entries.entry(reference.coord.clone()) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(node.entry.clone());
+fn load_exact_membership_graph_objects<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    exact_heads: &'a [MembershipHeadRef],
+) -> LoadedMembershipGraphFuture<'a> {
+    Box::pin(async move {
+        let mut entries = BTreeMap::new();
+        let mut heads = Vec::with_capacity(exact_heads.len());
+        let mut path_heads = BTreeMap::<MembershipCoord, LoadedExactMembershipHead>::new();
+        for requested in exact_heads {
+            let mut current = Some(requested.clone());
+            let mut requested_head = None;
+            while let Some(reference) = current {
+                let node = Box::pin(load_exact_membership_head_node(
+                    storage, root, root_value, &reference,
+                ))
+                .await?;
+                if reference == *requested {
+                    requested_head = Some((reference.clone(), node.head.clone()));
                 }
-                std::collections::btree_map::Entry::Occupied(slot) => {
-                    if slot.get() != &node.entry {
-                        return Err(AnchoredChainError::LoadFailed(
-                            "membership coordinate selects different exact entries".to_string(),
-                        ));
+                match entries.entry(reference.coord.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(node.entry.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(slot) => {
+                        if slot.get() != &node.entry {
+                            return Err(AnchoredChainError::LoadFailed(
+                                "membership coordinate selects different exact entries".to_string(),
+                            ));
+                        }
                     }
                 }
-            }
-            match path_heads.entry(reference.coord.clone()) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(node.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(slot) => {
-                    if slot.get().reference != node.reference
-                        || slot.get().head != node.head
-                        || slot.get().entry != node.entry
-                    {
-                        return Err(AnchoredChainError::LoadFailed(
-                            "membership coordinate selects different exact head paths".to_string(),
-                        ));
+                match path_heads.entry(reference.coord.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(node.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(slot) => {
+                        if slot.get().reference != node.reference
+                            || slot.get().head != node.head
+                            || slot.get().entry != node.entry
+                        {
+                            return Err(AnchoredChainError::LoadFailed(
+                                "membership coordinate selects different exact head paths"
+                                    .to_string(),
+                            ));
+                        }
                     }
                 }
+                current = node.head.body.predecessor.clone();
             }
-            current = node.head.body.predecessor.clone();
+            heads.push(requested_head.ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "requested exact membership head was not loaded".to_string(),
+                )
+            })?);
         }
-        heads.push(requested_head.ok_or_else(|| {
-            AnchoredChainError::LoadFailed(
-                "requested exact membership head was not loaded".to_string(),
-            )
-        })?);
-    }
-    let graph = LoadedExactMembershipGraph {
-        entries,
-        heads,
-        path_heads,
-    };
-    validate_exact_membership_head_paths(&graph)?;
-    Ok(graph)
+        let graph = LoadedExactMembershipGraph {
+            entries,
+            heads,
+            path_heads,
+        };
+        validate_exact_membership_head_paths(&graph)?;
+        Ok(graph)
+    })
 }
 
 fn exact_membership_chain_from_graph(
@@ -3125,9 +3144,14 @@ async fn load_anchored_chain_at_exact_heads_with_root_impl(
         founder_registration_ref,
         &root_value.descriptor.founder_provider_admin,
     );
-    let graph =
-        load_exact_membership_graph(storage, root, root_value, exact_heads, verified_activations)
-            .await?;
+    let graph = Box::pin(load_exact_membership_graph(
+        storage,
+        root,
+        root_value,
+        exact_heads,
+        verified_activations,
+    ))
+    .await?;
     let chain = load_layered_membership_chain(
         storage,
         root,

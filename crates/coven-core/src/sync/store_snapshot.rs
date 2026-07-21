@@ -6,8 +6,8 @@ use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotLocator,
-    StoreSnapshotRef, StoreSnapshotState,
+    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotHistorySummary,
+    StoreSnapshotLocator, StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::keys::UserKeypair;
 
@@ -143,7 +143,7 @@ pub(crate) async fn push_store_snapshot(
                         ));
                     }
                 },
-                resolved_devices.recovery,
+                resolved_devices.recovery.clone(),
                 &authorization,
             )
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
@@ -152,6 +152,29 @@ pub(crate) async fn push_store_snapshot(
     let state = StoreSnapshotState {
         membership: membership_state,
         devices,
+    };
+    let history_summary = match db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            let membership = membership.ok_or_else(|| {
+                SnapshotError::PublicationState(
+                    "Merge snapshot publication has no exact membership state".to_string(),
+                )
+            })?;
+            StoreSnapshotHistorySummary::MergeConcurrent(
+                super::store_pull::prepare_merge_snapshot_history_summary(
+                    db,
+                    &root,
+                    &coverage,
+                    membership,
+                    &resolved_devices,
+                    &registration_ref,
+                    &registration,
+                )
+                .await
+                .map_err(|error| SnapshotError::PublicationState(error.to_string()))?,
+            )
+        }
+        crate::WritePolicy::Serial => StoreSnapshotHistorySummary::Serial,
     };
     let previous = db
         .latest_local_store_snapshot()
@@ -245,6 +268,7 @@ pub(crate) async fn push_store_snapshot(
         image,
         coverage,
         state,
+        history_summary,
         schema_version,
         created_at,
         SnapshotSuccessorLink {

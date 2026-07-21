@@ -2047,23 +2047,17 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .export_activated_device_continuation(&joiner_keypair)
         .await
         .expect("export exact activated continuation");
-    let (source_device_snapshots, materialized_commits_without_device_state) = db_owner
+    let materialized_commits_without_device_state = db_owner
         .call(|conn| {
-            Ok((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM store_device_state_snapshots",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM materialized_commits AS commits \
-                     LEFT JOIN store_device_state_snapshots AS states \
-                       ON states.commit_ref = commits.commit_ref \
-                     WHERE states.commit_ref IS NULL",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-            ))
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialized_commits AS commits \
+                 LEFT JOIN store_device_state_snapshots AS states \
+                   ON states.commit_ref = commits.commit_ref \
+                 WHERE states.commit_ref IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(DbError::from)
         })
         .await
         .expect("verify source device-state snapshots");
@@ -2094,11 +2088,16 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         continuation.registration.device_id,
     )
     .expect("parse continuation Store registration");
+    let mut expected_device_snapshots = snapshot_coverage
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let mut cursor = latest_position.clone();
     loop {
         if snapshot_coverage.values().any(|covered| covered == &cursor) {
             break;
         }
+        expected_device_snapshots.insert(cursor.clone());
         let commit = crate::sync::store_objects::load_commit_ref(
             components.storage().as_ref(),
             store_root.store_root_hash,
@@ -2212,16 +2211,25 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     );
     let restored_device_snapshots = restored
         .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM store_device_state_snapshots",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(DbError::from)
+            let mut statement = conn
+                .prepare("SELECT commit_ref FROM store_device_state_snapshots")
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            Ok(rows)
         })
         .await
-        .expect("count restored device-state snapshots");
-    assert_eq!(restored_device_snapshots, source_device_snapshots);
+        .expect("load restored device-state snapshots")
+        .into_iter()
+        .map(|encoded| {
+            serde_json::from_str::<crate::sync::store_commit::StoreBatchCommitRef>(&encoded)
+                .expect("parse restored device-state snapshot reference")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(restored_device_snapshots, expected_device_snapshots);
     host_exec(
         &restored,
         "UPDATE note_photos

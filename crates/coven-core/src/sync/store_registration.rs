@@ -59,12 +59,21 @@ enum RetirementPublication {
     MergeConcurrent {
         head_bytes: Vec<u8>,
         head_prepared: PreparedExactObject,
+        history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
     },
     Serial {
         base_head: super::storage::VersionedObject,
         head_bytes: Vec<u8>,
         authorization_after: super::membership::SerialAuthorizationState,
     },
+}
+
+enum RetirementPolicyPreparation {
+    MergeConcurrent {
+        membership: MembershipChain,
+        predecessor_state: super::store_commit::ResolvedStoreDeviceState,
+    },
+    Serial(Box<super::store_outbound::SerialAuthorizationSnapshot>),
 }
 
 impl DurableRetirement {
@@ -100,6 +109,7 @@ impl DurableRetirement {
         if let RetirementPublication::MergeConcurrent {
             head_bytes,
             head_prepared,
+            ..
         } = &self.publication
         {
             let head: StoreDeviceHead = serde_json::from_slice(head_bytes)
@@ -337,7 +347,7 @@ async fn prepare_self_retirement(
     let (root, registration_ref, registration, device_signer) =
         super::store_outbound::load_local_store_authority(db, &device_id, signer).await?;
     let write_id = db.new_write_id();
-    let (coord, order, membership_state, device_state, publication_seed) = match db.write_policy() {
+    let (coord, order, membership_state, device_state, policy) = match db.write_policy() {
         crate::WritePolicy::MergeConcurrent => {
             let previous = db
                 .latest_local_store_position()
@@ -403,7 +413,16 @@ async fn prepare_self_retirement(
                     resolved.state_hash,
                 )
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            (coord, order, membership_state, device_state, None)
+            (
+                coord,
+                order,
+                membership_state,
+                device_state,
+                RetirementPolicyPreparation::MergeConcurrent {
+                    membership: chain.clone(),
+                    predecessor_state: resolved_devices,
+                },
+            )
         }
         crate::WritePolicy::Serial => {
             let coordination = coordination.ok_or_else(|| {
@@ -462,7 +481,7 @@ async fn prepare_self_retirement(
                 order,
                 membership_state,
                 device_state,
-                Some(snapshot),
+                RetirementPolicyPreparation::Serial(Box::new(snapshot)),
             )
         }
     };
@@ -540,7 +559,7 @@ async fn prepare_self_retirement(
         membership_state,
         device_state,
         None,
-        retirement_ref,
+        retirement_ref.clone(),
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
@@ -565,18 +584,27 @@ async fn prepare_self_retirement(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let publication = match publication_seed {
-        None => {
-            let previous = commit.order.predecessor().cloned();
-            let (head_slot, predecessor_head) =
-                super::store_outbound::exact_next_announcement_slot(
-                    storage,
-                    &root,
-                    &registration_ref,
-                    &registration,
-                    previous.as_ref(),
-                )
-                .await?;
+    let publication = match policy {
+        RetirementPolicyPreparation::MergeConcurrent {
+            membership,
+            predecessor_state,
+        } => {
+            let state_after = predecessor_state
+                .self_retire(retirement_ref.clone())
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            let history = super::store_pull::prepare_merge_history_successor(
+                db,
+                &root,
+                &commit,
+                &commit_ref,
+                &membership,
+                &registration,
+                None,
+                state_after,
+                super::store_pull::MergeHistorySuccessorEvidence::none(),
+            )
+            .await
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,
                 ProtocolObjectDomain::StoreHead,
@@ -593,12 +621,13 @@ async fn prepare_self_retirement(
                 root.store_root_hash,
                 registration_ref.clone(),
                 commit_ref.clone(),
+                history.summary.digest(),
                 SuccessorLink {
                     activation: registration
                         .store_announcement_activation(&registration_ref)
                         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
                         .activation_id(),
-                    predecessor: predecessor_head.map(|head| head.object),
+                    predecessor: history.predecessor_head.map(|head| head.object),
                     next_slot,
                 },
                 &device_signer,
@@ -607,14 +636,20 @@ async fn prepare_self_retirement(
             let head_prefix =
                 head_slot_prefix(&registration_ref.device_id.to_string(), commit.seq());
             let head_prepared = storage
-                .prepare_protocol_object(&head_context, head_slot, &head_prefix, head.to_bytes())
+                .prepare_protocol_object(
+                    &head_context,
+                    history.head_slot,
+                    &head_prefix,
+                    head.to_bytes(),
+                )
                 .map_err(StoreObjectError::from)?;
             RetirementPublication::MergeConcurrent {
                 head_bytes: head.to_bytes(),
                 head_prepared,
+                history_summary: history.summary,
             }
         }
-        Some(snapshot) => {
+        RetirementPolicyPreparation::Serial(snapshot) => {
             let authorization_after = snapshot
                 .authorization
                 .authorize_and_apply(&commit_ref, &commit, &registration)
@@ -744,6 +779,7 @@ async fn publish_self_retirement(
         RetirementPublication::MergeConcurrent {
             head_bytes,
             head_prepared,
+            history_summary,
         } => {
             storage
                 .create_protocol_object(&durable.commit_prepared)
@@ -822,6 +858,7 @@ async fn publish_self_retirement(
             crate::database::LocalRetirementMaterialization::MergeConcurrent {
                 head,
                 head_object: head_prepared.reference().clone(),
+                history_summary: history_summary.clone(),
             }
         }
         RetirementPublication::Serial {
@@ -1784,7 +1821,7 @@ pub async fn recover_owner_device_merge(
         predecessor: None,
         dependencies,
     };
-    let (device_state, _) = db
+    let (device_state, predecessor_state) = db
         .store_device_state_for_order(&order)
         .await
         .map_err(database_error)?;
@@ -1844,9 +1881,40 @@ pub async fn recover_owner_device_merge(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let state_after = predecessor_state
+        .activate_registration(
+            registration_ref.clone(),
+            Some(super::store_commit::OwnerRecoveryCursor {
+                owner_grant: authority.owner_grant.clone(),
+                position: OwnerRecoveryPosition::At {
+                    node: node_ref.clone(),
+                },
+            }),
+        )
+        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let history = super::store_pull::prepare_merge_history_successor(
+        db,
+        &root,
+        &commit,
+        &commit_ref,
+        membership,
+        &registration,
+        Some(&registration_ref),
+        state_after,
+        super::store_pull::MergeHistorySuccessorEvidence {
+            registrations: vec![super::store_commit::RetainedVerifiedRegistration {
+                reference: registration_ref.clone(),
+                value: registration.clone(),
+            }],
+            acknowledgement: None,
+            membership_proof: None,
+        },
+    )
+    .await
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let head_context = context(super::storage::ProtocolObjectDomain::StoreHead);
     let StoreCommitAnchor::MergeConcurrent {
-        announcements: DeviceStreamAnchor::StoreAnnouncements { first_slot },
+        announcements: DeviceStreamAnchor::StoreAnnouncements { first_slot: _ },
     } = &registration.store_commits
     else {
         return Err(StoreRegistrationError::Invalid(
@@ -1865,6 +1933,7 @@ pub async fn recover_owner_device_merge(
         root.store_root_hash,
         registration_ref.clone(),
         commit_ref.clone(),
+        history.summary.digest(),
         SuccessorLink {
             activation: registration
                 .store_announcement_activation(&registration_ref)
@@ -1879,7 +1948,7 @@ pub async fn recover_owner_device_merge(
     let head_prepared = storage
         .prepare_protocol_object(
             &head_context,
-            first_slot.clone(),
+            history.head_slot,
             &head_slot_prefix(&device_id.to_string(), 1),
             head.to_bytes(),
         )
@@ -1897,6 +1966,7 @@ pub async fn recover_owner_device_merge(
         commit_ref,
         head,
         head_prepared.reference().clone(),
+        history.summary,
         registration,
         registration_activation,
     )

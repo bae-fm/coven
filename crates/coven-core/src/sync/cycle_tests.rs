@@ -7452,7 +7452,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) = crate::sync::store_outbound::exact_next_announcement_slot(
+    let (next_slot, accepted_head_ref) = crate::sync::store_outbound::exact_next_announcement_slot(
         &storage.storage,
         &storage.root,
         &owner_ref,
@@ -7461,6 +7461,16 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
     )
     .await
     .expect("load exact next announcement slot");
+    let accepted_head_ref = accepted_head_ref.expect("activation has an accepted Store head");
+    let accepted_head = crate::sync::store_objects::load_head_ref(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &accepted_head_ref,
+        &owner_registration,
+        &activation,
+    )
+    .await
+    .expect("load accepted Store head");
     let next_sequence = activation
         .coord
         .sequence()
@@ -7484,6 +7494,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         storage.root.store_root_hash,
         owner_ref,
         next_commit,
+        accepted_head.value.history_summary,
         crate::sync::store_commit::SuccessorLink {
             activation: stream_activation,
             predecessor: None,

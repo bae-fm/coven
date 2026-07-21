@@ -580,6 +580,8 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "store_device_registration_activations",
     "store_device_state_snapshots",
     "store_author_exclusion_activations",
+    "retained_merge_materializations",
+    "retained_replay_objects",
 ];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
@@ -598,10 +600,9 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(&tx)
+    let coverage = crate::database::Database::materialized_frontier_on(&tx, None)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    let cleared_materialization_tables =
-        ["materialized_commits", "retained_merge_materializations"];
+    let cleared_materialization_tables = ["materialized_commits"];
     for table in cleared_materialization_tables {
         tx.execute_batch(&format!(
             "DELETE FROM {}",
@@ -609,6 +610,10 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         ))
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
+    crate::database::Database::retain_snapshot_author_exclusion_activations_on(&tx)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    crate::database::Database::retain_snapshot_device_states_on(&tx, coverage)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     for table in crate::db::user_table_names(conn)
         .map_err(|error| SnapshotError::ClearFailed(format!("list user tables: {error}")))?
     {
@@ -700,6 +705,9 @@ fn scope_authenticated_blob_graph(
          WHERE NOT EXISTS (
              SELECT 1 FROM blob_locators AS locator
              WHERE locator.remote_object_id = remote_objects.object_id
+         ) AND NOT EXISTS (
+             SELECT 1 FROM retained_replay_objects AS retained
+             WHERE retained.object_id = remote_objects.object_id
          );
          DROP TABLE snapshot_live_blob_bindings;",
     )
@@ -922,11 +930,91 @@ pub enum SnapshotBlobReconcile {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::keys::UserKeypair;
     use crate::sync::store_commit::CommitFrontier;
+
+    #[tokio::test]
+    async fn snapshot_retains_only_frontier_device_states_without_exclusion_authority() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-device-state-frontier",
+            signer.clone(),
+        )
+        .await
+        .expect("create device-state snapshot Store");
+        let membership = store
+            .open_into(&source)
+            .await
+            .expect("open device-state snapshot Store membership");
+        let device_id = source
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load snapshot device id")
+            .expect("snapshot Store has a local device id");
+        let (_store_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        for sequence in 1..=3 {
+            crate::sync::test_helpers::host_exec(
+                &source,
+                &format!(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                     VALUES ('snapshot-state-{sequence}', 'state', NULL, 1, \
+                             '000000000100{sequence}-0000-state', '2026-07-21')"
+                ),
+            )
+            .await;
+            assert!(super::super::store_outbound::prepare_pending_store_write(
+                &source,
+                &store.storage,
+                &device_id,
+                "2026-07-21T00:00:00Z",
+                &signer,
+                &store_dir,
+                Some(&membership),
+            )
+            .await
+            .expect("prepare snapshot history write"));
+            assert_eq!(
+                super::super::store_outbound::drain_store_writes(&source, &store.storage)
+                    .await
+                    .expect("publish snapshot history write"),
+                1,
+            );
+        }
+        let expected = source
+            .materialized_frontier()
+            .await
+            .expect("load snapshot frontier")
+            .into_values()
+            .map(|reference| serde_json::to_string(&reference).expect("encode frontier reference"))
+            .collect::<BTreeSet<_>>();
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = crate::sync::test_helpers::test_synced_tables();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create scoped snapshot image");
+        let scoped_path = image_dir.path().join("scoped.db");
+        std::fs::write(&scoped_path, image).expect("write scoped snapshot image");
+        let scoped = Connection::open(&scoped_path).expect("open scoped snapshot image");
+        let mut statement = scoped
+            .prepare("SELECT commit_ref FROM store_device_state_snapshots ORDER BY commit_ref")
+            .expect("query scoped device states");
+        let actual = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("read scoped device states")
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .expect("collect scoped device states");
+        assert_eq!(actual, expected);
+    }
 
     #[tokio::test]
     async fn bootstrap_installs_the_verified_exact_store_root() {
@@ -1039,6 +1127,34 @@ mod tests {
         baseline
             .validate_image()
             .expect("validate snapshot replay baseline");
+        let mut tampered = baseline.authority.clone();
+        let crate::sync::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) =
+            &mut tampered
+        else {
+            panic!("snapshot bootstrap installed a genesis replay baseline")
+        };
+        authority.metadata.signature = "00".repeat(64);
+        authority
+            .validate()
+            .expect_err("retained snapshot authority must re-open its signed metadata");
+        let authority_bytes = serde_json::to_vec(&tampered).expect("serialize tampered authority");
+        installed
+            .call(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE retained_replay_baselines SET authority_bytes = ?1 \
+                         WHERE singleton = 1",
+                        [authority_bytes],
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                Ok(())
+            })
+            .await
+            .expect("tamper retained snapshot metadata");
+        installed
+            .call(Database::generation_zero_replay_baseline_on)
+            .await
+            .expect_err("restart must reject retained snapshot metadata with another signature");
     }
 
     #[tokio::test]

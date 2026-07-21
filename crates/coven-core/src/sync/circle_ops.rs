@@ -44,6 +44,7 @@ use super::circle::CircleRole;
 pub(crate) enum CircleOperationPolicy {
     MergeConcurrent {
         head: StoreDeviceHead,
+        history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
     },
     Serial {
         head: StoreSerialHead,
@@ -189,7 +190,7 @@ impl CircleOperationJournal {
             )
             .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
         );
-        if let CircleOperationPolicy::MergeConcurrent { head } = &operation.policy {
+        if let CircleOperationPolicy::MergeConcurrent { head, .. } = &operation.policy {
             let prepared = operation
                 .prepared_objects
                 .get("store-head")
@@ -1548,7 +1549,7 @@ async fn prepare_circle_operation_request(
             let membership_state = StoreMembershipStateRef::merge_concurrent(
                 heads,
                 resolutions,
-                resolved_devices.recovery,
+                resolved_devices.recovery.clone(),
                 state_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -1652,6 +1653,19 @@ async fn prepare_circle_operation_request(
                 commit_prepared.reference().clone(),
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let history_summary = super::store_pull::prepare_merge_history_successor(
+                db,
+                &root,
+                &commit,
+                &commit_ref,
+                &exact,
+                &author,
+                None,
+                resolved_devices,
+                super::store_pull::MergeHistorySuccessorEvidence::none(),
+            )
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             prepared_objects.insert("store-commit".to_string(), commit_prepared);
             let head_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
@@ -1659,15 +1673,6 @@ async fn prepare_circle_operation_request(
             );
             let device_id = author_registration.device_id.to_string();
             let head_prefix = head_slot_prefix(&device_id, seq);
-            let (head_slot, predecessor_head) =
-                super::store_outbound::exact_next_announcement_slot(
-                    storage,
-                    &root,
-                    &author_registration,
-                    &author,
-                    base.as_ref(),
-                )
-                .await?;
             let next_head_slot = storage
                 .allocate_protocol_slot(
                     &head_context,
@@ -1680,26 +1685,37 @@ async fn prepare_circle_operation_request(
                 store_root_hash,
                 author_registration.clone(),
                 commit_ref.clone(),
+                history_summary.summary.digest(),
                 SuccessorLink {
                     activation: author
                         .store_announcement_activation(&author_registration)
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
                         .activation_id(),
-                    predecessor: predecessor_head.map(|reference| reference.object),
+                    predecessor: history_summary
+                        .predecessor_head
+                        .map(|reference| reference.object),
                     next_slot: next_head_slot,
                 },
                 &device_signer,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let head_prepared = storage
-                .prepare_protocol_object(&head_context, head_slot, &head_prefix, head.to_bytes())
+                .prepare_protocol_object(
+                    &head_context,
+                    history_summary.head_slot,
+                    &head_prefix,
+                    head.to_bytes(),
+                )
                 .map_err(super::store_objects::StoreObjectError::from)?;
             prepared_objects.insert("store-head".to_string(), head_prepared);
             (
                 creation,
                 commit,
                 commit_ref,
-                CircleOperationPolicy::MergeConcurrent { head },
+                CircleOperationPolicy::MergeConcurrent {
+                    head,
+                    history_summary: history_summary.summary,
+                },
                 prepared_objects,
             )
         }
@@ -1949,20 +1965,20 @@ async fn publish_circle_operation(
             .await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
     }
-    if let CircleOperationPolicy::MergeConcurrent { head } = &journal.operation().policy {
+    if let CircleOperationPolicy::MergeConcurrent {
+        head,
+        history_summary,
+    } = &journal.operation().policy
+    {
         let root = db
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let (expected_slot, predecessor_head) =
-            super::store_outbound::exact_next_announcement_slot(
-                storage,
-                &root,
-                &commit.author_registration,
-                &author,
-                commit.order.predecessor(),
-            )
-            .await?;
+        if root.store_root_hash != store_root_hash {
+            return Err(CircleOperationError::InvalidState(
+                "Circle commit names a different Store root".to_string(),
+            ));
+        }
         let prepared_head = journal
             .operation()
             .prepared_objects
@@ -1972,25 +1988,27 @@ async fn publish_circle_operation(
                     "Merge Circle operation lacks its prepared Store head".to_string(),
                 )
             })?;
-        StoreDeviceHead::parse_at(
-            &head.to_bytes(),
-            store_root_hash,
-            &author,
-            &journal.operation().commit_ref,
+        let (_, state_after) = super::store_pull::retained_merge_device_state_for_order(
+            db,
+            storage,
+            &root,
+            &commit.order,
         )
+        .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        let expected_activation = author
-            .store_announcement_activation(&commit.author_registration)
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-            .activation_id();
-        if prepared_head.reference().slot() != &expected_slot
-            || head.successor.activation != expected_activation
-            || head.successor.predecessor != predecessor_head.map(|reference| reference.object)
-        {
-            return Err(CircleOperationError::Journal(
-                "Merge Circle Store head differs from its reserved successor slot".to_string(),
-            ));
-        }
+        let head_ref = super::store_commit::StoreDeviceHeadRef {
+            head_hash: head.head_hash(),
+            object: prepared_head.reference().clone(),
+        };
+        history_summary
+            .open(
+                &commit,
+                &journal.operation().commit_ref,
+                head,
+                &head_ref,
+                &state_after,
+            )
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     }
 
     let metadata_encryption = circle_encryption
@@ -2223,7 +2241,7 @@ async fn publish_circle_operation(
     }
     let policy = journal.operation().policy.clone();
     match policy {
-        CircleOperationPolicy::MergeConcurrent { head } => {
+        CircleOperationPolicy::MergeConcurrent { head, .. } => {
             let commit_bytes = journal.operation().commit_bytes.clone();
             let commit_hash = journal.operation().commit_ref.commit_hash;
             let StoreCommitCoord::MergeConcurrent { stream_id, .. } =
@@ -2701,14 +2719,19 @@ mod tests {
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .expect("bind substituted Circle commit");
-        let CircleOperationPolicy::MergeConcurrent { head: old_head } = &journal.operation().policy
+        let CircleOperationPolicy::MergeConcurrent {
+            head: old_head,
+            history_summary,
+        } = &journal.operation().policy
         else {
             panic!("fixture must carry a Merge Store head")
         };
+        let history_summary = history_summary.clone();
         let head = StoreDeviceHead::signed(
             commit.store_root_hash,
             commit.author_registration.clone(),
             commit_ref.clone(),
+            history_summary.digest(),
             old_head.successor.clone(),
             &device_signer,
         )
@@ -2744,7 +2767,10 @@ mod tests {
         operation
             .prepared_objects
             .insert("store-head".to_string(), head_prepared);
-        operation.policy = CircleOperationPolicy::MergeConcurrent { head };
+        operation.policy = CircleOperationPolicy::MergeConcurrent {
+            head,
+            history_summary,
+        };
         operation.uploaded.clear();
     }
 
@@ -4203,6 +4229,7 @@ mod tests {
 
         let CircleOperationPolicy::MergeConcurrent {
             head: original_head,
+            ..
         } = &journal.operation().policy
         else {
             panic!("invented access test requires a MergeConcurrent head")
@@ -4211,6 +4238,7 @@ mod tests {
             commit.store_root_hash,
             commit.author_registration.clone(),
             commit_ref.clone(),
+            original_head.history_summary,
             original_head.successor.clone(),
             &device_signer,
         )

@@ -143,8 +143,12 @@ fn load_store_device_snapshot_on(
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    serde_json::from_str(&raw)
-        .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))
+    let state: ResolvedStoreDeviceState = serde_json::from_str(&raw)
+        .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))?;
+    state
+        .validate_canonical()
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    Ok(state)
 }
 
 fn store_device_state_for_history_cut_on(
@@ -509,6 +513,8 @@ struct DatabaseState {
         Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
     #[cfg(any(test, feature = "test-utils"))]
     test_pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
+    #[cfg(any(test, feature = "test-utils"))]
+    merge_materialization_failure: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
 }
 
 /// Test-only checkpoints reached by database operations whose ordering matters.
@@ -528,6 +534,35 @@ pub enum DatabaseTestPoint {
     SerialStoreMaterialized,
     SerialRemovalBeforeAdoption,
     SerialMembershipTerminalized,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMaterializationFailurePoint {
+    SummaryMaterialization,
+    RetractionDeletion,
+    ProjectionReplacement,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub(crate) struct MergeMaterializationFailureInjection {
+    armed: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl MergeMaterializationFailureInjection {
+    pub(crate) fn reach(&self, point: MergeMaterializationFailurePoint) -> Result<bool, DbError> {
+        let mut armed = self.armed.lock().map_err(|_| {
+            DbError::Message("Merge materialization failure lock poisoned".to_string())
+        })?;
+        if armed.as_ref() != Some(&point) {
+            return Ok(false);
+        }
+        armed.take();
+        Ok(true)
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1203,6 +1238,8 @@ impl DatabaseCore {
             write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
             #[cfg(any(test, feature = "test-utils"))]
             test_pause_points: Arc::new(TestPausePoints::default()),
+            #[cfg(any(test, feature = "test-utils"))]
+            merge_materialization_failure: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1433,6 +1470,7 @@ pub(crate) enum CompletePreparedStoreWriteOutcome {
 pub(crate) struct AuthorExclusionActivationLocator {
     exclusion: crate::sync::store_commit::StoreDeviceExclusionRef,
     accepted_cut: BTreeMap<crate::sync::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+    activation_commit: StoreBatchCommitRef,
     activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
 }
 
@@ -1440,11 +1478,13 @@ impl AuthorExclusionActivationLocator {
     pub(crate) fn verified(
         exclusion: crate::sync::store_commit::StoreDeviceExclusionRef,
         accepted_cut: BTreeMap<crate::sync::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+        activation_commit: StoreBatchCommitRef,
         activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
     ) -> Self {
         Self {
             exclusion,
             accepted_cut,
+            activation_commit,
             activation_head,
         }
     }
@@ -1462,6 +1502,10 @@ impl AuthorExclusionActivationLocator {
     pub(crate) fn activation_head(&self) -> &crate::sync::store_commit::StoreDeviceHeadRef {
         &self.activation_head
     }
+
+    pub(crate) fn activation_commit(&self) -> &StoreBatchCommitRef {
+        &self.activation_commit
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1473,6 +1517,7 @@ pub(crate) enum TerminalCandidateAuthority {
         activation_commit: StoreBatchCommitRef,
         activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
     },
+    DependencyRetraction(crate::sync::remote_object::VerifiedDependencyRetractionAuthority),
 }
 
 #[derive(Debug, Clone)]
@@ -3175,6 +3220,7 @@ pub(crate) struct StoreWritePreparation {
     pub audiences: PreparedAudienceObjects,
     pub commit: PreparedProtocolObject<StoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
+    pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
 }
@@ -3183,6 +3229,7 @@ pub(crate) struct MergeCandidateAbandonmentPreparation {
     pub write_id: WriteId,
     pub commit: PreparedProtocolObject<StoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
+    pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 pub(crate) struct SerialCandidateAbandonmentPreparation {
@@ -3221,14 +3268,17 @@ enum PreparedStoreWriteState {
     MergeConcurrent {
         commit: DurablePreparedProtocolObject,
         head: DurablePreparedProtocolObject,
+        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
     MergeAbandonment {
         candidate_commit: DurablePreparedProtocolObject,
         candidate_head: DurablePreparedProtocolObject,
+        candidate_history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         authority_commit: DurablePreparedProtocolObject,
         authority_head: DurablePreparedProtocolObject,
+        authority_history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         outcome: MergeAbandonmentOutcome,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
@@ -3247,6 +3297,7 @@ enum PreparedWriteMaterialization<'a> {
     MergeConcurrent {
         head: &'a StoreDeviceHead,
         head_object: &'a ExactObjectRef,
+        history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     },
     Serial,
 }
@@ -3256,6 +3307,7 @@ enum PreparedWriteMaterialization<'a> {
 struct RetainedMergeMaterializationInput {
     commit: PreparedExactObject,
     activation_head: PreparedExactObject,
+    history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<RetainedAudiencePackage>,
     activation: RetainedCommitActivationInput,
@@ -3403,6 +3455,7 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     circle_activations: &'a VerifiedCircleActivations,
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
+    history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
@@ -3425,6 +3478,7 @@ pub(crate) struct OwnedVerifiedMergeMaterialization {
     circle_activations: VerifiedCircleActivations,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
+    history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<AudiencePackage>,
     package_application: Option<RetainedPackageApplication>,
@@ -3442,6 +3496,7 @@ impl OwnedVerifiedMergeMaterialization {
             &self.circle_activations,
             &self.activation_head,
             &self.activation_head_object,
+            &self.history_summary,
             self.membership_objects.as_ref(),
             &self.packages,
             self.package_application,
@@ -3489,6 +3544,12 @@ impl OwnedVerifiedMergeMaterialization {
         &self.activation_head_object
     }
 
+    pub(crate) fn history_summary(
+        &self,
+    ) -> &crate::sync::store_commit::RetainedVerifiedMergeHistorySummary {
+        &self.history_summary
+    }
+
     pub(crate) fn membership_objects(&self) -> Option<&VerifiedMergeMembershipObjects> {
         self.membership_objects.as_ref()
     }
@@ -3515,6 +3576,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,
         activation_head_object: &'a ExactObjectRef,
+        history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
         packages: &'a [AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
@@ -3522,9 +3584,15 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         commit_ref
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
+        history_summary
+            .validate_shape()
+            .map_err(|error| DbError::Message(error.to_string()))?;
         if commit.store_root_hash != root.store_root_hash
             || commit.policy() != WritePolicy::MergeConcurrent
             || commit_ref.coord.policy() != WritePolicy::MergeConcurrent
+            || history_summary.store_root_hash != root.store_root_hash
+            || history_summary.digest() != activation_head.history_summary
+            || history_summary.causal_cut.get(&commit_ref.coord) != Some(commit_ref)
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()
             || circle_activations.circles().len() != commit.circle_controls().len()
@@ -3552,6 +3620,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             circle_activations,
             activation_head,
             activation_head_object,
+            history_summary,
             membership_objects,
             packages,
             package_application,
@@ -3564,6 +3633,7 @@ pub(crate) enum LocalRetirementMaterialization {
     MergeConcurrent {
         head: StoreDeviceHead,
         head_object: ExactObjectRef,
+        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     },
     Serial {
         authorization: SerialAuthorizationState,
@@ -3847,30 +3917,48 @@ fn load_author_exclusion_activation_locator_on(
     let exclusion_json = serde_json::to_string(exclusion).map_err(|error| {
         DbError::Message(format!("serialize author exclusion reference: {error}"))
     })?;
-    let stored: Option<(String, String)> = conn
+    let stored: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT accepted_cut, activation_head
+            "SELECT accepted_cut, activation_commit, activation_head
              FROM store_author_exclusion_activations
              WHERE exclusion_ref = ?1",
             [&exclusion_json],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(DbError::from)?;
-    let Some((accepted_cut, activation_head)) = stored else {
+    let Some((accepted_cut, activation_commit, activation_head)) = stored else {
         return Err(DbError::Message(
             "applied author exclusion has no exact activation locator".to_string(),
         ));
     };
-    Ok(AuthorExclusionActivationLocator {
+    let locator = AuthorExclusionActivationLocator {
         exclusion: exclusion.clone(),
         accepted_cut: serde_json::from_str(&accepted_cut).map_err(|error| {
             DbError::Message(format!("parse author exclusion accepted cut: {error}"))
         })?,
+        activation_commit: serde_json::from_str(&activation_commit).map_err(|error| {
+            DbError::Message(format!("parse author exclusion activation commit: {error}"))
+        })?,
         activation_head: serde_json::from_str(&activation_head).map_err(|error| {
             DbError::Message(format!("parse author exclusion activation head: {error}"))
         })?,
-    })
+    };
+    let retained =
+        Database::load_retained_merge_materialization_by_ref_on(conn, locator.activation_commit())?;
+    let accepted_cut = StoreHistoryCut::MergeConcurrent(locator.accepted_cut().clone());
+    if retained.activation_head_object() != &locator.activation_head().object
+        || retained.activation_head().head_hash() != locator.activation_head().head_hash
+        || !retained
+            .device_operations()
+            .exclusions()
+            .any(|(candidate, cut)| candidate == exclusion && cut == &accepted_cut)
+    {
+        return Err(DbError::Message(
+            "author exclusion locator differs from its exact retained activation".to_string(),
+        ));
+    }
+    Ok(locator)
 }
 
 enum BlockedMergeCandidateNonactivation {
@@ -3888,6 +3976,7 @@ fn blocked_merge_candidate_nonactivation(
         verified.proof(),
         crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
             | crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+            | crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. }
     ) {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
@@ -3910,16 +3999,39 @@ fn validate_terminal_candidate_authority_on(
     candidate: &PreparedMergeCandidate,
     durable: &crate::sync::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
+    if durable
+        .reference()
+        .map_err(|error| DbError::Message(error.to_string()))?
+        != candidate.reference
+    {
+        return Err(DbError::Message(
+            "terminal candidate authority names another candidate".to_string(),
+        ));
+    }
+    validate_terminal_nonactivation_authority_on(conn, durable)
+}
+
+fn validate_terminal_nonactivation_authority_on(
+    conn: &Connection,
+    durable: &crate::sync::remote_object::CandidateNonactivation,
+) -> Result<(), DbError> {
     match durable.proof() {
         crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
             exclusion,
             accepted_cut,
             activation_head,
         } => {
+            let commit: StoreBatchCommit = serde_json::from_slice(
+                &durable.candidate().canonical_signed_bytes,
+            )
+            .map_err(|error| DbError::Message(format!("terminal candidate commit: {error}")))?;
+            let reference = durable
+                .reference()
+                .map_err(|error| DbError::Message(error.to_string()))?;
             let current = author_exclusion_activation_for_candidate_on(
                 conn,
-                &candidate.reference,
-                &candidate.commit.author_registration,
+                &reference,
+                &commit.author_registration,
             )?
             .ok_or_else(|| {
                 DbError::Message(
@@ -3961,6 +4073,12 @@ fn validate_terminal_candidate_authority_on(
                         .to_string(),
                 ));
             }
+        }
+        crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction {
+            dependency_nonactivation,
+            ..
+        } => {
+            validate_terminal_nonactivation_authority_on(conn, dependency_nonactivation)?;
         }
         crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
         | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
@@ -5653,6 +5771,25 @@ impl Database {
         self.state.test_pause_points.reach(point).await;
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn fail_next_merge_materialization_at(&self, point: MergeMaterializationFailurePoint) {
+        *self
+            .state
+            .merge_materialization_failure
+            .lock()
+            .expect("Merge materialization failure lock poisoned") = Some(point);
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn merge_materialization_failure_injection(
+        &self,
+    ) -> MergeMaterializationFailureInjection {
+        MergeMaterializationFailureInjection {
+            armed: self.state.merge_materialization_failure.clone(),
+        }
+    }
+
     /// Open and own the connection at `path`.
     ///
     /// Runs the host migration ladder and validates its final sync-routing
@@ -6860,6 +6997,13 @@ impl Database {
                     "prepared Store head does not activate the exact prepared commit".to_string(),
                 ));
             }
+            if stage.history_summary.digest() != stage.head.value.history_summary
+                || stage.history_summary.causal_cut.get(&commit_ref.coord) != Some(&commit_ref)
+            {
+                return Err(DbError::Message(
+                    "prepared Store history summary differs from its signed head".to_string(),
+                ));
+            }
             StoreDeviceHead::parse_at(
                 &stage.head.value.to_bytes(),
                 root.store_root_hash,
@@ -6983,6 +7127,7 @@ impl Database {
                     semantic_bytes: stage.head.value.to_bytes(),
                     prepared: stage.head.prepared,
                 },
+                history_summary: stage.history_summary,
                 local_cleanup: stage.local_cleanup,
                 completion: stage.completion,
             };
@@ -7044,6 +7189,7 @@ impl Database {
             let PreparedStoreWriteState::MergeConcurrent {
                 commit: candidate_commit,
                 head: candidate_head,
+                history_summary: candidate_history_summary,
                 local_cleanup,
                 completion,
             } = prepared
@@ -7094,6 +7240,9 @@ impl Database {
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
             if stage.head.value.commit != authority_ref
+                || stage.history_summary.digest() != stage.head.value.history_summary
+                || stage.history_summary.causal_cut.get(&authority_ref.coord)
+                    != Some(&authority_ref)
                 || stage.head.prepared.reference().slot()
                     != candidate.head_prepared.reference().slot()
                 || stage.head.value.successor != candidate.head.successor
@@ -7133,6 +7282,7 @@ impl Database {
             let replacement = PreparedStoreWriteState::MergeAbandonment {
                 candidate_commit,
                 candidate_head,
+                candidate_history_summary,
                 authority_commit: DurablePreparedProtocolObject {
                     semantic_bytes: stage.commit.value.to_bytes(),
                     prepared: stage.commit.prepared,
@@ -7141,6 +7291,7 @@ impl Database {
                     semantic_bytes: stage.head.value.to_bytes(),
                     prepared: stage.head.prepared,
                 },
+                authority_history_summary: stage.history_summary,
                 outcome: MergeAbandonmentOutcome::Prepared,
                 local_cleanup,
                 completion,
@@ -8631,6 +8782,7 @@ impl Database {
                 candidate_head,
                 authority_commit,
                 authority_head,
+                authority_history_summary,
                 ..
             } = &prepared
             {
@@ -8699,6 +8851,7 @@ impl Database {
                     &[],
                     &authority.head,
                     authority.head_prepared.reference(),
+                    authority_history_summary,
                     &[],
                     None,
                 )?;
@@ -8746,6 +8899,7 @@ impl Database {
             let PreparedStoreWriteState::MergeConcurrent {
                 commit,
                 head,
+                history_summary,
                 local_cleanup,
                 ..
             } = prepared
@@ -8810,6 +8964,7 @@ impl Database {
                 PreparedWriteMaterialization::MergeConcurrent {
                     head: &head_value,
                     head_object: head.prepared.reference(),
+                    history_summary: &history_summary,
                 },
                 local_cleanup,
                 &[head_object_id],
@@ -8935,6 +9090,11 @@ impl Database {
                 return Err(DbError::Message(
                     "Merge slot conflict cannot carry membership-grant revocation evidence"
                         .to_string(),
+                ));
+            }
+            crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+                return Err(DbError::Message(
+                    "Merge slot conflict cannot carry dependent-retraction evidence".to_string(),
                 ));
             }
         };
@@ -10629,7 +10789,7 @@ impl Database {
         let remotes = operation
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
                 if active.operation_id() != operation.operation_id() {
@@ -10659,7 +10819,7 @@ impl Database {
             insert_store_device_exclusion_on(&tx, &operation, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(operation)
-        })
+        }))
         .await
     }
 
@@ -11226,13 +11386,13 @@ impl Database {
     pub(crate) async fn active_outbound_store_device_exclusion(
         &self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
-        self.call(load_active_store_device_exclusion_on).await
+        Box::pin(self.call(load_active_store_device_exclusion_on)).await
     }
 
     pub(crate) async fn outbound_store_device_exclusion_operations(
         &self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        self.call(|conn| {
+        Box::pin(self.call(|conn| {
             let mut statement = conn
                 .prepare(
                     "SELECT operation_id, state
@@ -11254,7 +11414,7 @@ impl Database {
                 })
                 .collect();
             operations
-        })
+        }))
         .await
     }
 
@@ -11282,7 +11442,7 @@ impl Database {
                     .to_string(),
             ));
         }
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let next_candidate = next.candidate().expect("validated candidate state");
@@ -11313,7 +11473,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -11341,7 +11501,7 @@ impl Database {
             };
             let expected = Box::new(expected);
             let next = Box::new(next);
-            self.call(move |conn| {
+            Box::pin(self.call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 require_store_device_exclusion_transition_on(
                     &tx,
@@ -11369,7 +11529,7 @@ impl Database {
                 update_store_device_exclusion_on(&tx, expected.as_ref(), next.as_ref(), false)?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(*next)
-            })
+            }))
             .await
         })
     }
@@ -11390,7 +11550,7 @@ impl Database {
         let remotes = expected
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             for remote in &remotes {
@@ -11429,7 +11589,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, false)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -11460,7 +11620,7 @@ impl Database {
                     .to_string(),
             ));
         }
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let authority_id = remote_object_id(expected.object().object());
@@ -11499,7 +11659,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -11547,7 +11707,7 @@ impl Database {
         }
         .remote_objects()
         .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             for remote in replacement_remotes
@@ -11603,7 +11763,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -11611,7 +11771,7 @@ impl Database {
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let current = load_store_device_exclusion_on(conn, expected.operation_id())?
                 .ok_or_else(|| {
                     DbError::Message("Store-device exclusion journal is absent".to_string())
@@ -11650,7 +11810,7 @@ impl Database {
                     "losing Store-device exclusion commit is not awaiting deletion".to_string(),
                 ))
             }
-        })
+        }))
         .await
     }
 
@@ -11674,7 +11834,7 @@ impl Database {
         };
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&losing.candidate.reference.object);
@@ -11739,7 +11899,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -11766,7 +11926,7 @@ impl Database {
         );
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        self.call(move |conn| {
+        Box::pin(self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&candidate.reference.object);
@@ -11829,7 +11989,7 @@ impl Database {
             update_store_device_exclusion_on(&tx, &expected, &next, false)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
-        })
+        }))
         .await
     }
 
@@ -14276,6 +14436,7 @@ impl Database {
         commit_ref: StoreBatchCommitRef,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
+        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         registration: StoreDeviceRegistration,
         authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
     ) -> Result<(), DbError> {
@@ -14292,6 +14453,7 @@ impl Database {
                 &registrations,
                 &activation_head,
                 &activation_head_object,
+                &history_summary,
                 &[],
                 None,
             )?;
@@ -14854,7 +15016,11 @@ impl Database {
                 &remote_object_ids,
             )?;
             match materialization {
-                LocalRetirementMaterialization::MergeConcurrent { head, head_object } => {
+                LocalRetirementMaterialization::MergeConcurrent {
+                    head,
+                    head_object,
+                    history_summary,
+                } => {
                     Self::record_materialized_merge_commit_on(
                         &tx,
                         &root,
@@ -14863,6 +15029,7 @@ impl Database {
                         &[],
                         &head,
                         &head_object,
+                        &history_summary,
                         &[],
                         None,
                     )?
@@ -16547,7 +16714,10 @@ impl Database {
                 Ok(commit)
             };
             let (commit, activation, merge_head_object_id) = match &operation.policy {
-                crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent { head } => {
+                crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent {
+                    head,
+                    history_summary,
+                } => {
                     let commit = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
@@ -16580,6 +16750,7 @@ impl Database {
                         &verified,
                         head,
                         prepared_head.reference(),
+                        history_summary,
                         None,
                         &[],
                         None,
@@ -16674,6 +16845,27 @@ impl Database {
         &self,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.call(Self::load_retained_merge_replay_inputs_on).await
+    }
+
+    pub(crate) async fn retained_merge_materialization(
+        &self,
+        reference: StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        self.call(move |conn| Self::load_retained_merge_materialization_by_ref_on(conn, &reference))
+            .await
+    }
+
+    pub(crate) async fn retained_merge_history_frontier(
+        &self,
+        references: Vec<StoreBatchCommitRef>,
+    ) -> Result<Vec<crate::sync::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
+        self.call(move |conn| {
+            references
+                .iter()
+                .map(|reference| Self::load_retained_merge_history_checkpoint_on(conn, reference))
+                .collect()
+        })
+        .await
     }
 
     pub(crate) async fn exact_materialized_ref(
@@ -17889,6 +18081,270 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn retain_snapshot_author_exclusion_activations_on(
+        conn: &rusqlite::Transaction<'_>,
+    ) -> Result<(), DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT DISTINCT activation_commit
+                 FROM store_author_exclusion_activations
+                 ORDER BY activation_commit",
+            )
+            .map_err(DbError::from)?;
+        let references = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut retained = Vec::with_capacity(references.len());
+        for encoded in references {
+            let reference: StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::Message(format!(
+                        "snapshot author exclusion activation commit: {error}"
+                    ))
+                })?;
+            Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
+            let StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence,
+            } = &reference.coord
+            else {
+                return Err(DbError::Message(
+                    "snapshot author exclusion activation names a Serial commit".to_string(),
+                ));
+            };
+            let stream_id = stream_id.to_string();
+            let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let (stored_ref, input_hash, canonical_input): (String, String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT commit_ref, input_hash, canonical_input
+                     FROM retained_merge_materializations
+                     WHERE device_id = ?1 AND seq = ?2",
+                    rusqlite::params![&stream_id, sequence_sql],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            if stored_ref != encoded
+                || input_hash != ObjectHash::digest(&canonical_input).to_string()
+            {
+                return Err(DbError::Message(
+                    "snapshot author exclusion activation differs from its retained input"
+                        .to_string(),
+                ));
+            }
+            let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
+                .map_err(|error| {
+                    DbError::Message(format!("snapshot author exclusion retained input: {error}"))
+                })?;
+            retained.push((reference, input_hash, canonical_input, input));
+        }
+        Self::remove_retained_replay_ownership_from_snapshot_on(conn)?;
+        conn.execute("DELETE FROM retained_merge_materializations", [])
+            .map_err(DbError::from)?;
+        for (reference, input_hash, canonical_input, input) in retained {
+            let StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence,
+            } = &reference.coord
+            else {
+                return Err(DbError::Message(
+                    "snapshot author exclusion activation became Serial".to_string(),
+                ));
+            };
+            let stream_id = stream_id.to_string();
+            let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let encoded_ref = serde_json::to_string(&reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize snapshot author exclusion activation: {error}"
+                ))
+            })?;
+            conn.execute(
+                "INSERT INTO retained_merge_materializations
+                 (device_id, seq, commit_ref, input_hash, canonical_input)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    &stream_id,
+                    sequence,
+                    &encoded_ref,
+                    &input_hash,
+                    &canonical_input
+                ],
+            )
+            .map_err(DbError::from)?;
+            let input_hash = input_hash.parse().map_err(|error| {
+                DbError::Message(format!(
+                    "snapshot author exclusion input hash {input_hash}: {error}"
+                ))
+            })?;
+            let owner = RetainedReplayOwner::Commit {
+                commit: reference,
+                input_hash,
+            };
+            Self::pin_retained_merge_objects_on(conn, &input, &owner)?;
+            Self::validate_retained_merge_pin_closure_on(conn, &input, &owner)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain_snapshot_device_states_on(
+        conn: &rusqlite::Transaction<'_>,
+        coverage: BTreeMap<String, StoreBatchCommitRef>,
+    ) -> Result<(), DbError> {
+        let mut required = coverage.into_values().collect::<BTreeSet<_>>();
+        let mut statement = conn
+            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
+            .map_err(DbError::from)?;
+        let retained = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in retained {
+            let reference: StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::Message(format!("snapshot retained device-state authority: {error}"))
+                })?;
+            let materialization =
+                Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
+            required.insert(reference);
+            match &materialization.commit.order {
+                crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
+                    predecessor,
+                    dependencies,
+                    ..
+                } => {
+                    required.extend(predecessor.iter().cloned());
+                    required.extend(dependencies.values().cloned());
+                }
+                crate::sync::store_commit::StoreCommitOrder::Serial { .. } => {
+                    return Err(DbError::Message(
+                        "snapshot retained Merge authority has a Serial order".to_string(),
+                    ));
+                }
+            }
+        }
+        conn.execute_batch(
+            "CREATE TEMP TABLE snapshot_required_device_states (
+                 commit_ref TEXT PRIMARY KEY
+             ) STRICT;",
+        )
+        .map_err(DbError::from)?;
+        for reference in &required {
+            let encoded = serde_json::to_string(reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize snapshot device-state reference: {error}"
+                ))
+            })?;
+            let present = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM store_device_state_snapshots WHERE commit_ref = ?1
+                     )",
+                    [&encoded],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)?;
+            if !present {
+                return Err(DbError::Message(
+                    "snapshot device-state closure is incomplete".to_string(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO snapshot_required_device_states (commit_ref) VALUES (?1)",
+                [&encoded],
+            )
+            .map_err(DbError::from)?;
+        }
+        conn.execute(
+            "DELETE FROM store_device_state_snapshots
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM snapshot_required_device_states required
+                 WHERE required.commit_ref = store_device_state_snapshots.commit_ref
+             )",
+            [],
+        )
+        .map_err(DbError::from)?;
+        let actual = conn
+            .prepare("SELECT commit_ref FROM store_device_state_snapshots ORDER BY commit_ref")
+            .map_err(DbError::from)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(DbError::from)?;
+        let expected = required
+            .iter()
+            .map(|reference| {
+                serde_json::to_string(reference).map_err(|error| {
+                    DbError::Message(format!("serialize expected snapshot device state: {error}"))
+                })
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if actual != expected {
+            return Err(DbError::Message(
+                "snapshot device-state closure differs from its exact authority".to_string(),
+            ));
+        }
+        conn.execute_batch("DROP TABLE snapshot_required_device_states")
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_snapshot_author_exclusion_activations_on(
+        conn: &Connection,
+    ) -> Result<(), DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT exclusion_ref, activation_commit
+                 FROM store_author_exclusion_activations
+                 ORDER BY exclusion_ref",
+            )
+            .map_err(DbError::from)?;
+        let stored = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut expected = BTreeSet::new();
+        for (encoded_exclusion, activation_commit) in stored {
+            let exclusion = serde_json::from_str(&encoded_exclusion).map_err(|error| {
+                DbError::Message(format!("snapshot author exclusion reference: {error}"))
+            })?;
+            let locator = load_author_exclusion_activation_locator_on(conn, &exclusion)?;
+            let encoded_locator =
+                serde_json::to_string(locator.activation_commit()).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize snapshot author exclusion activation: {error}"
+                    ))
+                })?;
+            if encoded_locator != activation_commit {
+                return Err(DbError::Message(
+                    "snapshot author exclusion activation changed during verification".to_string(),
+                ));
+            }
+            expected.insert(activation_commit);
+        }
+        let mut statement = conn
+            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
+            .map_err(DbError::from)?;
+        let actual = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(DbError::from)?;
+        if actual != expected {
+            return Err(DbError::Message(
+                "snapshot retained inputs differ from its author exclusion activations".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn open_retained_merge_materialization_input_on(
         conn: &Connection,
         commit_ref: &StoreBatchCommitRef,
@@ -18080,6 +18536,7 @@ impl Database {
             circle_activations,
             activation_head: head,
             activation_head_object: input.activation_head.reference().clone(),
+            history_summary: input.history_summary.clone(),
             membership_objects: input.membership_objects.clone(),
             packages: package_values,
             package_application: input.activation.package_application,
@@ -18107,6 +18564,7 @@ impl Database {
                 materialization.activation_head.to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
+            history_summary: materialization.history_summary.clone(),
             membership_objects: materialization.membership_objects.cloned(),
             packages,
             activation: RetainedCommitActivationInput {
@@ -18262,6 +18720,173 @@ impl Database {
         Ok(verified)
     }
 
+    fn load_retained_merge_materialization_by_ref_on(
+        conn: &Connection,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &reference.coord
+        else {
+            return Err(DbError::Message(
+                "retained Merge materialization lookup received a Serial commit".to_string(),
+            ));
+        };
+        let stream_id = stream_id.to_string();
+        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let (stored_ref, input_hash): (String, String) = conn
+            .query_row(
+                "SELECT commit_ref, input_hash FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![&stream_id, sequence_sql],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let stored_ref = Self::parse_stored_commit_ref(&stream_id, *sequence, &stored_ref)?;
+        if &stored_ref != reference {
+            return Err(DbError::Message(
+                "retained Merge materialization coordinate contains another commit".to_string(),
+            ));
+        }
+        Self::load_retained_merge_materialization_on(
+            conn,
+            &stream_id,
+            *sequence,
+            reference,
+            &input_hash,
+        )
+    }
+
+    fn load_retained_merge_history_checkpoint_on(
+        conn: &Connection,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<crate::sync::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = &reference.coord
+        else {
+            return Err(DbError::Message(
+                "retained Merge checkpoint names a Serial commit".to_string(),
+            ));
+        };
+        let stream = stream_id.to_string();
+        let sequence_sql = Self::sequence_to_sqlite(&stream, *sequence)?;
+        let snapshot_reference: Option<String> = conn
+            .query_row(
+                "SELECT commit_ref FROM snapshot_coverage WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![&stream, sequence_sql],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if let Some(snapshot_reference) = snapshot_reference {
+            let snapshot_reference: StoreBatchCommitRef = serde_json::from_str(&snapshot_reference)
+                .map_err(|error| {
+                    DbError::Message(format!("snapshot Merge checkpoint commit ref: {error}"))
+                })?;
+            if &snapshot_reference != reference {
+                return Err(DbError::Message(
+                    "snapshot Merge checkpoint coordinate contains another commit".to_string(),
+                ));
+            }
+            let baseline = load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+                DbError::Message(
+                    "snapshot Merge checkpoint has no retained replay baseline".to_string(),
+                )
+            })?;
+            let RetainedReplayAuthority::StableSnapshot(authority) = baseline.authority else {
+                return Err(DbError::Message(
+                    "snapshot Merge checkpoint has genesis replay authority".to_string(),
+                ));
+            };
+            let crate::sync::store_commit::StoreSnapshotHistorySummary::MergeConcurrent(summary) =
+                authority.metadata.history_summary
+            else {
+                return Err(DbError::Message(
+                    "snapshot Merge checkpoint carries Serial history authority".to_string(),
+                ));
+            };
+            summary
+                .validate_snapshot_baseline()
+                .map_err(|error| DbError::Message(format!("snapshot Merge checkpoint: {error}")))?;
+            if summary
+                .frontier()
+                .map_err(|error| {
+                    DbError::Message(format!("snapshot Merge checkpoint frontier: {error}"))
+                })?
+                .get(stream_id)
+                != Some(reference)
+            {
+                return Err(DbError::Message(
+                    "snapshot Merge checkpoint is absent from its signed frontier".to_string(),
+                ));
+            }
+            let state = load_store_device_snapshot_on(conn, reference)?;
+            let expected_state = crate::sync::store_commit::StoreDeviceStateRef::merge_concurrent(
+                CommitFrontier::MergeConcurrent(
+                    summary
+                        .frontier()
+                        .map_err(|error| DbError::Message(error.to_string()))?,
+                ),
+                &state,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            if summary.post_state != expected_state {
+                return Err(DbError::Message(
+                    "snapshot Merge checkpoint state differs from its signed reference".to_string(),
+                ));
+            }
+            return Ok(
+                crate::sync::store_commit::OpenedRetainedMergeHistorySummary {
+                    announcement_frontier: summary.announcement_frontier.clone(),
+                    post_state: state,
+                    summary,
+                },
+            );
+        }
+        let (stored_ref, input_hash): (String, String) = conn
+            .query_row(
+                "SELECT commit_ref, input_hash FROM retained_merge_materializations \
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream, sequence_sql],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let stored_ref: StoreBatchCommitRef =
+            serde_json::from_str(&stored_ref).map_err(|error| {
+                DbError::Message(format!("retained Merge checkpoint commit ref: {error}"))
+            })?;
+        if &stored_ref != reference {
+            return Err(DbError::Message(
+                "retained Merge checkpoint coordinate contains another commit".to_string(),
+            ));
+        }
+        let retained = Self::load_retained_merge_materialization_on(
+            conn,
+            &stream_id.to_string(),
+            *sequence,
+            reference,
+            &input_hash,
+        )?;
+        let head_ref = crate::sync::store_commit::StoreDeviceHeadRef {
+            head_hash: retained.activation_head.head_hash(),
+            object: retained.activation_head_object.clone(),
+        };
+        let state = load_store_device_snapshot_on(conn, reference)?;
+        retained
+            .history_summary
+            .open(
+                &retained.commit,
+                reference,
+                &retained.activation_head,
+                &head_ref,
+                &state,
+            )
+            .map_err(|error| DbError::Message(format!("retained Merge checkpoint: {error}")))
+    }
+
     pub(crate) fn load_retained_merge_replay_inputs_on(
         conn: &Connection,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
@@ -18300,8 +18925,8 @@ impl Database {
             .collect()
     }
 
-    pub(crate) fn reconcile_store_device_exclusion_freezes_after_replay_on(
-        conn: &Connection,
+    pub(crate) fn replace_store_device_exclusion_freezes_from_replay_on(
+        conn: &rusqlite::Transaction<'_>,
     ) -> Result<(), DbError> {
         let root = required_store_root_authority_on(conn)?;
         let existing = load_store_device_exclusion_freezes_on(conn, &root)?;
@@ -18590,6 +19215,43 @@ impl Database {
         Ok(())
     }
 
+    fn complete_merge_retraction_closure(
+        direct_dependencies: &BTreeMap<StoreBatchCommitRef, BTreeSet<StoreBatchCommitRef>>,
+        mut closure: BTreeSet<StoreBatchCommitRef>,
+    ) -> BTreeSet<StoreBatchCommitRef> {
+        loop {
+            let additions = direct_dependencies
+                .iter()
+                .filter(|(reference, _)| !closure.contains(*reference))
+                .filter(|(_, dependencies)| {
+                    dependencies
+                        .iter()
+                        .any(|dependency| closure.contains(dependency))
+                })
+                .map(|(reference, _)| reference.clone())
+                .collect::<Vec<_>>();
+            if additions.is_empty() {
+                return closure;
+            }
+            closure.extend(additions);
+        }
+    }
+
+    fn require_exact_merge_retraction_closure(
+        direct_dependencies: &BTreeMap<StoreBatchCommitRef, BTreeSet<StoreBatchCommitRef>>,
+        roots: BTreeSet<StoreBatchCommitRef>,
+        provided: &BTreeSet<StoreBatchCommitRef>,
+    ) -> Result<(), DbError> {
+        let required = Self::complete_merge_retraction_closure(direct_dependencies, roots);
+        if provided != &required {
+            return Err(DbError::Message(
+                "verified terminal retractions do not exactly cover excluded materializations"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn retract_verified_merge_materializations_on(
         conn: &rusqlite::Transaction<'_>,
         retractions: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
@@ -18602,8 +19264,9 @@ impl Database {
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
+        let retained = Self::load_retained_merge_replay_inputs_on(conn)?;
         let mut required = BTreeSet::new();
-        for retained in Self::load_retained_merge_replay_inputs_on(conn)? {
+        for retained in &retained {
             if author_exclusion_activation_for_candidate_on(
                 conn,
                 &retained.commit_ref,
@@ -18611,7 +19274,7 @@ impl Database {
             )?
             .is_some()
             {
-                required.insert(retained.commit_ref);
+                required.insert(retained.commit_ref.clone());
             }
         }
         for retraction in &retractions {
@@ -18626,12 +19289,24 @@ impl Database {
                 );
             }
         }
-        if provided != required {
-            return Err(DbError::Message(
-                "verified terminal retractions do not exactly cover excluded materializations"
-                    .to_string(),
-            ));
-        }
+        let direct_dependencies = retained
+            .iter()
+            .map(|retained| {
+                let mut direct = retained
+                    .commit
+                    .order
+                    .dependencies()
+                    .into_iter()
+                    .flat_map(|dependencies| dependencies.values())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if let Some(predecessor) = retained.commit.order.predecessor() {
+                    direct.insert(predecessor.clone());
+                }
+                (retained.commit_ref.clone(), direct)
+            })
+            .collect::<BTreeMap<_, _>>();
+        Self::require_exact_merge_retraction_closure(&direct_dependencies, required, &provided)?;
         let mut notifications = Vec::new();
         for verified in retractions {
             let (nonactivation, head_nonactivation) =
@@ -18641,6 +19316,7 @@ impl Database {
             let candidate = nonactivation
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
+            validate_terminal_nonactivation_authority_on(conn, &nonactivation)?;
             match nonactivation.proof() {
                 crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
@@ -18658,6 +19334,7 @@ impl Database {
                     }
                 }
                 crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {}
+                crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {}
                 crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                 | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
                     return Err(DbError::Message(
@@ -18787,11 +19464,17 @@ impl Database {
                     "retracted Merge materialization disappeared".to_string(),
                 ));
             }
-            conn.execute(
-                "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
-                [&encoded_ref],
-            )
-            .map_err(DbError::from)?;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
+                    [&encoded_ref],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "retracted Merge device state disappeared".to_string(),
+                ));
+            }
             let deleted = conn
                 .execute(
                     "DELETE FROM retained_merge_materializations
@@ -18882,6 +19565,7 @@ impl Database {
         )],
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
+        history_summary: &crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<(), DbError> {
@@ -18898,6 +19582,7 @@ impl Database {
             &circle_activations,
             activation_head,
             activation_head_object,
+            history_summary,
             None,
             packages,
             package_application,
@@ -18917,6 +19602,29 @@ impl Database {
             materialization.activation_head,
             materialization.activation_head_object,
         )?;
+        let root = required_store_root_authority_on(conn)?;
+        let state_after = Self::derive_materialized_store_device_state_on(
+            conn,
+            &root,
+            materialization.commit,
+            materialization.device_operations,
+        )?;
+        let expected_post_state = crate::sync::store_commit::StoreDeviceStateRef::merge_concurrent(
+            CommitFrontier::MergeConcurrent(
+                materialization
+                    .history_summary
+                    .frontier()
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            ),
+            &state_after,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        if materialization.history_summary.post_state != expected_post_state {
+            return Err(DbError::Message(
+                "retained Merge history summary differs from the derived post-commit device state"
+                    .to_string(),
+            ));
+        }
         let retained_commit_ref = Self::retain_merge_materialization_on(conn, &materialization)?;
         let activation = ReclaimCommitActivation::merge_concurrent(
             materialization.commit_ref.clone(),
@@ -18935,6 +19643,198 @@ impl Database {
             MaterializedCommitRetention::MergeConcurrent(&retained_commit_ref),
             &activation,
         )
+    }
+
+    fn derive_materialized_store_device_state_on(
+        conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
+        commit: &StoreBatchCommit,
+        device_operations: &VerifiedStoreDeviceOperations,
+    ) -> Result<crate::sync::store_commit::ResolvedStoreDeviceState, DbError> {
+        let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
+        let recovery_author = commit
+            .device_registrations()
+            .iter()
+            .find_map(|activation| {
+                if activation.registration != commit.author_registration {
+                    return None;
+                }
+                let crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                    node,
+                    ..
+                } = &activation.authority
+                else {
+                    return None;
+                };
+                Some((&activation.registration, node))
+            })
+            .map(|(registration_ref, node)| {
+                let registration = load_activated_registration_on(conn, root, registration_ref)?;
+                let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                    owner_grant,
+                    ..
+                } = registration.origin
+                else {
+                    return Err(DbError::Message(
+                        "recovery activation author has a non-recovery registration origin"
+                            .to_string(),
+                    ));
+                };
+                Ok((
+                    registration_ref.clone(),
+                    crate::sync::store_commit::OwnerRecoveryCursor {
+                        owner_grant,
+                        position: crate::sync::store_commit::OwnerRecoveryPosition::At {
+                            node: node.clone(),
+                        },
+                    },
+                ))
+            })
+            .transpose()?;
+        if let Some((registration, recovery)) = &recovery_author {
+            device_state = device_state
+                .activate_registration(registration.clone(), Some(recovery.clone()))
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        let active_author = device_state
+            .devices
+            .get(&commit.author_registration.device_id)
+            .is_some_and(|record| {
+                record.registration == commit.author_registration
+                    && matches!(
+                        record.status,
+                        crate::sync::store_commit::StoreDeviceStatus::Active
+                    )
+            });
+        if !active_author {
+            return Err(DbError::Message(
+                "materialized commit author is not active at its exact predecessor state".into(),
+            ));
+        }
+        device_state = device_operations
+            .apply_to(device_state, &commit.device_state)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        for activation in commit.device_registrations() {
+            if recovery_author
+                .as_ref()
+                .is_some_and(|(registration, _)| registration == &activation.registration)
+            {
+                continue;
+            }
+            device_state = device_state
+                .activate_registration(activation.registration.clone(), None)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        for retirement in commit.device_retirements() {
+            device_state = device_state
+                .self_retire(retirement.clone())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        enum OwnerRecoveryAuthority<'a> {
+            Merge {
+                registration: &'a StoreDeviceRegistrationRef,
+                grant_id: &'a crate::sync::membership::MembershipGrantId,
+                anchor: &'a crate::sync::store_commit::GrantStreamAnchor,
+            },
+            Serial {
+                grant_id: &'a crate::sync::membership::MembershipGrantId,
+                acceptance: &'a crate::sync::store_commit::OwnerPromotionAcceptance,
+            },
+        }
+        let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
+            let crate::sync::store_commit::StreamActivation::GrantAuthorized {
+                author_registration,
+                grant_id,
+                anchor: anchor @ crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
+                ..
+            } = activation
+            else {
+                return None;
+            };
+            Some(OwnerRecoveryAuthority::Merge {
+                registration: author_registration,
+                grant_id,
+                anchor,
+            })
+        });
+        let mut owner_recovery = owner_recoveries.next();
+        if owner_recoveries.next().is_some() {
+            return Err(DbError::Message(
+                "materialized commit activates more than one Owner recovery stream".to_string(),
+            ));
+        }
+        if let Some(serial) =
+            commit.control().and_then(|control| {
+                let crate::sync::store_commit::StoreControl::SerialMembership { entry } = control
+                else {
+                    return None;
+                };
+                let crate::sync::membership::SerialMembershipChange::SetMember {
+                    role:
+                        crate::sync::membership::StoreMembershipRoleGrant::Owner {
+                            recovery:
+                                crate::sync::membership::OwnerRecoveryAnchorRef::Promotion {
+                                    acceptance,
+                                },
+                        },
+                    grant_id,
+                    ..
+                } = &entry.change
+                else {
+                    return None;
+                };
+                Some(OwnerRecoveryAuthority::Serial {
+                    grant_id,
+                    acceptance,
+                })
+            })
+        {
+            if owner_recovery.replace(serial).is_some() {
+                return Err(DbError::Message(
+                    "materialized commit mixes Merge and Serial Owner recovery activation"
+                        .to_string(),
+                ));
+            }
+        }
+        let owner_recovery = match owner_recovery {
+            Some(OwnerRecoveryAuthority::Merge {
+                registration,
+                grant_id,
+                anchor,
+            }) => {
+                let registration = load_activated_registration_on(conn, root, registration)?;
+                Some((
+                    grant_id.clone(),
+                    crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+                        root,
+                        &registration.author_pubkey,
+                        grant_id,
+                        anchor,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+                ))
+            }
+            Some(OwnerRecoveryAuthority::Serial {
+                grant_id,
+                acceptance,
+            }) => Some((
+                grant_id.clone(),
+                crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+                    root,
+                    &acceptance.request.member_pubkey,
+                    grant_id,
+                    acceptance.anchors.recovery(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?,
+            )),
+            None => None,
+        };
+        if let Some((grant_id, activation)) = owner_recovery {
+            device_state = device_state
+                .activate_owner_recovery(grant_id, activation)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        Ok(device_state)
     }
 
     fn record_materialized_commit_with_device_operations_on(
@@ -19033,190 +19933,13 @@ impl Database {
                 predecessor
             )));
         }
-        let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
-        let recovery_author = commit
-            .device_registrations()
-            .iter()
-            .find_map(|activation| {
-                if activation.registration != commit.author_registration {
-                    return None;
-                }
-                let crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
-                    node,
-                    ..
-                } = &activation.authority
-                else {
-                    return None;
-                };
-                Some((&activation.registration, node))
-            })
-            .map(|(registration_ref, node)| {
-                let registration = load_activated_registration_on(conn, &root, registration_ref)?;
-                let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
-                    owner_grant,
-                    ..
-                } = registration.origin
-                else {
-                    return Err(DbError::Message(
-                        "recovery activation author has a non-recovery registration origin"
-                            .to_string(),
-                    ));
-                };
-                Ok((
-                    registration_ref.clone(),
-                    crate::sync::store_commit::OwnerRecoveryCursor {
-                        owner_grant,
-                        position: crate::sync::store_commit::OwnerRecoveryPosition::At {
-                            node: node.clone(),
-                        },
-                    },
-                ))
-            })
-            .transpose()?;
-        if let Some((registration, recovery)) = &recovery_author {
-            device_state = device_state
-                .activate_registration(registration.clone(), Some(recovery.clone()))
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        let active_author = device_state
-            .devices
-            .get(&commit.author_registration.device_id)
-            .is_some_and(|record| {
-                record.registration == commit.author_registration
-                    && matches!(
-                        record.status,
-                        crate::sync::store_commit::StoreDeviceStatus::Active
-                    )
-            });
-        if !active_author {
-            return Err(DbError::Message(
-                "materialized commit author is not active at its exact predecessor state".into(),
-            ));
-        }
+        let device_state = Self::derive_materialized_store_device_state_on(
+            conn,
+            &root,
+            commit,
+            device_operations,
+        )?;
         record_activated_store_ack_on(conn, commit, commit_ref)?;
-        device_state = device_operations
-            .apply_to(device_state, &commit.device_state)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        for activation in commit.device_registrations() {
-            if recovery_author
-                .as_ref()
-                .is_some_and(|(registration, _)| registration == &activation.registration)
-            {
-                continue;
-            }
-            device_state = device_state
-                .activate_registration(activation.registration.clone(), None)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        for retirement in commit.device_retirements() {
-            device_state = device_state
-                .self_retire(retirement.clone())
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        enum OwnerRecoveryAuthority<'a> {
-            Merge {
-                registration: &'a StoreDeviceRegistrationRef,
-                grant_id: &'a crate::sync::membership::MembershipGrantId,
-                anchor: &'a crate::sync::store_commit::GrantStreamAnchor,
-            },
-            Serial {
-                grant_id: &'a crate::sync::membership::MembershipGrantId,
-                acceptance: &'a crate::sync::store_commit::OwnerPromotionAcceptance,
-            },
-        }
-        let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
-            let crate::sync::store_commit::StreamActivation::GrantAuthorized {
-                author_registration,
-                grant_id,
-                anchor: anchor @ crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
-                ..
-            } = activation
-            else {
-                return None;
-            };
-            Some(OwnerRecoveryAuthority::Merge {
-                registration: author_registration,
-                grant_id,
-                anchor,
-            })
-        });
-        let mut owner_recovery = owner_recoveries.next();
-        if owner_recoveries.next().is_some() {
-            return Err(DbError::Message(
-                "materialized commit activates more than one Owner recovery stream".to_string(),
-            ));
-        }
-        if let Some(serial) =
-            commit.control().and_then(|control| {
-                let crate::sync::store_commit::StoreControl::SerialMembership { entry } = control
-                else {
-                    return None;
-                };
-                let crate::sync::membership::SerialMembershipChange::SetMember {
-                    role:
-                        crate::sync::membership::StoreMembershipRoleGrant::Owner {
-                            recovery:
-                                crate::sync::membership::OwnerRecoveryAnchorRef::Promotion {
-                                    acceptance,
-                                },
-                        },
-                    grant_id,
-                    ..
-                } = &entry.change
-                else {
-                    return None;
-                };
-                Some(OwnerRecoveryAuthority::Serial {
-                    grant_id,
-                    acceptance,
-                })
-            })
-        {
-            if owner_recovery.replace(serial).is_some() {
-                return Err(DbError::Message(
-                    "materialized commit mixes Merge and Serial Owner recovery activation"
-                        .to_string(),
-                ));
-            }
-        }
-        let owner_recovery = match owner_recovery {
-            Some(OwnerRecoveryAuthority::Merge {
-                registration,
-                grant_id,
-                anchor,
-            }) => {
-                let registration = load_activated_registration_on(conn, &root, registration)?;
-                Some((
-                    grant_id.clone(),
-                    crate::sync::store_commit::OwnerRecoveryActivationId::derive(
-                        &root,
-                        &registration.author_pubkey,
-                        grant_id,
-                        anchor,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?,
-                ))
-            }
-            Some(OwnerRecoveryAuthority::Serial {
-                grant_id,
-                acceptance,
-            }) => Some((
-                grant_id.clone(),
-                crate::sync::store_commit::OwnerRecoveryActivationId::derive(
-                    &root,
-                    &acceptance.request.member_pubkey,
-                    grant_id,
-                    acceptance.anchors.recovery(),
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?,
-            )),
-            None => None,
-        };
-        if let Some((grant_id, activation)) = owner_recovery {
-            device_state = device_state
-                .activate_owner_recovery(grant_id, activation)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
         let seq = Self::sequence_to_sqlite(&stream_id, commit.seq())?;
         let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::Message(format!("serialize exact Store commit ref: {error}"))
@@ -19344,6 +20067,11 @@ impl Database {
             head_hash: activation_head.head_hash(),
             object: activation_head_object.clone(),
         };
+        let activation_commit = serde_json::to_string(commit_ref).map_err(|error| {
+            DbError::Message(format!(
+                "serialize author exclusion activation commit: {error}"
+            ))
+        })?;
         for (exclusion, accepted_cut) in device_operations.exclusions() {
             let StoreHistoryCut::MergeConcurrent(accepted_cut) = accepted_cut else {
                 return Err(DbError::Message(
@@ -19365,23 +20093,34 @@ impl Database {
             let inserted = conn
                 .execute(
                     "INSERT INTO store_author_exclusion_activations (
-                         exclusion_ref, accepted_cut, activation_head
-                     ) VALUES (?1, ?2, ?3)
+                         exclusion_ref, accepted_cut, activation_commit, activation_head
+                     ) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(exclusion_ref) DO NOTHING",
-                    (&exclusion_json, &accepted_cut_json, &activation_head_json),
+                    (
+                        &exclusion_json,
+                        &accepted_cut_json,
+                        &activation_commit,
+                        &activation_head_json,
+                    ),
                 )
                 .map_err(DbError::from)?;
             if inserted == 0 {
-                let stored: (String, String) = conn
+                let stored: (String, String, String) = conn
                     .query_row(
-                        "SELECT accepted_cut, activation_head
+                        "SELECT accepted_cut, activation_commit, activation_head
                          FROM store_author_exclusion_activations
                          WHERE exclusion_ref = ?1",
                         [&exclusion_json],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(DbError::from)?;
-                if stored != (accepted_cut_json, activation_head_json) {
+                if stored
+                    != (
+                        accepted_cut_json,
+                        activation_commit.clone(),
+                        activation_head_json,
+                    )
+                {
                     return Err(DbError::Message(
                         "author exclusion already names different activation evidence".to_string(),
                     ));
@@ -19993,6 +20732,7 @@ impl Database {
                         crate::sync::store_pull::DeviceJoinBootstrapActivation::MergeConcurrent {
                             head,
                             object,
+                            history_summary,
                         },
                     ) => {
                         let materialization = VerifiedMergeMaterialization::verify(
@@ -20004,6 +20744,7 @@ impl Database {
                             &circle_activations,
                             head,
                             object,
+                            history_summary,
                             None,
                             &[],
                             None,
@@ -20477,7 +21218,11 @@ impl Database {
             None => {}
         }
         match materialization {
-            PreparedWriteMaterialization::MergeConcurrent { head, head_object } => {
+            PreparedWriteMaterialization::MergeConcurrent {
+                head,
+                head_object,
+                history_summary,
+            } => {
                 Self::record_materialized_merge_commit_on(
                     conn,
                     root,
@@ -20486,6 +21231,7 @@ impl Database {
                     &[],
                     head,
                     head_object,
+                    history_summary,
                     &retained_packages,
                     (!retained_packages.is_empty())
                         .then_some(RetainedPackageApplication::LocallyAuthored),
@@ -20885,6 +21631,35 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn blocked_merge_history_summary(
+        &self,
+        write_id: WriteId,
+    ) -> Result<crate::sync::store_commit::RetainedVerifiedMergeHistorySummary, DbError> {
+        self.call(move |conn| {
+            let raw: String = conn
+                .query_row(
+                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw).map_err(|error| {
+                    DbError::Message(format!("blocked Merge history summary: {error}"))
+                })?;
+            let PreparedStoreWriteState::MergeConcurrent {
+                history_summary, ..
+            } = prepared
+            else {
+                return Err(DbError::Message(
+                    "blocked Merge history summary has no original candidate".to_string(),
+                ));
+            };
+            Ok(history_summary)
+        })
+        .await
+    }
+
     pub(crate) async fn prepared_merge_abandonment_candidates(
         &self,
         write_id: WriteId,
@@ -21186,8 +21961,10 @@ impl Database {
             let PreparedStoreWriteState::MergeAbandonment {
                 candidate_commit,
                 candidate_head,
+                candidate_history_summary,
                 authority_commit,
                 authority_head,
+                authority_history_summary: _,
                 outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
                 local_cleanup,
                 completion,
@@ -21210,6 +21987,7 @@ impl Database {
             let replacement = PreparedStoreWriteState::MergeConcurrent {
                 commit: candidate_commit,
                 head: candidate_head,
+                history_summary: candidate_history_summary,
                 local_cleanup,
                 completion,
             };
@@ -21266,8 +22044,10 @@ impl Database {
             let PreparedStoreWriteState::MergeAbandonment {
                 candidate_commit,
                 candidate_head,
+                candidate_history_summary,
                 authority_commit,
                 authority_head,
+                authority_history_summary: _,
                 outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
                 local_cleanup,
                 completion,
@@ -21290,6 +22070,7 @@ impl Database {
             let replacement = PreparedStoreWriteState::MergeConcurrent {
                 commit: candidate_commit,
                 head: candidate_head,
+                history_summary: candidate_history_summary,
                 local_cleanup,
                 completion,
             };
@@ -21341,8 +22122,10 @@ impl Database {
             let PreparedStoreWriteState::MergeAbandonment {
                 candidate_commit,
                 candidate_head,
+                candidate_history_summary,
                 authority_commit,
                 authority_head,
+                authority_history_summary: _,
                 outcome: MergeAbandonmentOutcome::AuthorExcluded,
                 local_cleanup,
                 completion,
@@ -21368,6 +22151,7 @@ impl Database {
             let replacement = PreparedStoreWriteState::MergeConcurrent {
                 commit: candidate_commit,
                 head: candidate_head,
+                history_summary: candidate_history_summary,
                 local_cleanup,
                 completion,
             };
@@ -21703,6 +22487,19 @@ impl Database {
                     activation_commit: activation_commit.clone(),
                     activation_head: activation_head.clone(),
                 },
+                crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+                    let durable = crate::sync::remote_object::CandidateNonactivation::from_durable_parts(
+                        &candidate,
+                        &prepared.commit,
+                        proof.clone(),
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    validate_terminal_nonactivation_authority_on(conn, &durable)?;
+                    TerminalCandidateAuthority::DependencyRetraction(
+                        crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
+                            .map_err(|error| DbError::Message(error.to_string()))?,
+                    )
+                }
                 crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                 | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
                     return Err(DbError::Message(
@@ -21902,6 +22699,19 @@ impl Database {
                         activation_commit: activation_commit.clone(),
                         activation_head: activation_head.clone(),
                     },
+                    crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+                        let durable = crate::sync::remote_object::CandidateNonactivation::from_durable_parts(
+                            &candidate.reference,
+                            &candidate.commit,
+                            proof.clone(),
+                        )
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                        validate_terminal_nonactivation_authority_on(conn, &durable)?;
+                        TerminalCandidateAuthority::DependencyRetraction(
+                            crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
+                                .map_err(|error| DbError::Message(error.to_string()))?,
+                        )
+                    }
                     crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                     | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => continue,
                 };
@@ -22105,19 +22915,23 @@ impl Database {
             let replacement = match prepared {
                 PreparedStoreWriteState::MergeConcurrent {
                     commit,
+                    history_summary,
                     local_cleanup,
                     completion,
                     ..
                 } => PreparedStoreWriteState::MergeConcurrent {
                     commit,
                     head: replacement_head,
+                    history_summary,
                     local_cleanup,
                     completion,
                 },
                 PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
+                    candidate_history_summary,
                     authority_commit,
+                    authority_history_summary,
                     outcome,
                     local_cleanup,
                     completion,
@@ -22125,8 +22939,10 @@ impl Database {
                 } => PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
+                    candidate_history_summary,
                     authority_commit,
                     authority_head: replacement_head,
+                    authority_history_summary,
                     outcome,
                     local_cleanup,
                     completion,
@@ -27093,6 +27909,7 @@ mod tests {
         let locator = |exclusion, sequence, label: &str| AuthorExclusionActivationLocator {
             exclusion,
             accepted_cut: BTreeMap::from([(stream, commit(sequence, label))]),
+            activation_commit: commit(sequence + 1, &format!("{label}-activation")),
             activation_head: crate::sync::store_commit::StoreDeviceHeadRef {
                 head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
                 object: reclaim_test_object(&format!("store-v1/test/{label}/head.json")),
@@ -27119,6 +27936,45 @@ mod tests {
             .expect("one terminal excludes the candidate");
 
         assert_eq!(selected, low_locator);
+    }
+
+    #[test]
+    fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
+        let stream = crate::sync::causal_grants::AuthorStreamId::from_bytes([19; 32]);
+        let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
+            coord: StoreCommitCoord::MergeConcurrent {
+                stream_id: stream,
+                sequence,
+            },
+            commit_hash: ObjectHash::digest(format!("{label} commit").as_bytes()),
+            object: reclaim_test_object(&format!("store-v1/test/{label}/commit.json")),
+        };
+        let root = commit(1, "retraction-root");
+        let child = commit(2, "retraction-child");
+        let grandchild = commit(3, "retraction-grandchild");
+        let independent = commit(4, "retraction-independent");
+        let graph = BTreeMap::from([
+            (root.clone(), BTreeSet::new()),
+            (child.clone(), BTreeSet::from([root.clone()])),
+            (grandchild.clone(), BTreeSet::from([child.clone()])),
+            (independent.clone(), BTreeSet::new()),
+        ]);
+
+        let required =
+            Database::complete_merge_retraction_closure(&graph, BTreeSet::from([root.clone()]));
+
+        assert_eq!(
+            required,
+            BTreeSet::from([root.clone(), child.clone(), grandchild]),
+        );
+        assert_ne!(required, BTreeSet::from([root.clone(), child.clone()]));
+        assert!(!required.contains(&independent));
+        assert!(Database::require_exact_merge_retraction_closure(
+            &graph,
+            BTreeSet::from([root.clone()]),
+            &BTreeSet::from([root, child]),
+        )
+        .is_err());
     }
 
     fn notes_migration() -> Migration {

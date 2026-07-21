@@ -2906,11 +2906,13 @@ pub async fn cancel_device_join(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
-        storage,
-        &root,
-        &attempt_ref,
-        &owner,
+    let attempt = Box::pin(
+        crate::sync::store_pull::load_verified_device_join_attempt_ref(
+            storage,
+            &root,
+            &attempt_ref,
+            &owner,
+        ),
     )
     .await?
     .value;
@@ -4917,13 +4919,13 @@ pub async fn complete_device_join(
         else {
             return Err(DeviceJoinError::JournalConflict);
         };
-        let joined = materialize_device_join_activation(db, storage, activation).await?;
+        let joined = Box::pin(materialize_device_join_activation(db, storage, activation)).await?;
         return (existing == &joined)
             .then_some(joined)
             .ok_or(DeviceJoinError::JournalConflict);
     }
     let current_readiness = observe_device_join_activation(pending, &activation)?;
-    let joined = materialize_device_join_activation(db, storage, activation).await?;
+    let joined = Box::pin(materialize_device_join_activation(db, storage, activation)).await?;
     if current_readiness.proof.registration != joined.registration {
         return Err(DeviceJoinError::JournalConflict);
     }

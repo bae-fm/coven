@@ -51,6 +51,8 @@ pub mod storage;
 pub mod store_ack;
 pub mod store_commit;
 pub mod store_device_exclusion;
+#[cfg(test)]
+mod store_history_checkpoint_tests;
 pub mod store_objects;
 pub mod store_outbound;
 pub mod store_protocol_root;

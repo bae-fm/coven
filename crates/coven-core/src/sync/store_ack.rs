@@ -226,14 +226,15 @@ pub async fn drain_outbound_store_acks(
                 )
                 .await?;
                 plan.validate_acknowledgement(&outbound.ack.value)?;
-                let candidate = super::store_outbound::prepare_store_operation_candidate(
+                let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
                     db,
                     storage,
                     plan,
-                    super::store_outbound::StoreOperationBatch::Acknowledgement(
-                        outbound.reference.clone(),
-                    ),
-                )
+                    super::store_outbound::StoreOperationBatch::Acknowledgement {
+                        reference: outbound.reference.clone(),
+                        value: outbound.ack.value.clone(),
+                    },
+                ))
                 .await?;
                 db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate)
                     .await?;
@@ -298,12 +299,12 @@ pub async fn drain_outbound_store_acks(
             })?;
         db.mark_remote_object_uploaded(acknowledgement_remote)
             .await?;
-        let outcome = super::store_outbound::publish_prepared_store_operation(
+        let outcome = Box::pin(super::store_outbound::publish_prepared_store_operation(
             db,
             storage,
             coordination,
             Box::new(candidate),
-        )
+        ))
         .await?;
         match outcome {
             super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => {
@@ -468,9 +469,10 @@ mod tests {
             db,
             storage,
             plan,
-            super::super::store_outbound::StoreOperationBatch::Acknowledgement(
-                outbound.reference.clone(),
-            ),
+            super::super::store_outbound::StoreOperationBatch::Acknowledgement {
+                reference: outbound.reference.clone(),
+                value: outbound.ack.value.clone(),
+            },
         )
         .await
         .expect("prepare acknowledgement candidate");
@@ -507,9 +509,10 @@ mod tests {
             db,
             storage,
             plan,
-            super::super::store_outbound::StoreOperationBatch::Acknowledgement(
-                outbound.reference.clone(),
-            ),
+            super::super::store_outbound::StoreOperationBatch::Acknowledgement {
+                reference: outbound.reference.clone(),
+                value: outbound.ack.value.clone(),
+            },
         )
         .await
         .expect("prepare Serial acknowledgement candidate");
@@ -1336,6 +1339,7 @@ mod tests {
             root.store_root_hash,
             registration_ref,
             candidate.reference.clone(),
+            expected_head.history_summary,
             super::super::store_commit::SuccessorLink {
                 activation: expected_head.successor.activation,
                 predecessor: expected_head.successor.predecessor.clone(),
