@@ -1744,7 +1744,7 @@ pub async fn abandon_merge_candidate(
             }
             if let Some(candidate) = db.blocked_merge_candidate(write_id.clone()).await? {
                 if let Some(nonactivation) =
-                    excluded_candidate_nonactivation(db, storage, &candidate).await?
+                    Box::pin(excluded_candidate_nonactivation(db, storage, &candidate)).await?
                 {
                     db.begin_blocked_merge_candidate_nonactivation(write_id.clone(), nonactivation)
                         .await?;
@@ -1774,10 +1774,18 @@ pub async fn abandon_merge_candidate(
                         "prepared Merge abandonment has no exact candidates".to_string(),
                     )
                 })?;
-            let candidate =
-                excluded_candidate_nonactivation(db, storage, &candidates.candidate).await?;
-            let authority =
-                excluded_candidate_nonactivation(db, storage, &candidates.authority).await?;
+            let candidate = Box::pin(excluded_candidate_nonactivation(
+                db,
+                storage,
+                &candidates.candidate,
+            ))
+            .await?;
+            let authority = Box::pin(excluded_candidate_nonactivation(
+                db,
+                storage,
+                &candidates.authority,
+            ))
+            .await?;
             match (candidate, authority) {
                 (Some(candidate), Some(authority)) => {
                     db.begin_prepared_merge_abandonment_nonactivation(

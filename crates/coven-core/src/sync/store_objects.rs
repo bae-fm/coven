@@ -390,7 +390,7 @@ fn verify_opened_registration(
     Ok(registration)
 }
 
-pub async fn load_device_join_attempt_ref(
+pub(crate) async fn load_owner_signed_device_join_attempt_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
     reference: &DeviceJoinAttemptRef,

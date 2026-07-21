@@ -675,10 +675,19 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
         let join = self.build_storage(&signer).await?;
         let pending = self.open_pending_journal()?;
+        let coordination = match &self.code.membership_floor {
+            MembershipFloor::MergeConcurrent(_) => None,
+            MembershipFloor::Serial(_) => {
+                Some(join.storage.serial_coordination().map_err(|error| {
+                    BootstrapError::Membership(format!("Serial coordination: {error}"))
+                })?)
+            }
+        };
         Ok(
             crate::sync::device_join::prepare_device_registration_request(
                 &pending,
                 &join.storage,
+                coordination,
                 Some(join.exact.as_ref()),
                 &signer,
                 approval,

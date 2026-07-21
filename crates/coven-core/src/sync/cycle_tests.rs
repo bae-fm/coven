@@ -973,6 +973,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
+                    coordination,
                     None,
                     member,
                     *approval,
@@ -1436,6 +1437,7 @@ fn exercise_missing_provider_administrator<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
+                    None,
                     Some(peer_home.as_ref()),
                     member,
                     *approval,
@@ -1708,6 +1710,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
+                    coordination,
                     None,
                     member,
                     *approval,
@@ -6614,6 +6617,741 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
             .is_some_and(|registration| registration.is_activated()),
         "the public join sequence activates the joining registration",
     );
+}
+
+struct SamePrincipalApprovalFixture {
+    _pending_dir: tempfile::TempDir,
+    pending: crate::sync::device_join::DeviceJoinJournalDatabase,
+    authorization: crate::sync::device_join::DeviceJoinAuthorization,
+    approval: crate::sync::device_join::DeviceProviderAdmissionApproval,
+}
+
+async fn prepare_same_principal_approval_fixture(
+    owner_db: &Database,
+    storage: &TestStore,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+    hlc_node: &str,
+) -> SamePrincipalApprovalFixture {
+    crate::sync::membership_ops::invite_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        owner,
+        &Hlc::new(hlc_node.to_string()),
+        &pubkey_hex(member),
+        None,
+        crate::sync::membership::MemberRole::Member,
+        &EncryptionService::from_key([59; 32]),
+        "test-lib",
+        "Test Store",
+        owner_db,
+    )
+    .await
+    .expect("invite exact Member identity");
+    let authorization = crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
+        storage
+            .open_into(owner_db)
+            .await
+            .expect("load exact Merge membership"),
+    );
+    let pending_dir = tempfile::tempdir().expect("create join directory");
+    let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open join journal");
+    let offer = crate::sync::device_join::begin_device_join(
+        owner_db,
+        &storage.storage,
+        &authorization,
+        owner,
+        &pubkey_hex(member),
+        storage
+            .protocol_root
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone(),
+    )
+    .await
+    .expect("begin exact device join");
+    let access_request = crate::sync::device_join::prepare_device_provider_access_request(
+        &pending,
+        SyncStorage::provider_binding(&storage.storage)
+            .await
+            .expect("resolve provider binding"),
+        member,
+        offer,
+    )
+    .await
+    .expect("prepare exact provider request");
+    let approval = crate::sync::device_join::authorize_device_provider_access(
+        owner_db,
+        &storage.storage,
+        None,
+        None,
+        None,
+        &authorization,
+        owner,
+        access_request,
+    )
+    .await
+    .expect("authorize exact provider access");
+    SamePrincipalApprovalFixture {
+        _pending_dir: pending_dir,
+        pending,
+        authorization,
+        approval,
+    }
+}
+
+#[tokio::test]
+async fn provider_approval_rejects_access_activation_policy_that_differs_from_the_signed_store_root(
+) {
+    use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
+
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let source = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "join-policy-member",
+    )
+    .await;
+    let valid_approval = source.approval;
+
+    let serial_db = open_serial_test_db();
+    let serial_store = TestStore::create(&serial_db, "join-policy-source", owner.clone())
+        .await
+        .expect("create exact Serial Store");
+    let mut provider_admin = valid_approval.request.offer.provider_admin.as_ref().clone();
+    provider_admin.capability.serial_coordination = serial_store
+        .protocol_root
+        .descriptor
+        .founder_provider_admin
+        .capability
+        .serial_coordination
+        .clone();
+    let (owner_registration_ref, owner_registration, owner_device_signer) = storage
+        .founder_device_authority()
+        .await
+        .expect("load exact founder authority");
+    let valid_offer = valid_approval.request.offer.as_ref();
+    let conflicting_offer = crate::sync::device_join::DeviceJoinOffer::signed(
+        valid_offer.attempt_id,
+        valid_offer.member_pubkey.clone(),
+        valid_offer.store_root.clone(),
+        valid_offer.provider.clone(),
+        valid_offer.attempt_slot.clone(),
+        valid_offer.outcome_slot.clone(),
+        owner_registration_ref,
+        valid_offer.owner_grant.clone(),
+        provider_admin,
+        &owner_registration,
+        &owner_device_signer,
+    )
+    .expect("sign conflicting offer");
+    let pending_dir = tempfile::tempdir().expect("create joining directory");
+    let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open joining journal");
+    let conflicting_request = crate::sync::device_join::prepare_device_provider_access_request(
+        &pending,
+        SyncStorage::provider_binding(&storage.storage)
+            .await
+            .expect("resolve provider binding"),
+        &member,
+        conflicting_offer,
+    )
+    .await
+    .expect("prepare conflicting provider request");
+    let mut conflicting_grant = valid_approval.access_grant;
+    conflicting_grant.activation.coord = crate::sync::store_commit::StoreCommitCoord::Serial {
+        sequence: conflicting_grant.activation.coord.sequence(),
+    };
+    let verified_root =
+        crate::sync::store_objects::load_store_protocol_root(&storage.storage, &storage.root)
+            .await
+            .expect("load exact signed Store root");
+    let error = crate::sync::device_join::DeviceProviderAdmissionApproval::signed(
+        conflicting_request.clone(),
+        conflicting_grant.clone(),
+        crate::sync::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
+        &verified_root,
+        &owner_registration,
+        &owner_device_signer,
+    )
+    .expect_err("the pinned Merge root rejects a Serial access activation");
+    assert!(matches!(
+        error,
+        crate::sync::device_join::DeviceJoinError::ApprovalMismatch
+    ));
+    let malformed_approval =
+        crate::sync::device_join::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
+            conflicting_request.clone(),
+            conflicting_grant,
+            crate::sync::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
+            &owner_device_signer,
+        );
+    let consumer_error = crate::sync::device_join::prepare_device_registration_request(
+        &pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        malformed_approval,
+    )
+    .await
+    .expect_err("the production joiner rejects the signed malformed approval");
+    assert!(matches!(
+        consumer_error,
+        crate::sync::device_join::DeviceJoinError::ApprovalMismatch
+    ));
+    assert!(matches!(
+        crate::sync::device_join::load_pending_device_join_status(
+            &pending,
+            conflicting_request.offer.attempt_id,
+        )
+        .expect("load unchanged join status"),
+        Some(DeviceJoinStatus::AwaitingProviderAdmission { request })
+            if request == conflicting_request
+    ));
+    assert!(pending
+        .load(conflicting_request.offer.attempt_id, DeviceJoinRole::Joiner,)
+        .expect("load exact join journal")
+        .is_some());
+}
+
+#[tokio::test]
+async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let first = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "first-join-member",
+    )
+    .await;
+    let first_registration_request = crate::sync::device_join::prepare_device_registration_request(
+        &first.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        first.approval,
+    )
+    .await
+    .expect("prepare first registration request");
+
+    let second_member = UserKeypair::generate();
+    let second = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &second_member,
+        "second-join-member",
+    )
+    .await;
+
+    crate::sync::device_join::accept_device_registration_request(
+        &owner_db,
+        &storage.storage,
+        None,
+        &second.authorization,
+        &owner,
+        first_registration_request,
+    )
+    .await
+    .expect("the later predecessor head covers the first access activation");
+}
+
+#[tokio::test]
+async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let fixture = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "invalid-embedded-approval",
+    )
+    .await;
+    let request = crate::sync::device_join::prepare_device_registration_request(
+        &fixture.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        fixture.approval,
+    )
+    .await
+    .expect("prepare exact registration request");
+    let offer = request.approval.request.offer.as_ref();
+    let local_device_id = owner_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("load local device id")
+        .expect("active founder device id");
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
+        &owner_db,
+        &storage.storage,
+        None,
+        &local_device_id,
+        &owner,
+        fixture.authorization.merge_chain(),
+    )
+    .await
+    .expect("prepare exact Owner Store commit");
+    let cut = plan.predecessor_cut().expect("load exact predecessor cut");
+    let membership = plan.membership_state().clone();
+    let (_, owner_registration, owner_device_signer) = storage
+        .founder_device_authority()
+        .await
+        .expect("load exact founder authority");
+    let mut invalid_approval = request.approval.as_ref().clone();
+    invalid_approval.signature.push('0');
+    let attempt = crate::sync::store_commit::DeviceJoinAttempt::signed(
+        offer.store_root.clone(),
+        offer.attempt_id,
+        offer.attempt_slot.clone(),
+        request.expected_registration.clone(),
+        request.registration_slot.clone(),
+        offer.outcome_slot.clone(),
+        cut,
+        membership,
+        offer.provider_admin.grant_id.clone(),
+        invalid_approval,
+        request.response.clone(),
+        offer.owner_registration.clone(),
+        offer.owner_grant.clone(),
+        &owner_registration,
+        &owner_device_signer,
+    )
+    .expect("Owner signs the attempt envelope");
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+        offer.store_root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+    );
+    let prefix = crate::sync::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
+    let prepared = storage
+        .storage
+        .prepare_protocol_object(
+            &context,
+            offer.attempt_slot.clone(),
+            &prefix,
+            attempt.to_bytes(),
+        )
+        .expect("prepare exact attempt object");
+    storage
+        .storage
+        .create_protocol_object(&prepared)
+        .await
+        .expect("publish exact attempt object");
+    let attempt_ref = crate::sync::store_commit::DeviceJoinAttemptRef {
+        attempt_id: offer.attempt_id,
+        attempt_hash: attempt.attempt_hash(),
+        object: prepared.reference().clone(),
+    };
+    crate::sync::store_pull::load_verified_device_join_attempt_ref(
+        &storage.storage,
+        &offer.store_root,
+        &attempt_ref,
+        &owner_registration,
+    )
+    .await
+    .expect_err("the complete attempt loader rejects the embedded approval signature");
+}
+
+#[tokio::test]
+async fn owner_rejects_invalid_access_activation_without_consuming_the_join_journal() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let fixture = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "invalid-access-activation",
+    )
+    .await;
+    let valid_request = crate::sync::device_join::prepare_device_registration_request(
+        &fixture.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        fixture.approval,
+    )
+    .await
+    .expect("prepare exact registration request");
+    let mut invalid_access = valid_request.approval.access_grant.clone();
+    invalid_access.activation.commit_hash =
+        crate::sync::store_commit::ObjectHash::digest(b"absent provider-access activation");
+    let malformed_approval =
+        crate::sync::device_join::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
+            valid_request.approval.request.as_ref().clone(),
+            invalid_access,
+            valid_request.approval.admission.clone(),
+            &storage
+                .founder_device_authority()
+                .await
+                .expect("load exact founder authority")
+                .2,
+        );
+    let malformed_request = crate::sync::device_join::DeviceRegistrationRequest::signed(
+        malformed_approval,
+        valid_request.expected_registration.clone(),
+        valid_request.registration_slot.clone(),
+        valid_request.response.clone(),
+        &member,
+    )
+    .expect("joiner signs malformed remote request fixture");
+    crate::sync::device_join::accept_device_registration_request(
+        &owner_db,
+        &storage.storage,
+        None,
+        &fixture.authorization,
+        &owner,
+        malformed_request,
+    )
+    .await
+    .expect_err("Owner rejects the absent exact provider-access activation");
+    crate::sync::device_join::accept_device_registration_request(
+        &owner_db,
+        &storage.storage,
+        None,
+        &fixture.authorization,
+        &owner,
+        valid_request,
+    )
+    .await
+    .expect("valid retry remains possible after rejected activation");
+}
+
+#[tokio::test]
+async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() {
+    let founder = UserKeypair::generate();
+    let founder_db = open_test_db();
+    let storage = cycle_test_store(&founder_db, &founder).await;
+    let excluding_owner = UserKeypair::generate();
+    crate::sync::membership_ops::invite_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        &founder,
+        &Hlc::new("excluding-owner".to_string()),
+        &pubkey_hex(&excluding_owner),
+        None,
+        crate::sync::membership::MemberRole::Owner,
+        &EncryptionService::from_key([62; 32]),
+        "test-lib",
+        "Test Store",
+        &founder_db,
+    )
+    .await
+    .expect("invite second exact Owner identity");
+    let excluding_db = open_test_db();
+    crate::sync::test_helpers::install_active_device_fixture(
+        &storage,
+        &founder_db,
+        &excluding_db,
+        &excluding_owner,
+        "2026-07-20T00:00:00Z",
+    )
+    .await
+    .expect("activate second Owner device");
+    let founder_registration = storage
+        .founder_device_authority()
+        .await
+        .expect("load exact founder authority")
+        .0;
+    let proposal = match crate::sync::store_device_exclusion::propose_device_exclusion(
+        &excluding_db,
+        &storage.storage,
+        None,
+        &excluding_owner,
+        &founder_registration,
+    )
+    .await
+    .expect("propose founder device exclusion")
+    {
+        crate::sync::store_device_exclusion::StoreDeviceExclusionResult::ProposalActivated {
+            proposal,
+            ..
+        } => proposal,
+        result => panic!("unexpected exclusion proposal result: {result:?}"),
+    };
+
+    let joining_member = UserKeypair::generate();
+    let approval = prepare_same_principal_approval_fixture(
+        &founder_db,
+        &storage,
+        &founder,
+        &joining_member,
+        "post-freeze-access",
+    )
+    .await;
+
+    let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
+        excluding_db.write_policy(),
+        excluding_db
+            .materialized_frontier()
+            .await
+            .expect("load exclusion frontier"),
+    )
+    .expect("shape exclusion frontier");
+    crate::sync::store_ack::stage_store_ack(
+        &excluding_db,
+        &storage.storage,
+        None,
+        frontier,
+        "2026-07-20T00:01:00Z".to_string(),
+        &excluding_owner,
+    )
+    .await
+    .expect("stage exclusion acknowledgement");
+    let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &excluding_db)
+        .await
+        .expect("load exclusion membership");
+    crate::sync::store_ack::drain_outbound_store_acks(
+        &excluding_db,
+        &storage.storage,
+        None,
+        &excluding_owner,
+        membership.chain.as_ref(),
+    )
+    .await
+    .expect("publish exclusion acknowledgement");
+    match crate::sync::store_device_exclusion::finalize_device_exclusion(
+        &excluding_db,
+        &storage.storage,
+        None,
+        &excluding_owner,
+        &proposal,
+    )
+    .await
+    .expect("activate founder exclusion")
+    {
+        crate::sync::store_device_exclusion::StoreDeviceExclusionResult::OutcomeActivated {
+            ..
+        } => {}
+        result => panic!("unexpected exclusion outcome result: {result:?}"),
+    }
+
+    crate::sync::device_join::prepare_device_registration_request(
+        &approval.pending,
+        &storage.storage,
+        None,
+        None,
+        &joining_member,
+        approval.approval,
+    )
+    .await
+    .expect_err("the excluded founder suffix cannot authorize provider access");
+}
+
+#[tokio::test]
+async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_access() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let fixture = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "missing-current-commit",
+    )
+    .await;
+    let later_member = UserKeypair::generate();
+    let later = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &later_member,
+        "missing-current-commit-later-member",
+    )
+    .await;
+    storage
+        .storage
+        .delete_protocol_object(&later.approval.access_grant.activation.object)
+        .await
+        .expect("remove the commit body behind its authenticated head");
+
+    crate::sync::device_join::prepare_device_registration_request(
+        &fixture.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        fixture.approval,
+    )
+    .await
+    .expect_err("an authenticated head cannot hide its missing commit body");
+}
+
+#[tokio::test]
+async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commit() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let fixture = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "garbage-next-head",
+    )
+    .await;
+    let activation = fixture.approval.access_grant.activation.clone();
+    let (owner_ref, owner_registration, _) = storage
+        .founder_device_authority()
+        .await
+        .expect("load exact founder authority");
+    let (next_slot, _) = crate::sync::store_outbound::exact_next_announcement_slot(
+        &storage.storage,
+        &storage.root,
+        &owner_ref,
+        &owner_registration,
+        Some(&activation),
+    )
+    .await
+    .expect("load exact next announcement slot");
+    let next_sequence = activation
+        .coord
+        .sequence()
+        .checked_add(1)
+        .expect("next sequence exists");
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+        storage.root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::StoreHead,
+    );
+    let prefix = crate::sync::store_commit::head_slot_prefix(
+        &owner_registration.device_id.to_string(),
+        next_sequence,
+    );
+    let garbage = storage
+        .storage
+        .prepare_protocol_object(&context, next_slot, &prefix, b"not a signed head".to_vec())
+        .expect("prepare unauthenticated next-head bytes");
+    storage
+        .storage
+        .create_protocol_object(&garbage)
+        .await
+        .expect("publish unauthenticated next-head bytes");
+    crate::sync::device_join::prepare_device_registration_request(
+        &fixture.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        fixture.approval,
+    )
+    .await
+    .expect("unauthenticated garbage leaves the prior accepted access commit current");
+}
+
+#[tokio::test]
+async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(&owner_db, &owner).await;
+    let member = UserKeypair::generate();
+    let fixture = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "signed-malformed-next-head",
+    )
+    .await;
+    let activation = fixture.approval.access_grant.activation.clone();
+    let (owner_ref, owner_registration, owner_device_signer) = storage
+        .founder_device_authority()
+        .await
+        .expect("load exact founder authority");
+    let (next_slot, _) = crate::sync::store_outbound::exact_next_announcement_slot(
+        &storage.storage,
+        &storage.root,
+        &owner_ref,
+        &owner_registration,
+        Some(&activation),
+    )
+    .await
+    .expect("load exact next announcement slot");
+    let next_sequence = activation
+        .coord
+        .sequence()
+        .checked_add(1)
+        .expect("next sequence exists");
+    let crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
+        activation.coord
+    else {
+        panic!("Merge fixture produced a Serial activation");
+    };
+    let mut next_commit = activation;
+    next_commit.coord = crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence: next_sequence,
+    };
+    let stream_activation = owner_registration
+        .store_announcement_activation(&owner_ref)
+        .expect("derive founder announcement activation")
+        .activation_id();
+    let malformed = crate::sync::store_commit::StoreDeviceHead::signed(
+        storage.root.store_root_hash,
+        owner_ref,
+        next_commit,
+        crate::sync::store_commit::SuccessorLink {
+            activation: stream_activation,
+            predecessor: None,
+            next_slot: next_slot.clone(),
+        },
+        &owner_device_signer,
+    )
+    .expect("sign malformed successor chain");
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+        storage.root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::StoreHead,
+    );
+    let prefix = crate::sync::store_commit::head_slot_prefix(
+        &owner_registration.device_id.to_string(),
+        next_sequence,
+    );
+    let prepared = storage
+        .storage
+        .prepare_protocol_object(&context, next_slot, &prefix, malformed.to_bytes())
+        .expect("prepare authenticated malformed head");
+    storage
+        .storage
+        .create_protocol_object(&prepared)
+        .await
+        .expect("publish authenticated malformed head");
+
+    crate::sync::device_join::prepare_device_registration_request(
+        &fixture.pending,
+        &storage.storage,
+        None,
+        None,
+        &member,
+        fixture.approval,
+    )
+    .await
+    .expect_err("an authenticated malformed successor makes current history unverifiable");
 }
 
 #[tokio::test]

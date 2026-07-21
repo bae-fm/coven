@@ -3393,6 +3393,17 @@ impl StoreDeviceHead {
         self.commit.coord.sequence()
     }
 
+    pub(crate) fn signature_is_valid_for(
+        &self,
+        expected_registration: &StoreDeviceRegistration,
+    ) -> bool {
+        keys::verify_signature_hex(
+            &expected_registration.device_signing_pubkey,
+            &self.signature,
+            &self.canonical_signed_bytes(),
+        )
+    }
+
     pub fn parse_at(
         bytes: &[u8],
         expected_store_root_hash: ObjectHash,
@@ -3418,11 +3429,7 @@ impl StoreDeviceHead {
         if head.commit.coord.sequence() == 0 {
             return Err(StoreProtocolError::InvalidSequence(0));
         }
-        if !keys::verify_signature_hex(
-            &expected_registration.device_signing_pubkey,
-            &head.signature,
-            &head.canonical_signed_bytes(),
-        ) {
+        if !head.signature_is_valid_for(expected_registration) {
             return Err(StoreProtocolError::InvalidSignature);
         }
         Ok(head)
@@ -8627,6 +8634,12 @@ mod tests {
                 &access_grant.to_bytes(),
             ),
         );
+        let verified_root = crate::sync::store_objects::VerifiedObject {
+            value: fixture.root.clone(),
+            bytes: fixture.root.to_bytes(),
+            semantic_hash: fixture.root_ref.store_root_hash,
+            object: fixture.root_ref.object.clone(),
+        };
         let approval = crate::sync::device_join::DeviceProviderAdmissionApproval::signed(
             access_request,
             crate::sync::provider::ActivatedStoreMemberProviderAccessGrant {
@@ -8635,6 +8648,7 @@ mod tests {
                 activation: fixture.commit_ref.clone(),
             },
             crate::sync::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
+            &verified_root,
             &fixture.registration,
             &owner_device_signer,
         )

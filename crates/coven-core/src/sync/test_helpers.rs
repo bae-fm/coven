@@ -1569,6 +1569,7 @@ pub fn install_active_device_fixture<'a>(
                     &pending,
                     &store.storage,
                     None,
+                    None,
                     identity,
                     *approval,
                 ),
@@ -1814,6 +1815,7 @@ pub fn install_cross_principal_device_fixture<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
+                    None,
                     Some(peer_home.as_ref()),
                     identity,
                     *approval,

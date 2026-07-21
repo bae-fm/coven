@@ -1509,40 +1509,16 @@ async fn position_covers(
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
-    if !same_stream(&covering.coord, &covered.coord)
-        || covering.coord.sequence() < covered.coord.sequence()
-    {
-        return Ok(false);
-    }
-    let mut cursor = covering.clone();
-    while cursor.coord.sequence() > covered.coord.sequence() {
-        let (commit, _) = super::store_pull::load_commit_with_author(storage, root, &cursor)
-            .await
-            .map_err(StoreReclaimError::Object)?;
-        cursor = commit
-            .order
-            .predecessor()
-            .cloned()
-            .ok_or(StoreReclaimError::MissingAncestry {
-                commit_hash: cursor.commit_hash,
-            })?;
-    }
-    Ok(cursor == *covered)
-}
-
-fn same_stream(left: &StoreCommitCoord, right: &StoreCommitCoord) -> bool {
-    match (left, right) {
-        (
-            StoreCommitCoord::MergeConcurrent {
-                stream_id: left, ..
-            },
-            StoreCommitCoord::MergeConcurrent {
-                stream_id: right, ..
-            },
-        ) => left == right,
-        (StoreCommitCoord::Serial { .. }, StoreCommitCoord::Serial { .. }) => true,
-        _ => false,
-    }
+    super::store_pull::commit_position_covers(storage, root, covering, covered)
+        .await
+        .map_err(|error| match error {
+            super::store_pull::CommitCoverageError::Object(error) => {
+                StoreReclaimError::Object(error)
+            }
+            super::store_pull::CommitCoverageError::MissingAncestry { commit_hash } => {
+                StoreReclaimError::MissingAncestry { commit_hash }
+            }
+        })
 }
 
 async fn exact_package_targets(
