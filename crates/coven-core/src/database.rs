@@ -35,7 +35,7 @@ use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef, SerialAuthorizationState,
-    SerialMembershipState,
+    SerialMembershipState, StoreMembershipConflictResolutionRef,
 };
 use crate::sync::provider::ProviderAdminState;
 use crate::sync::remote_object::{
@@ -524,6 +524,10 @@ pub enum DatabaseTestPoint {
     StoreWriteCommitUploaded { write_id: WriteId },
     StoreWriteHeadReadBack { write_id: WriteId },
     StoreDeviceExclusionCandidateStaged,
+    SerialStoreHeadActivated,
+    SerialStoreMaterialized,
+    SerialRemovalBeforeAdoption,
+    SerialMembershipTerminalized,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1461,9 +1465,29 @@ impl AuthorExclusionActivationLocator {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AuthorExclusionCleanupVerification {
-    pub(crate) locator: AuthorExclusionActivationLocator,
+pub(crate) enum TerminalCandidateAuthority {
+    AuthorExclusion(AuthorExclusionActivationLocator),
+    MembershipGrantRevocation {
+        grant_id: crate::sync::membership::MembershipGrantId,
+        membership: crate::sync::circle_control::MergeStoreMembershipStateRef,
+        activation_commit: StoreBatchCommitRef,
+        activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalCandidateCleanupVerification {
+    pub(crate) authority: TerminalCandidateAuthority,
     pub(crate) candidate: BlockedMergeCandidate,
+}
+
+pub(crate) enum InitialStoreMembershipAuthority {
+    MergeConcurrent {
+        head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
+    },
+    Serial {
+        authorization: SerialAuthorizationState,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2287,16 +2311,16 @@ fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
             };
             if parsed_head != head.value
                 || !parsed_head.verify(&registration)
-                || parsed_head.author_registration != registration_ref
-                || parsed_head.entry != *entry_ref
-                || parsed_head.predecessor.is_some()
+                || parsed_head.body.author_registration != registration_ref
+                || parsed_head.body.entry != *entry_ref
+                || parsed_head.body.predecessor.is_some()
                 || parsed_head.entry_coord() != parsed_entry.coord()
                 || head_ref.coord != parsed_entry.coord()
                 || head_ref.head_hash != parsed_head.head_hash()
                 || head_ref.object != head.object
                 || head.object != *head.prepared.reference()
                 || head.object.slot() != &first_slot
-                || parsed_head.successor.activation
+                || parsed_head.body.successor.activation
                     != crate::sync::store_commit::StreamActivation::grant_authorized(
                         root_ref.store_root_hash,
                         registration_ref.clone(),
@@ -2421,7 +2445,7 @@ fn consume_store_creation_probes_on(
                 },
             ) => {
                 entry.value.created_at != authority.founder_timestamp
-                    || head.value.successor.next_slot != *next_head_slot
+                    || head.value.body.successor.next_slot != *next_head_slot
             }
             (
                 DurableFounderMembership::Serial { .. },
@@ -3110,6 +3134,18 @@ pub(crate) struct DurableMembershipMutation {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct TerminalMembershipMutation {
+    pub plan_bytes: Vec<u8>,
+    pub result_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MembershipMutationActivation {
+    WithoutRotation,
+    Rotation { generation: u64 },
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DurableSnapshotPublication {
     pub reference: StoreSnapshotRef,
     pub meta: ExactProtocolObject<SnapshotMeta>,
@@ -3220,8 +3256,71 @@ enum PreparedWriteMaterialization<'a> {
 struct RetainedMergeMaterializationInput {
     commit: PreparedExactObject,
     activation_head: PreparedExactObject,
+    membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<RetainedAudiencePackage>,
     activation: RetainedCommitActivationInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VerifiedMergeMembershipObjects {
+    entry: MembershipEntryRef,
+    head: MembershipHeadRef,
+    resolution: Option<StoreMembershipConflictResolutionRef>,
+}
+
+impl VerifiedMergeMembershipObjects {
+    pub(crate) fn verify(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        entry: &MembershipEntry,
+        head_value: &AuthorHead,
+        head: MembershipHeadRef,
+    ) -> Result<Self, DbError> {
+        let Some(crate::sync::store_commit::StoreControl::MergeMembership { transition }) =
+            commit.control()
+        else {
+            return Err(DbError::Message(
+                "Merge membership object closure accompanies another Store control".to_string(),
+            ));
+        };
+        if transition.body.entry.coord != entry.coord()
+            || !transition.matches_head(head_value, &head)
+            || !matches!(
+                &head_value.activation,
+                crate::sync::membership::MembershipHeadActivation::StoreCommit { commit }
+                    if commit == commit_ref
+            )
+        {
+            return Err(DbError::Message(
+                "Merge membership object closure differs from its exact Store transition"
+                    .to_string(),
+            ));
+        }
+        let resolution = match &entry.change {
+            crate::sync::membership::MembershipChange::ResolutionActivation { resolution } => {
+                Some(resolution.clone())
+            }
+            _ => None,
+        };
+        Ok(Self {
+            entry: transition.body.entry.clone(),
+            head,
+            resolution,
+        })
+    }
+
+    fn object_ids(&self) -> impl Iterator<Item = ObjectHash> + '_ {
+        [
+            Some(remote_object_id(&self.entry.object)),
+            Some(remote_object_id(&self.head.object)),
+            self.resolution
+                .as_ref()
+                .map(|resolution| remote_object_id(&resolution.object)),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3304,6 +3403,7 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     circle_activations: &'a VerifiedCircleActivations,
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
+    membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
     registrations: &'a [(
@@ -3325,6 +3425,7 @@ pub(crate) struct OwnedVerifiedMergeMaterialization {
     circle_activations: VerifiedCircleActivations,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
+    membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<AudiencePackage>,
     package_application: Option<RetainedPackageApplication>,
     input_hash: ObjectHash,
@@ -3341,6 +3442,7 @@ impl OwnedVerifiedMergeMaterialization {
             &self.circle_activations,
             &self.activation_head,
             &self.activation_head_object,
+            self.membership_objects.as_ref(),
             &self.packages,
             self.package_application,
         )
@@ -3387,6 +3489,10 @@ impl OwnedVerifiedMergeMaterialization {
         &self.activation_head_object
     }
 
+    pub(crate) fn membership_objects(&self) -> Option<&VerifiedMergeMembershipObjects> {
+        self.membership_objects.as_ref()
+    }
+
     pub(crate) fn packages(&self) -> &[AudiencePackage] {
         &self.packages
     }
@@ -3409,6 +3515,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,
         activation_head_object: &'a ExactObjectRef,
+        membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
         packages: &'a [AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<Self, DbError> {
@@ -3427,6 +3534,10 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 .zip(commit.circle_controls())
                 .any(|(activation, reference)| activation.reference != *reference)
             || packages.is_empty() != package_application.is_none()
+            || matches!(
+                commit.control(),
+                Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
+            ) != membership_objects.is_some()
         {
             return Err(DbError::Message(
                 "verified Merge materialization differs from its exact Store commit".to_string(),
@@ -3441,6 +3552,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             circle_activations,
             activation_head,
             activation_head_object,
+            membership_objects,
             packages,
             package_application,
             registrations,
@@ -3763,7 +3875,7 @@ fn load_author_exclusion_activation_locator_on(
 
 enum BlockedMergeCandidateNonactivation {
     Merge(crate::sync::remote_object::CandidateNonactivation),
-    AuthorExclusion {
+    Terminal {
         durable: crate::sync::remote_object::CandidateNonactivation,
         head_nonactivation: crate::sync::remote_object::VerifiedCandidateHeadNonactivation,
     },
@@ -3775,11 +3887,12 @@ fn blocked_merge_candidate_nonactivation(
     if matches!(
         verified.proof(),
         crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+            | crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
     ) {
         let (durable, head_nonactivation) = verified
-            .into_author_exclusion()
+            .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        return Ok(BlockedMergeCandidateNonactivation::AuthorExclusion {
+        return Ok(BlockedMergeCandidateNonactivation::Terminal {
             durable,
             head_nonactivation,
         });
@@ -3792,6 +3905,73 @@ fn blocked_merge_candidate_nonactivation(
     ))
 }
 
+fn validate_terminal_candidate_authority_on(
+    conn: &Connection,
+    candidate: &PreparedMergeCandidate,
+    durable: &crate::sync::remote_object::CandidateNonactivation,
+) -> Result<(), DbError> {
+    match durable.proof() {
+        crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+            exclusion,
+            accepted_cut,
+            activation_head,
+        } => {
+            let current = author_exclusion_activation_for_candidate_on(
+                conn,
+                &candidate.reference,
+                &candidate.commit.author_registration,
+            )?
+            .ok_or_else(|| {
+                DbError::Message(
+                    "candidate is no longer excluded by the selected terminal cutoff".to_string(),
+                )
+            })?;
+            if &current.exclusion != exclusion
+                || &current.accepted_cut != accepted_cut
+                || &current.activation_head != activation_head
+            {
+                return Err(DbError::Message(
+                    "author-exclusion activation changed after remote verification".to_string(),
+                ));
+            }
+        }
+        crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+            activation_commit,
+            ..
+        } => {
+            let StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence,
+            } = &activation_commit.coord
+            else {
+                return Err(DbError::Message(
+                    "membership-grant revocation activation is not Merge".to_string(),
+                ));
+            };
+            if Database::materialized_commit_ref_on(
+                conn,
+                &stream_id.to_string(),
+                *sequence,
+            )?
+            .as_ref()
+                != Some(activation_commit)
+            {
+                return Err(DbError::Message(
+                    "membership-grant revocation activation is no longer current accepted history"
+                        .to_string(),
+                ));
+            }
+        }
+        crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+        | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+            return Err(DbError::Message(
+                "terminal candidate authority received another proof family".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn begin_blocked_merge_candidate_nonactivation_on(
     tx: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
@@ -3799,35 +3979,8 @@ fn begin_blocked_merge_candidate_nonactivation_on(
     nonactivation: &BlockedMergeCandidateNonactivation,
     include_indexed_blobs: bool,
 ) -> Result<(), DbError> {
-    if let BlockedMergeCandidateNonactivation::AuthorExclusion { durable, .. } = nonactivation {
-        let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-            exclusion,
-            accepted_cut,
-            activation_head,
-        } = durable.proof()
-        else {
-            return Err(DbError::Message(
-                "author-exclusion evidence carries another proof family".to_string(),
-            ));
-        };
-        let current = author_exclusion_activation_for_candidate_on(
-            tx,
-            &candidate.reference,
-            &candidate.commit.author_registration,
-        )?
-        .ok_or_else(|| {
-            DbError::Message(
-                "candidate is no longer excluded by the selected terminal cutoff".to_string(),
-            )
-        })?;
-        if &current.exclusion != exclusion
-            || &current.accepted_cut != accepted_cut
-            || &current.activation_head != activation_head
-        {
-            return Err(DbError::Message(
-                "author-exclusion activation changed after remote verification".to_string(),
-            ));
-        }
+    if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
+        validate_terminal_candidate_authority_on(tx, candidate, durable)?;
     }
     match nonactivation {
         BlockedMergeCandidateNonactivation::Merge(durable) => {
@@ -3839,7 +3992,7 @@ fn begin_blocked_merge_candidate_nonactivation_on(
                 include_indexed_blobs,
             )
         }
-        BlockedMergeCandidateNonactivation::AuthorExclusion {
+        BlockedMergeCandidateNonactivation::Terminal {
             durable,
             head_nonactivation,
         } => begin_merge_candidate_nonactivation_with_verified_head_on(
@@ -3967,9 +4120,11 @@ fn merge_candidate_cleanup_targets_on(
                 crate::sync::remote_object::CandidateCommitState::CleanupPending {
                     proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                         | crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                        | crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
                 } | crate::sync::remote_object::CandidateCommitState::AbsentVerified {
                     proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                         | crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                        | crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
                 }
             )
     ) {
@@ -4170,7 +4325,7 @@ fn load_merge_candidate_head_cleanup_on(
         (false, true) => {
             let inert = load_protocol_inert_object_on(conn, object_id)?;
             if !inert
-                .is_author_exclusion_head_for(candidate, head)
+                .is_terminal_head_for(candidate, head)
                 .map_err(|error| DbError::Message(format!("Merge cleanup inert head: {error}")))?
             {
                 return Err(DbError::Message(format!(
@@ -8776,6 +8931,12 @@ impl Database {
                     "Merge slot conflict cannot carry author-exclusion evidence".to_string(),
                 ));
             }
+            crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {
+                return Err(DbError::Message(
+                    "Merge slot conflict cannot carry membership-grant revocation evidence"
+                        .to_string(),
+                ));
+            }
         };
         let winner_proof = first.proof().clone();
         let nonactivations = nonactivations
@@ -11710,6 +11871,58 @@ impl Database {
         .await
     }
 
+    async fn terminal_membership_mutation(
+        &self,
+        kind: &'static str,
+    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT intent_hash, plan_bytes, result_bytes \
+                 FROM terminal_membership_mutation \
+                 WHERE singleton = 1 AND kind = ?1",
+                [kind],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(hash, plan_bytes, result_bytes)| {
+                let intent_hash: ObjectHash = hash.parse().map_err(|error| {
+                    DbError::Message(format!("terminal membership intent hash: {error}"))
+                })?;
+                if ObjectHash::digest(&plan_bytes) != intent_hash {
+                    return Err(DbError::Message(
+                        "terminal membership intent hash differs from its exact plan bytes"
+                            .to_string(),
+                    ));
+                }
+                Ok(TerminalMembershipMutation {
+                    plan_bytes,
+                    result_bytes,
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn terminal_serial_invite_mutation(
+        &self,
+    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
+        self.terminal_membership_mutation("serial_invite").await
+    }
+
+    pub(crate) async fn terminal_serial_removal_mutation(
+        &self,
+    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
+        self.terminal_membership_mutation("serial_removal").await
+    }
+
     pub(crate) async fn select_membership_author_stream(
         &self,
         author_pubkey: &str,
@@ -11779,10 +11992,12 @@ impl Database {
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
+        pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
         self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let intent_hash = ObjectHash::digest(&plan_bytes);
-            let existing = conn
+            let existing = tx
                 .query_row(
                     "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
                      WHERE singleton = 1",
@@ -11793,29 +12008,34 @@ impl Database {
                 .map_err(DbError::from)?;
             if let Some((existing_hash, existing_plan)) = existing {
                 if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
+                    Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+                    tx.commit().map_err(DbError::from)?;
                     return Ok(intent_hash);
                 }
                 return Err(DbError::Message(
                     "a different membership mutation is already pending".to_string(),
                 ));
             }
-            conn.execute(
+            tx.execute(
                 "INSERT INTO outbound_membership_mutation \
                  (singleton, intent_hash, plan_bytes, progress_bytes) \
                  VALUES (1, ?1, ?2, ?3)",
                 rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
             )
             .map_err(DbError::from)?;
+            Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+            tx.commit().map_err(DbError::from)?;
             Ok(intent_hash)
         })
         .await
     }
 
-    pub(crate) async fn stage_serial_membership_mutation(
+    pub(crate) async fn stage_membership_candidate_mutation(
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
         remote_objects: Vec<RemoteObjectRecord>,
+        pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
         self.call(move |conn| {
             let intent_hash = ObjectHash::digest(&plan_bytes);
@@ -11844,22 +12064,23 @@ impl Database {
                         ));
                     }
                 }
+                Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
                 tx.commit().map_err(DbError::from)?;
                 return Ok(intent_hash);
             }
             if remote_objects.is_empty() {
                 return Err(DbError::Message(
-                    "Serial membership mutation has no remote ownership graph".to_string(),
+                    "membership candidate mutation has no remote ownership graph".to_string(),
                 ));
             }
             let mut object_ids = BTreeSet::new();
             for remote in &remote_objects {
                 if !object_ids.insert(remote.object_id()) {
                     return Err(DbError::Message(
-                        "Serial membership mutation repeats a remote object".to_string(),
+                        "membership candidate mutation repeats a remote object".to_string(),
                     ));
                 }
-                persist_exact_remote_object_on(&tx, remote, "Serial membership candidate object")?;
+                persist_exact_remote_object_on(&tx, remote, "membership candidate object")?;
             }
             tx.execute(
                 "INSERT INTO outbound_membership_mutation \
@@ -11868,8 +12089,324 @@ impl Database {
                 rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
             )
             .map_err(DbError::from)?;
+            Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
             tx.commit().map_err(DbError::from)?;
             Ok(intent_hash)
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_serial_invite_candidate_mutation(
+        &self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<RemoteObjectRecord>,
+    ) -> Result<ObjectHash, DbError> {
+        self.stage_membership_candidate_mutation(plan_bytes, progress_bytes, remote_objects, None)
+            .await
+    }
+
+    pub(crate) async fn stage_serial_removal_candidate_mutation(
+        &self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<RemoteObjectRecord>,
+        generation: u64,
+    ) -> Result<ObjectHash, DbError> {
+        self.stage_membership_candidate_mutation(
+            plan_bytes,
+            progress_bytes,
+            remote_objects,
+            Some(generation),
+        )
+        .await
+    }
+
+    fn stage_pending_rotation_on(
+        tx: &rusqlite::Transaction<'_>,
+        generation: Option<u64>,
+        mutation: ObjectHash,
+    ) -> Result<(), DbError> {
+        let Some(generation) = generation else {
+            return Ok(());
+        };
+        let existing = Self::load_rotation_gate_on(tx)?;
+        let gate = existing
+            .as_ref()
+            .map(|(_, gate)| gate.clone())
+            .unwrap_or_else(crate::sync::cloud_storage::RotationGate::empty)
+            .with_candidate(generation, mutation)
+            .map_err(DbError::Message)?;
+        Self::replace_rotation_gate_on(tx, existing.as_ref(), Some(gate), "candidate staging")
+    }
+
+    fn load_rotation_gate_on(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<Option<(String, crate::sync::cloud_storage::RotationGate)>, DbError> {
+        let key = crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY;
+        tx.query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .map(|encoded| {
+            let gate =
+                serde_json::from_str::<crate::sync::cloud_storage::RotationGate>(&encoded)
+                    .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
+            gate.validate().map_err(DbError::Message)?;
+            Ok((encoded, gate))
+        })
+        .transpose()
+    }
+
+    fn replace_rotation_gate_on(
+        tx: &rusqlite::Transaction<'_>,
+        expected: Option<&(String, crate::sync::cloud_storage::RotationGate)>,
+        next: Option<crate::sync::cloud_storage::RotationGate>,
+        operation: &'static str,
+    ) -> Result<(), DbError> {
+        let key = crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY;
+        let changed = match (expected, next) {
+            (Some((expected, _)), Some(next)) => {
+                let encoded = serde_json::to_string(&next).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize rotation gate during {operation}: {error}"
+                    ))
+                })?;
+                tx.execute(
+                    "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                    (&encoded, key, expected),
+                )
+                .map_err(DbError::from)?
+            }
+            (Some((expected, _)), None) => tx
+                .execute(
+                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
+                    (key, expected),
+                )
+                .map_err(DbError::from)?,
+            (None, Some(next)) => {
+                let encoded = serde_json::to_string(&next).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize rotation gate during {operation}: {error}"
+                    ))
+                })?;
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+                    (key, &encoded),
+                )
+                .map_err(DbError::from)?
+            }
+            (None, None) => return Ok(()),
+        };
+        if changed != 1 {
+            return Err(DbError::Message(format!(
+                "rotation gate changed during {operation}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_peer_rotation(
+        &self,
+        generation: u64,
+    ) -> Result<crate::sync::cloud_storage::RotationGate, DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing = Self::load_rotation_gate_on(&tx)?;
+            let next = existing
+                .as_ref()
+                .map(|(_, gate)| gate.clone())
+                .unwrap_or_else(crate::sync::cloud_storage::RotationGate::empty)
+                .merge_peer_commit(generation)
+                .map_err(DbError::Message)?;
+            Self::replace_rotation_gate_on(
+                &tx,
+                existing.as_ref(),
+                Some(next.clone()),
+                "peer rotation recording",
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_peer_rotation_adoption(
+        &self,
+        adopted_generation: u64,
+    ) -> Result<Option<crate::sync::cloud_storage::RotationGate>, DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
+                DbError::Message(
+                    "rotation gate is absent during peer rotation adoption".to_string(),
+                )
+            })?;
+            let next = existing
+                .1
+                .clone()
+                .complete_peer_adoption(adopted_generation)
+                .map_err(DbError::Message)?;
+            Self::replace_rotation_gate_on(
+                &tx,
+                Some(&existing),
+                next.clone(),
+                "peer rotation adoption",
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_local_rotation_adoption(
+        &self,
+        intent_hash: ObjectHash,
+        generation: u64,
+    ) -> Result<Option<crate::sync::cloud_storage::RotationGate>, DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
+                DbError::Message(
+                    "rotation gate is absent during local rotation adoption".to_string(),
+                )
+            })?;
+            let next = existing
+                .1
+                .clone()
+                .complete_local_adoption(generation, intent_hash)
+                .map_err(DbError::Message)?;
+            if tx
+                .execute(
+                    "DELETE FROM outbound_membership_mutation \
+                     WHERE singleton = 1 AND intent_hash = ?1",
+                    [intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "membership mutation changed during local rotation adoption".to_string(),
+                ));
+            }
+            Self::replace_rotation_gate_on(
+                &tx,
+                Some(&existing),
+                next.clone(),
+                "local rotation adoption",
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    fn terminalize_membership_mutation_on(
+        tx: &rusqlite::Transaction<'_>,
+        kind: &'static str,
+        intent_hash: ObjectHash,
+        result_bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        let plan_bytes = tx
+            .query_row(
+                "SELECT plan_bytes FROM outbound_membership_mutation \
+                 WHERE singleton = 1 AND intent_hash = ?1",
+                [intent_hash.to_string()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .ok_or_else(|| {
+                DbError::Message(
+                    "membership mutation changed before terminal receipt recording".to_string(),
+                )
+            })?;
+        if ObjectHash::digest(&plan_bytes) != intent_hash {
+            return Err(DbError::Message(
+                "terminal membership plan differs from its immutable identity".to_string(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO terminal_membership_mutation \
+             (singleton, kind, intent_hash, plan_bytes, result_bytes) \
+             VALUES (1, ?1, ?2, ?3, ?4) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+                 kind = excluded.kind, \
+                 intent_hash = excluded.intent_hash, \
+                 plan_bytes = excluded.plan_bytes, \
+                 result_bytes = excluded.result_bytes",
+            rusqlite::params![kind, intent_hash.to_string(), plan_bytes, result_bytes],
+        )
+        .map_err(DbError::from)?;
+        if tx
+            .execute(
+                "DELETE FROM outbound_membership_mutation \
+                 WHERE singleton = 1 AND intent_hash = ?1",
+                [intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed during terminal receipt recording".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn complete_serial_invite_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        result_bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::terminalize_membership_mutation_on(
+                &tx,
+                "serial_invite",
+                intent_hash,
+                result_bytes,
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_serial_removal_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        generation: u64,
+        result_bytes: Vec<u8>,
+    ) -> Result<Option<crate::sync::cloud_storage::RotationGate>, DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
+                DbError::Message(
+                    "rotation gate is absent during Serial removal completion".to_string(),
+                )
+            })?;
+            let next = existing
+                .1
+                .clone()
+                .complete_local_adoption(generation, intent_hash)
+                .map_err(DbError::Message)?;
+            Self::terminalize_membership_mutation_on(
+                &tx,
+                "serial_removal",
+                intent_hash,
+                result_bytes,
+            )?;
+            Self::replace_rotation_gate_on(
+                &tx,
+                Some(&existing),
+                next.clone(),
+                "Serial removal completion",
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
         })
         .await
     }
@@ -11897,7 +12434,7 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn replace_serial_membership_candidate(
+    pub(crate) async fn replace_membership_candidate(
         &self,
         intent_hash: ObjectHash,
         plan_bytes: Vec<u8>,
@@ -11918,7 +12455,7 @@ impl Database {
                 .map_err(DbError::from)?;
             if updated != 1 {
                 return Err(DbError::Message(
-                    "Serial membership mutation changed before candidate receipt adoption"
+                    "membership candidate mutation changed before candidate receipt adoption"
                         .to_string(),
                 ));
             }
@@ -11927,21 +12464,190 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn begin_serial_membership_candidate_nonactivation(
+    pub(crate) async fn replace_serial_removal_candidate(
+        &self,
+        previous_intent_hash: ObjectHash,
+        previous_generation: u64,
+        plan_bytes: Vec<u8>,
+    ) -> Result<ObjectHash, DbError> {
+        let replacement_hash = ObjectHash::digest(&plan_bytes);
+        if replacement_hash == previous_intent_hash {
+            return Err(DbError::Message(
+                "reprepared Serial removal has the same immutable identity".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            if tx
+                .execute(
+                    "UPDATE outbound_membership_mutation \
+                     SET intent_hash = ?1, plan_bytes = ?2 \
+                     WHERE singleton = 1 AND intent_hash = ?3",
+                    rusqlite::params![
+                        replacement_hash.to_string(),
+                        plan_bytes,
+                        previous_intent_hash.to_string()
+                    ],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "Serial removal changed before candidate replacement".to_string(),
+                ));
+            }
+            Self::replace_rotation_candidate_mutation_on(
+                &tx,
+                previous_intent_hash,
+                replacement_hash,
+                previous_generation,
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(replacement_hash)
+        })
+        .await
+    }
+
+    pub(crate) async fn adopt_merge_membership_candidate_head(
+        &self,
+        intent_hash: ObjectHash,
+        plan_bytes: Vec<u8>,
+        previous: RemoteObjectRecord,
+        mut replacement: RemoteObjectRecord,
+        rotation_generation: Option<u64>,
+    ) -> Result<ObjectHash, DbError> {
+        let (
+            RemoteObjectRecord::RetainedAuthority(previous_head),
+            RemoteObjectRecord::RetainedAuthority(replacement_head),
+        ) = (&previous, &replacement)
+        else {
+            return Err(DbError::Message(
+                "Merge membership candidate head adoption received a non-authority object"
+                    .to_string(),
+            ));
+        };
+        let (
+            crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                reference: previous_ref,
+            },
+            crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                reference: replacement_ref,
+            },
+        ) = (
+            &previous_head.identity.domain,
+            &replacement_head.identity.domain,
+        )
+        else {
+            return Err(DbError::Message(
+                "Merge membership candidate head adoption received another authority domain"
+                    .to_string(),
+            ));
+        };
+        if previous_ref.object.slot() != replacement_ref.object.slot()
+            || previous_ref == replacement_ref
+        {
+            return Err(DbError::Message(
+                "adopted Merge membership head does not replace the same exact slot".to_string(),
+            ));
+        }
+        replacement.mark_uploaded_verified().map_err(|error| {
+            DbError::Message(format!(
+                "mark adopted Merge membership head uploaded: {error}"
+            ))
+        })?;
+        let replacement_hash = ObjectHash::digest(&plan_bytes);
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let previous_id = previous.object_id();
+            let current = load_remote_object_on(&tx, previous_id)?;
+            if current != previous {
+                return Err(DbError::Message(
+                    "Merge membership candidate head changed before receipt adoption".to_string(),
+                ));
+            }
+            if tx
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [previous_id.to_string()],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "prepared Merge membership head disappeared during receipt adoption"
+                        .to_string(),
+                ));
+            }
+            persist_exact_remote_object_on(
+                &tx,
+                &replacement,
+                "adopted Merge membership candidate head",
+            )?;
+            if tx
+                .execute(
+                    "UPDATE outbound_membership_mutation
+                     SET intent_hash = ?1, plan_bytes = ?2
+                     WHERE singleton = 1 AND intent_hash = ?3",
+                    rusqlite::params![
+                        replacement_hash.to_string(),
+                        plan_bytes,
+                        intent_hash.to_string()
+                    ],
+                )
+                .map_err(DbError::from)?
+                != 1
+            {
+                return Err(DbError::Message(
+                    "membership mutation changed before Merge head receipt adoption".to_string(),
+                ));
+            }
+            if let Some(generation) = rotation_generation {
+                Self::replace_rotation_candidate_mutation_on(
+                    &tx,
+                    intent_hash,
+                    replacement_hash,
+                    generation,
+                )?;
+            }
+            tx.commit().map_err(DbError::from)?;
+            Ok(replacement_hash)
+        })
+        .await
+    }
+
+    fn replace_rotation_candidate_mutation_on(
+        tx: &rusqlite::Transaction<'_>,
+        previous: ObjectHash,
+        replacement: ObjectHash,
+        generation: u64,
+    ) -> Result<(), DbError> {
+        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
+            DbError::Message("rotation gate is absent during candidate replacement".to_string())
+        })?;
+        let next = existing
+            .1
+            .clone()
+            .replace_candidate_mutation(generation, previous, replacement)
+            .map_err(DbError::Message)?;
+        Self::replace_rotation_gate_on(tx, Some(&existing), Some(next), "candidate replacement")
+    }
+
+    pub(crate) async fn begin_membership_candidate_nonactivation(
         &self,
         intent_hash: ObjectHash,
         candidate: StoreBatchCommitRef,
-        wrapped_keys: Vec<ExactObjectRef>,
+        candidate_objects: Vec<ExactObjectRef>,
+        retained_authorities: Vec<ExactObjectRef>,
         progress_bytes: Vec<u8>,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
-    ) -> Result<CandidateCleanupObject, DbError> {
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         if nonactivation
             .candidate_reference()
             .map_err(|error| DbError::Message(error.to_string()))?
             != candidate
         {
             return Err(DbError::Message(
-                "verified nonactivation names another Serial membership candidate".to_string(),
+                "verified nonactivation names another membership candidate".to_string(),
             ));
         }
         let nonactivation = nonactivation.into_durable();
@@ -11959,39 +12665,31 @@ impl Database {
                 .map_err(DbError::from)?;
             if !exists {
                 return Err(DbError::Message(
-                    "Serial membership mutation changed before nonactivation".to_string(),
+                    "membership candidate mutation changed before nonactivation".to_string(),
                 ));
             }
             let mut unique = BTreeSet::new();
-            for object in &wrapped_keys {
+            let mut cleanup = Vec::new();
+            for object in candidate_objects.iter().chain(retained_authorities.iter()) {
                 let object_id = remote_object_id(object);
                 if !unique.insert(object_id) {
                     return Err(DbError::Message(
-                        "Serial membership nonactivation repeats a wrapped key".to_string(),
+                        "membership nonactivation repeats an exact owned object".to_string(),
                     ));
                 }
-                if begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation.clone())?
-                    .is_some()
+                if let Some(target) =
+                    begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation.clone())?
                 {
-                    return Err(DbError::Message(
-                        "losing Serial membership wrap became a deletion target".to_string(),
-                    ));
+                    cleanup.push(CandidateCleanupObject { object: target });
                 }
             }
-            let commit_target = begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&candidate.object),
-                nonactivation,
-            )?
-            .ok_or_else(|| {
-                DbError::Message(
-                    "losing Serial membership commit has no exact deletion target".to_string(),
-                )
-            })?;
-            if commit_target != candidate.object {
+            if !candidate_objects.contains(&candidate.object)
+                || !cleanup
+                    .iter()
+                    .any(|target| target.object == candidate.object)
+            {
                 return Err(DbError::Message(
-                    "Serial membership cleanup target differs from its candidate commit"
-                        .to_string(),
+                    "losing membership candidate has no exact commit cleanup target".to_string(),
                 ));
             }
             let updated = tx
@@ -12003,55 +12701,140 @@ impl Database {
                 .map_err(DbError::from)?;
             if updated != 1 {
                 return Err(DbError::Message(
-                    "Serial membership mutation changed during nonactivation".to_string(),
+                    "membership candidate mutation changed during nonactivation".to_string(),
                 ));
             }
             tx.commit().map_err(DbError::from)?;
-            Ok(CandidateCleanupObject {
-                object: commit_target,
-            })
+            cleanup.sort_by(|left, right| left.object.cmp(&right.object));
+            Ok(cleanup)
         })
         .await
     }
 
-    pub(crate) async fn complete_nonactivating_serial_membership_mutation(
+    pub(crate) async fn complete_nonactivating_membership_candidate_mutation(
         &self,
         intent_hash: ObjectHash,
         candidate: StoreBatchCommitRef,
-        wrapped_keys: Vec<ExactObjectRef>,
+        candidate_objects: Vec<ExactObjectRef>,
+        retained_authorities: Vec<ExactObjectRef>,
+        rotation_generation: Option<u64>,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let commit_id = remote_object_id(&candidate.object);
-            let commit = load_remote_object_on(&tx, commit_id)?;
-            if !commit
-                .candidate_cleanup_complete(&candidate)
-                .map_err(|error| DbError::Message(error.to_string()))?
-            {
-                return Err(DbError::Message(
-                    "losing Serial membership commit cleanup is incomplete".to_string(),
-                ));
-            }
-            for object in wrapped_keys {
-                let object_id = remote_object_id(&object);
-                let inert = load_protocol_inert_object_on(&tx, object_id)?;
-                if inert.object_id() != object_id {
+            let mut unique = BTreeSet::new();
+            for object in &candidate_objects {
+                let object_id = remote_object_id(object);
+                if !unique.insert(object_id) {
                     return Err(DbError::Message(
-                        "protocol-inert Serial membership wrap changed exact identity".to_string(),
+                        "nonactivating membership candidate repeats an exact object".to_string(),
                     ));
                 }
+                let remote = load_remote_object_on(&tx, object_id)?;
+                if !remote
+                    .candidate_cleanup_complete(&candidate)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                {
+                    return Err(DbError::Message(format!(
+                        "losing membership object {object_id} cleanup is incomplete"
+                    )));
+                }
             }
-            if tx
-                .execute(
-                    "DELETE FROM remote_objects WHERE object_id = ?1",
-                    [commit_id.to_string()],
-                )
-                .map_err(DbError::from)?
-                != 1
-            {
-                return Err(DbError::Message(
-                    "losing Serial membership commit disappeared during removal".to_string(),
-                ));
+            for object in &retained_authorities {
+                let object_id = remote_object_id(object);
+                if !unique.insert(object_id) {
+                    return Err(DbError::Message(
+                        "nonactivating membership authority repeats an exact object".to_string(),
+                    ));
+                }
+                let remote = tx
+                    .query_row(
+                        "SELECT state FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?
+                    .map(|encoded| {
+                        serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
+                            DbError::Message(format!(
+                                "parse nonactivating membership authority {object_id}: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                match remote {
+                    Some(remote) => {
+                        if !remote
+                            .candidate_cleanup_complete(&candidate)
+                            .map_err(|error| DbError::Message(error.to_string()))?
+                        {
+                            return Err(DbError::Message(format!(
+                                "membership authority {object_id} still owns its losing candidate"
+                            )));
+                        }
+                    }
+                    None => {
+                        let inert = load_protocol_inert_object_on(&tx, object_id)?;
+                        if inert.object_id() != object_id {
+                            return Err(DbError::Message(
+                                "protocol-inert membership authority changed exact identity"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            for object in candidate_objects {
+                let object_id = remote_object_id(&object);
+                if tx
+                    .execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?
+                    != 1
+                {
+                    return Err(DbError::Message(format!(
+                        "losing membership object {object_id} disappeared during completion"
+                    )));
+                }
+            }
+            for object in retained_authorities {
+                let object_id = remote_object_id(&object);
+                let removable = tx
+                    .query_row(
+                        "SELECT state FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?
+                    .map(|encoded| {
+                        serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
+                            DbError::Message(format!(
+                                "parse terminal membership authority {object_id}: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?
+                    .is_some_and(|remote| {
+                        matches!(
+                            remote,
+                            RemoteObjectRecord::RetainedAuthority(
+                                crate::sync::remote_object::RetainedAuthorityRecord {
+                                    state: crate::sync::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
+                                    ..
+                                }
+                            )
+                        )
+                    });
+                if removable {
+                    tx.execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                }
             }
             if tx
                 .execute(
@@ -12063,60 +12846,200 @@ impl Database {
                 != 1
             {
                 return Err(DbError::Message(
-                    "Serial membership mutation changed during completion".to_string(),
+                    "membership mutation changed during nonactivation completion".to_string(),
                 ));
+            }
+            if let Some(generation) = rotation_generation {
+                Self::remove_rotation_candidate_on(&tx, intent_hash, generation)?;
             }
             tx.commit().map_err(DbError::from)
         })
         .await
     }
 
-    pub(crate) async fn complete_activated_serial_membership_mutation(
+    fn remove_rotation_candidate_on(
+        tx: &rusqlite::Transaction<'_>,
+        intent_hash: ObjectHash,
+        generation: u64,
+    ) -> Result<(), DbError> {
+        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
+            DbError::Message("rotation gate is absent during candidate loss".to_string())
+        })?;
+        let next = existing
+            .1
+            .clone()
+            .remove_candidate(generation, intent_hash)
+            .map_err(DbError::Message)?;
+        Self::replace_rotation_gate_on(tx, Some(&existing), next, "candidate loss")
+    }
+
+    pub(crate) async fn membership_candidate_cleanup_targets(
         &self,
         intent_hash: ObjectHash,
         candidate: StoreBatchCommitRef,
-        wrapped_keys: Vec<ExactObjectRef>,
-    ) -> Result<(), DbError> {
+        objects: Vec<ExactObjectRef>,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let mut objects = vec![candidate.object.clone()];
-            objects.extend(wrapped_keys);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM outbound_membership_mutation
+                         WHERE singleton = 1 AND intent_hash = ?1
+                     )",
+                    [intent_hash.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !exists {
+                return Err(DbError::Message(
+                    "membership mutation changed before candidate cleanup".to_string(),
+                ));
+            }
             let mut unique = BTreeSet::new();
+            let mut cleanup = Vec::new();
             for object in objects {
                 let object_id = remote_object_id(&object);
                 if !unique.insert(object_id) {
                     return Err(DbError::Message(
-                        "activated Serial membership graph repeats an exact object".to_string(),
+                        "membership cleanup repeats an exact candidate object".to_string(),
                     ));
                 }
-                let remote = load_remote_object_on(&tx, object_id)?;
-                let activated = remote.clone().into_activated(&candidate).map_err(|error| {
-                    DbError::Message(format!(
-                        "validate activated Serial membership object {object_id}: {error}"
-                    ))
-                })?;
-                if activated != remote {
+                let remote = load_remote_object_on(conn, object_id)?;
+                if let Some(target) = remote.cleanup_target() {
+                    cleanup.push(CandidateCleanupObject {
+                        object: target.clone(),
+                    });
+                } else if !remote
+                    .candidate_cleanup_complete(&candidate)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                {
                     return Err(DbError::Message(format!(
-                        "Serial membership object {object_id} still has pending candidate ownership"
+                        "membership candidate object {object_id} has no cleanup decision"
                     )));
                 }
             }
+            cleanup.sort_by(|left, right| left.object.cmp(&right.object));
+            Ok(cleanup)
+        })
+        .await
+    }
+
+    pub(crate) fn record_activated_membership_candidate_mutation_on(
+        tx: &rusqlite::Transaction<'_>,
+        intent_hash: ObjectHash,
+        candidate: &StoreBatchCommitRef,
+        objects: &[ExactObjectRef],
+        progress_bytes: Vec<u8>,
+        activation: MembershipMutationActivation,
+    ) -> Result<(), DbError> {
+        Self::activate_membership_candidate_graph_on(tx, candidate, objects)?;
+        if tx
+            .execute(
+                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                 WHERE singleton = 1 AND intent_hash = ?2",
+                rusqlite::params![progress_bytes, intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed during activated recording".to_string(),
+            ));
+        }
+        if let MembershipMutationActivation::Rotation { generation } = activation {
+            Self::commit_rotation_candidate_on(tx, intent_hash, generation)?;
+        }
+        Ok(())
+    }
+
+    fn commit_rotation_candidate_on(
+        tx: &rusqlite::Transaction<'_>,
+        intent_hash: ObjectHash,
+        generation: u64,
+    ) -> Result<(), DbError> {
+        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
+            DbError::Message("rotation gate is absent during candidate activation".to_string())
+        })?;
+        let gate = existing
+            .1
+            .clone()
+            .commit_candidate(generation, intent_hash)
+            .map_err(DbError::Message)?;
+        Self::replace_rotation_gate_on(tx, Some(&existing), Some(gate), "membership activation")
+    }
+
+    pub(crate) async fn record_direct_revoke_activation(
+        &self,
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+        generation: u64,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if tx
                 .execute(
-                    "DELETE FROM outbound_membership_mutation \
-                     WHERE singleton = 1 AND intent_hash = ?1",
-                    [intent_hash.to_string()],
+                    "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                     WHERE singleton = 1 AND intent_hash = ?2",
+                    rusqlite::params![progress_bytes, intent_hash.to_string()],
                 )
                 .map_err(DbError::from)?
                 != 1
             {
                 return Err(DbError::Message(
-                    "Serial membership mutation changed during activated completion".to_string(),
+                    "direct revoke mutation changed during activation".to_string(),
                 ));
             }
+            Self::commit_rotation_candidate_on(&tx, intent_hash, generation)?;
             tx.commit().map_err(DbError::from)
         })
         .await
+    }
+
+    fn activate_membership_candidate_graph_on(
+        tx: &rusqlite::Transaction<'_>,
+        candidate: &StoreBatchCommitRef,
+        objects: &[ExactObjectRef],
+    ) -> Result<(), DbError> {
+        let mut unique = BTreeSet::new();
+        for object in objects {
+            let object_id = remote_object_id(object);
+            if !unique.insert(object_id) {
+                return Err(DbError::Message(
+                    "activated membership graph repeats an exact object".to_string(),
+                ));
+            }
+            let remote = load_remote_object_on(tx, object_id)?;
+            let activated = remote.clone().into_activated(candidate).map_err(|error| {
+                DbError::Message(format!(
+                    "validate activated membership object {object_id}: {error}"
+                ))
+            })?;
+            if activated != remote {
+                let expected = serde_json::to_string(&remote).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize pending membership object {object_id}: {error}"
+                    ))
+                })?;
+                let replacement = serde_json::to_string(&activated).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize activated membership object {object_id}: {error}"
+                    ))
+                })?;
+                if tx
+                    .execute(
+                        "UPDATE remote_objects SET state = ?1 WHERE object_id = ?2 AND state = ?3",
+                        rusqlite::params![replacement, object_id.to_string(), expected],
+                    )
+                    .map_err(DbError::from)?
+                    != 1
+                {
+                    return Err(DbError::Message(format!(
+                        "membership object {object_id} changed during activation"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn complete_membership_mutation(
@@ -12438,7 +13361,7 @@ impl Database {
         founder_bytes: Vec<u8>,
         genesis: ResolvedStoreDeviceState,
         owner: String,
-        head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
+        membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
         if founder.author_pubkey != owner {
             return Err(DbError::Message(
@@ -12464,8 +13387,27 @@ impl Database {
                 rusqlite::params![crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner,],
             )
             .map_err(DbError::from)?;
-            for reference in &head_refs {
-                crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
+            match membership {
+                InitialStoreMembershipAuthority::MergeConcurrent { head_refs } => {
+                    if write_policy != crate::WritePolicy::MergeConcurrent {
+                        return Err(DbError::Message(
+                            "Merge founder membership cannot initialize a Serial database"
+                                .to_string(),
+                        ));
+                    }
+                    for reference in &head_refs {
+                        crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
+                    }
+                }
+                InitialStoreMembershipAuthority::Serial { authorization } => {
+                    if write_policy != crate::WritePolicy::Serial {
+                        return Err(DbError::Message(
+                            "Serial founder membership cannot initialize a Merge database"
+                                .to_string(),
+                        ));
+                    }
+                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
+                }
             }
             ensure_founder_replay_baseline_on(
                 &tx,
@@ -12813,17 +13755,17 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                    &graph.root.value.descriptor.founder_pubkey,
+                ),
+            )
+            .map_err(DbError::from)?;
             match &graph.membership {
                 DurableFounderMembership::MergeConcurrent { head_ref, .. } => {
-                    tx.execute(
-                        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (
-                            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
-                            &graph.root.value.descriptor.founder_pubkey,
-                        ),
-                    )
-                    .map_err(DbError::from)?;
                     crate::sync::membership_ops::upsert_head_cursor_on(&tx, head_ref)?;
                 }
                 DurableFounderMembership::Serial { .. } => {
@@ -12834,11 +13776,7 @@ impl Database {
                         &graph.registration.value,
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                    Self::install_serial_root_authorization_on(
-                        &tx,
-                        &graph.root.value.descriptor.founder_pubkey,
-                        &authorization,
-                    )?;
+                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
                 }
             }
             install_generation_zero_replay_baseline_on(
@@ -14205,6 +15143,294 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn load_owner_promotion_journal(
+        &self,
+        promotion_id: crate::sync::store_commit::OwnerPromotionId,
+    ) -> Result<Option<crate::sync::owner_promotion::OwnerPromotionJournal>, DbError> {
+        let key = format!("owner_promotion/{promotion_id}");
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|value| {
+                let journal: crate::sync::owner_promotion::OwnerPromotionJournal =
+                    serde_json::from_str(&value).map_err(|error| {
+                        DbError::Message(format!("parse Owner-promotion journal: {error}"))
+                    })?;
+                journal
+                    .validate_id(promotion_id)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                Ok(journal)
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn load_owner_promotion_target(
+        &self,
+        key: String,
+    ) -> Result<Option<crate::sync::owner_promotion::OwnerPromotionJournal>, DbError> {
+        self.call(move |conn| {
+            let value = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            let journal: crate::sync::owner_promotion::OwnerPromotionJournal =
+                serde_json::from_str(&value).map_err(|error| {
+                    DbError::Message(format!("parse Owner-promotion target journal: {error}"))
+                })?;
+            journal
+                .validate_target_key(&key)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let journal_key = format!("owner_promotion/{}", journal.promotion_id());
+            let by_id = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [journal_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if by_id.as_deref() != Some(value.as_str()) {
+                return Err(DbError::Message(
+                    "Owner-promotion target and id journals disagree".to_string(),
+                ));
+            }
+            Ok(Some(journal))
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_owner_promotion_journal(
+        &self,
+        target_key: String,
+        journal: crate::sync::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::owner_promotion::OwnerPromotionJournal, DbError> {
+        journal
+            .validate_begin()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if journal
+            .target_state_key()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != target_key
+        {
+            return Err(DbError::Message(
+                "Owner-promotion target index differs from its journal target".to_string(),
+            ));
+        }
+        let journal_key = format!("owner_promotion/{}", journal.promotion_id());
+        let value = serde_json::to_string(&journal).map_err(|error| {
+            DbError::Message(format!("serialize Owner-promotion journal: {error}"))
+        })?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&journal_key, &value),
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&target_key, &value),
+            )
+            .map_err(DbError::from)?;
+            let by_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&journal_key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let by_target: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&target_key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if by_id != by_target {
+                return Err(DbError::Message(
+                    "Owner-promotion id and target journals disagree".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            serde_json::from_str(&by_id).map_err(|error| {
+                DbError::Message(format!("parse begun Owner-promotion journal: {error}"))
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_owner_promotion_acceptance_journal(
+        &self,
+        journal: crate::sync::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::owner_promotion::OwnerPromotionJournal, DbError> {
+        journal
+            .validate_acceptance_begin()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let journal_key = format!("owner_promotion/{}", journal.promotion_id());
+        let value = serde_json::to_string(&journal).map_err(|error| {
+            DbError::Message(format!(
+                "serialize Owner-promotion candidate acceptance: {error}"
+            ))
+        })?;
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&journal_key, &value),
+            )
+            .map_err(DbError::from)?;
+            let actual: String = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&journal_key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if actual != value {
+                return Err(DbError::Message(
+                    "Owner-promotion id is already bound to different candidate acceptance"
+                        .to_string(),
+                ));
+            }
+            serde_json::from_str(&actual).map_err(|error| {
+                DbError::Message(format!(
+                    "parse begun Owner-promotion candidate acceptance: {error}"
+                ))
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn advance_owner_promotion_journal(
+        &self,
+        transition: crate::sync::owner_promotion::OwnerPromotionJournalTransition,
+    ) -> Result<(), DbError> {
+        let (journal_key, target_key, previous_value, next_value, remote_objects) =
+            transition.into_values();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::advance_owner_promotion_journal_on(
+                &tx,
+                journal_key,
+                target_key,
+                previous_value,
+                next_value,
+                remote_objects,
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) fn advance_owner_promotion_journal_on(
+        tx: &rusqlite::Transaction<'_>,
+        journal_key: String,
+        target_key: String,
+        previous_value: String,
+        next_value: String,
+        remote_objects: Vec<RemoteObjectRecord>,
+    ) -> Result<(), DbError> {
+        let mut object_ids = BTreeSet::new();
+        for remote in &remote_objects {
+            if !object_ids.insert(remote.object_id()) {
+                return Err(DbError::Message(
+                    "Owner-promotion journal repeats a remote object".to_string(),
+                ));
+            }
+            persist_exact_remote_object_on(tx, remote, "Owner-promotion candidate object")?;
+        }
+        let by_id = tx
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (&next_value, &journal_key, &previous_value),
+            )
+            .map_err(DbError::from)?;
+        let by_target = tx
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (&next_value, &target_key, &previous_value),
+            )
+            .map_err(DbError::from)?;
+        if by_id != 1 || by_target != 1 {
+            return Err(DbError::Message(
+                "Owner-promotion journal advance lost its exact predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn replace_failed_owner_promotion_journal(
+        &self,
+        previous: crate::sync::owner_promotion::OwnerPromotionJournal,
+        replacement: crate::sync::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::owner_promotion::OwnerPromotionJournal, DbError> {
+        previous
+            .validate_failed_attempt_replacement(&replacement)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let target_key = previous
+            .target_state_key()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if replacement
+            .target_state_key()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != target_key
+        {
+            return Err(DbError::Message(
+                "Owner-promotion retry target differs from its failed attempt".to_string(),
+            ));
+        }
+        let replacement_key = format!("owner_promotion/{}", replacement.promotion_id());
+        let previous_value = serde_json::to_string(&previous).map_err(|error| {
+            DbError::Message(format!("serialize failed Owner-promotion journal: {error}"))
+        })?;
+        let replacement_value = serde_json::to_string(&replacement).map_err(|error| {
+            DbError::Message(format!(
+                "serialize replacement Owner-promotion journal: {error}"
+            ))
+        })?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                    (&replacement_key, &replacement_value),
+                )
+                .map_err(DbError::from)?;
+            if inserted != 1 {
+                return Err(DbError::Message(
+                    "fresh Owner-promotion retry identity is already present".to_string(),
+                ));
+            }
+            let replaced = tx
+                .execute(
+                    "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                    (&replacement_value, &target_key, &previous_value),
+                )
+                .map_err(DbError::from)?;
+            if replaced != 1 {
+                return Err(DbError::Message(
+                    "Owner-promotion retry lost its exact failed target attempt".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Ok(replacement)
+        })
+        .await
+    }
+
     pub(crate) async fn begin_store_creation_attempt(
         &self,
         initialized: crate::sync::store_protocol_root::StoreCreationAttempt,
@@ -15354,6 +16580,7 @@ impl Database {
                         &verified,
                         head,
                         prepared_head.reference(),
+                        None,
                         &[],
                         None,
                     )?;
@@ -16792,6 +18019,58 @@ impl Database {
             local_identity.as_deref(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
+        if matches!(
+            commit.control(),
+            Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
+        ) != input.membership_objects.is_some()
+        {
+            return Err(DbError::Message(
+                "retained Merge membership closure differs from its exact Store control"
+                    .to_string(),
+            ));
+        }
+        if let Some(objects) = &input.membership_objects {
+            let entry_remote =
+                load_remote_object_on(conn, remote_object_id(&objects.entry.object))?;
+            let entry: MembershipEntry = serde_json::from_slice(
+                entry_remote.bytes().canonical_semantic_bytes(),
+            )
+            .map_err(|error| DbError::Message(format!("retained membership entry: {error}")))?;
+            let head_remote = load_remote_object_on(conn, remote_object_id(&objects.head.object))?;
+            let head_value: AuthorHead = serde_json::from_slice(
+                head_remote.bytes().canonical_semantic_bytes(),
+            )
+            .map_err(|error| DbError::Message(format!("retained membership head: {error}")))?;
+            let verified_objects = VerifiedMergeMembershipObjects::verify(
+                &commit,
+                commit_ref,
+                &entry,
+                &head_value,
+                objects.head.clone(),
+            )?;
+            if &verified_objects != objects || entry_remote.object() != &objects.entry.object {
+                return Err(DbError::Message(
+                    "retained membership objects differ from their exact authority".to_string(),
+                ));
+            }
+            if let Some(reference) = &objects.resolution {
+                let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
+                let resolution: crate::sync::membership::StoreMembershipConflictResolution =
+                    serde_json::from_slice(remote.bytes().canonical_semantic_bytes()).map_err(
+                        |error| {
+                            DbError::Message(format!("retained membership resolution: {error}"))
+                        },
+                    )?;
+                if !resolution.verify_signature()
+                    || resolution.resolution_ref(reference.object.clone()) != *reference
+                {
+                    return Err(DbError::Message(
+                        "retained membership resolution differs from its exact authority"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         Ok(OwnedVerifiedMergeMaterialization {
             root,
             commit,
@@ -16801,6 +18080,7 @@ impl Database {
             circle_activations,
             activation_head: head,
             activation_head_object: input.activation_head.reference().clone(),
+            membership_objects: input.membership_objects.clone(),
             packages: package_values,
             package_application: input.activation.package_application,
             input_hash,
@@ -16827,6 +18107,7 @@ impl Database {
                 materialization.activation_head.to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
+            membership_objects: materialization.membership_objects.cloned(),
             packages,
             activation: RetainedCommitActivationInput {
                 registrations: RetainedStoreDeviceRegistrationActivations::from_verified(
@@ -17333,6 +18614,18 @@ impl Database {
                 required.insert(retained.commit_ref);
             }
         }
+        for retraction in &retractions {
+            if matches!(
+                retraction.proof(),
+                crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+            ) {
+                required.insert(
+                    retraction
+                        .candidate_reference()
+                        .map_err(|error| DbError::Message(error.to_string()))?,
+                );
+            }
+        }
         if provided != required {
             return Err(DbError::Message(
                 "verified terminal retractions do not exactly cover excluded materializations"
@@ -17341,29 +18634,36 @@ impl Database {
         }
         let mut notifications = Vec::new();
         for verified in retractions {
-            let (nonactivation, head_nonactivation) = verified
-                .into_author_exclusion()
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            let (nonactivation, head_nonactivation) =
+                verified
+                    .into_terminal_head_nonactivation()
+                    .map_err(|error| DbError::Message(error.to_string()))?;
             let candidate = nonactivation
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                exclusion,
-                accepted_cut,
-                activation_head,
-            } = nonactivation.proof()
-            else {
-                return Err(DbError::Message(
-                    "terminal Merge retraction carries another proof family".to_string(),
-                ));
-            };
-            let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
-            if locator.accepted_cut() != accepted_cut
-                || locator.activation_head() != activation_head
-            {
-                return Err(DbError::Message(
-                    "terminal Merge retraction differs from its activated exclusion".to_string(),
-                ));
+            match nonactivation.proof() {
+                crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                    exclusion,
+                    accepted_cut,
+                    activation_head,
+                } => {
+                    let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
+                    if locator.accepted_cut() != accepted_cut
+                        || locator.activation_head() != activation_head
+                    {
+                        return Err(DbError::Message(
+                            "terminal Merge retraction differs from its activated exclusion"
+                                .to_string(),
+                        ));
+                    }
+                }
+                crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {}
+                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+                    return Err(DbError::Message(
+                        "terminal Merge retraction carries nonterminal evidence".to_string(),
+                    ));
+                }
             }
             let StoreCommitCoord::MergeConcurrent {
                 stream_id,
@@ -17434,6 +18734,9 @@ impl Database {
                 .map(remote_object_id)
                 .collect::<BTreeSet<_>>();
             activated_object_ids.extend(replay_object_ids.iter().copied());
+            if let Some(membership_objects) = retained.membership_objects() {
+                activated_object_ids.extend(membership_objects.object_ids());
+            }
             activated_object_ids.insert(remote_object_id(&candidate.object));
             activated_object_ids.insert(head_object_id);
             for object_id in &replay_object_ids {
@@ -17595,6 +18898,7 @@ impl Database {
             &circle_activations,
             activation_head,
             activation_head_object,
+            None,
             packages,
             package_application,
         )?;
@@ -17807,6 +19111,110 @@ impl Database {
         for retirement in commit.device_retirements() {
             device_state = device_state
                 .self_retire(retirement.clone())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        enum OwnerRecoveryAuthority<'a> {
+            Merge {
+                registration: &'a StoreDeviceRegistrationRef,
+                grant_id: &'a crate::sync::membership::MembershipGrantId,
+                anchor: &'a crate::sync::store_commit::GrantStreamAnchor,
+            },
+            Serial {
+                grant_id: &'a crate::sync::membership::MembershipGrantId,
+                acceptance: &'a crate::sync::store_commit::OwnerPromotionAcceptance,
+            },
+        }
+        let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
+            let crate::sync::store_commit::StreamActivation::GrantAuthorized {
+                author_registration,
+                grant_id,
+                anchor: anchor @ crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
+                ..
+            } = activation
+            else {
+                return None;
+            };
+            Some(OwnerRecoveryAuthority::Merge {
+                registration: author_registration,
+                grant_id,
+                anchor,
+            })
+        });
+        let mut owner_recovery = owner_recoveries.next();
+        if owner_recoveries.next().is_some() {
+            return Err(DbError::Message(
+                "materialized commit activates more than one Owner recovery stream".to_string(),
+            ));
+        }
+        if let Some(serial) =
+            commit.control().and_then(|control| {
+                let crate::sync::store_commit::StoreControl::SerialMembership { entry } = control
+                else {
+                    return None;
+                };
+                let crate::sync::membership::SerialMembershipChange::SetMember {
+                    role:
+                        crate::sync::membership::StoreMembershipRoleGrant::Owner {
+                            recovery:
+                                crate::sync::membership::OwnerRecoveryAnchorRef::Promotion {
+                                    acceptance,
+                                },
+                        },
+                    grant_id,
+                    ..
+                } = &entry.change
+                else {
+                    return None;
+                };
+                Some(OwnerRecoveryAuthority::Serial {
+                    grant_id,
+                    acceptance,
+                })
+            })
+        {
+            if owner_recovery.replace(serial).is_some() {
+                return Err(DbError::Message(
+                    "materialized commit mixes Merge and Serial Owner recovery activation"
+                        .to_string(),
+                ));
+            }
+        }
+        let owner_recovery = match owner_recovery {
+            Some(OwnerRecoveryAuthority::Merge {
+                registration,
+                grant_id,
+                anchor,
+            }) => {
+                let registration = load_activated_registration_on(conn, &root, registration)?;
+                Some((
+                    grant_id.clone(),
+                    crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+                        &root,
+                        &registration.author_pubkey,
+                        grant_id,
+                        anchor,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+                ))
+            }
+            Some(OwnerRecoveryAuthority::Serial {
+                grant_id,
+                acceptance,
+            }) => Some((
+                grant_id.clone(),
+                crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+                    &root,
+                    &acceptance.request.member_pubkey,
+                    grant_id,
+                    acceptance.anchors.recovery(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?,
+            )),
+            None => None,
+        };
+        if let Some((grant_id, activation)) = owner_recovery {
+            device_state = device_state
+                .activate_owner_recovery(grant_id, activation)
                 .map_err(|error| DbError::Message(error.to_string()))?;
         }
         let seq = Self::sequence_to_sqlite(&stream_id, commit.seq())?;
@@ -18176,13 +19584,22 @@ impl Database {
                     "Store operation names a duplicate remote object".to_string(),
                 ));
             }
-            let remote = load_remote_object_on(conn, *object_id)?
-                .into_activated(commit_ref)
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "activate Store operation remote object {object_id}: {error}"
-                    ))
-                })?;
+            let remote = load_remote_object_on(conn, *object_id).map_err(|error| {
+                DbError::Message(format!(
+                    "load Store operation remote object {object_id} for activation: {error}"
+                ))
+            })?;
+            let kind = match &remote {
+                RemoteObjectRecord::CandidateCommit(_) => "candidate commit",
+                RemoteObjectRecord::CandidateExclusive(_) => "candidate-exclusive object",
+                RemoteObjectRecord::RetainedAuthority(_) => "retained authority",
+                RemoteObjectRecord::SharedLiveSet(_) => "shared live-set object",
+            };
+            let remote = remote.into_activated(commit_ref).map_err(|error| {
+                DbError::Message(format!(
+                    "activate Store operation {kind} {object_id}: {error}"
+                ))
+            })?;
             update_remote_object_on(conn, *object_id, &remote)?;
         }
         Ok(())
@@ -18339,7 +19756,6 @@ impl Database {
 
     fn install_serial_root_authorization_on(
         conn: &Connection,
-        founder_pubkey: &str,
         authorization: &SerialAuthorizationState,
     ) -> Result<(), DbError> {
         if Self::latest_position_for_device_on(conn, SERIAL_STREAM_ID)?.is_some() {
@@ -18350,9 +19766,8 @@ impl Database {
         }
         let existing_state: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3, ?4, ?5)",
+                "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3, ?4)",
                 rusqlite::params![
-                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
                     SERIAL_MEMBERSHIP_STATE_KEY,
                     SERIAL_KEY_GENERATION_STATE_KEY,
                     SERIAL_PROVIDER_ADMIN_STATE_KEY,
@@ -18382,10 +19797,6 @@ impl Database {
                 DbError::Message(format!("serialize Serial founder wrapped keys: {error}"))
             })?;
         for (key, value) in [
-            (
-                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
-                founder_pubkey.to_string(),
-            ),
             (SERIAL_MEMBERSHIP_STATE_KEY, membership),
             (SERIAL_PROVIDER_ADMIN_STATE_KEY, provider_admin),
             (
@@ -18402,19 +19813,6 @@ impl Database {
             .map_err(DbError::from)?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn install_serial_root_authorization(
-        &self,
-        founder_pubkey: String,
-        authorization: SerialAuthorizationState,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::install_serial_root_authorization_on(&tx, &founder_pubkey, &authorization)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
     }
 
     pub(crate) async fn install_serial_authorization_at_position(
@@ -18606,6 +20004,7 @@ impl Database {
                             &circle_activations,
                             head,
                             object,
+                            None,
                             &[],
                             None,
                         )?;
@@ -20274,23 +21673,45 @@ impl Database {
     pub(crate) async fn merge_retraction_cleanup_verification(
         &self,
         candidate: StoreBatchCommitRef,
-    ) -> Result<AuthorExclusionCleanupVerification, DbError> {
+    ) -> Result<TerminalCandidateCleanupVerification, DbError> {
         self.call(move |conn| {
             let prepared = Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
             let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
-            let Some(crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                exclusion,
-                ..
-            }) = remote
+            let proof = remote
                 .candidate_nonactivation_proof(&candidate)
                 .map_err(|error| DbError::Message(error.to_string()))?
-            else {
-                return Err(DbError::Message(
-                    "Merge retraction cleanup has no author-exclusion proof".to_string(),
-                ));
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "Merge retraction cleanup has no terminal proof".to_string(),
+                    )
+                })?;
+            let authority = match proof {
+                crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                    exclusion,
+                    ..
+                } => TerminalCandidateAuthority::AuthorExclusion(
+                    load_author_exclusion_activation_locator_on(conn, exclusion)?,
+                ),
+                crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+                    grant_id,
+                    membership,
+                    activation_commit,
+                    activation_head,
+                } => TerminalCandidateAuthority::MembershipGrantRevocation {
+                    grant_id: grant_id.clone(),
+                    membership: membership.clone(),
+                    activation_commit: activation_commit.clone(),
+                    activation_head: activation_head.clone(),
+                },
+                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+                    return Err(DbError::Message(
+                        "Merge retraction cleanup has nonterminal proof".to_string(),
+                    ));
+                }
             };
-            Ok(AuthorExclusionCleanupVerification {
-                locator: load_author_exclusion_activation_locator_on(conn, exclusion)?,
+            Ok(TerminalCandidateCleanupVerification {
+                authority,
                 candidate: blocked_merge_candidate_from_prepared(prepared),
             })
         })
@@ -20314,7 +21735,7 @@ impl Database {
         verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let (durable, head_nonactivation) = verified
-            .into_author_exclusion()
+            .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
         self.call(move |conn| {
             let prepared = Self::load_merge_retraction_cleanup_on(conn, &candidate)?;
@@ -20328,22 +21749,21 @@ impl Database {
                     "verified Merge retraction cleanup names another candidate".to_string(),
                 ));
             }
-            let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+            if let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
                 exclusion,
                 accepted_cut,
                 activation_head,
             } = durable.proof()
-            else {
-                unreachable!("verified author-exclusion cleanup")
-            };
-            let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
-            if locator.accepted_cut() != accepted_cut
-                || locator.activation_head() != activation_head
             {
-                return Err(DbError::Message(
-                    "verified Merge retraction differs from durable exclusion authority"
-                        .to_string(),
-                ));
+                let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
+                if locator.accepted_cut() != accepted_cut
+                    || locator.activation_head() != activation_head
+                {
+                    return Err(DbError::Message(
+                        "verified Merge retraction differs from durable exclusion authority"
+                            .to_string(),
+                    ));
+                }
             }
             let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
             if remote
@@ -20386,10 +21806,10 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn merge_candidate_author_exclusion_verifications(
+    pub(crate) async fn merge_candidate_terminal_verifications(
         &self,
         write_id: WriteId,
-    ) -> Result<Vec<AuthorExclusionCleanupVerification>, DbError> {
+    ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
         self.call(move |conn| {
             let (raw_status, raw_prepared): (String, Option<String>) = conn
                 .query_row(
@@ -20458,19 +21878,35 @@ impl Database {
             for candidate in candidates {
                 let remote =
                     load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-                let Some(
-                    crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                        exclusion,
-                        ..
-                    },
-                ) = remote
+                let Some(proof) = remote
                     .candidate_nonactivation_proof(&candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
                 else {
                     continue;
                 };
-                verifications.push(AuthorExclusionCleanupVerification {
-                    locator: load_author_exclusion_activation_locator_on(conn, exclusion)?,
+                let authority = match proof {
+                    crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                        exclusion,
+                        ..
+                    } => TerminalCandidateAuthority::AuthorExclusion(
+                        load_author_exclusion_activation_locator_on(conn, exclusion)?,
+                    ),
+                    crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+                        grant_id,
+                        membership,
+                        activation_commit,
+                        activation_head,
+                    } => TerminalCandidateAuthority::MembershipGrantRevocation {
+                        grant_id: grant_id.clone(),
+                        membership: membership.clone(),
+                        activation_commit: activation_commit.clone(),
+                        activation_head: activation_head.clone(),
+                    },
+                    crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                    | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => continue,
+                };
+                verifications.push(TerminalCandidateCleanupVerification {
+                    authority,
                     candidate: blocked_merge_candidate_from_prepared(candidate),
                 });
             }
@@ -20479,7 +21915,7 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn reconcile_merge_candidate_author_exclusion_head(
+    pub(crate) async fn reconcile_merge_candidate_terminal_head(
         &self,
         write_id: WriteId,
         verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
@@ -20487,13 +21923,14 @@ impl Database {
         if !matches!(
             verified.proof(),
             crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                | crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
         ) {
             return Err(DbError::Message(
-                "excluded-author head reconciliation received another proof family".to_string(),
+                "terminal head reconciliation received another proof family".to_string(),
             ));
         }
         let (durable, head_nonactivation) = verified
-            .into_author_exclusion()
+            .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -20528,10 +21965,9 @@ impl Database {
                         DbError::Message(format!("prepared Merge cleanup: {error}"))
                     })?;
                 match &prepared {
-                    PreparedStoreWriteState::MergeConcurrent { .. } => candidates.push(
-                        parse_prepared_merge_candidate_on(&tx, &prepared)?
-                            .expect("matched Merge preparation"),
-                    ),
+                    PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(&tx, commit, head)?)
+                    }
                     PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
                         candidate_head,
@@ -20566,32 +22002,7 @@ impl Database {
                         "fresh excluded-author head evidence names another write".to_string(),
                     )
                 })?;
-            let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                exclusion,
-                accepted_cut,
-                activation_head,
-            } = durable.proof()
-            else {
-                unreachable!("checked author-exclusion proof family")
-            };
-            let current = author_exclusion_activation_for_candidate_on(
-                &tx,
-                &candidate.reference,
-                &candidate.commit.author_registration,
-            )?
-            .ok_or_else(|| {
-                DbError::Message(
-                    "candidate is no longer excluded by the selected terminal cutoff".to_string(),
-                )
-            })?;
-            if &current.exclusion != exclusion
-                || &current.accepted_cut != accepted_cut
-                || &current.activation_head != activation_head
-            {
-                return Err(DbError::Message(
-                    "author-exclusion activation changed before head reconciliation".to_string(),
-                ));
-            }
+            validate_terminal_candidate_authority_on(&tx, &candidate, &durable)?;
             let object_id = remote_object_id(candidate.head_prepared.reference());
             let remote_exists: bool = tx
                 .query_row(
@@ -21532,6 +22943,47 @@ impl Database {
             })?;
             persist_exact_remote_object_on(conn, &remote, "pulled audience package")
         }
+    }
+
+    pub(crate) fn install_pulled_merge_membership_activations_on(
+        conn: &Connection,
+        commit_ref: &StoreBatchCommitRef,
+        remotes: &[RemoteObjectRecord],
+    ) -> Result<(), DbError> {
+        let mut object_ids = BTreeSet::new();
+        for expected in remotes {
+            let object_id = expected.object_id();
+            if !object_ids.insert(object_id) {
+                return Err(DbError::Message(
+                    "pulled Merge membership closure repeats an exact object".to_string(),
+                ));
+            }
+            let existing = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)?;
+            if existing {
+                let mut remote = load_remote_object_on(conn, object_id)?;
+                remote
+                    .merge_retained_authority_activation(expected, commit_ref)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "merge pulled Merge membership authority {object_id}: {error}"
+                        ))
+                    })?;
+                update_remote_object_on(conn, object_id, &remote)?;
+            } else {
+                persist_exact_remote_object_on(
+                    conn,
+                    expected,
+                    "pulled Merge membership authority",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
@@ -25134,7 +26586,11 @@ fn mark_reusable_retained_authority_uploaded_on(
         crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified {
             ownership,
         } => ownership.pending.contains(candidate) || ownership.activated.contains(candidate),
-        crate::sync::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. } => false,
+        crate::sync::remote_object::RetainedAuthorityObjectState::CleanupPending { .. }
+        | crate::sync::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. }
+        | crate::sync::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. } => {
+            false
+        }
     };
     if !owns_candidate {
         return Err(DbError::Message(format!(

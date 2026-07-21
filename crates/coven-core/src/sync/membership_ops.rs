@@ -16,19 +16,21 @@ use super::cloud_storage::{CloudCipherAccess, PendingRotation};
 use super::hlc::Hlc;
 use super::invite::InviteError;
 use super::membership::{
-    AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipConflict, MembershipCoord,
-    MembershipEntry, MembershipGrantId, MembershipHeadRef, StoreMembershipConflictResolution,
-    StoreMembershipConflictResolutionRef,
+    AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipChange, MembershipConflict,
+    MembershipCoord, MembershipEntry, MembershipGrantId, MembershipHeadRef,
+    StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
 use super::storage::{
     CoordinationStorage, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
-    GrantStreamAnchor, ResolvedStoreDeviceState, StoreControl, StoreRootRef,
+    GrantStreamAnchor, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreControl, StoreRootRef,
 };
 use super::store_objects::StoreObjectError;
 use crate::database::Database;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 
 /// Why a high-level membership operation (list members, invite, remove, rotate)
 /// failed. The security-critical orchestration layer that downloads the chain,
@@ -49,18 +51,12 @@ pub enum MembershipOpsError {
     Chain(#[from] AnchoredChainError),
     #[error("{0}")]
     Invite(#[from] InviteError),
-    /// The cloud key rotation a member removal performs is committed — the member
-    /// is out and the store is rotated for every remaining member — but this
-    /// device could not adopt the rotated key into its own keyring and live cipher.
-    /// The removal is durable; this device keeps sealing under the superseded
-    /// generation until adoption succeeds. Its two remedies are non-destructive:
-    /// retrying the removal re-derives and re-adopts the same generation (the write
-    /// is idempotent), and the next sync cycle adopts it from this device's own
-    /// `keys/{self}` wrapped key.
+    /// The removal and cloud rotation committed, but this device could not adopt
+    /// the rotated key into custody and its live cipher. The exact removal journal
+    /// and rotation gate remain durable, and retrying the same removal resumes it.
     #[error(
         "member removal committed the cloud key rotation, but this device could not \
-         adopt the rotated key locally: {source}; retry the removal to re-adopt it, \
-         or let the next sync cycle adopt it from this device's wrapped key"
+         adopt the rotated key locally: {source}; retry the same removal"
     )]
     RotationCommittedAdoptionFailed {
         #[source]
@@ -88,7 +84,9 @@ pub enum MembershipOpsError {
     Serial(#[from] super::store_outbound::StoreOutboundError),
 }
 
-fn require_resolved_membership(chain: &MembershipChain) -> Result<(), MembershipOpsError> {
+pub(crate) fn require_resolved_membership(
+    chain: &MembershipChain,
+) -> Result<(), MembershipOpsError> {
     match chain.conflict() {
         Some(conflict) => Err(MembershipOpsError::SemanticConflict(Box::new(
             conflict.clone(),
@@ -104,7 +102,7 @@ async fn required_store_root_ref(db: &Database) -> Result<StoreRootRef, Membersh
         .ok_or(MembershipOpsError::NoFounderChain)
 }
 
-async fn load_current_exact_chain(
+pub(crate) async fn load_current_exact_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     owner_pubkey: Option<&str>,
@@ -307,6 +305,11 @@ pub async fn invite_member_with_coordination(
     db: &Database,
     serial: Option<SerialMembershipContext<'_>>,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    if role == MemberRole::Owner {
+        return Err(MembershipOpsError::Invite(InviteError::Membership(
+            super::membership::MembershipError::OwnerPromotionRequired,
+        )));
+    }
     let user_pubkey_hex = hex::encode(user_keypair.public_key());
 
     if public_key_hex == user_pubkey_hex {
@@ -429,6 +432,10 @@ struct SerialInvitePlan {
     desired_access: CloudAccessState,
     invitee_was_member: bool,
     wrapped_key: super::wrapped_store_key::PreparedWrappedStoreKey,
+    store_id: String,
+    store_name: String,
+    store_root: StoreRootRef,
+    owner_pubkey: String,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -441,6 +448,104 @@ enum SerialInviteProgress {
     CandidateNonactivating {
         join_info: crate::storage::cloud::CloudHomeJoinInfo,
     },
+    Activated {
+        join_info: crate::storage::cloud::CloudHomeJoinInfo,
+        candidate: StoreBatchCommitRef,
+    },
+}
+
+fn serial_invite_result(
+    plan: &SerialInvitePlan,
+    join_info: crate::storage::cloud::CloudHomeJoinInfo,
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    if plan.store_root.store_root_hash != plan.prepared.commit.store_root_hash {
+        return Err(MembershipOpsError::Database(
+            "Serial invite commit names a different Store root".to_string(),
+        ));
+    }
+    Ok(crate::join_code::InviteCode {
+        v: crate::join_code::INVITE_CODE_VERSION,
+        store_id: plan.store_id.clone(),
+        store_name: plan.store_name.clone(),
+        join_info,
+        owner_pubkey: plan.owner_pubkey.clone(),
+        wrapped_key: plan.wrapped_key.reference.clone(),
+        store_root: plan.store_root.clone(),
+        membership_floor: crate::join_code::MembershipFloor::Serial(Some(
+            plan.prepared.reference.clone(),
+        )),
+    })
+}
+
+fn serial_invite_receipt_is_current(
+    plan: &SerialInvitePlan,
+    authorization: &super::membership::SerialAuthorizationState,
+) -> Result<bool, MembershipOpsError> {
+    plan.prepared.validate_closed_shape().map_err(|error| {
+        MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+            "terminal Serial invitation candidate is invalid: {error}"
+        )))
+    })?;
+    let Some(StoreControl::SerialMembership { entry }) = plan.prepared.commit.control() else {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial invitation does not carry a Serial membership grant".to_string(),
+            ),
+        ));
+    };
+    let super::membership::SerialMembershipChange::SetMember {
+        user_pubkey,
+        provider_account_email,
+        role,
+        grant_id,
+        wrapped_key,
+        ..
+    } = &entry.change
+    else {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial invitation carries a removal".to_string(),
+            ),
+        ));
+    };
+    let role_matches = matches!(
+        (&plan.role, role),
+        (
+            MemberRole::Member,
+            super::membership::StoreMembershipRoleGrant::Member
+        ) | (
+            MemberRole::Follower,
+            super::membership::StoreMembershipRoleGrant::Follower
+        )
+    );
+    if user_pubkey != &plan.invitee_pubkey
+        || provider_account_email != &plan.invitee_email
+        || !role_matches
+        || wrapped_key != &plan.wrapped_key.reference
+    {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial invitation plan differs from its membership grant".to_string(),
+            ),
+        ));
+    }
+    let expected_grants = BTreeSet::from([grant_id.clone()]);
+    let expected_wraps = vec![wrapped_key.clone()];
+    Ok(authorization.key_generation == wrapped_key.generation
+        && authorization
+            .membership
+            .active_grant_ids(&plan.invitee_pubkey)
+            == expected_grants
+        && authorization.active_wrapped_keys_for(&plan.invitee_pubkey) == expected_wraps
+        && authorization
+            .membership
+            .current_members()
+            .iter()
+            .any(|(pubkey, role)| pubkey == &plan.invitee_pubkey && role == &plan.role)
+        && authorization
+            .membership
+            .current_member_provider_email(&plan.invitee_pubkey)
+            == plan.invitee_email.as_deref())
 }
 
 async fn restore_serial_invite_provider_access(
@@ -478,10 +583,12 @@ async fn finish_nonactivating_serial_invite(
     db.mark_candidate_cleanup_absent(plan.prepared.reference.object.clone())
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    db.complete_nonactivating_serial_membership_mutation(
+    db.complete_nonactivating_membership_candidate_mutation(
         intent_hash,
         plan.prepared.reference.clone(),
+        vec![plan.prepared.reference.object.clone()],
         vec![plan.wrapped_key.reference.object.clone()],
+        None,
     )
     .await
     .map_err(|error| MembershipOpsError::Database(error.to_string()))
@@ -545,6 +652,35 @@ async fn invite_serial_member(
     let root_ref = required_store_root_ref(db).await?;
     let protocol_store_id = root_ref.store_root_id.to_string();
     let _mutation = db.lock_membership_mutation().await;
+    if let Some(receipt) = db
+        .terminal_serial_invite_mutation()
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+    {
+        let plan: SerialInvitePlan =
+            serde_json::from_slice(&receipt.plan_bytes).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "parse terminal Serial invitation plan: {error}"
+                )))
+            })?;
+        if plan.invitee_pubkey == public_key_hex
+            && plan.invitee_email.as_deref() == invitee_email
+            && plan.role == role
+            && plan.store_id == store_id
+            && plan.store_name == store_name
+        {
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            if serial_invite_receipt_is_current(&plan, &authorization)? {
+                return serde_json::from_slice(&receipt.result_bytes).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "parse terminal Serial invitation result: {error}"
+                    )))
+                });
+            }
+        }
+    }
     let (plan, mut progress, intent_hash) = match db
         .outbound_membership_mutation()
         .await
@@ -573,6 +709,9 @@ async fn invite_serial_member(
             (plan, progress, row.intent_hash)
         }
         None => {
+            let root = super::store_objects::load_store_protocol_root(storage, &root_ref)
+                .await?
+                .value;
             let authorization =
                 super::store_outbound::current_serial_authorization(db, storage, coordination)
                     .await?;
@@ -657,6 +796,10 @@ async fn invite_serial_member(
                 },
                 invitee_was_member,
                 wrapped_key,
+                store_id: store_id.to_string(),
+                store_name: store_name.to_string(),
+                store_root: root_ref.clone(),
+                owner_pubkey: root.descriptor.founder_pubkey,
             };
             let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
                 MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
@@ -673,7 +816,7 @@ async fn invite_serial_member(
                 .prepared
                 .membership_control_remote_objects(std::slice::from_ref(&plan.wrapped_key))?;
             let intent_hash = db
-                .stage_serial_membership_mutation(plan_bytes, progress_bytes, remote_objects)
+                .stage_serial_invite_candidate_mutation(plan_bytes, progress_bytes, remote_objects)
                 .await
                 .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
             (plan, progress, intent_hash)
@@ -728,7 +871,32 @@ async fn invite_serial_member(
             SerialInviteProgress::CandidateNonactivating { .. } => {
                 unreachable!("nonactivating invitation returned before access grant")
             }
+            SerialInviteProgress::Activated { join_info, .. } => join_info.clone(),
         };
+    if let SerialInviteProgress::Activated {
+        join_info,
+        candidate,
+    } = &progress
+    {
+        if candidate != &plan.prepared.reference {
+            return Err(MembershipOpsError::Database(
+                "activated Serial invitation names another candidate".to_string(),
+            ));
+        }
+        let result = serial_invite_result(&plan, join_info.clone())?;
+        let result_bytes = serde_json::to_vec(&result).map_err(|error| {
+            MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                "serialize terminal Serial invitation result: {error}"
+            )))
+        })?;
+        db.complete_serial_invite_mutation(intent_hash, result_bytes)
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+        #[cfg(any(test, feature = "test-utils"))]
+        db.reach_test_point(crate::database::DatabaseTestPoint::SerialMembershipTerminalized)
+            .await;
+        return Ok(result);
+    }
     publish_serial_membership_wraps(
         db,
         storage,
@@ -740,11 +908,27 @@ async fn invite_serial_member(
     let mut plan = plan;
     let mut intent_hash = intent_hash;
     loop {
-        match super::store_outbound::publish_prepared_store_operation(
+        let activated_progress = SerialInviteProgress::Activated {
+            join_info: join_info.clone(),
+            candidate: plan.prepared.reference.clone(),
+        };
+        let remote_objects = plan
+            .prepared
+            .membership_control_remote_objects(std::slice::from_ref(&plan.wrapped_key))?;
+        match super::store_outbound::publish_prepared_serial_membership_operation(
             db,
             storage,
-            Some(coordination),
+            coordination,
             Box::new(plan.prepared.clone()),
+            super::store_outbound::StoreMembershipJournalCompletion::Mutation {
+                intent_hash,
+                progress_bytes: serde_json::to_vec(&activated_progress).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize activated Serial invitation: {error}"
+                    )))
+                })?,
+                remote_objects,
+            },
         )
         .await?
         {
@@ -759,7 +943,7 @@ async fn invite_serial_member(
                     )))
                 })?;
                 intent_hash = db
-                    .replace_serial_membership_candidate(intent_hash, plan_bytes)
+                    .replace_membership_candidate(intent_hash, plan_bytes)
                     .await
                     .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
             }
@@ -781,9 +965,10 @@ async fn invite_serial_member(
                         "serialize nonactivating Serial invitation: {error}"
                     )))
                 })?;
-                db.begin_serial_membership_candidate_nonactivation(
+                db.begin_membership_candidate_nonactivation(
                     intent_hash,
                     plan.prepared.reference.clone(),
+                    vec![plan.prepared.reference.object.clone()],
                     vec![plan.wrapped_key.reference.object.clone()],
                     progress_bytes,
                     *nonactivation,
@@ -813,34 +998,19 @@ async fn invite_serial_member(
             }
         }
     }
-    db.complete_activated_serial_membership_mutation(
-        intent_hash,
-        plan.prepared.reference.clone(),
-        vec![plan.wrapped_key.reference.object.clone()],
-    )
-    .await
-    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    let root_hash = root_ref.store_root_hash;
-    if root_hash != plan.prepared.commit.store_root_hash {
-        return Err(MembershipOpsError::Database(
-            "Serial invite commit names a different Store root".to_string(),
-        ));
-    }
-    let root = super::store_objects::load_store_protocol_root(storage, &root_ref)
-        .await?
-        .value;
-    Ok(crate::join_code::InviteCode {
-        v: crate::join_code::INVITE_CODE_VERSION,
-        store_id: store_id.to_string(),
-        store_name: store_name.to_string(),
-        join_info,
-        owner_pubkey: root.descriptor.founder_pubkey,
-        wrapped_key: plan.wrapped_key.reference.clone(),
-        store_root: root_ref,
-        membership_floor: crate::join_code::MembershipFloor::Serial(Some(
-            plan.prepared.reference.clone(),
-        )),
-    })
+    let result = serial_invite_result(&plan, join_info)?;
+    let result_bytes = serde_json::to_vec(&result).map_err(|error| {
+        MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+            "serialize terminal Serial invitation result: {error}"
+        )))
+    })?;
+    db.complete_serial_invite_mutation(intent_hash, result_bytes)
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::SerialMembershipTerminalized)
+        .await;
+    Ok(result)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -851,6 +1021,7 @@ struct SerialRemovalPlan {
     revokee_email: Option<String>,
     wraps: Vec<super::wrapped_store_key::PreparedWrappedStoreKey>,
     keyring_payload: Vec<u8>,
+    generation: u64,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -859,6 +1030,62 @@ enum SerialRemovalProgress {
     Pending,
     AccessRevoked,
     CandidateNonactivating,
+    Activated { candidate: StoreBatchCommitRef },
+}
+
+struct ActivatedSerialRemoval {
+    encryption: EncryptionService,
+    intent_hash: super::store_commit::ObjectHash,
+    generation: u64,
+}
+
+enum SerialRemovalResult {
+    Activated(ActivatedSerialRemoval),
+    Terminal(String),
+}
+
+fn serial_removal_receipt_is_current(
+    plan: &SerialRemovalPlan,
+    authorization: &super::membership::SerialAuthorizationState,
+) -> Result<bool, MembershipOpsError> {
+    plan.prepared.validate_closed_shape().map_err(|error| {
+        MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+            "terminal Serial removal candidate is invalid: {error}"
+        )))
+    })?;
+    let Some(StoreControl::SerialMembershipAndKeyRotation {
+        entry, generation, ..
+    }) = plan.prepared.commit.control()
+    else {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial removal does not carry a membership key rotation".to_string(),
+            ),
+        ));
+    };
+    let super::membership::SerialMembershipChange::RemoveMember { user_pubkey, .. } = &entry.change
+    else {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial removal carries a membership grant".to_string(),
+            ),
+        ));
+    };
+    if user_pubkey != &plan.revokee_pubkey || generation != &plan.generation {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "terminal Serial removal plan differs from its membership rotation".to_string(),
+            ),
+        ));
+    }
+    Ok(authorization.key_generation == plan.generation
+        && authorization
+            .membership
+            .active_grant_ids(&plan.revokee_pubkey)
+            .is_empty()
+        && authorization
+            .active_wrapped_keys_for(&plan.revokee_pubkey)
+            .is_empty())
 }
 
 async fn restore_serial_removal_provider_access(
@@ -888,22 +1115,28 @@ async fn finish_nonactivating_serial_removal(
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     plan: &SerialRemovalPlan,
     intent_hash: super::store_commit::ObjectHash,
+    pending_rotation: &PendingRotation,
 ) -> Result<(), MembershipOpsError> {
     restore_serial_removal_provider_access(cloud_home, plan).await?;
     super::store_objects::delete_exact_object(storage, &plan.prepared.reference.object).await?;
     db.mark_candidate_cleanup_absent(plan.prepared.reference.object.clone())
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    db.complete_nonactivating_serial_membership_mutation(
+    db.complete_nonactivating_membership_candidate_mutation(
         intent_hash,
         plan.prepared.reference.clone(),
+        vec![plan.prepared.reference.object.clone()],
         plan.wraps
             .iter()
             .map(|wrap| wrap.reference.object.clone())
             .collect(),
+        Some(plan.generation),
     )
     .await
-    .map_err(|error| MembershipOpsError::Database(error.to_string()))
+    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    pending_rotation
+        .remove_candidate(plan.generation, intent_hash)
+        .map_err(|error| MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -918,10 +1151,37 @@ async fn remove_serial_member(
     store_id: &str,
     current_encryption: &EncryptionService,
     new_key: [u8; 32],
+    pending_rotation: &PendingRotation,
     db: &Database,
-) -> Result<EncryptionService, MembershipOpsError> {
+) -> Result<SerialRemovalResult, MembershipOpsError> {
     let root_ref = required_store_root_ref(db).await?;
     let _mutation = db.lock_membership_mutation().await;
+    if let Some(receipt) = db
+        .terminal_serial_removal_mutation()
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+    {
+        let plan: SerialRemovalPlan =
+            serde_json::from_slice(&receipt.plan_bytes).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "parse terminal Serial removal plan: {error}"
+                )))
+            })?;
+        if plan.revokee_pubkey == public_key_hex {
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            if serial_removal_receipt_is_current(&plan, &authorization)? {
+                let fingerprint =
+                    serde_json::from_slice(&receipt.result_bytes).map_err(|error| {
+                        MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                            "parse terminal Serial removal result: {error}"
+                        )))
+                    })?;
+                return Ok(SerialRemovalResult::Terminal(fingerprint));
+            }
+        }
+    }
     let (plan, mut progress, intent_hash) = match db
         .outbound_membership_mutation()
         .await
@@ -1060,6 +1320,7 @@ async fn remove_serial_member(
                 revokee_email,
                 wraps,
                 keyring_payload,
+                generation,
             };
             let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
                 MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
@@ -1076,18 +1337,56 @@ async fn remove_serial_member(
                 .prepared
                 .membership_control_remote_objects(&plan.wraps)?;
             let intent_hash = db
-                .stage_serial_membership_mutation(plan_bytes, progress_bytes, remote_objects)
+                .stage_serial_removal_candidate_mutation(
+                    plan_bytes,
+                    progress_bytes,
+                    remote_objects,
+                    generation,
+                )
                 .await
                 .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
             (plan, progress, intent_hash)
         }
     };
+    match &progress {
+        SerialRemovalProgress::Activated { .. } => {
+            pending_rotation.mark_committed_mutation(plan.generation, intent_hash)
+        }
+        _ => pending_rotation.mark_candidate(plan.generation, intent_hash),
+    }
+    .map_err(|error| MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error)))?;
     if matches!(&progress, SerialRemovalProgress::CandidateNonactivating) {
-        finish_nonactivating_serial_removal(db, storage, cloud_home, &plan, intent_hash).await?;
+        finish_nonactivating_serial_removal(
+            db,
+            storage,
+            cloud_home,
+            &plan,
+            intent_hash,
+            pending_rotation,
+        )
+        .await?;
         return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
             "Serial removal candidate did not activate".to_string(),
         )
         .into());
+    }
+    if let SerialRemovalProgress::Activated { candidate } = &progress {
+        if candidate != &plan.prepared.reference {
+            return Err(MembershipOpsError::Database(
+                "activated Serial removal names another candidate".to_string(),
+            ));
+        }
+        let encryption =
+            EncryptionService::from_keyring_payload(plan.keyring_payload).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::Crypto(format!(
+                    "parse Serial rotated keyring: {error}"
+                )))
+            })?;
+        return Ok(SerialRemovalResult::Activated(ActivatedSerialRemoval {
+            encryption,
+            intent_hash,
+            generation: plan.generation,
+        }));
     }
     let outcome = cloud_home
         .set_access(CloudAccessState::Absent {
@@ -1120,11 +1419,27 @@ async fn remove_serial_member(
     let mut plan = plan;
     let mut intent_hash = intent_hash;
     loop {
-        match super::store_outbound::publish_prepared_store_operation(
+        let activated_progress = SerialRemovalProgress::Activated {
+            candidate: plan.prepared.reference.clone(),
+        };
+        let remote_objects = plan
+            .prepared
+            .membership_control_remote_objects(&plan.wraps)?;
+        match super::store_outbound::publish_prepared_serial_membership_operation(
             db,
             storage,
-            Some(coordination),
+            coordination,
             Box::new(plan.prepared.clone()),
+            super::store_outbound::StoreMembershipJournalCompletion::RotationMutation {
+                intent_hash,
+                progress_bytes: serde_json::to_vec(&activated_progress).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize activated Serial removal: {error}"
+                    )))
+                })?,
+                generation: plan.generation,
+                remote_objects,
+            },
         )
         .await?
         {
@@ -1138,10 +1453,25 @@ async fn remove_serial_member(
                         "serialize reprepared Serial removal: {error}"
                     )))
                 })?;
-                intent_hash = db
-                    .replace_serial_membership_candidate(intent_hash, plan_bytes)
+                let previous_intent_hash = intent_hash;
+                let replacement_hash = db
+                    .replace_serial_removal_candidate(
+                        previous_intent_hash,
+                        plan.generation,
+                        plan_bytes,
+                    )
                     .await
                     .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+                pending_rotation
+                    .replace_candidate_mutation(
+                        plan.generation,
+                        previous_intent_hash,
+                        replacement_hash,
+                    )
+                    .map_err(|error| {
+                        MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error))
+                    })?;
+                intent_hash = replacement_hash;
             }
             super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
                 candidate,
@@ -1158,9 +1488,10 @@ async fn remove_serial_member(
                         "serialize nonactivating Serial removal: {error}"
                     )))
                 })?;
-                db.begin_serial_membership_candidate_nonactivation(
+                db.begin_membership_candidate_nonactivation(
                     intent_hash,
                     plan.prepared.reference.clone(),
+                    vec![plan.prepared.reference.object.clone()],
                     plan.wraps
                         .iter()
                         .map(|wrap| wrap.reference.object.clone())
@@ -1170,8 +1501,15 @@ async fn remove_serial_member(
                 )
                 .await
                 .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-                finish_nonactivating_serial_removal(db, storage, cloud_home, &plan, intent_hash)
-                    .await?;
+                finish_nonactivating_serial_removal(
+                    db,
+                    storage,
+                    cloud_home,
+                    &plan,
+                    intent_hash,
+                    pending_rotation,
+                )
+                .await?;
                 return Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
                     "Serial removal candidate did not activate".to_string(),
                 )
@@ -1193,21 +1531,20 @@ async fn remove_serial_member(
             }
         }
     }
-    db.complete_activated_serial_membership_mutation(
+    pending_rotation
+        .mark_committed_mutation(plan.generation, intent_hash)
+        .map_err(|error| MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error)))?;
+    let encryption =
+        EncryptionService::from_keyring_payload(plan.keyring_payload).map_err(|error| {
+            MembershipOpsError::Invite(InviteError::Crypto(format!(
+                "parse Serial rotated keyring: {error}"
+            )))
+        })?;
+    Ok(SerialRemovalResult::Activated(ActivatedSerialRemoval {
+        encryption,
         intent_hash,
-        plan.prepared.reference.clone(),
-        plan.wraps
-            .iter()
-            .map(|wrap| wrap.reference.object.clone())
-            .collect(),
-    )
-    .await
-    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    EncryptionService::from_keyring_payload(plan.keyring_payload).map_err(|error| {
-        MembershipOpsError::Invite(InviteError::Crypto(format!(
-            "parse Serial rotated keyring: {error}"
-        )))
-    })
+        generation: plan.generation,
+    }))
 }
 
 /// Remove a member from the shared store and adopt the rotated key locally.
@@ -1220,14 +1557,9 @@ async fn remove_serial_member(
 /// The cloud rotation commits before the local adoption. When adoption fails, the
 /// removal is already durable, so the failure surfaces as
 /// [`MembershipOpsError::RotationCommittedAdoptionFailed`] — distinct from a
-/// rotation that never committed — and both of its remedies converge without data
-/// loss: a retry of this call (idempotent for an already-removed member) or the
-/// device's next sync cycle. Either way, `pending_rotation` marks the committed
-/// generation the moment the cloud rotation lands (see
-/// [`apply_key_rotation`]), so this device seals nothing new for the cloud until
-/// one of those remedies adopts it — the failed return here does not leave a
-/// window where the store keeps producing content the removed member can still
-/// decrypt.
+/// rotation that never committed. The durable operation remains resumable by the
+/// same call, while its rotation gate prevents every cloud seal until adoption
+/// and exact journal completion both succeed.
 pub async fn remove_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
@@ -1278,7 +1610,7 @@ pub async fn remove_member_with_coordination(
     if db.write_policy() == crate::WritePolicy::Serial {
         let serial =
             serial.ok_or(super::store_outbound::StoreOutboundError::MissingSerialCoordination)?;
-        let rotated = remove_serial_member(
+        let removal = remove_serial_member(
             storage,
             cloud_home,
             serial.coordination,
@@ -1289,11 +1621,37 @@ pub async fn remove_member_with_coordination(
             &protocol_store_id,
             current_encryption,
             crate::encryption::generate_random_key(),
+            pending_rotation,
             db,
         )
         .await?;
-        return apply_key_rotation(rotated, custody, cipher, pending_rotation)
-            .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source });
+        let removal = match removal {
+            SerialRemovalResult::Activated(removal) => removal,
+            SerialRemovalResult::Terminal(fingerprint) => return Ok(fingerprint),
+        };
+        #[cfg(any(test, feature = "test-utils"))]
+        db.reach_test_point(crate::database::DatabaseTestPoint::SerialRemovalBeforeAdoption)
+            .await;
+        let fingerprint = apply_key_rotation(removal.encryption, custody, cipher)
+            .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })?;
+        let result_bytes = serde_json::to_vec(&fingerprint).map_err(|error| {
+            MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                "serialize terminal Serial removal result: {error}"
+            )))
+        })?;
+        let gate = db
+            .complete_serial_removal_mutation(removal.intent_hash, removal.generation, result_bytes)
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+        pending_rotation
+            .install_durable_gate(gate)
+            .map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error))
+            })?;
+        #[cfg(any(test, feature = "test-utils"))]
+        db.reach_test_point(crate::database::DatabaseTestPoint::SerialMembershipTerminalized)
+            .await;
+        return Ok(fingerprint);
     }
     // Download existing membership entries and build the chain.
     let store_root_hash = root_ref.store_root_hash;
@@ -1320,6 +1678,7 @@ pub async fn remove_member_with_coordination(
         &protocol_store_id,
         &revoke_ts,
         current_encryption,
+        pending_rotation,
         db,
     )
     .await?;
@@ -1332,8 +1691,11 @@ pub async fn remove_member_with_coordination(
     // Adopt the rotated key into this device's live cipher and custody. The cloud
     // rotation is already committed, so a failure here is not a generic membership
     // error but the specific half-applied state its own variant names.
-    apply_key_rotation(new_key, custody, cipher, pending_rotation)
-        .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
+    let generation = new_key.current_generation();
+    let fingerprint = apply_key_rotation(new_key, custody, cipher)
+        .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })?;
+    super::invite::complete_revoke_rotation_adoption(db, pending_rotation, generation).await?;
+    Ok(fingerprint)
 }
 
 /// Rotate the in-use encryption key after a member removal: persist it via
@@ -1341,20 +1703,11 @@ pub async fn remove_member_with_coordination(
 /// for the host to record in its own config — coven never writes the host's
 /// config.
 ///
-/// `pending_rotation` is marked with the committed generation before adoption is
-/// even attempted, and cleared only once the swap below actually lands — so a
-/// concurrent seal can never observe "adoption hasn't finished" as "nothing is
-/// pending" in the gap between this function starting and either outcome. On
-/// success the mark is redundant (the swap already makes the live cipher current)
-/// but harmless; on failure it is what keeps every seal path refusing until one
-/// of the two remedies (a retried removal, or the next sync cycle's own adoption)
-/// clears it.
-///
 /// The key is persisted before the live cipher is swapped, so a persistence
 /// failure leaves the cipher untouched on the superseded generation rather than
-/// live on a key that never reached custody. The write is idempotent —
-/// persisting the same keyring and swapping to it again converges — so a caller
-/// that failed here can retry adoption alone.
+/// live on a key that never reached custody. Reapplying an already-held keyring
+/// returns its fingerprint, allowing the durable caller to finish its exact
+/// journal transition after a lost response or restart.
 ///
 /// A plaintext home has no store key to rotate, so this is an error there:
 /// sharing (and hence member removal) requires an encrypted home.
@@ -1362,24 +1715,25 @@ pub fn apply_key_rotation(
     new_encryption: EncryptionService,
     custody: &dyn MasterKeyCustody,
     cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
 ) -> Result<String, KeyError> {
-    // Mark first, so a seal that clones the live cipher during the persist+swap
-    // below refuses under the superseded generation until the swap lands.
-    pending_rotation.mark_committed(new_encryption.current_generation());
     // Merge, never replace: the fixed-mode cipher state can extend an encrypted
     // keyring but has no transition to plaintext. Re-check under its keyring lock
     // because another member operation may have adopted a newer rotation while
     // this caller was reading the cloud.
-    let new_fingerprint = cipher.merge_key_rotation(&new_encryption, custody)?;
-    // Re-derive the pause from the live cipher: a merge (or an already-covered
-    // stale apply) that now covers everything committed clears it; a strictly
-    // newer generation still pending stays paused.
-    pending_rotation.resolve(&cipher.snapshot());
-    match new_fingerprint {
-        Some(fingerprint) => Ok(fingerprint),
-        None => Err(KeyError::StaleKeyRotation),
+    if let Some(fingerprint) = cipher.merge_key_rotation(&new_encryption, custody)? {
+        return Ok(fingerprint);
     }
+    let super::cloud_storage::CloudCipher::Encrypted(live) = cipher.snapshot() else {
+        return Err(KeyError::Crypto(
+            "cannot rotate the key of a plaintext cloud home".to_string(),
+        ));
+    };
+    if live.merged_with(&new_encryption).key_count() != live.key_count() {
+        return Err(KeyError::Crypto(
+            "live keyring changed without retaining an adopted rotation".to_string(),
+        ));
+    }
+    Ok(live.fingerprint())
 }
 
 /// Why [`load_anchored_chain`] refused a chain. Split so each caller renders the
@@ -1467,6 +1821,86 @@ struct ExactMembershipStream {
     resolutions: BTreeMap<StoreMembershipConflictResolutionRef, StoreMembershipConflictResolution>,
 }
 
+fn membership_entry_requires_store_activation(entry: &MembershipEntry) -> bool {
+    match &entry.change {
+        MembershipChange::Founder { .. } | MembershipChange::ProviderAdmin => false,
+        MembershipChange::SetMember {
+            role,
+            retirement_barriers,
+            ..
+        } => {
+            matches!(
+                role,
+                super::membership::StoreMembershipRoleGrant::Owner { .. }
+            ) || retirement_barriers.values().any(|barrier| {
+                matches!(
+                    barrier,
+                    super::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+                )
+            })
+        }
+        MembershipChange::RemoveMember {
+            retirement_barriers,
+            ..
+        } => retirement_barriers.values().any(|barrier| {
+            matches!(
+                barrier,
+                super::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+            )
+        }),
+        MembershipChange::ResolutionActivation { .. } => true,
+    }
+}
+
+async fn validate_membership_head_activation(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    reference: &MembershipHeadRef,
+    head: &AuthorHead,
+    entry: &MembershipEntry,
+    verified_activations: Option<&super::store_pull::VerifiedMergeMembershipPrefix>,
+) -> Result<bool, AnchoredChainError> {
+    match (
+        membership_entry_requires_store_activation(entry),
+        &head.activation,
+    ) {
+        (false, super::membership::MembershipHeadActivation::Direct) => Ok(true),
+        (true, super::membership::MembershipHeadActivation::StoreCommit { commit }) => {
+            if let Some(verified_activations) = verified_activations {
+                let activation = verified_activations
+                    .head_activation(commit)
+                    .ok_or_else(|| {
+                        AnchoredChainError::LoadFailed(
+                            "membership head activation is absent from its verified Store prefix"
+                                .to_string(),
+                        )
+                    })?;
+                if !activation.verifies(reference, head, commit) {
+                    return Err(AnchoredChainError::LoadFailed(
+                        "membership head differs from its verified Store activation".to_string(),
+                    ));
+                }
+                return Ok(true);
+            }
+            Box::pin(super::store_pull::verify_merge_membership_head_activation(
+                storage, root, reference, head, commit,
+            ))
+            .await
+            .map_err(AnchoredChainError::LoadFailed)
+        }
+        (true, super::membership::MembershipHeadActivation::Direct) => {
+            Err(AnchoredChainError::LoadFailed(
+                "membership authority change has no exact Store activation".to_string(),
+            ))
+        }
+        (false, super::membership::MembershipHeadActivation::StoreCommit { .. }) => {
+            Err(AnchoredChainError::LoadFailed(
+                "direct membership change carries an unrelated Store activation".to_string(),
+            ))
+        }
+    }
+}
+
 async fn traverse_exact_membership_stream(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1532,8 +1966,8 @@ async fn traverse_exact_membership_stream(
             head_hash: head.head_hash(),
             object,
         };
-        if head.predecessor != predecessor
-            || head.successor.predecessor
+        if head.body.predecessor != predecessor
+            || head.body.successor.predecessor
                 != predecessor
                     .as_ref()
                     .map(|reference| reference.object.clone())
@@ -1542,17 +1976,20 @@ async fn traverse_exact_membership_stream(
                 "membership head {coord:?} does not extend its exact predecessor"
             )));
         }
-        let registration =
-            super::store_objects::load_registration_ref(storage, root, &head.author_registration)
-                .await
-                .map_err(map_membership_object_error)?
-                .value;
+        let registration = super::store_objects::load_registration_ref(
+            storage,
+            root,
+            &head.body.author_registration,
+        )
+        .await
+        .map_err(map_membership_object_error)?
+        .value;
         if registration.author_pubkey != author
             || !head.verify(&registration)
-            || head.successor.activation
+            || head.body.successor.activation
                 != super::store_commit::StreamActivation::grant_authorized(
                     root.store_root_hash,
-                    head.author_registration.clone(),
+                    head.body.author_registration.clone(),
                     grant.clone(),
                     anchor.clone(),
                 )
@@ -1565,16 +2002,33 @@ async fn traverse_exact_membership_stream(
         let loaded_entry = super::store_objects::load_membership_entry_ref(
             storage,
             root.store_root_hash,
-            &head.entry,
+            &head.body.entry,
         )
         .await
         .map_err(map_membership_object_error)?;
-        if loaded_entry.value.resolution_dependencies != head.resolutions {
+        if loaded_entry.value.resolution_dependencies != head.body.resolutions {
             return Err(AnchoredChainError::LoadFailed(format!(
                 "membership head {coord:?} carries a resolution cut different from its entry"
             )));
         }
-        for resolution_ref in &head.resolutions {
+        if !validate_membership_head_activation(
+            storage,
+            root,
+            &reference,
+            &head,
+            &loaded_entry.value,
+            None,
+        )
+        .await?
+        {
+            if cursor == Some(&reference) {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership cursor names an unactivated Store-bound head".to_string(),
+                ));
+            }
+            break;
+        }
+        for resolution_ref in &head.body.resolutions {
             if !resolutions.contains_key(resolution_ref) {
                 let resolution = super::store_objects::load_membership_resolution_ref(
                     storage,
@@ -1593,7 +2047,7 @@ async fn traverse_exact_membership_stream(
         entries.push((coord, loaded_entry.value));
         heads.push((reference.clone(), head.clone()));
         predecessor = Some(reference);
-        slot = head.successor.next_slot;
+        slot = head.body.successor.next_slot.clone();
         expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
             AnchoredChainError::LoadFailed("membership head sequence overflow".to_string())
         })?;
@@ -1795,7 +2249,7 @@ async fn load_exact_membership_head_with_root(
         storage,
         root,
         root_value,
-        &head.author_registration,
+        &head.body.author_registration,
     ))
     .await
     .map_err(map_membership_object_error)?
@@ -1838,59 +2292,822 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_root(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
-    if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {
+    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
+        storage,
+        root,
+        root_value,
+        owner_pubkey,
+        exact_heads,
+        exact_resolutions,
+        None,
+        None,
+    ))
+    .await
+}
+
+pub(crate) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    owner_pubkey: &str,
+    exact_heads: &[MembershipHeadRef],
+    exact_resolutions: &[StoreMembershipConflictResolutionRef],
+    verified_activations: &super::store_pull::VerifiedMergeMembershipPrefix,
+    pending_resolution: Option<&super::store_pull::VerifiedMergeConflictResolutionActivation>,
+) -> Result<MembershipChain, AnchoredChainError> {
+    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
+        storage,
+        root,
+        root_value,
+        owner_pubkey,
+        exact_heads,
+        exact_resolutions,
+        Some(verified_activations),
+        pending_resolution,
+    ))
+    .await
+}
+
+#[derive(Clone)]
+struct LoadedExactMembershipHead {
+    reference: MembershipHeadRef,
+    head: AuthorHead,
+    entry: MembershipEntry,
+}
+
+#[derive(Clone)]
+struct LoadedExactMembershipGraph {
+    entries: BTreeMap<MembershipCoord, MembershipEntry>,
+    heads: Vec<(MembershipHeadRef, AuthorHead)>,
+    path_heads: BTreeMap<MembershipCoord, LoadedExactMembershipHead>,
+}
+
+impl LoadedExactMembershipGraph {
+    fn head_refs(&self) -> Vec<MembershipHeadRef> {
+        self.heads
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect()
+    }
+
+    fn resolution_cut(&self) -> Vec<StoreMembershipConflictResolutionRef> {
+        self.heads
+            .iter()
+            .flat_map(|(_, head)| head.body.resolutions.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+async fn load_exact_membership_head_node(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    reference: &MembershipHeadRef,
+) -> Result<LoadedExactMembershipHead, AnchoredChainError> {
+    let head = Box::pin(load_exact_membership_head_with_root(
+        storage, root, root_value, reference,
+    ))
+    .await?;
+    let loaded_entry = Box::pin(super::store_objects::load_membership_entry_ref(
+        storage,
+        root.store_root_hash,
+        &head.body.entry,
+    ))
+    .await
+    .map_err(map_membership_object_error)?;
+    if loaded_entry.value.resolution_dependencies != head.body.resolutions {
         return Err(AnchoredChainError::LoadFailed(
-            "membership resolution cut is not canonical".to_string(),
+            "membership head and selected entry carry different resolution cuts".to_string(),
         ));
     }
+    Ok(LoadedExactMembershipHead {
+        reference: reference.clone(),
+        head,
+        entry: loaded_entry.value,
+    })
+}
+
+fn validate_exact_membership_head_paths(
+    graph: &LoadedExactMembershipGraph,
+) -> Result<(), AnchoredChainError> {
+    for requested in &graph.heads {
+        let mut current = Some(&requested.0);
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = current {
+            if !visited.insert(reference.clone()) {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership head predecessor chain contains a cycle".to_string(),
+                ));
+            }
+            let node = graph.path_heads.get(&reference.coord).ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "membership head predecessor is absent from its exact path".to_string(),
+                )
+            })?;
+            if node.reference != *reference {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership coordinate selects different exact heads".to_string(),
+                ));
+            }
+            match &node.head.body.predecessor {
+                Some(predecessor) => {
+                    if predecessor.coord.stream_key() != reference.coord.stream_key()
+                        || predecessor.coord.seq.checked_add(1) != Some(reference.coord.seq)
+                        || predecessor.coord.entry_hash
+                            != node.entry.previous_hash.ok_or_else(|| {
+                                AnchoredChainError::LoadFailed(
+                                    "membership head successor entry omits its predecessor hash"
+                                        .to_string(),
+                                )
+                            })?
+                    {
+                        return Err(AnchoredChainError::LoadFailed(
+                            "membership head does not extend its exact author stream".to_string(),
+                        ));
+                    }
+                    let predecessor_node =
+                        graph.path_heads.get(&predecessor.coord).ok_or_else(|| {
+                            AnchoredChainError::LoadFailed(
+                                "membership head predecessor is absent from its exact path"
+                                    .to_string(),
+                            )
+                        })?;
+                    if predecessor_node.reference != *predecessor
+                        || predecessor_node.head.body.successor.next_slot
+                            != *reference.object.slot()
+                    {
+                        return Err(AnchoredChainError::LoadFailed(
+                            "membership head does not occupy its predecessor-reserved slot"
+                                .to_string(),
+                        ));
+                    }
+                }
+                None => {
+                    if reference.coord.seq != 1 || node.entry.previous_hash.is_some() {
+                        return Err(AnchoredChainError::LoadFailed(
+                            "membership stream begins without its exact first entry".to_string(),
+                        ));
+                    }
+                }
+            }
+            current = node.head.body.predecessor.as_ref();
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_membership_stream_anchors(
+    root: &StoreRootRef,
+    graph: &LoadedExactMembershipGraph,
+    chain: &MembershipChain,
+) -> Result<(), AnchoredChainError> {
+    for node in graph.path_heads.values() {
+        let grant = &node.reference.coord.author_owner_grant;
+        let anchor = chain.membership_anchor(grant).ok_or_else(|| {
+            AnchoredChainError::LoadFailed(
+                "membership head author has no exact membership stream anchor".to_string(),
+            )
+        })?;
+        let GrantStreamAnchor::StoreMembership { first_slot } = anchor else {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head author uses a recovery stream anchor".to_string(),
+            ));
+        };
+        if node.reference.coord.seq == 1 && node.reference.object.slot() != first_slot {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership stream does not begin at its grant-authorized slot".to_string(),
+            ));
+        }
+        let expected = super::store_commit::StreamActivation::grant_authorized(
+            root.store_root_hash,
+            node.head.body.author_registration.clone(),
+            grant.clone(),
+            anchor.clone(),
+        )
+        .activation_id();
+        if node.head.body.successor.activation != expected {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head carries another grant stream activation".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MembershipProjectionStatus {
+    Included,
+    OutsidePrefix,
+}
+
+fn membership_resolution_activations(
+    graph: &LoadedExactMembershipGraph,
+) -> Result<BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>, AnchoredChainError> {
+    let mut activations = BTreeMap::new();
+    for node in graph.path_heads.values() {
+        if let MembershipChange::ResolutionActivation { resolution } = &node.entry.change {
+            if activations
+                .insert(resolution.clone(), node.reference.coord.clone())
+                .is_some()
+            {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership resolution has multiple candidate activation heads".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(activations)
+}
+
+fn membership_projection_activation_status(
+    graph: &LoadedExactMembershipGraph,
+    prefix: &super::store_pull::VerifiedMergeMembershipPrefix,
+    coord: &MembershipCoord,
+) -> Result<MembershipProjectionStatus, AnchoredChainError> {
+    let node = graph.path_heads.get(coord).ok_or_else(|| {
+        AnchoredChainError::LoadFailed(
+            "membership projection dependency is absent from its candidate graph".to_string(),
+        )
+    })?;
+    match (
+        membership_entry_requires_store_activation(&node.entry),
+        &node.head.activation,
+    ) {
+        (false, super::membership::MembershipHeadActivation::Direct) => {
+            Ok(MembershipProjectionStatus::Included)
+        }
+        (true, super::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
+            .classify_head(&node.reference, &node.head, commit)
+            .map(|status| match status {
+                super::store_pull::VerifiedMergePrefixHeadStatus::Included => {
+                    MembershipProjectionStatus::Included
+                }
+                super::store_pull::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
+                    MembershipProjectionStatus::OutsidePrefix
+                }
+            })
+            .map_err(AnchoredChainError::LoadFailed),
+        (true, super::membership::MembershipHeadActivation::Direct) => {
+            Err(AnchoredChainError::LoadFailed(
+                "membership authority change has no exact Store activation".to_string(),
+            ))
+        }
+        (false, super::membership::MembershipHeadActivation::StoreCommit { .. }) => {
+            Err(AnchoredChainError::LoadFailed(
+                "direct membership change carries an unrelated Store activation".to_string(),
+            ))
+        }
+    }
+}
+
+fn membership_projection_dependencies(
+    graph: &LoadedExactMembershipGraph,
+    resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
+    coord: &MembershipCoord,
+) -> Result<Vec<MembershipCoord>, AnchoredChainError> {
+    let node = graph.path_heads.get(coord).ok_or_else(|| {
+        AnchoredChainError::LoadFailed(
+            "membership projection dependency is absent from its candidate graph".to_string(),
+        )
+    })?;
+    let mut dependencies = node
+        .head
+        .body
+        .predecessor
+        .iter()
+        .map(|reference| reference.coord.clone())
+        .chain(node.entry.dependencies.iter().cloned())
+        .collect::<Vec<_>>();
+    for resolution in &node.entry.resolution_dependencies {
+        let introduced_here = matches!(
+            &node.entry.change,
+            MembershipChange::ResolutionActivation { resolution: introduced }
+                if introduced == resolution
+        );
+        if !introduced_here {
+            dependencies.push(
+                resolution_activations
+                    .get(resolution)
+                    .ok_or_else(|| {
+                        AnchoredChainError::LoadFailed(
+                            "membership resolution lacks its candidate activation head".to_string(),
+                        )
+                    })?
+                    .clone(),
+            );
+        }
+    }
+    Ok(dependencies)
+}
+
+fn membership_projection_statuses(
+    graph: &LoadedExactMembershipGraph,
+    prefix: &super::store_pull::VerifiedMergeMembershipPrefix,
+    resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
+) -> Result<BTreeMap<MembershipCoord, MembershipProjectionStatus>, AnchoredChainError> {
+    let mut statuses = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    for root in graph.path_heads.keys() {
+        if statuses.contains_key(root) {
+            continue;
+        }
+        let mut stack = vec![(root.clone(), false)];
+        while let Some((coord, expanded)) = stack.pop() {
+            if statuses.contains_key(&coord) {
+                continue;
+            }
+            if expanded {
+                let node = graph.path_heads.get(&coord).ok_or_else(|| {
+                    AnchoredChainError::LoadFailed(
+                        "membership projection dependency is absent from its candidate graph"
+                            .to_string(),
+                    )
+                })?;
+                let dependencies =
+                    membership_projection_dependencies(graph, resolution_activations, &coord)?;
+                let status = if dependencies.iter().any(|dependency| {
+                    statuses.get(dependency) == Some(&MembershipProjectionStatus::OutsidePrefix)
+                }) {
+                    MembershipProjectionStatus::OutsidePrefix
+                } else {
+                    for resolution in &node.entry.resolution_dependencies {
+                        if !prefix.verifies_conflict_resolution(resolution) {
+                            return Err(AnchoredChainError::LoadFailed(
+                                "in-prefix membership resolution lacks its verified Store authority"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    MembershipProjectionStatus::Included
+                };
+                visiting.remove(&coord);
+                statuses.insert(coord, status);
+                continue;
+            }
+            if !visiting.insert(coord.clone()) {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership projection dependency graph contains a cycle".to_string(),
+                ));
+            }
+            let activation_status = membership_projection_activation_status(graph, prefix, &coord)?;
+            if activation_status == MembershipProjectionStatus::OutsidePrefix {
+                visiting.remove(&coord);
+                statuses.insert(coord, MembershipProjectionStatus::OutsidePrefix);
+                continue;
+            }
+            let dependencies =
+                membership_projection_dependencies(graph, resolution_activations, &coord)?;
+            stack.push((coord, true));
+            for dependency in dependencies.into_iter().rev() {
+                if !statuses.contains_key(&dependency) {
+                    stack.push((dependency, false));
+                }
+            }
+        }
+    }
+    Ok(statuses)
+}
+
+fn project_membership_cut_to_store_prefix(
+    graph: &LoadedExactMembershipGraph,
+    prefix: &super::store_pull::VerifiedMergeMembershipPrefix,
+) -> Result<
+    (
+        Vec<MembershipHeadRef>,
+        Vec<StoreMembershipConflictResolutionRef>,
+    ),
+    AnchoredChainError,
+> {
+    let resolution_activations = membership_resolution_activations(graph)?;
+    let statuses = membership_projection_statuses(graph, prefix, &resolution_activations)?;
+    let mut projected = Vec::new();
+    for (candidate, _) in &graph.heads {
+        let mut current = Some(candidate);
+        let selected = loop {
+            let Some(reference) = current else {
+                break None;
+            };
+            match statuses.get(&reference.coord).copied().ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "membership projection status is absent from its candidate graph".to_string(),
+                )
+            })? {
+                MembershipProjectionStatus::Included => break Some(reference.clone()),
+                MembershipProjectionStatus::OutsidePrefix => {
+                    current = graph
+                        .path_heads
+                        .get(&reference.coord)
+                        .ok_or_else(|| {
+                            AnchoredChainError::LoadFailed(
+                                "membership projection cursor is absent from its exact path"
+                                    .to_string(),
+                            )
+                        })?
+                        .head
+                        .body
+                        .predecessor
+                        .as_ref();
+                }
+            }
+        };
+        if let Some(selected) = selected {
+            projected.push(selected);
+        }
+    }
+    projected.sort_by_key(|reference| reference.coord.stream_key());
+    validate_membership_floor(&projected).map_err(AnchoredChainError::LoadFailed)?;
+    let resolutions = projected
+        .iter()
+        .map(|reference| {
+            graph.path_heads.get(&reference.coord).ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "projected membership head is absent from its exact candidate path".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flat_map(|node| node.head.body.resolutions.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok((projected, resolutions))
+}
+
+pub(crate) async fn project_anchored_chain_to_verified_store_prefix(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    owner_pubkey: &str,
+    candidate_heads: &[MembershipHeadRef],
+    prefix: &super::store_pull::VerifiedMergeMembershipPrefix,
+) -> Result<MembershipChain, AnchoredChainError> {
+    let root_value = super::store_objects::load_store_protocol_root(storage, root)
+        .await
+        .map_err(map_membership_object_error)?
+        .value;
+    let candidate =
+        load_exact_membership_graph_objects(storage, root, &root_value, candidate_heads).await?;
+    let (heads, resolutions) = project_membership_cut_to_store_prefix(&candidate, prefix)?;
+    let projected = load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+        storage,
+        root,
+        &root_value,
+        owner_pubkey,
+        &heads,
+        &resolutions,
+        prefix,
+        None,
+    )
+    .await?;
+    prefix
+        .validate_complete_membership(&projected)
+        .map_err(AnchoredChainError::LoadFailed)?;
+    Ok(projected)
+}
+
+async fn load_exact_membership_graph(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    exact_heads: &[MembershipHeadRef],
+    verified_activations: Option<&super::store_pull::VerifiedMergeMembershipPrefix>,
+) -> Result<LoadedExactMembershipGraph, AnchoredChainError> {
+    let graph = load_exact_membership_graph_objects(storage, root, root_value, exact_heads).await?;
+    for node in graph.path_heads.values() {
+        if !Box::pin(validate_membership_head_activation(
+            storage,
+            root,
+            &node.reference,
+            &node.head,
+            &node.entry,
+            verified_activations,
+        ))
+        .await?
+        {
+            return Err(AnchoredChainError::LoadFailed(
+                "exact membership state names an unactivated Store-bound head".to_string(),
+            ));
+        }
+    }
+    let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
+    Box::pin(validate_provider_admin_records(
+        storage,
+        root,
+        root_value,
+        &entry_values,
+    ))
+    .await?;
+    validate_owner_grant_records(root_value, &entry_values)?;
+    Ok(graph)
+}
+
+async fn load_exact_membership_graph_objects(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    exact_heads: &[MembershipHeadRef],
+) -> Result<LoadedExactMembershipGraph, AnchoredChainError> {
     let mut entries = BTreeMap::new();
     let mut heads = Vec::with_capacity(exact_heads.len());
-    let mut activated_resolutions = std::collections::BTreeSet::new();
+    let mut path_heads = BTreeMap::<MembershipCoord, LoadedExactMembershipHead>::new();
     for requested in exact_heads {
         let mut current = Some(requested.clone());
         let mut requested_head = None;
         while let Some(reference) = current {
-            let head = Box::pin(load_exact_membership_head_with_root(
+            let node = Box::pin(load_exact_membership_head_node(
                 storage, root, root_value, &reference,
             ))
             .await?;
-            let loaded_entry = Box::pin(super::store_objects::load_membership_entry_ref(
-                storage,
-                root.store_root_hash,
-                &head.entry,
-            ))
-            .await
-            .map_err(map_membership_object_error)?;
-            if loaded_entry.value.resolution_dependencies != head.resolutions {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership head and selected entry carry different resolution cuts"
-                        .to_string(),
-                ));
-            }
             if reference == *requested {
-                activated_resolutions.extend(head.resolutions.iter().cloned());
-                requested_head = Some((reference.clone(), head.clone()));
+                requested_head = Some((reference.clone(), node.head.clone()));
             }
             match entries.entry(reference.coord.clone()) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(loaded_entry.value);
+                    slot.insert(node.entry.clone());
                 }
                 std::collections::btree_map::Entry::Occupied(slot) => {
-                    if slot.get() != &loaded_entry.value {
+                    if slot.get() != &node.entry {
                         return Err(AnchoredChainError::LoadFailed(
                             "membership coordinate selects different exact entries".to_string(),
                         ));
                     }
                 }
             }
-            current = head.predecessor;
+            match path_heads.entry(reference.coord.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(node.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    if slot.get().reference != node.reference
+                        || slot.get().head != node.head
+                        || slot.get().entry != node.entry
+                    {
+                        return Err(AnchoredChainError::LoadFailed(
+                            "membership coordinate selects different exact head paths".to_string(),
+                        ));
+                    }
+                }
+            }
+            current = node.head.body.predecessor.clone();
         }
-        heads.push(requested_head.expect("requested exact head was loaded"));
+        heads.push(requested_head.ok_or_else(|| {
+            AnchoredChainError::LoadFailed(
+                "requested exact membership head was not loaded".to_string(),
+            )
+        })?);
     }
-    if activated_resolutions.iter().cloned().collect::<Vec<_>>() != exact_resolutions {
+    let graph = LoadedExactMembershipGraph {
+        entries,
+        heads,
+        path_heads,
+    };
+    validate_exact_membership_head_paths(&graph)?;
+    Ok(graph)
+}
+
+fn exact_membership_chain_from_graph(
+    root: &StoreRootRef,
+    graph: LoadedExactMembershipGraph,
+    provider_admin: super::provider::ProviderAdminState,
+) -> Result<MembershipChain, AnchoredChainError> {
+    let chain = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
+        graph
+            .entries
+            .iter()
+            .map(|(coord, entry)| (coord.clone(), entry.clone()))
+            .collect(),
+        graph.heads.clone(),
+        provider_admin,
+    )
+    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    validate_exact_membership_stream_anchors(root, &graph, &chain)?;
+    Ok(chain)
+}
+
+fn add_exact_membership_suffix(
+    chain: &mut MembershipChain,
+    graph: &LoadedExactMembershipGraph,
+) -> Result<(), AnchoredChainError> {
+    let mut pending = graph
+        .entries
+        .iter()
+        .filter(|(coord, _)| !chain.contains_coord(coord))
+        .map(|(coord, entry)| (coord.clone(), entry.clone()))
+        .collect::<BTreeMap<_, _>>();
+    while !pending.is_empty() {
+        let next = pending.iter().find_map(|(coord, entry)| {
+            let dependencies_loaded = entry
+                .dependencies
+                .iter()
+                .all(|dependency| chain.contains_coord(dependency));
+            let predecessor_loaded = entry.previous_hash.is_none()
+                || graph.entries.keys().any(|candidate| {
+                    candidate.author_pubkey == coord.author_pubkey
+                        && candidate.author_owner_grant == coord.author_owner_grant
+                        && candidate.stream_id == coord.stream_id
+                        && candidate.seq.checked_add(1) == Some(coord.seq)
+                        && Some(candidate.entry_hash) == entry.previous_hash
+                        && chain.contains_coord(candidate)
+                });
+            (dependencies_loaded && predecessor_loaded).then(|| coord.clone())
+        });
+        let Some(coord) = next else {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution suffix has an unresolved causal predecessor".to_string(),
+            ));
+        };
+        let entry = pending
+            .remove(&coord)
+            .expect("selected membership resolution suffix entry remains pending");
+        chain
+            .add_entry_at(coord, entry)
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    }
+    for (reference, _) in &graph.heads {
+        chain
+            .activate_head_ref(reference.clone())
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    }
+    Ok(())
+}
+
+type LayeredMembershipFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<MembershipChain, AnchoredChainError>> + Send + 'a>>;
+
+#[allow(clippy::too_many_arguments)]
+fn load_layered_membership_chain<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    graph: LoadedExactMembershipGraph,
+    exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
+    provider_admin: &'a super::provider::ProviderAdminState,
+    verified_activations: Option<&'a super::store_pull::VerifiedMergeMembershipPrefix>,
+    pending_resolution: Option<&'a super::store_pull::VerifiedMergeConflictResolutionActivation>,
+) -> LayeredMembershipFuture<'a> {
+    Box::pin(async move {
+        let exact_heads = graph.head_refs();
+        if exact_resolutions.is_empty() {
+            if !graph.resolution_cut().is_empty() {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership signed heads name a nonempty resolution cut".to_string(),
+                ));
+            }
+            return exact_membership_chain_from_graph(root, graph, provider_admin.clone());
+        }
+
+        let mut resolutions = BTreeMap::new();
+        for reference in exact_resolutions {
+            let value = Box::pin(super::store_objects::load_membership_resolution_ref(
+                storage,
+                root.store_root_hash,
+                reference,
+            ))
+            .await
+            .map_err(map_membership_object_error)?
+            .value;
+            let verified_by_prefix = verified_activations
+                .is_some_and(|prefix| prefix.verifies_conflict_resolution(reference));
+            let verified_by_pending =
+                pending_resolution.is_some_and(|pending| pending.verifies(reference));
+            if verified_activations.is_some() && !verified_by_prefix && !verified_by_pending {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership conflict resolution is absent from its verified Store authority"
+                        .to_string(),
+                ));
+            }
+            if verified_activations.is_none() {
+                Box::pin(super::store_pull::verify_merge_owner_conflict_acceptance(
+                    storage,
+                    root,
+                    &value.replacement_acceptance,
+                    &value.resolver_pubkey,
+                ))
+                .await
+                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+            }
+            resolutions.insert(reference.clone(), value);
+        }
+
+        let target_cut = exact_resolutions.iter().cloned().collect::<BTreeSet<_>>();
+        let mut activation_counts = BTreeMap::<_, usize>::new();
+        for entry in graph.entries.values() {
+            if let MembershipChange::ResolutionActivation { resolution } = &entry.change {
+                if entry.resolution_dependencies == exact_resolutions {
+                    *activation_counts.entry(resolution.clone()).or_default() += 1;
+                }
+            }
+        }
+        if let Some(pending) = pending_resolution {
+            *activation_counts
+                .entry(pending.reference().clone())
+                .or_default() += 1;
+        }
+        if activation_counts.values().any(|count| *count != 1) {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution has multiple exact activations".to_string(),
+            ));
+        }
+        let activated_here = activation_counts.keys().cloned().collect::<BTreeSet<_>>();
+        if !activated_here.is_subset(&target_cut) || activated_here.is_empty() {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution cut has no exact activation layer".to_string(),
+            ));
+        }
+
+        let first_resolution = resolutions
+            .get(
+                activated_here
+                    .first()
+                    .expect("activation layer is nonempty"),
+            )
+            .expect("activated resolution belongs to the exact cut");
+        let conflict_heads = &first_resolution.conflicting_heads;
+        if activated_here.iter().any(|reference| {
+            resolutions.get(reference).is_none_or(|resolution| {
+                resolution.conflict_hash != first_resolution.conflict_hash
+                    || resolution.conflicting_heads != *conflict_heads
+            })
+        }) {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership activation layer combines different conflicts".to_string(),
+            ));
+        }
+        let conflict_graph = load_exact_membership_graph(
+            storage,
+            root,
+            root_value,
+            conflict_heads,
+            verified_activations,
+        )
+        .await?;
+        let prior_cut = conflict_graph.resolution_cut();
+        let prior_set = prior_cut.iter().cloned().collect::<BTreeSet<_>>();
+        let introduced = target_cut
+            .difference(&prior_set)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if activated_here != introduced {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution activations differ from the introduced cut".to_string(),
+            ));
+        }
+        let mut chain = load_layered_membership_chain(
+            storage,
+            root,
+            root_value,
+            conflict_graph,
+            &prior_cut,
+            provider_admin,
+            verified_activations,
+            None,
+        )
+        .await?;
+        let introduced_resolutions = introduced
+            .iter()
+            .map(|reference| {
+                resolutions
+                    .get(reference)
+                    .cloned()
+                    .map(|value| (reference.clone(), value))
+                    .ok_or_else(|| {
+                        AnchoredChainError::LoadFailed(
+                            "introduced membership resolution is absent from its exact cut"
+                                .to_string(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        chain
+            .apply_resolutions(root.store_root_hash, &introduced_resolutions)
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        add_exact_membership_suffix(&mut chain, &graph)?;
+        validate_exact_membership_stream_anchors(root, &graph, &chain)?;
+        if chain.head_refs() != exact_heads || chain.resolution_refs() != exact_resolutions {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution reconstruction differs from its exact state".to_string(),
+            ));
+        }
+        Ok(chain)
+    })
+}
+
+async fn load_anchored_chain_at_exact_heads_with_root_impl(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    owner_pubkey: &str,
+    exact_heads: &[MembershipHeadRef],
+    exact_resolutions: &[StoreMembershipConflictResolutionRef],
+    verified_activations: Option<&super::store_pull::VerifiedMergeMembershipPrefix>,
+    pending_resolution: Option<&super::store_pull::VerifiedMergeConflictResolutionActivation>,
+) -> Result<MembershipChain, AnchoredChainError> {
+    validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
+    if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {
         return Err(AnchoredChainError::LoadFailed(
-            "membership signed heads name a different resolution cut".to_string(),
+            "membership resolution cut is not canonical".to_string(),
         ));
     }
     let founder_registration = Box::pin(super::store_objects::load_founder_registration_with_root(
@@ -1908,37 +3125,20 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_root(
         founder_registration_ref,
         &root_value.descriptor.founder_provider_admin,
     );
-    let entry_values = entries.values().cloned().collect::<Vec<_>>();
-    Box::pin(validate_provider_admin_records(
+    let graph =
+        load_exact_membership_graph(storage, root, root_value, exact_heads, verified_activations)
+            .await?;
+    let chain = load_layered_membership_chain(
         storage,
         root,
         root_value,
-        &entry_values,
-    ))
-    .await?;
-    let mut chain = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
-        entries.into_iter().collect(),
-        heads,
-        provider_admin,
+        graph,
+        exact_resolutions,
+        &provider_admin,
+        verified_activations,
+        pending_resolution,
     )
-    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    if !exact_resolutions.is_empty() {
-        let mut resolutions = Vec::with_capacity(exact_resolutions.len());
-        for reference in exact_resolutions {
-            let value = Box::pin(super::store_objects::load_membership_resolution_ref(
-                storage,
-                root.store_root_hash,
-                reference,
-            ))
-            .await
-            .map_err(map_membership_object_error)?
-            .value;
-            resolutions.push((reference.clone(), value));
-        }
-        chain
-            .apply_resolutions(root.store_root_hash, &resolutions)
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    }
+    .await?;
     if !chain.is_founded_by(owner_pubkey) {
         return Err(AnchoredChainError::FounderMismatch {
             founder: chain.founder_pubkey().map(str::to_string),
@@ -1985,6 +3185,46 @@ async fn validate_provider_admin_records(
         capability
             .verify(&root_value.descriptor.provider, provider, false)
             .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_owner_grant_records(
+    root_value: &super::store_commit::StoreProtocolRoot,
+    entries: &[MembershipEntry],
+) -> Result<(), AnchoredChainError> {
+    for entry in entries {
+        match &entry.change {
+            MembershipChange::Founder { creation_id, .. }
+                if *creation_id == root_value.descriptor.creation_id => {}
+            MembershipChange::Founder { .. } => {
+                return Err(AnchoredChainError::LoadFailed(
+                    "founder Owner grant carries another Store creation id".to_string(),
+                ));
+            }
+            MembershipChange::SetMember {
+                role:
+                    super::membership::StoreMembershipRoleGrant::Owner {
+                        recovery: super::membership::OwnerRecoveryAnchorRef::Promotion { .. },
+                    },
+                ..
+            } => {
+                // The exact head's Store activation verified this entry's promotion
+                // acceptance before records are reduced into a membership chain.
+            }
+            MembershipChange::SetMember {
+                role: super::membership::StoreMembershipRoleGrant::Owner { .. },
+                ..
+            } => {
+                return Err(AnchoredChainError::LoadFailed(
+                    "non-founder Owner grant does not carry promotion acceptance".to_string(),
+                ));
+            }
+            MembershipChange::SetMember { .. }
+            | MembershipChange::RemoveMember { .. }
+            | MembershipChange::ProviderAdmin
+            | MembershipChange::ResolutionActivation { .. } => {}
+        }
     }
     Ok(())
 }
@@ -2153,7 +3393,7 @@ pub(crate) async fn load_and_persist_owner_anchor(
             )
         })?;
     let founder_head = load_exact_membership_head(storage, root, &founder_head_ref).await?;
-    let founder_registration_ref = founder_head.author_registration;
+    let founder_registration_ref = founder_head.body.author_registration.clone();
     let founder_registration =
         super::store_objects::load_registration_ref(storage, root, &founder_registration_ref)
             .await
@@ -2194,7 +3434,9 @@ pub(crate) async fn load_and_persist_owner_anchor(
         founder_registration_bytes,
         founder_genesis,
         owner_pubkey.to_string(),
-        chain.head_refs().to_vec(),
+        crate::database::InitialStoreMembershipAuthority::MergeConcurrent {
+            head_refs: chain.head_refs().to_vec(),
+        },
     )
     .await
     .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
@@ -2208,7 +3450,10 @@ mod tests {
     use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
     use crate::sync::membership::AuthorStreamId;
     use crate::sync::storage::ExactObjectRef;
-    use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestCustody, TestStore};
+    use crate::sync::test_helpers::{
+        install_active_device_fixture, open_test_db, promote_active_member_fixture, pubkey_hex,
+        TestCustody, TestStore,
+    };
     use std::sync::RwLock;
 
     struct MergeFixture {
@@ -2381,7 +3626,7 @@ mod tests {
         fixture
             .store
             .storage
-            .delete_protocol_object(&loaded_head.entry.object)
+            .delete_protocol_object(&loaded_head.body.entry.object)
             .await
             .expect("remove exact selected entry");
 
@@ -2437,7 +3682,7 @@ mod tests {
             load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &reference)
                 .await
                 .expect("load exact head");
-        head.entry.coord.author_pubkey = hex::encode([9; 32]);
+        head.body.entry.coord.author_pubkey = hex::encode([9; 32]);
         overwrite_head(&fixture, &reference, &head).await;
 
         load_fixture_result(&fixture)
@@ -2567,6 +3812,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_prefix_projection_retains_direct_membership_heads() {
+        let fixture = merge_fixture("project-direct-membership").await;
+        let member = UserKeypair::generate();
+        invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+        let current = load_fixture(&fixture).await;
+
+        let projected = project_anchored_chain_to_verified_store_prefix(
+            &fixture.store.storage,
+            &fixture.store.root,
+            &fixture.owner_pubkey,
+            current.head_refs(),
+            &super::super::store_pull::VerifiedMergeMembershipPrefix::default(),
+        )
+        .await
+        .expect("project direct membership to the empty Store prefix");
+
+        assert_eq!(projected.head_refs(), current.head_refs());
+        assert!(projected.can_write_now(&pubkey_hex(&member)));
+    }
+
+    #[tokio::test]
+    async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_suffix() {
+        let fixture = merge_fixture("project-store-bound-membership").await;
+        let member = UserKeypair::generate();
+        invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+        let member_db = open_test_db();
+        install_active_device_fixture(
+            &fixture.store,
+            &fixture.db,
+            &member_db,
+            &member,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate member device");
+        let before_promotion = load_fixture(&fixture).await;
+        promote_active_member_fixture(
+            &fixture.store,
+            &fixture.db,
+            &member_db,
+            &fixture.owner,
+            &member,
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("promote member to Owner");
+        let after_promotion = load_fixture(&fixture).await;
+        assert_ne!(after_promotion.head_refs(), before_promotion.head_refs());
+        let later_member = UserKeypair::generate();
+        invite_fixture_member(&fixture, &later_member, MemberRole::Member).await;
+        let candidate = load_fixture(&fixture).await;
+        assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
+
+        let projected = project_anchored_chain_to_verified_store_prefix(
+            &fixture.store.storage,
+            &fixture.store.root,
+            &fixture.owner_pubkey,
+            candidate.head_refs(),
+            &super::super::store_pull::VerifiedMergeMembershipPrefix::default(),
+        )
+        .await
+        .expect("project membership before the Owner promotion Store control");
+
+        assert_eq!(projected.head_refs(), before_promotion.head_refs());
+        assert!(projected.can_write_now(&pubkey_hex(&member)));
+        assert!(!projected.is_owner_now(&pubkey_hex(&member)));
+        assert!(!projected.can_write_now(&pubkey_hex(&later_member)));
+    }
+
+    #[tokio::test]
+    async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
+        let fixture = merge_fixture("relocated-exact-membership-head").await;
+        let current = load_fixture(&fixture).await;
+        let founder_ref = current
+            .head_refs()
+            .first()
+            .expect("founder membership head")
+            .clone();
+        let founder_head =
+            load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &founder_ref)
+                .await
+                .expect("load founder membership head");
+        let registration = fixture
+            .db
+            .activated_store_device_registration(founder_head.body.author_registration.clone())
+            .await
+            .expect("load founder device registration");
+        let signer = registration
+            .device_signer(&fixture.owner)
+            .expect("derive founder device signer");
+        let relocated = AuthorHead::signed(
+            founder_head.store_id.clone(),
+            founder_head.body.clone(),
+            founder_head.activation.clone(),
+            &signer,
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
+            fixture.store.root.store_root_hash,
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let prefix = super::super::store_commit::membership_head_slot_prefix(
+            &founder_ref.coord.author_pubkey,
+            &founder_ref.coord.author_owner_grant,
+            AuthorStreamId::from_bytes([99; 32]),
+            founder_ref.coord.seq,
+        );
+        let slot = fixture
+            .store
+            .storage
+            .allocate_protocol_slot(&context, &prefix, ".json")
+            .await
+            .expect("allocate relocated membership head slot");
+        let prepared = fixture
+            .store
+            .storage
+            .prepare_protocol_object(
+                &context,
+                slot,
+                &prefix,
+                serde_json::to_vec(&relocated).expect("serialize relocated membership head"),
+            )
+            .expect("prepare relocated membership head");
+        super::super::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+            .await
+            .expect("publish relocated membership head");
+        let relocated_ref = MembershipHeadRef {
+            coord: founder_ref.coord,
+            head_hash: relocated.head_hash(),
+            object: prepared.reference().clone(),
+        };
+
+        load_anchored_chain_at_exact_heads(
+            &fixture.store.storage,
+            &fixture.store.root,
+            &fixture.owner_pubkey,
+            &[relocated_ref],
+            &[],
+        )
+        .await
+        .expect_err("a membership head relocated outside its grant anchor must fail");
+    }
+
+    #[tokio::test]
     async fn invite_carries_the_founder_and_exact_root() {
         let fixture = merge_fixture("invite-authority").await;
         let invitee = UserKeypair::generate();
@@ -2669,7 +4057,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_key_rotation_refuses_a_nonextending_keyring_and_leaves_custody_untouched() {
+    fn apply_key_rotation_replays_an_already_adopted_keyring() {
         let live = EncryptionService::from_key([1; 32])
             .with_appended_generation(2, [2; 32])
             .unwrap();
@@ -2678,16 +4066,10 @@ mod tests {
             .persist(&MasterKeyring::from(live.clone()))
             .expect("seed custody");
         let cipher = RwLock::new(CloudCipher::Encrypted(live.clone()));
-        let pending = PendingRotation::none();
-
-        let error = apply_key_rotation(
-            EncryptionService::from_key([1; 32]),
-            &custody,
-            &cipher,
-            &pending,
-        )
-        .expect_err("a nonextending keyring must fail");
-        assert!(matches!(error, KeyError::StaleKeyRotation));
+        let fingerprint =
+            apply_key_rotation(EncryptionService::from_key([1; 32]), &custody, &cipher)
+                .expect("an already-covered keyring is an idempotent adoption");
+        assert_eq!(fingerprint, live.fingerprint());
         assert_eq!(
             custody.unlock().unwrap().unwrap().fingerprint(),
             live.fingerprint()
@@ -2883,7 +4265,7 @@ mod tests {
             load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &latest)
                 .await
                 .expect("load latest head");
-        let predecessor = latest_head.predecessor.expect("remove predecessor");
+        let predecessor = latest_head.body.predecessor.expect("remove predecessor");
         fixture
             .store
             .storage
@@ -2896,5 +4278,66 @@ mod tests {
             .expect_err("the accepted cursor cannot regress to its predecessor");
         assert!(error.to_string().contains("regressed"));
         assert!(predecessor.coord.seq < latest.coord.seq);
+    }
+
+    #[tokio::test]
+    async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively() {
+        let fixture = merge_fixture("deep-membership-projection").await;
+        let chain = load_fixture(&fixture).await;
+        let root_value = super::super::store_objects::load_store_protocol_root(
+            &fixture.store.storage,
+            &fixture.store.root,
+        )
+        .await
+        .expect("load Store root")
+        .value;
+        let seed = load_exact_membership_graph_objects(
+            &fixture.store.storage,
+            &fixture.store.root,
+            &root_value,
+            chain.head_refs(),
+        )
+        .await
+        .expect("load seed membership graph")
+        .path_heads
+        .into_values()
+        .next()
+        .expect("founder membership head");
+
+        let mut path_heads = BTreeMap::new();
+        let mut predecessor = None;
+        for sequence in 1..=20_000_u64 {
+            let mut node = seed.clone();
+            node.entry.seq = sequence;
+            node.entry.previous_hash = predecessor
+                .as_ref()
+                .map(|reference: &MembershipHeadRef| reference.coord.entry_hash);
+            node.entry.dependencies.clear();
+            node.entry.resolution_dependencies.clear();
+            node.reference.coord = node.entry.coord();
+            node.head.body.entry.coord = node.reference.coord.clone();
+            node.head.body.predecessor = predecessor.clone();
+            predecessor = Some(node.reference.clone());
+            path_heads.insert(node.reference.coord.clone(), node);
+        }
+        let graph = LoadedExactMembershipGraph {
+            entries: path_heads
+                .iter()
+                .map(|(coord, node)| (coord.clone(), node.entry.clone()))
+                .collect(),
+            heads: Vec::new(),
+            path_heads,
+        };
+        let statuses = membership_projection_statuses(
+            &graph,
+            &super::super::store_pull::VerifiedMergeMembershipPrefix::default(),
+            &BTreeMap::new(),
+        )
+        .expect("project deep predecessor path");
+
+        assert_eq!(statuses.len(), 20_000);
+        assert!(statuses
+            .values()
+            .all(|status| *status == MembershipProjectionStatus::Included));
     }
 }

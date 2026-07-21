@@ -30,6 +30,7 @@ pub mod invite;
 pub mod loop_policy;
 pub mod membership;
 pub mod membership_ops;
+pub mod owner_promotion;
 pub mod provider;
 pub mod pull;
 #[cfg(test)]

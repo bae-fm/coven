@@ -1042,6 +1042,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_rejects_a_signed_snapshot_with_a_terminal_membership_receipt() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-bootstrap-rejects-terminal-receipt",
+            signer.clone(),
+        )
+        .await
+        .expect("create terminal-receipt bootstrap Store");
+        let membership = store
+            .open_into(&source)
+            .await
+            .expect("open terminal-receipt bootstrap Store membership");
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = crate::sync::test_helpers::test_synced_tables();
+        let image_tables = tables.clone();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &image_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create terminal-receipt bootstrap database image");
+        let signed_image_path = image_dir.path().join("signed-image.db");
+        std::fs::write(&signed_image_path, image).expect("write signed snapshot fixture");
+        let plan = b"terminal Serial invitation plan";
+        let image = {
+            let image = Connection::open(&signed_image_path).expect("open signed snapshot fixture");
+            image
+                .execute(
+                    "INSERT INTO terminal_membership_mutation
+                     (singleton, kind, intent_hash, plan_bytes, result_bytes)
+                     VALUES (1, 'serial_invite', ?1, ?2, x'01')",
+                    (
+                        crate::sync::store_commit::ObjectHash::digest(plan).to_string(),
+                        plan.as_slice(),
+                    ),
+                )
+                .expect("insert terminal receipt into signed snapshot fixture");
+            image
+                .close()
+                .map_err(|(_, error)| error)
+                .expect("close signed snapshot fixture");
+            std::fs::read(&signed_image_path).expect("read signed snapshot fixture")
+        };
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            image,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            &signer,
+            Some(&membership),
+            &source,
+        )
+        .await
+        .expect("publish terminal-receipt bootstrap database image");
+        crate::sync::store_ack::stage_store_ack(
+            &source,
+            &store.storage,
+            None,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            "2026-07-16T00:00:01Z".to_string(),
+            &signer,
+        )
+        .await
+        .expect("stage terminal-receipt snapshot stability acknowledgement");
+        crate::sync::store_ack::drain_outbound_store_acks(
+            &source,
+            &store.storage,
+            None,
+            &signer,
+            Some(&membership),
+        )
+        .await
+        .expect("activate terminal-receipt snapshot stability acknowledgement");
+
+        let destination = tempfile::tempdir().expect("bootstrap destination");
+        let database_path = destination.path().join("store.db");
+        let bootstrap = bootstrap_from_snapshot(
+            &store.storage,
+            None,
+            "snapshot-bootstrap-rejects-terminal-receipt",
+            store.root,
+            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            1,
+            &database_path,
+        )
+        .await
+        .expect("verify signed terminal-receipt bootstrap authority");
+        let result = bootstrap
+            .open_database(
+                "snapshot-bootstrap-rejects-terminal-receipt",
+                &database_path,
+                tables,
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "joining-device".to_string(),
+                &crate::sync::test_helpers::test_migrations(),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("accepted terminal membership receipt during snapshot installation"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("terminal_membership_mutation to be empty"));
+        assert!(!database_path.exists());
+    }
+
+    #[tokio::test]
     async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements() {
         let source = crate::sync::test_helpers::open_test_db();
         let signer = UserKeypair::generate();

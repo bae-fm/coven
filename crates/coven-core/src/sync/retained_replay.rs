@@ -111,6 +111,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ("row_blob_locators", ReplayTableDisposition::Replace),
     ("serial_head_receipt", ReplayTableDisposition::MustBeEmpty),
     (
+        "terminal_membership_mutation",
+        ReplayTableDisposition::MustBeEmpty,
+    ),
+    (
         "snapshot_blob_spool_cleanup",
         ReplayTableDisposition::Preserve,
     ),
@@ -171,6 +175,13 @@ fn projection_table_names(include_routing: bool) -> Vec<String> {
 pub(crate) fn validate_merge_generation_zero_preconditions(
     connection: &Connection,
 ) -> Result<(), DbError> {
+    validate_must_be_empty_replay_tables(connection, "generation-zero retained replay")
+}
+
+fn validate_must_be_empty_replay_tables(
+    connection: &Connection,
+    context: &str,
+) -> Result<(), DbError> {
     for (table, disposition) in REPLAY_TABLES {
         if *disposition != ReplayTableDisposition::MustBeEmpty {
             continue;
@@ -187,7 +198,7 @@ pub(crate) fn validate_merge_generation_zero_preconditions(
             .map_err(DbError::from)?;
         if count != 0 {
             return Err(DbError::Message(format!(
-                "generation-zero retained replay requires {table} to be empty"
+                "{context} requires {table} to be empty"
             )));
         }
     }
@@ -807,6 +818,7 @@ fn validate_snapshot_replay_image(
             "snapshot replay image coverage differs from its baseline".to_string(),
         ));
     }
+    validate_must_be_empty_replay_tables(image, "snapshot replay baseline")?;
     for table in ["materialized_commits", "retained_merge_materializations"] {
         let count: i64 = image
             .query_row(
@@ -954,6 +966,27 @@ mod tests {
                 "_coven_row_routes".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn merge_replay_rejects_serial_terminal_membership_receipts() {
+        let connection = fixture(WritePolicy::MergeConcurrent);
+        let plan = b"terminal Serial invitation plan";
+        connection
+            .execute(
+                "INSERT INTO terminal_membership_mutation
+                 (singleton, kind, intent_hash, plan_bytes, result_bytes)
+                 VALUES (1, 'serial_invite', ?1, ?2, x'01')",
+                (ObjectHash::digest(plan).to_string(), plan.as_slice()),
+            )
+            .expect("insert Serial-only terminal receipt into Merge fixture");
+
+        let error = validate_merge_generation_zero_preconditions(&connection)
+            .expect_err("Merge retained replay must reject a Serial terminal receipt");
+
+        assert!(error
+            .to_string()
+            .contains("terminal_membership_mutation to be empty"));
     }
 
     fn populate_fixture(connection: &Connection, policy: WritePolicy) {

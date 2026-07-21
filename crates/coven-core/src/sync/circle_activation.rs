@@ -87,6 +87,25 @@ impl VerifiedStreamActivations {
         })
     }
 
+    pub(crate) fn from_verified_store_control(
+        commit: &StoreBatchCommit,
+        activating_commit: &StoreBatchCommitRef,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        activating_commit.verify_commit(commit)?;
+        if !matches!(
+            commit.control(),
+            Some(super::store_commit::StoreControl::MergeMembership { .. })
+        ) {
+            return Err(super::store_commit::StoreProtocolError::Malformed(
+                "verified Store membership activations carry another control".to_string(),
+            ));
+        }
+        Ok(Self {
+            activating_commit: activating_commit.clone(),
+            activations: commit.stream_activations().to_vec(),
+        })
+    }
+
     pub(crate) fn as_slice(&self) -> &[StreamActivation] {
         &self.activations
     }
@@ -197,6 +216,23 @@ impl VerifiedCircleActivations {
         Ok(Self {
             circles: Vec::new(),
             stream_activations: VerifiedStreamActivations::none(commit, commit_ref)?,
+        })
+    }
+
+    pub(crate) fn membership_control(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        if !commit.circle_controls().is_empty() {
+            return Err(super::store_commit::StoreProtocolError::Malformed(
+                "Store membership control also carries Circle controls".to_string(),
+            ));
+        }
+        Ok(Self {
+            circles: Vec::new(),
+            stream_activations: VerifiedStreamActivations::from_verified_store_control(
+                commit, commit_ref,
+            )?,
         })
     }
 

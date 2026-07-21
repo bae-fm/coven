@@ -889,13 +889,6 @@ impl SyncManager {
             // (`pending_rotation`, shared with the sync loop this same store runs).
             let outcome = sync_loop.remove_member(public_key_hex).await;
 
-            // Durably record the marker's state whether adoption succeeded or failed:
-            // on a failed adoption the rotation is committed on the cloud but this
-            // device is still sealing under the superseded generation, so a restart
-            // must remember the pause; on success the marker is already cleared and
-            // this deletes the durable record.
-            sync_loop.persist_pending_rotation().await?;
-
             let fingerprint = outcome.map_err(SyncError::from)?;
             Ok(fingerprint)
         })

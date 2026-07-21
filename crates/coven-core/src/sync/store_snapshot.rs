@@ -911,16 +911,16 @@ pub(crate) async fn select_store_snapshot(
                     super::membership_ops::load_exact_membership_head(storage, root, reference)
                         .await
                         .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-                resolutions.extend(head.resolutions.iter().cloned());
+                resolutions.extend(head.body.resolutions.iter().cloned());
                 let registration = super::store_objects::load_registration_ref(
                     storage,
                     root,
-                    &head.author_registration,
+                    &head.body.author_registration,
                 )
                 .await
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?
                 .value;
-                registrations.insert(head.author_registration, registration);
+                registrations.insert(head.body.author_registration.clone(), registration);
             }
             let resolutions = resolutions.into_iter().collect::<Vec<_>>();
             let membership = super::membership_ops::load_anchored_chain_at_exact_heads(

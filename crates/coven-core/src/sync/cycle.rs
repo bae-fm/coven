@@ -64,12 +64,10 @@ pub struct SyncCycleResult {
     /// should run the next cycle promptly to drain + publish the rest instead of
     /// waiting the idle interval.
     pub resume_drain_promptly: bool,
-    /// Set when this device has not adopted a store-key rotation the cloud has
-    /// already committed. While set, this cycle sealed nothing new for the
-    /// cloud — no changeset, blob, tombstone, or snapshot — even though pull and
-    /// local writes proceeded normally; the pending local changeset (if any)
-    /// stays queued undrained until a later cycle adopts the rotation. A host
-    /// surfaces this as why sync is paused, distinct from a hard failure.
+    /// Set when an exact local rotation operation or a committed peer rotation
+    /// still blocks sealing. While set, this cycle sealed no changeset, blob,
+    /// tombstone, or snapshot. The state identifies whether the blocker is a
+    /// candidate, a local committed removal, a peer commit, or both.
     pub rotation_pending: Option<RotationPending>,
 }
 
@@ -637,10 +635,9 @@ async fn prepare_cycle_before_pull(
     let rotation_pending = pending_rotation.check(&cipher.snapshot()).err();
     if let Some(pending) = &rotation_pending {
         warn!(
-            committed_generation = pending.committed_generation,
+            rotation_state = ?pending.state,
             live_generation = pending.live_generation,
-            "sync paused: this device has not adopted a committed store-key rotation; \
-             sealing nothing new for the cloud until it adopts"
+            "sync paused: store-key rotation work is incomplete; sealing nothing new for the cloud"
         );
     }
 
@@ -972,21 +969,20 @@ async fn reclaim_cycle_packages(
 /// A plaintext (browsable) home still loads membership for authorization, but it
 /// has no wrapped store key to rotate. The key refresh is therefore a no-op.
 ///
-/// A rotation this refresh discovers but cannot adopt (no custody handed to this
-/// cycle, or custody's own persist fails) is not a reason to abort the cycle —
-/// `pending_rotation` marks the committed generation instead, and the caller
-/// gates every seal on it for the rest of this cycle. Membership state that
-/// can't be resolved at all (a conflict or exact-object read failure) still
-/// aborts: those mean this device doesn't reliably know the current state, which
-/// is a different condition from "knows the state and can't adopt it yet".
+/// A discovered rotation is durably recorded before adoption. Without custody,
+/// the cycle returns the gate as pending and seals nothing. If custody is present
+/// but persistence fails, the cycle fails with that error and leaves the durable
+/// gate armed. Membership conflicts and exact-object read failures also abort.
 #[derive(Debug, thiserror::Error)]
 enum AuthorizationRefreshError {
     #[error("read this device's wrapped key: {0}")]
     WrappedKey(#[source] super::invite::InviteError),
     #[error("refresh state is invalid: {0}")]
     InvalidState(String),
-    #[error("persist pending rotation: {0}")]
+    #[error("rotation gate database state: {0}")]
     Database(String),
+    #[error("adopt committed store-key rotation: {0}")]
+    KeyAdoption(#[source] crate::keys::KeyError),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1043,15 +1039,26 @@ async fn refresh_authorization_state(
             // converge instead of partition.
             let merged = live_keyring.merged_with(&new_encryption);
             if merged.key_count() == live_keyring.key_count() {
-                // Every authority-selected key is already held. Not adopted — and,
-                // crucially, `pending_rotation` is NOT cleared here (only a
-                // successful adoption clears it), so an earlier failed local
-                // adoption remains visible until that key is installed.
-                debug!("refresh: wrapped store key adds nothing new; keeping the live keyring");
+                if pending_rotation.gate().is_some() {
+                    let gate = db
+                        .complete_peer_rotation_adoption(live_keyring.current_generation())
+                        .await
+                        .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
+                    pending_rotation
+                        .install_durable_gate(gate)
+                        .map_err(AuthorizationRefreshError::InvalidState)?;
+                }
+                debug!("refresh: wrapped store key is already held by the live keyring");
             } else {
+                let gate = db
+                    .record_peer_rotation(merged.current_generation())
+                    .await
+                    .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
+                pending_rotation
+                    .install_durable_gate(Some(gate))
+                    .map_err(AuthorizationRefreshError::InvalidState)?;
                 match custody {
                     None => {
-                        pending_rotation.mark_committed(merged.current_generation());
                         info!(
                             committed_generation = merged.current_generation(),
                             "refresh: found a rotated store key but this cycle has no \
@@ -1060,32 +1067,38 @@ async fn refresh_authorization_state(
                         );
                     }
                     Some(custody) => {
-                        match super::membership_ops::apply_key_rotation(
+                        let fingerprint = super::membership_ops::apply_key_rotation(
                             new_encryption,
                             custody,
                             cipher,
-                            pending_rotation,
-                        ) {
-                            Ok(fingerprint) => info!(%fingerprint, "Adopted rotated store key"),
-                            Err(e) => warn!(
-                                "refresh: could not adopt a rotated store key ({e}); sealing \
-                                 is paused until adoption succeeds"
-                            ),
-                        }
+                        )
+                        .map_err(AuthorizationRefreshError::KeyAdoption)?;
+                        let adopted_generation = match cipher.snapshot() {
+                            super::cloud_storage::CloudCipher::Encrypted(encryption) => {
+                                encryption.current_generation()
+                            }
+                            super::cloud_storage::CloudCipher::Plaintext => {
+                                return Err(AuthorizationRefreshError::InvalidState(
+                                    "encrypted key refresh produced a plaintext cipher".to_string(),
+                                ));
+                            }
+                        };
+                        let gate = db
+                            .complete_peer_rotation_adoption(adopted_generation)
+                            .await
+                            .map_err(|error| {
+                                AuthorizationRefreshError::Database(error.to_string())
+                            })?;
+                        pending_rotation
+                            .install_durable_gate(gate)
+                            .map_err(AuthorizationRefreshError::InvalidState)?;
+                        info!(%fingerprint, "Adopted rotated store key");
                     }
                 }
             }
         }
         Err(error) => return Err(AuthorizationRefreshError::WrappedKey(error)),
     }
-
-    // Durably record whatever the marker now holds — a newly-marked pending
-    // rotation, or its clearing on adoption — before this cycle seals anything.
-    // A restart mid-pause must not forget the pause and seal under the superseded
-    // generation just because a fresh cloud scan happens to lag behind it.
-    super::cloud_storage::persist_pending_rotation(db, pending_rotation)
-        .await
-        .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
 
     Ok(())
 }
@@ -1289,7 +1302,7 @@ pub(crate) async fn ensure_serial_founder_authorization(
                 .map_err(|error| error.to_string())?;
             let founder_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
                 &founder.value,
-                founder.object,
+                founder.object.clone(),
             );
             let authorization = super::membership::SerialAuthorizationState::from_founder(
                 root_ref,
@@ -1298,9 +1311,22 @@ pub(crate) async fn ensure_serial_founder_authorization(
                 &founder.value,
             )
             .map_err(|error| error.to_string())?;
-            db.install_serial_root_authorization(
+            let genesis = super::store_commit::ResolvedStoreDeviceState::founder(
+                root_ref,
+                founder_ref.clone(),
+                &root.descriptor.founder_pubkey,
+                root.descriptor.founder_grant.clone(),
+                &root.descriptor.founder_recovery,
+            )
+            .map_err(|error| error.to_string())?;
+            db.install_store_owner_anchor(
+                root_ref.clone(),
+                founder_ref,
+                founder.value,
+                founder.bytes,
+                genesis,
                 root.descriptor.founder_pubkey.clone(),
-                authorization,
+                crate::database::InitialStoreMembershipAuthority::Serial { authorization },
             )
             .await
             .map_err(|error| error.to_string())
@@ -1523,21 +1549,12 @@ impl SyncComponents {
         .await
     }
 
-    pub async fn persist_pending_rotation(&self) -> Result<(), DbError> {
-        super::cloud_storage::persist_pending_rotation(&self.db, &self.pending_rotation).await
-    }
-
     pub fn adopt_key_rotation(
         &self,
         encryption: crate::encryption::EncryptionService,
         custody: &dyn MasterKeyCustody,
     ) -> Result<String, crate::keys::KeyError> {
-        super::membership_ops::apply_key_rotation(
-            encryption,
-            custody,
-            &self.cipher,
-            &self.pending_rotation,
-        )
+        super::membership_ops::apply_key_rotation(encryption, custody, &self.cipher)
     }
 
     fn circle_coordination(

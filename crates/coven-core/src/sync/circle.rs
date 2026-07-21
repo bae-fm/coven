@@ -471,6 +471,17 @@ mod tests {
             if pubkey == &keys::public_key_hex(owner) {
                 continue;
             }
+            if role == &super::super::membership::MemberRole::Owner {
+                chain
+                    .add_owner_for_test(
+                        owner,
+                        founder_coord.stream_id,
+                        pubkey.clone(),
+                        format!("member-{index}"),
+                    )
+                    .expect("promote merge-concurrent Owner");
+                continue;
+            }
             let entry = chain
                 .signed_set_member_in_stream(
                     owner,

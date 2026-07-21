@@ -90,6 +90,11 @@ pub enum StoreOutboundError {
     SequenceExhausted { current: u64 },
     #[error("Store author {device_id} was excluded before candidate activation")]
     AuthorExcluded { device_id: StoreDeviceId },
+    #[error("Merge announcement selected {actual:?}, not candidate {expected:?}")]
+    MergeAnnouncementOccupied {
+        expected: Box<StoreBatchCommitRef>,
+        actual: Box<StoreBatchCommitRef>,
+    },
 }
 
 impl From<crate::database::DbError> for StoreOutboundError {
@@ -225,9 +230,10 @@ pub(crate) async fn exact_next_announcement_slot(
         };
         if sequence == target.coord.sequence() {
             if head.commit != *target {
-                return Err(StoreOutboundError::InvalidOutbound(
-                    "durable local predecessor differs from its exact Store head".to_string(),
-                ));
+                return Err(StoreOutboundError::MergeAnnouncementOccupied {
+                    expected: Box::new(target.clone()),
+                    actual: Box::new(head.commit),
+                });
             }
             return Ok((head.successor.next_slot, Some(reference)));
         }
@@ -328,20 +334,6 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         }
     };
     let preparation = async {
-        let payload = super::service::prepare_store_payload(
-            &blob_facts,
-            keypair,
-            store_dir,
-            super::service::StorePayloadMembership::MergeConcurrent(membership.ok_or_else(
-                || {
-                    StoreOutboundError::InvalidOutbound(
-                        "Merge Store write has no exact membership state".to_string(),
-                    )
-                },
-            )?),
-        )
-        .await
-        .map_err(StoreOutboundError::Preparation)?;
         let (root, registration_ref, registration, device_signer) =
             load_local_store_authority(db, device_id, keypair).await?;
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
@@ -363,28 +355,30 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             predecessor: previous.clone(),
             dependencies,
         };
-        let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-        let membership = membership.ok_or_else(|| {
+        let candidate_membership = membership.ok_or_else(|| {
             StoreOutboundError::InvalidOutbound(
                 "Merge Store write has no exact membership state".to_string(),
             )
         })?;
-        let membership_state = match membership.status() {
-            super::membership::MembershipStatus::Resolved(resolved) => {
-                super::circle_control::StoreMembershipStateRef::merge_concurrent(
-                    membership.head_refs().to_vec(),
-                    membership.resolution_refs().to_vec(),
-                    resolved_devices.recovery.clone(),
-                    resolved.state_hash,
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
-            }
-            super::membership::MembershipStatus::Conflict(_) => {
-                return Err(StoreOutboundError::InvalidOutbound(
-                    "Merge Store write requires resolved membership".to_string(),
-                ));
-            }
-        };
+        let authorization = super::store_pull::load_merge_outbound_authorization(
+            storage,
+            &root,
+            &order,
+            candidate_membership.head_refs(),
+            &registration_ref,
+        )
+        .await
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        let payload = super::service::prepare_store_payload(
+            &blob_facts,
+            keypair,
+            store_dir,
+            super::service::StorePayloadMembership::MergeConcurrent(&authorization.membership),
+        )
+        .await
+        .map_err(StoreOutboundError::Preparation)?;
+        let membership_state = authorization.membership_state;
+        let device_state = authorization.device_state_ref;
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &registration_ref, &write_id, &order);
         let mut prepared_packages = Vec::new();
@@ -3116,7 +3110,8 @@ fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
                 reason: error.to_string(),
             })
         }
-        StoreOutboundError::SerialControlConflict { .. } => {
+        StoreOutboundError::SerialControlConflict { .. }
+        | StoreOutboundError::MergeAnnouncementOccupied { .. } => {
             Some(crate::WriteBlock::InvalidProtocolState {
                 reason: error.to_string(),
             })
@@ -3370,6 +3365,11 @@ pub(crate) enum StoreOperationBatch {
     DeviceExclusionOutcome(super::store_commit::StoreDeviceExclusionOutcomeRef),
     ReclaimAuthorization(Box<super::store_reclaim::ReclaimAuthorizationRef>),
     ReclaimReceipt(Box<super::store_reclaim::ReclaimReceiptRef>),
+    OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
+    MergeMembershipActivation {
+        transition: super::membership::MergeMembershipHeadTransition,
+        stream_activations: Vec<super::store_commit::StreamActivation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3394,9 +3394,138 @@ pub(crate) struct StoreOperationCommitPlan {
     serial: Option<Box<StoreOperationSerialPlan>>,
 }
 
+pub(crate) struct MergeConflictResolutionCommitPlan {
+    root: StoreRootRef,
+    registration_ref: StoreDeviceRegistrationRef,
+    registration: Box<StoreDeviceRegistration>,
+    device_signer: UserKeypair,
+    coord: StoreCommitCoord,
+    order: StoreCommitOrder,
+    membership: MembershipChain,
+    device_state: super::store_commit::StoreDeviceStateRef,
+}
+
+impl MergeConflictResolutionCommitPlan {
+    pub(crate) fn root(&self) -> &StoreRootRef {
+        &self.root
+    }
+
+    pub(crate) fn registration_ref(&self) -> &StoreDeviceRegistrationRef {
+        &self.registration_ref
+    }
+
+    pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
+        &self.registration
+    }
+
+    pub(crate) fn device_state(&self) -> &super::store_commit::StoreDeviceStateRef {
+        &self.device_state
+    }
+
+    pub(crate) fn membership(&self) -> &MembershipChain {
+        &self.membership
+    }
+
+    pub(crate) fn finish(
+        self,
+        membership: &MembershipChain,
+        resolution: &super::membership::StoreMembershipConflictResolutionRef,
+    ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
+        let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "conflict-resolution candidate membership remains conflicted".to_string(),
+            ));
+        };
+        if membership
+            .resolution_refs()
+            .binary_search(resolution)
+            .is_err()
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "conflict-resolution candidate membership omits its exact resolution".to_string(),
+            ));
+        }
+        let replacement_grant = super::membership::derive_store_resolution_grant(
+            &resolution.conflict_hash,
+            &resolution.resolver_pubkey,
+        );
+        let authority = super::membership::MembershipGrantCreationAuthority::ConflictResolution(
+            resolution.clone(),
+        );
+        if membership
+            .active_grant(&replacement_grant)
+            .is_none_or(|record| {
+                record.member_pubkey != self.registration.author_pubkey
+                    || record.creation_authority != authority
+            })
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "conflict-resolution candidate is not authorized by its replacement Owner grant"
+                    .to_string(),
+            ));
+        }
+        let membership_state = super::circle_control::StoreMembershipStateRef::merge_concurrent(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            self.device_state.recovery().to_vec(),
+            resolved.state_hash,
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        Ok(StoreOperationCommitPlan {
+            root: self.root,
+            registration_ref: self.registration_ref,
+            registration: self.registration,
+            device_signer: self.device_signer,
+            coord: self.coord,
+            order: self.order,
+            membership_state,
+            device_state: self.device_state,
+            membership_authority: StoreOperationMembershipAuthority::MergeConcurrent {
+                predecessor: authority,
+            },
+            owner_grant: Some(replacement_grant),
+            serial: None,
+        })
+    }
+}
+
 struct StoreOperationSerialPlan {
     base_head: VersionedObject,
     authorization: SerialAuthorizationState,
+}
+
+impl StoreOperationCommitPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sign_owner_promotion_request(
+        &self,
+        promotion_id: super::store_commit::OwnerPromotionId,
+        member_registration: super::store_commit::StoreDeviceRegistrationRef,
+        member_pubkey: String,
+        member_grant: super::membership::MembershipGrantId,
+        finalization: super::store_commit::OwnerPromotionFinalization,
+        identity_signer: &UserKeypair,
+    ) -> Result<super::store_commit::OwnerPromotionRequest, StoreOutboundError> {
+        let promoter_owner_grant = self.owner_grant.clone().ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "Owner-promotion request author has no active Owner grant".to_string(),
+            )
+        })?;
+        super::store_commit::OwnerPromotionRequest::signed(
+            promotion_id,
+            &self.root,
+            self.registration_ref.clone(),
+            &self.registration,
+            promoter_owner_grant,
+            member_pubkey,
+            member_grant,
+            member_registration,
+            self.membership_state.clone(),
+            self.device_state.clone(),
+            finalization,
+            identity_signer,
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
+    }
 }
 
 impl StoreOperationCommitPlan {
@@ -3432,6 +3561,24 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn owner_grant(&self) -> Option<&super::membership::MembershipGrantId> {
         self.owner_grant.as_ref()
+    }
+
+    pub(crate) fn serial_member_grant(
+        &self,
+        member_pubkey: &str,
+    ) -> Option<super::membership::MembershipGrantId> {
+        let serial = self.serial.as_ref()?;
+        let grants = serial
+            .authorization
+            .membership
+            .active_grant_ids(member_pubkey);
+        let grant = grants.iter().next()?;
+        (grants.len() == 1
+            && serial
+                .authorization
+                .membership
+                .is_member_grant(member_pubkey, grant))
+        .then(|| grant.clone())
     }
 
     pub(crate) fn validate_acknowledgement(
@@ -3521,6 +3668,63 @@ pub(crate) async fn serial_successor_plan_for_test(
     })
 }
 
+pub(crate) async fn prepare_merge_conflict_resolution_commit(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    keypair: &UserKeypair,
+    candidate_membership_heads: &[super::membership::MembershipHeadRef],
+) -> Result<MergeConflictResolutionCommitPlan, StoreOutboundError> {
+    if db.write_policy() != crate::WritePolicy::MergeConcurrent {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "membership conflict resolution requires MergeConcurrent policy".to_string(),
+        ));
+    }
+    let (root, registration_ref, registration, device_signer) =
+        load_local_store_authority(db, device_id, keypair).await?;
+    let previous = db.latest_local_store_position().await?;
+    let dependencies = super::store_commit::CommitFrontier::from_refs(
+        crate::WritePolicy::MergeConcurrent,
+        db.materialized_frontier().await?,
+    )
+    .and_then(|frontier| frontier.merge_commits().cloned())
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let seq = next_store_sequence(previous.as_ref())?;
+    let coord = StoreCommitCoord::MergeConcurrent {
+        stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &registration_ref,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        ),
+        sequence: seq,
+    };
+    let order = StoreCommitOrder::MergeConcurrent {
+        seq,
+        predecessor: previous,
+        dependencies,
+    };
+    let authorization = super::store_pull::load_merge_conflict_resolution_authorization(
+        storage,
+        &root,
+        &order,
+        candidate_membership_heads,
+        &registration_ref,
+        &registration.author_pubkey,
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    Ok(MergeConflictResolutionCommitPlan {
+        root,
+        registration_ref,
+        registration: Box::new(registration),
+        device_signer,
+        coord,
+        order,
+        membership: authorization.membership,
+        device_state: authorization.device_state_ref,
+    })
+}
+
 pub(crate) async fn prepare_store_operation_commit(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -3555,29 +3759,25 @@ pub(crate) async fn prepare_store_operation_commit(
                     predecessor: previous,
                     dependencies,
                 };
-                let (device_state, resolved_devices) =
-                    db.store_device_state_for_order(&order).await?;
-                let membership = membership.ok_or_else(|| {
+                let candidate_membership = membership.ok_or_else(|| {
                     StoreOutboundError::InvalidOutbound(
                         "Merge device join commit has no exact membership state".to_string(),
                     )
                 })?;
-                let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
-                else {
-                    return Err(StoreOutboundError::InvalidOutbound(
-                        "Merge device join commit requires resolved membership".to_string(),
-                    ));
-                };
-                let membership_state =
-                    super::circle_control::StoreMembershipStateRef::merge_concurrent(
-                        membership.head_refs().to_vec(),
-                        membership.resolution_refs().to_vec(),
-                        resolved_devices.recovery,
-                        resolved.state_hash,
-                    )
-                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-                let owner_grant = membership.active_owner_grant(&registration.author_pubkey);
-                let predecessor = membership
+                let authorization = super::store_pull::load_merge_outbound_authorization(
+                    storage,
+                    &root,
+                    &order,
+                    candidate_membership.head_refs(),
+                    &registration_ref,
+                )
+                .await
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                let owner_grant = authorization
+                    .membership
+                    .active_owner_grant(&registration.author_pubkey);
+                let predecessor = authorization
+                    .membership
                     .write_grant_authority(&registration.author_pubkey)
                     .ok_or_else(|| {
                         StoreOutboundError::InvalidOutbound(format!(
@@ -3588,8 +3788,8 @@ pub(crate) async fn prepare_store_operation_commit(
                 (
                     coord,
                     order,
-                    membership_state,
-                    device_state,
+                    authorization.membership_state,
+                    authorization.device_state_ref,
                     StoreOperationMembershipAuthority::MergeConcurrent { predecessor },
                     owner_grant,
                     None,
@@ -3666,6 +3866,302 @@ pub(crate) struct PreparedStoreOperationCommit {
 }
 
 impl PreparedStoreOperationCommit {
+    fn candidate_remote_objects(
+        &self,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        let mut objects = vec![super::remote_object::RemoteObjectRecord::candidate_commit(
+            self.reference.clone(),
+            self.commit.to_bytes(),
+            self.prepared.stored_bytes().to_vec(),
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?];
+        if let Some((head, prepared)) = self.merge_publication() {
+            objects.push(
+                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                    super::store_commit::StoreDeviceHeadRef {
+                        head_hash: head.head_hash(),
+                        object: prepared.reference().clone(),
+                    },
+                    head.to_bytes(),
+                    prepared.stored_bytes().to_vec(),
+                    self.reference.clone(),
+                )
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            );
+        }
+        Ok(objects)
+    }
+
+    pub(crate) fn merge_membership_activation_remote_objects(
+        &self,
+        transition: &super::invite::PreparedMembershipTransition,
+        publication: &super::invite::PreparedMembershipPublication,
+        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        self.validate_closed_shape()
+            .map_err(StoreOutboundError::InvalidOutbound)?;
+        super::invite::validate_prepared_transition(transition)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        super::invite::validate_prepared_publication(publication)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
+            || self.commit.control()
+                != Some(&StoreControl::MergeMembership {
+                    transition: transition.transition.clone(),
+                })
+            || !transition
+                .transition
+                .matches_head(&publication.head, &publication.head_ref)
+            || !matches!(
+                &publication.head.activation,
+                super::membership::MembershipHeadActivation::StoreCommit { commit }
+                    if commit == &self.reference
+            )
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge membership authority graph differs from its activating Store candidate"
+                    .to_string(),
+            ));
+        }
+        let expected_wraps = match &transition.entry.change {
+            super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
+            _ => {
+                return Err(StoreOutboundError::InvalidOutbound(
+                    "Merge membership removal graph contains another change".to_string(),
+                ))
+            }
+        };
+        if expected_wraps.len() != wraps.len()
+            || expected_wraps
+                .iter()
+                .zip(wraps)
+                .any(|(reference, prepared)| reference != &prepared.reference)
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge membership removal wraps differ from its exact entry".to_string(),
+            ));
+        }
+        self.close_merge_membership_remote_objects(transition, publication, wraps, Vec::new())
+    }
+
+    pub(crate) fn merge_membership_resolution_remote_objects(
+        &self,
+        transition: &super::invite::PreparedMembershipTransition,
+        publication: &super::invite::PreparedMembershipPublication,
+        resolution: &super::membership::StoreMembershipConflictResolution,
+        reference: &super::membership::StoreMembershipConflictResolutionRef,
+        prepared: &PreparedExactObject,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        self.validate_closed_shape()
+            .map_err(StoreOutboundError::InvalidOutbound)?;
+        super::invite::validate_prepared_transition(transition)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        super::invite::validate_prepared_publication(publication)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
+            || self.commit.control()
+                != Some(&StoreControl::MergeMembership {
+                    transition: transition.transition.clone(),
+                })
+            || !transition
+                .transition
+                .matches_head(&publication.head, &publication.head_ref)
+            || !matches!(
+                &publication.head.activation,
+                super::membership::MembershipHeadActivation::StoreCommit { commit }
+                    if commit == &self.reference
+            )
+            || !matches!(
+                &transition.entry.change,
+                super::membership::MembershipChange::ResolutionActivation {
+                    resolution: introduced,
+                } if introduced == reference
+            )
+            || reference.object != *prepared.reference()
+            || reference.resolution_hash != resolution.resolution_hash()
+            || reference.conflict_hash != resolution.conflict_hash
+            || reference.resolver_pubkey != resolution.resolver_pubkey
+            || prepared.stored_bytes()
+                != serde_json::to_vec(resolution).map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "serialize Store membership resolution: {error}"
+                    ))
+                })?
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge membership resolution graph differs from its activating Store candidate"
+                    .to_string(),
+            ));
+        }
+        let authority =
+            super::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
+                reference.clone(),
+                serde_json::to_vec(resolution).map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "serialize Store membership resolution: {error}"
+                    ))
+                })?,
+                prepared.stored_bytes().to_vec(),
+                self.reference.clone(),
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        self.close_merge_membership_remote_objects(transition, publication, &[], vec![authority])
+    }
+
+    pub(crate) fn merge_owner_promotion_remote_objects(
+        &self,
+        transition: &super::invite::PreparedMembershipTransition,
+        publication: &super::invite::PreparedMembershipPublication,
+        wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        self.validate_closed_shape()
+            .map_err(StoreOutboundError::InvalidOutbound)?;
+        super::invite::validate_prepared_transition(transition)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        super::invite::validate_prepared_publication(publication)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
+            || self.commit.control()
+                != Some(&StoreControl::MergeMembership {
+                    transition: transition.transition.clone(),
+                })
+            || !transition
+                .transition
+                .matches_head(&publication.head, &publication.head_ref)
+            || !matches!(
+                &publication.head.activation,
+                super::membership::MembershipHeadActivation::StoreCommit { commit }
+                    if commit == &self.reference
+            )
+            || !matches!(
+                &transition.entry.change,
+                super::membership::MembershipChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
+                    if expected == &wrapped_key.reference
+            )
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge Owner-promotion graph differs from its activating Store candidate"
+                    .to_string(),
+            ));
+        }
+        self.close_merge_membership_remote_objects(
+            transition,
+            publication,
+            std::slice::from_ref(wrapped_key),
+            Vec::new(),
+        )
+    }
+
+    fn close_merge_membership_remote_objects(
+        &self,
+        transition: &super::invite::PreparedMembershipTransition,
+        publication: &super::invite::PreparedMembershipPublication,
+        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
+        authorities: Vec<super::remote_object::RemoteObjectRecord>,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+        let family = self.commit.candidate_family();
+        let mut objects = self.candidate_remote_objects()?;
+        let entry_bytes = serde_json::to_vec(&transition.entry).map_err(|error| {
+            StoreOutboundError::InvalidOutbound(format!(
+                "serialize Merge membership candidate entry: {error}"
+            ))
+        })?;
+        objects.push(
+            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+                family,
+                transition.entry_ref.clone(),
+                entry_bytes,
+                transition.entry_object.stored_bytes().to_vec(),
+                self.reference.clone(),
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        );
+        objects.push(
+            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+                family,
+                publication.head_ref.clone(),
+                serde_json::to_vec(&publication.head).map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "serialize Merge membership candidate head: {error}"
+                    ))
+                })?,
+                publication.head_object.stored_bytes().to_vec(),
+                self.reference.clone(),
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        );
+        for prepared in wraps {
+            let value = prepared.validate().map_err(StoreObjectError::from)?;
+            let canonical = serde_json::to_vec(&value).map_err(|error| {
+                StoreOutboundError::InvalidOutbound(format!(
+                    "serialize Merge membership candidate wrap: {error}"
+                ))
+            })?;
+            objects.push(
+                super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_wrapped_store_key(
+                    family,
+                    prepared.reference.clone(),
+                    canonical,
+                    prepared.object.stored_bytes().to_vec(),
+                    self.reference.clone(),
+                )
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            );
+        }
+        objects.extend(authorities);
+        let mut unique = std::collections::BTreeSet::new();
+        if objects
+            .iter()
+            .any(|object| !unique.insert(object.object_id()))
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge membership authority graph repeats an exact object".to_string(),
+            ));
+        }
+        Ok(objects)
+    }
+
+    pub(crate) fn validate_closed_shape(&self) -> Result<(), String> {
+        self.reference
+            .verify_commit(&self.commit)
+            .map_err(|error| error.to_string())?;
+        if self.prepared.reference() != &self.reference.object
+            || self.prepared.stored_bytes() != self.commit.to_bytes()
+        {
+            return Err(
+                "prepared Store operation does not bind its exact commit bytes".to_string(),
+            );
+        }
+        match &self.publication {
+            StoreOperationPublication::MergeConcurrent { head, prepared } => {
+                if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
+                    || head.commit != self.reference
+                    || prepared.stored_bytes() != head.to_bytes()
+                {
+                    return Err(
+                        "prepared Merge operation does not bind its exact activation head"
+                            .to_string(),
+                    );
+                }
+            }
+            StoreOperationPublication::Serial { head, .. } => {
+                if self.reference.coord.policy() != crate::WritePolicy::Serial
+                    || !matches!(
+                        &head.state,
+                        StoreSerialHeadState::Commit { commit, .. }
+                            if commit == &self.reference
+                    )
+                {
+                    return Err(
+                        "prepared Serial operation does not bind its exact coordination head"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_same_durable_activation_as(&self, other: &Self) -> bool {
         self.reference == other.reference
             && self.commit.to_bytes() == other.commit.to_bytes()
@@ -3706,6 +4202,16 @@ impl PreparedStoreOperationCommit {
         match &self.publication {
             StoreOperationPublication::MergeConcurrent { head, prepared } => Some((head, prepared)),
             StoreOperationPublication::Serial { .. } => None,
+        }
+    }
+
+    pub(crate) fn serial_authorization_after(&self) -> Option<&SerialAuthorizationState> {
+        match &self.publication {
+            StoreOperationPublication::Serial {
+                authorization_after,
+                ..
+            } => Some(authorization_after),
+            StoreOperationPublication::MergeConcurrent { .. } => None,
         }
     }
 
@@ -3832,27 +4338,8 @@ impl PreparedStoreOperationCommit {
                 ));
             }
         }
-        let mut objects = vec![super::remote_object::RemoteObjectRecord::candidate_commit(
-            self.reference.clone(),
-            self.commit.to_bytes(),
-            self.prepared.stored_bytes().to_vec(),
-        )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?];
+        let mut objects = self.candidate_remote_objects()?;
         objects.extend(authorities);
-        if let StoreOperationPublication::MergeConcurrent { head, prepared } = &self.publication {
-            objects.push(
-                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                    super::store_commit::StoreDeviceHeadRef {
-                        head_hash: head.head_hash(),
-                        object: prepared.reference().clone(),
-                    },
-                    head.to_bytes(),
-                    prepared.stored_bytes().to_vec(),
-                    self.reference.clone(),
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
-            );
-        }
         Ok(objects)
     }
 
@@ -4143,6 +4630,52 @@ pub(crate) async fn prepare_store_operation_candidate(
             *receipt,
             &plan.device_signer,
         ),
+        StoreOperationBatch::OwnerPromotionRequest(request) => {
+            StoreBatchCommit::signed_with_owner_promotion_request(
+                store_root_hash,
+                db.new_write_id(),
+                plan.coord.clone(),
+                plan.registration_ref.clone(),
+                &plan.registration,
+                plan.order.clone(),
+                plan.membership_state.clone(),
+                plan.device_state.clone(),
+                plan.membership_authority.clone(),
+                request,
+                &plan.device_signer,
+            )
+        }
+        StoreOperationBatch::MergeMembershipActivation {
+            transition,
+            stream_activations,
+        } => StoreBatchCommit::signed_operations(
+            store_root_hash,
+            db.new_write_id(),
+            plan.coord.clone(),
+            plan.registration_ref.clone(),
+            &plan.registration,
+            plan.order.clone(),
+            plan.membership_state.clone(),
+            plan.device_state.clone(),
+            plan.membership_authority.clone(),
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                control: Some(StoreControl::MergeMembership { transition }),
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations,
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            &plan.device_signer,
+        ),
     }
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let context =
@@ -4249,6 +4782,62 @@ pub(crate) async fn publish_prepared_store_operation(
     coordination: Option<&dyn CoordinationStorage>,
     prepared: Box<PreparedStoreOperationCommit>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    publish_prepared_store_operation_with_membership_completion(
+        db,
+        storage,
+        coordination,
+        prepared,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn publish_prepared_store_membership_operation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    prepared: Box<PreparedStoreOperationCommit>,
+    membership_objects: crate::database::VerifiedMergeMembershipObjects,
+    completion: StoreMembershipJournalCompletion,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    publish_prepared_store_operation_with_membership_completion(
+        db,
+        storage,
+        coordination,
+        prepared,
+        Some(membership_objects),
+        Some(completion),
+    )
+    .await
+}
+
+pub(crate) async fn publish_prepared_serial_membership_operation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    prepared: Box<PreparedStoreOperationCommit>,
+    completion: StoreMembershipJournalCompletion,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    publish_prepared_store_operation_with_membership_completion(
+        db,
+        storage,
+        Some(coordination),
+        prepared,
+        None,
+        Some(completion),
+    )
+    .await
+}
+
+async fn publish_prepared_store_operation_with_membership_completion(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    prepared: Box<PreparedStoreOperationCommit>,
+    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = required_store_root(db).await?;
     super::store_pull::validate_serial_control_wrapped_keys(
         storage,
@@ -4278,6 +4867,11 @@ pub(crate) async fn publish_prepared_store_operation(
             head,
             authorization_after,
         } => {
+            if membership_objects.is_some() {
+                return Err(StoreOutboundError::InvalidOutbound(
+                    "Serial membership publication received Merge membership objects".to_string(),
+                ));
+            }
             let attempt = Box::pin(publish_prepared_serial_store_operation(
                 db,
                 storage,
@@ -4286,6 +4880,7 @@ pub(crate) async fn publish_prepared_store_operation(
                 base_head,
                 head,
                 authorization_after,
+                membership_completion,
             ))
             .await?;
             match attempt {
@@ -4297,6 +4892,7 @@ pub(crate) async fn publish_prepared_store_operation(
                     commit,
                     reference,
                     authorization_after,
+                    membership_completion,
                 } => {
                     Box::pin(resolve_serial_store_operation_conflict(
                         db,
@@ -4306,6 +4902,7 @@ pub(crate) async fn publish_prepared_store_operation(
                         commit,
                         reference,
                         authorization_after,
+                        membership_completion,
                     ))
                     .await
                 }
@@ -4322,16 +4919,181 @@ pub(crate) async fn publish_prepared_store_operation(
                 activation,
                 head,
                 prepared_head,
+                membership_objects,
+                membership_completion,
             ))
             .await
         }
     }
 }
 
+pub(crate) async fn upload_prepared_merge_store_operation_commit(
+    storage: &dyn SyncStorage,
+    candidate: &PreparedStoreOperationCommit,
+) -> Result<(), StoreOutboundError> {
+    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &candidate.reference.coord else {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Merge commit upload received a Serial candidate".to_string(),
+        ));
+    };
+    let context = ProtocolObjectContext::signed_plaintext(
+        candidate.commit.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let prefix = commit_semantic_prefix(
+        candidate.commit.candidate_family(),
+        &stream_id.to_string(),
+        candidate.commit.seq(),
+        candidate.commit.commit_hash(),
+    );
+    storage
+        .create_protocol_object(&candidate.prepared)
+        .await
+        .map_err(StoreObjectError::from)?;
+    let opened = storage
+        .read_protocol_object(&context, &candidate.reference.object, &prefix)
+        .await
+        .map_err(StoreObjectError::from)?;
+    if opened != candidate.commit.to_bytes() {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Store operation commit exact readback differs from its signed bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 struct PreparedStoreOperationActivation {
     candidate: Box<PreparedStoreOperationCommit>,
     device_operations: super::store_commit::VerifiedStoreDeviceOperations,
     retained_operation_objects: Vec<ExactObjectRef>,
+}
+
+pub(crate) enum StoreMembershipJournalCompletion {
+    Mutation {
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
+    },
+    RotationMutation {
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+        generation: u64,
+        remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
+    },
+    OwnerPromotion {
+        transition: super::owner_promotion::OwnerPromotionJournalTransition,
+        remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
+    },
+}
+
+impl StoreMembershipJournalCompletion {
+    fn object_refs(&self) -> Vec<ExactObjectRef> {
+        let remote_objects = match self {
+            Self::Mutation { remote_objects, .. }
+            | Self::RotationMutation { remote_objects, .. }
+            | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
+        };
+        remote_objects
+            .iter()
+            .map(|remote| remote.object().clone())
+            .collect()
+    }
+
+    pub(crate) fn remote_object(
+        &self,
+        object: &ExactObjectRef,
+    ) -> Result<super::remote_object::RemoteObjectRecord, StoreOutboundError> {
+        let remote_objects = match self {
+            Self::Mutation { remote_objects, .. }
+            | Self::RotationMutation { remote_objects, .. }
+            | Self::OwnerPromotion { remote_objects, .. } => remote_objects,
+        };
+        remote_objects
+            .iter()
+            .find(|remote| remote.object() == object)
+            .cloned()
+            .ok_or_else(|| {
+                StoreOutboundError::InvalidOutbound(
+                    "membership completion omits an exact activated object".to_string(),
+                )
+            })
+    }
+
+    fn complete_on(
+        self,
+        tx: &rusqlite::Transaction<'_>,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<(), crate::database::DbError> {
+        match self {
+            Self::Mutation {
+                intent_hash,
+                progress_bytes,
+                remote_objects,
+            } => Database::record_activated_membership_candidate_mutation_on(
+                tx,
+                intent_hash,
+                candidate,
+                &remote_objects
+                    .iter()
+                    .map(|remote| remote.object().clone())
+                    .collect::<Vec<_>>(),
+                progress_bytes,
+                crate::database::MembershipMutationActivation::WithoutRotation,
+            ),
+            Self::RotationMutation {
+                intent_hash,
+                progress_bytes,
+                generation,
+                remote_objects,
+            } => Database::record_activated_membership_candidate_mutation_on(
+                tx,
+                intent_hash,
+                candidate,
+                &remote_objects
+                    .iter()
+                    .map(|remote| remote.object().clone())
+                    .collect::<Vec<_>>(),
+                progress_bytes,
+                crate::database::MembershipMutationActivation::Rotation { generation },
+            ),
+            Self::OwnerPromotion {
+                transition,
+                remote_objects,
+            } => {
+                let mut unique = std::collections::BTreeSet::new();
+                let object_ids = remote_objects
+                    .iter()
+                    .map(|remote| remote.object_id())
+                    .map(|object_id| {
+                        if unique.insert(object_id) {
+                            Ok(object_id)
+                        } else {
+                            Err(crate::database::DbError::Message(
+                                "activated Owner-promotion graph repeats an exact object"
+                                    .to_string(),
+                            ))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if object_ids.is_empty() {
+                    return Err(crate::database::DbError::Message(
+                        "activated Owner-promotion graph is empty".to_string(),
+                    ));
+                }
+                Database::activate_store_operation_remote_objects_on(tx, candidate, &object_ids)?;
+                let (journal_key, target_key, previous_value, next_value, remote_objects) =
+                    transition.into_values();
+                Database::advance_owner_promotion_journal_on(
+                    tx,
+                    journal_key,
+                    target_key,
+                    previous_value,
+                    next_value,
+                    remote_objects,
+                )
+            }
+        }
+    }
 }
 
 enum SerialStoreOperationAttempt {
@@ -4341,6 +5103,7 @@ enum SerialStoreOperationAttempt {
         commit: Box<StoreBatchCommit>,
         reference: StoreBatchCommitRef,
         authorization_after: Box<SerialAuthorizationState>,
+        membership_completion: Option<StoreMembershipJournalCompletion>,
     },
 }
 
@@ -4352,6 +5115,7 @@ async fn publish_prepared_serial_store_operation(
     base_head: VersionedObject,
     head: StoreSerialHead,
     authorization_after: SerialAuthorizationState,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<SerialStoreOperationAttempt, StoreOutboundError> {
     let coordination = coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
     let commit = activation.candidate.commit.clone();
@@ -4377,16 +5141,24 @@ async fn publish_prepared_serial_store_operation(
             commit: Box::new(commit),
             reference,
             authorization_after: Box::new(authorization_after),
+            membership_completion,
         });
     }
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::SerialStoreHeadActivated)
+        .await;
     Box::pin(record_activated_serial_store_operation(
         db,
         activation,
         Box::new(commit),
         reference.clone(),
         Box::new(authorization_after),
+        membership_completion,
     ))
     .await?;
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::SerialStoreMaterialized)
+        .await;
     Ok(SerialStoreOperationAttempt::Activated(reference))
 }
 
@@ -4396,8 +5168,13 @@ async fn record_activated_serial_store_operation(
     commit: Box<StoreBatchCommit>,
     reference: StoreBatchCommitRef,
     authorization_after: Box<SerialAuthorizationState>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<(), StoreOutboundError> {
-    let operation_object_ids = (!activation.retained_operation_objects.is_empty()).then(|| {
+    let has_tracked_remote_objects =
+        !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
+    let operation_object_ids = (membership_completion.is_none()
+        && !activation.retained_operation_objects.is_empty())
+    .then(|| {
         std::iter::once(super::remote_object::remote_object_id(&reference.object))
             .chain(
                 activation
@@ -4407,8 +5184,24 @@ async fn record_activated_serial_store_operation(
             )
             .collect::<Vec<_>>()
     });
-    if operation_object_ids.is_some() {
+    if has_tracked_remote_objects {
         db.mark_candidate_commit_uploaded(reference.clone()).await?;
+    }
+    if let Some(completion) = &membership_completion {
+        let completion_ids = completion
+            .object_refs()
+            .iter()
+            .map(super::remote_object::remote_object_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !completion_ids.contains(&super::remote_object::remote_object_id(&reference.object))
+            || activation.retained_operation_objects.iter().any(|object| {
+                !completion_ids.contains(&super::remote_object::remote_object_id(object))
+            })
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Serial membership completion does not cover its exact activated graph".to_string(),
+            ));
+        }
     }
     let recorded_ref = reference.clone();
     let registration_activation = activation.candidate.registration_activation.clone();
@@ -4438,6 +5231,9 @@ async fn record_activated_serial_store_operation(
             &device_operations,
             &stream_activations,
         )?;
+        if let Some(completion) = membership_completion {
+            completion.complete_on(&tx, &recorded_ref)?;
+        }
         tx.commit().map_err(crate::database::DbError::from)
     })
     .await?;
@@ -4452,6 +5248,7 @@ async fn resolve_serial_store_operation_conflict(
     commit: Box<StoreBatchCommit>,
     reference: StoreBatchCommitRef,
     authorization_after: Box<SerialAuthorizationState>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let coordination = coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
     let StoreCommitOrder::Serial { predecessor, .. } = &commit.order else {
@@ -4487,8 +5284,12 @@ async fn resolve_serial_store_operation_conflict(
                     commit,
                     reference.clone(),
                     authorization_after,
+                    membership_completion,
                 ))
                 .await?;
+                #[cfg(any(test, feature = "test-utils"))]
+                db.reach_test_point(crate::database::DatabaseTestPoint::SerialStoreMaterialized)
+                    .await;
                 return Ok(StoreOperationPublicationOutcome::Activated(reference));
             }
             let author = db
@@ -4527,6 +5328,8 @@ fn publish_prepared_merge_store_operation<'a>(
     activation: PreparedStoreOperationActivation,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
+    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Pin<
     Box<
         dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreOutboundError>>
@@ -4536,38 +5339,18 @@ fn publish_prepared_merge_store_operation<'a>(
 > {
     Box::pin(async move {
         let commit = activation.candidate.commit.clone();
-        let prepared = activation.candidate.prepared.clone();
         let reference = activation.candidate.reference.clone();
-        let commit_context = ProtocolObjectContext::signed_plaintext(
-            commit.store_root_hash,
-            ProtocolObjectDomain::StoreCommit,
-        );
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Merge operation candidate carries a Serial coordinate".to_string(),
-            ));
-        };
-        let commit_prefix = commit_semantic_prefix(
-            commit.candidate_family(),
-            &stream_id.to_string(),
-            commit.seq(),
-            commit.commit_hash(),
-        );
-        storage
-            .create_protocol_object(&prepared)
-            .await
-            .map_err(StoreObjectError::from)?;
-        let opened = storage
-            .read_protocol_object(&commit_context, &reference.object, &commit_prefix)
-            .await
-            .map_err(StoreObjectError::from)?;
-        if opened != commit.to_bytes() {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Store operation commit exact readback differs from its signed bytes".to_string(),
-            ));
-        }
-        if !activation.retained_operation_objects.is_empty() {
-            db.mark_candidate_commit_uploaded(reference.clone()).await?;
+        upload_prepared_merge_store_operation_commit(storage, &activation.candidate).await?;
+        let has_tracked_remote_objects =
+            !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
+        if has_tracked_remote_objects {
+            db.mark_candidate_commit_uploaded(reference.clone())
+                .await
+                .map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "record uploaded Store candidate: {error}"
+                    ))
+                })?;
         }
         let head_context = ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
@@ -4607,9 +5390,15 @@ fn publish_prepared_merge_store_operation<'a>(
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),
         };
-        let operation_object_ids = if !activation.retained_operation_objects.is_empty() {
-            db.mark_store_head_uploaded(activation_head.clone()).await?;
-            Some(
+        let operation_object_ids = if has_tracked_remote_objects {
+            db.mark_store_head_uploaded(activation_head.clone())
+                .await
+                .map_err(|error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "record uploaded Store head: {error}"
+                    ))
+                })?;
+            membership_completion.is_none().then(|| {
                 std::iter::once(super::remote_object::remote_object_id(&reference.object))
                     .chain(
                         activation
@@ -4620,11 +5409,30 @@ fn publish_prepared_merge_store_operation<'a>(
                     .chain(std::iter::once(super::remote_object::remote_object_id(
                         prepared_head.reference(),
                     )))
-                    .collect::<Vec<_>>(),
-            )
+                    .collect::<Vec<_>>()
+            })
         } else {
             None
         };
+        if let Some(completion) = &membership_completion {
+            let completion_ids = completion
+                .object_refs()
+                .iter()
+                .map(super::remote_object::remote_object_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if completion_ids.is_empty()
+                || !completion_ids
+                    .contains(&super::remote_object::remote_object_id(&reference.object))
+                || !completion_ids.contains(&super::remote_object::remote_object_id(
+                    prepared_head.reference(),
+                ))
+            {
+                return Err(StoreOutboundError::InvalidOutbound(
+                    "membership journal completion does not cover its exact Store candidate"
+                        .to_string(),
+                ));
+            }
+        }
         let recorded_ref = reference.clone();
         let registrations = activation
             .candidate
@@ -4633,8 +5441,20 @@ fn publish_prepared_merge_store_operation<'a>(
             .map(|activation| (activation.registration, activation.authority))
             .collect::<Vec<_>>();
         let device_operations = activation.device_operations;
-        let circle_activations = VerifiedCircleActivations::none(&commit, &recorded_ref)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        let circle_activations =
+            if matches!(commit.control(), Some(StoreControl::MergeMembership { .. })) {
+                super::store_pull::verify_merge_membership_control(
+                    storage,
+                    &root,
+                    &recorded_ref,
+                    &commit,
+                )
+                .await
+                .map_err(StoreOutboundError::InvalidOutbound)?
+            } else {
+                VerifiedCircleActivations::none(&commit, &recorded_ref)
+                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            };
         db.call(move |connection| {
             let tx = connection
                 .unchecked_transaction()
@@ -4662,10 +5482,26 @@ fn publish_prepared_merge_store_operation<'a>(
                 &circle_activations,
                 &head,
                 &activation_head.object,
+                membership_objects.as_ref(),
                 &[],
                 None,
             )?;
-            Database::record_verified_merge_materialization_on(&tx, materialization)?;
+            if let Some(completion) = membership_completion {
+                completion
+                    .complete_on(&tx, &recorded_ref)
+                    .map_err(|error| {
+                        crate::database::DbError::Message(format!(
+                            "complete exact membership journal: {error}"
+                        ))
+                    })?;
+            }
+            Database::record_verified_merge_materialization_on(&tx, materialization).map_err(
+                |error| {
+                    crate::database::DbError::Message(format!(
+                        "record exact Merge materialization: {error}"
+                    ))
+                },
+            )?;
             tx.commit().map_err(crate::database::DbError::from)
         })
         .await?;
@@ -4853,7 +5689,12 @@ pub(crate) async fn activate_test_serial_control_candidate(
         ))
     })?;
     let intent_hash = db
-        .stage_serial_membership_mutation(plan_bytes, b"test_serial_control".to_vec(), remotes)
+        .stage_membership_candidate_mutation(
+            plan_bytes,
+            b"test_serial_control".to_vec(),
+            remotes,
+            None,
+        )
         .await?;
     let root = required_store_root(db).await?;
     super::membership_ops::publish_serial_membership_wraps(db, storage, &root, &candidate, &wraps)
@@ -4882,15 +5723,18 @@ pub(crate) async fn activate_test_serial_control_candidate(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::cloud_storage::{
+        BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation,
+    };
     use crate::sync::storage::VersionedObject;
     use crate::sync::test_helpers::{
-        create_exact_test_store, host_exec, open_serial_test_db, open_test_db, temp_store_dir,
-        test_migrations, test_synced_tables,
+        create_exact_test_store, host_exec, install_active_device_fixture, open_serial_test_db,
+        open_test_db, promote_active_member_fixture, pubkey_hex, temp_store_dir, test_migrations,
+        test_synced_tables, TestCustody, TestStore,
     };
 
     #[test]
@@ -5132,6 +5976,477 @@ mod tests {
             .await
             .expect("load Serial head author");
         StoreSerialHead::parse(bytes, root, &registration).expect("verify Serial head")
+    }
+
+    #[tokio::test]
+    async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut() {
+        let owner_db = open_test_db();
+        let owner = UserKeypair::generate();
+        let writer = UserKeypair::generate();
+        let writer_pubkey = pubkey_hex(&writer);
+        let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let store = TestStore::create(&owner_db, "operation-predecessor-membership", owner.clone())
+            .await
+            .expect("create Merge Store");
+        super::super::membership_ops::invite_member(
+            &store.storage,
+            store.home.as_ref(),
+            &owner,
+            &super::super::hlc::Hlc::new("operation-predecessor-membership".to_string()),
+            &writer_pubkey,
+            None,
+            super::super::membership::MemberRole::Member,
+            &encryption,
+            store.storage.store_id(),
+            "Operation predecessor membership",
+            &owner_db,
+        )
+        .await
+        .expect("invite operation author");
+        let writer_db = open_test_db();
+        install_active_device_fixture(
+            &store,
+            &owner_db,
+            &writer_db,
+            &writer,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate operation author device");
+        promote_active_member_fixture(&store, &owner_db, &writer_db, &owner, &writer, &encryption)
+            .await
+            .expect("promote operation author to Owner");
+        let before_removal = super::super::membership_ops::load_current_exact_chain(
+            &store.storage,
+            &store.root,
+            Some(&pubkey_hex(&owner)),
+            Some(&owner_db),
+        )
+        .await
+        .expect("load membership at the writer's predecessor");
+        let predecessor_authority = before_removal
+            .write_grant_authority(&writer_pubkey)
+            .expect("predecessor membership authorizes the writer");
+        assert!(before_removal.is_owner_now(&writer_pubkey));
+
+        let custody = TestCustody::default();
+        let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
+        super::super::membership_ops::remove_member(
+            &store.storage,
+            store.home.as_ref(),
+            &owner,
+            &super::super::hlc::Hlc::new("operation-membership-removal".to_string()),
+            &writer_pubkey,
+            store.storage.store_id(),
+            &encryption,
+            &custody,
+            &cipher,
+            &PendingRotation::none(),
+            &owner_db,
+        )
+        .await
+        .expect("remove operation author after its predecessor cut");
+        let candidate = super::super::membership_ops::load_current_exact_chain(
+            &store.storage,
+            &store.root,
+            Some(&pubkey_hex(&owner)),
+            Some(&owner_db),
+        )
+        .await
+        .expect("load candidate membership after removal");
+        assert!(!candidate.can_write_now(&writer_pubkey));
+
+        let plan = prepare_store_operation_commit(
+            &writer_db,
+            &store.storage,
+            None,
+            &local_device_id(&writer_db).await,
+            &writer,
+            Some(&candidate),
+        )
+        .await
+        .expect("authorize operation at its predecessor cut");
+        let super::super::circle_control::StoreMembershipStateRef::MergeConcurrent(state) =
+            &plan.membership_state
+        else {
+            panic!("Merge operation produced Serial membership state")
+        };
+
+        assert_eq!(state.heads, before_removal.head_refs());
+        assert_eq!(state.resolutions, before_removal.resolution_refs());
+        assert_ne!(state.heads, candidate.head_refs());
+        assert_eq!(
+            plan.membership_authority,
+            StoreOperationMembershipAuthority::MergeConcurrent {
+                predecessor: predecessor_authority,
+            }
+        );
+        assert_eq!(
+            plan.owner_grant,
+            before_removal.active_owner_grant(&writer_pubkey)
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predecessor() {
+        let owner_db = open_test_db();
+        let owner = UserKeypair::generate();
+        let writer = UserKeypair::generate();
+        let writer_pubkey = pubkey_hex(&writer);
+        let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let store = TestStore::create(
+            &owner_db,
+            "direct-removal-predecessor-membership",
+            owner.clone(),
+        )
+        .await
+        .expect("create Merge Store");
+        super::super::membership_ops::invite_member(
+            &store.storage,
+            store.home.as_ref(),
+            &owner,
+            &super::super::hlc::Hlc::new("direct-removal-predecessor-membership".to_string()),
+            &writer_pubkey,
+            None,
+            super::super::membership::MemberRole::Member,
+            &encryption,
+            store.storage.store_id(),
+            "Direct removal predecessor membership",
+            &owner_db,
+        )
+        .await
+        .expect("invite operation author");
+        let writer_db = open_test_db();
+        install_active_device_fixture(
+            &store,
+            &owner_db,
+            &writer_db,
+            &writer,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate operation author device");
+        let before_removal = super::super::membership_ops::load_current_exact_chain(
+            &store.storage,
+            &store.root,
+            Some(&pubkey_hex(&owner)),
+            Some(&owner_db),
+        )
+        .await
+        .expect("load membership before direct removal");
+        assert!(before_removal.can_write_now(&writer_pubkey));
+
+        let custody = TestCustody::default();
+        let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
+        super::super::membership_ops::remove_member(
+            &store.storage,
+            store.home.as_ref(),
+            &owner,
+            &super::super::hlc::Hlc::new("direct-membership-removal".to_string()),
+            &writer_pubkey,
+            store.storage.store_id(),
+            &encryption,
+            &custody,
+            &cipher,
+            &PendingRotation::none(),
+            &owner_db,
+        )
+        .await
+        .expect("remove operation author directly");
+        let after_removal = super::super::membership_ops::load_current_exact_chain(
+            &store.storage,
+            &store.root,
+            Some(&pubkey_hex(&owner)),
+            Some(&owner_db),
+        )
+        .await
+        .expect("load membership after direct removal");
+        assert!(!after_removal.can_write_now(&writer_pubkey));
+
+        host_exec(
+            &owner_db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('direct-removal-witness', 'witness', NULL, 1, \
+                     '0000000001000-0000-owner', '2026-01-01')",
+        )
+        .await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write(
+            &owner_db,
+            &store.storage,
+            &local_device_id(&owner_db).await,
+            "2026-07-21T00:01:00Z",
+            &owner,
+            &store_dir,
+            Some(&after_removal),
+        )
+        .await
+        .expect("prepare removal-witnessing predecessor commit"));
+        let prepared = owner_db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load removal-witnessing predecessor")
+            .expect("removal-witnessing predecessor exists");
+        let super::super::circle_control::StoreMembershipStateRef::MergeConcurrent(
+            predecessor_membership,
+        ) = &prepared.commit.value.membership_state
+        else {
+            panic!("Merge predecessor produced Serial membership state")
+        };
+        assert_eq!(predecessor_membership.heads, after_removal.head_refs());
+        let predecessor = prepared.head.value.commit.clone();
+        assert_eq!(
+            drain_store_writes(&owner_db, &store.storage).await.unwrap(),
+            1
+        );
+
+        let (root, registration_ref, _, _) =
+            load_local_store_authority(&writer_db, &local_device_id(&writer_db).await, &writer)
+                .await
+                .expect("load removed writer registration");
+        let super::super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
+            predecessor.coord
+        else {
+            panic!("Merge predecessor has Serial coordinate")
+        };
+        let order = super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+            seq: 1,
+            predecessor: None,
+            dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
+        };
+        let result = super::super::store_pull::load_merge_outbound_authorization(
+            &store.storage,
+            &root,
+            &order,
+            before_removal.head_refs(),
+            &registration_ref,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an older Direct cut re-authorized a member removed in the exact predecessor"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_outbound_authorization_admits_direct_membership_after_its_predecessor() {
+        let owner_db = open_test_db();
+        let owner = UserKeypair::generate();
+        let owner_pubkey = pubkey_hex(&owner);
+        let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let store = TestStore::create(
+            &owner_db,
+            "new-direct-predecessor-membership",
+            owner.clone(),
+        )
+        .await
+        .expect("create Merge Store");
+        let predecessor_membership = super::super::membership_ops::load_and_persist_owner_anchor(
+            &store.storage,
+            &store.root,
+            &owner_pubkey,
+            &owner_db,
+        )
+        .await
+        .expect("load predecessor membership");
+        host_exec(
+            &owner_db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('new-direct-witness', 'witness', NULL, 1, \
+                     '0000000001000-0000-owner', '2026-01-01')",
+        )
+        .await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write(
+            &owner_db,
+            &store.storage,
+            &local_device_id(&owner_db).await,
+            "2026-07-21T00:00:00Z",
+            &owner,
+            &store_dir,
+            Some(&predecessor_membership),
+        )
+        .await
+        .expect("prepare predecessor commit"));
+        let predecessor = owner_db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load predecessor commit")
+            .expect("predecessor commit exists")
+            .head
+            .value
+            .commit;
+        assert_eq!(
+            drain_store_writes(&owner_db, &store.storage).await.unwrap(),
+            1
+        );
+
+        let new_member = UserKeypair::generate();
+        let new_member_pubkey = pubkey_hex(&new_member);
+        super::super::membership_ops::invite_member(
+            &store.storage,
+            store.home.as_ref(),
+            &owner,
+            &super::super::hlc::Hlc::new("new-direct-membership".to_string()),
+            &new_member_pubkey,
+            None,
+            super::super::membership::MemberRole::Member,
+            &encryption,
+            store.storage.store_id(),
+            "New Direct membership",
+            &owner_db,
+        )
+        .await
+        .expect("publish new Direct membership");
+        let candidate = super::super::membership_ops::load_current_exact_chain(
+            &store.storage,
+            &store.root,
+            Some(&owner_pubkey),
+            Some(&owner_db),
+        )
+        .await
+        .expect("load candidate with new Direct membership");
+        assert!(candidate.can_write_now(&new_member_pubkey));
+
+        let (root, registration_ref, _, _) =
+            load_local_store_authority(&owner_db, &local_device_id(&owner_db).await, &owner)
+                .await
+                .expect("load owner registration");
+        let super::super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
+            predecessor.coord
+        else {
+            panic!("Merge predecessor has Serial coordinate")
+        };
+        let order = super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+            seq: predecessor.coord.sequence() + 1,
+            predecessor: Some(predecessor.clone()),
+            dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
+        };
+        let authorization = super::super::store_pull::load_merge_outbound_authorization(
+            &store.storage,
+            &root,
+            &order,
+            candidate.head_refs(),
+            &registration_ref,
+        )
+        .await
+        .expect("authorize membership that causally extends the predecessor");
+
+        assert_eq!(authorization.membership.head_refs(), candidate.head_refs());
+        assert!(authorization.membership.can_write_now(&new_member_pubkey));
+    }
+
+    #[tokio::test]
+    async fn conflict_resolution_preparation_ignores_a_tampered_local_device_projection() {
+        let owner_db = open_test_db();
+        let owner = UserKeypair::generate();
+        let store = TestStore::create(
+            &owner_db,
+            "conflict-resolution-remote-device-authority",
+            owner.clone(),
+        )
+        .await
+        .expect("create Merge Store");
+        let chain = store
+            .open_into(&owner_db)
+            .await
+            .expect("load exact founder membership");
+        let changeset = super::super::test_helpers::capture_bytes(
+            &open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('remote-device-authority', 'authority', NULL, 1, \
+                         '0000000001000-0000-owner', '2026-01-01')",
+            ],
+        )
+        .await;
+        store
+            .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
+            .await
+            .expect("publish exact predecessor commit");
+        let device_id = local_device_id(&owner_db).await;
+        let expected = prepare_merge_conflict_resolution_commit(
+            &owner_db,
+            &store.storage,
+            &device_id,
+            &owner,
+            chain.head_refs(),
+        )
+        .await
+        .expect("prepare from verified device history")
+        .device_state()
+        .clone();
+        let (_, mut forged_registration, _, _) =
+            load_local_store_authority(&owner_db, &device_id, &owner)
+                .await
+                .expect("load exact local authority");
+        forged_registration.device_id = super::super::store_commit::StoreDeviceId::derive(
+            &store.root,
+            &super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
+                creation_id: super::super::store_commit::StoreCreationId::from_nonce(
+                    "forged-local-projection",
+                ),
+            },
+        );
+        owner_db
+            .call(move |connection| {
+                let rows = {
+                    let mut statement = connection
+                        .prepare("SELECT commit_ref, state FROM store_device_state_snapshots")
+                        .map_err(crate::database::DbError::from)?;
+                    let rows = statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(crate::database::DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(crate::database::DbError::from)?;
+                    rows
+                };
+                for (commit, encoded) in rows {
+                    let state: super::super::store_commit::ResolvedStoreDeviceState =
+                        serde_json::from_str(&encoded).map_err(|error| {
+                            crate::database::DbError::Message(format!(
+                                "parse test Store device snapshot: {error}"
+                            ))
+                        })?;
+                    let forged = state
+                        .activate_registration(forged_registration.clone(), None)
+                        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+                    connection
+                        .execute(
+                            "UPDATE store_device_state_snapshots SET state = ?1 \
+                             WHERE commit_ref = ?2",
+                            rusqlite::params![
+                                serde_json::to_string(&forged).map_err(|error| {
+                                    crate::database::DbError::Message(format!(
+                                        "serialize forged Store device snapshot: {error}"
+                                    ))
+                                })?,
+                                commit,
+                            ],
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("tamper local Store device projection");
+
+        let actual = prepare_merge_conflict_resolution_commit(
+            &owner_db,
+            &store.storage,
+            &device_id,
+            &owner,
+            chain.head_refs(),
+        )
+        .await
+        .expect("prepare from exact remote predecessor history")
+        .device_state()
+        .clone();
+
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
@@ -6112,10 +7427,11 @@ mod tests {
             .membership_control_remote_objects(std::slice::from_ref(&wrapped))
             .expect("close losing membership ownership");
         let intent_hash = db
-            .stage_serial_membership_mutation(
+            .stage_membership_candidate_mutation(
                 serde_json::to_vec(&candidate).expect("serialize losing candidate"),
                 b"candidate_pending".to_vec(),
                 remotes,
+                None,
             )
             .await
             .expect("atomically stage losing membership ownership");
@@ -6147,31 +7463,35 @@ mod tests {
         };
         assert_eq!(*returned, candidate);
         let cleanup = db
-            .begin_serial_membership_candidate_nonactivation(
+            .begin_membership_candidate_nonactivation(
                 intent_hash,
                 candidate.reference.clone(),
+                vec![candidate.reference.object.clone()],
                 vec![wrapped.reference.object.clone()],
                 b"candidate_nonactivating".to_vec(),
                 *nonactivation,
             )
             .await
             .expect("terminalize losing membership candidate");
-        assert_eq!(cleanup.object, candidate.reference.object);
+        assert_eq!(cleanup.len(), 1);
+        assert_eq!(cleanup[0].object, candidate.reference.object);
         assert!(db
             .protocol_inert_object(wrapped.reference.object.clone())
             .await
             .expect("read protocol-inert membership wrap")
             .is_some());
-        crate::sync::store_objects::delete_exact_object(&storage, &cleanup.object)
+        crate::sync::store_objects::delete_exact_object(&storage, &cleanup[0].object)
             .await
             .expect("delete only the losing membership commit");
-        db.mark_candidate_cleanup_absent(cleanup.object)
+        db.mark_candidate_cleanup_absent(cleanup[0].object.clone())
             .await
             .expect("record exact losing commit absence");
-        db.complete_nonactivating_serial_membership_mutation(
+        db.complete_nonactivating_membership_candidate_mutation(
             intent_hash,
             candidate.reference.clone(),
+            vec![candidate.reference.object.clone()],
             vec![wrapped.reference.object.clone()],
+            None,
         )
         .await
         .expect("complete losing membership ownership");

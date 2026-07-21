@@ -11,6 +11,7 @@
 //! reaches the cloud at all, and whether the removed member's superseded key
 //! can open it.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,9 +34,14 @@ use crate::sync::membership_ops::{
     invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
     MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
+use crate::sync::storage::{
+    CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError, StorageError,
+    SyncStorage, VersionToken, VersionedObject,
+};
 use crate::sync::store_commit::{StoreDeviceRegistration, StoreRootRef, StoreSerialHeadState};
 use crate::sync::test_helpers::{
-    host_exec, open_serial_test_db, open_test_db, pubkey_hex, temp_store_dir, TestCustody,
+    host_exec, open_serial_test_db, open_test_db, pubkey_hex, temp_store_dir, test_migrations,
+    test_synced_tables, TestCustody,
 };
 
 const LIB_ID: &str = "rotation-pending-test";
@@ -89,6 +95,7 @@ async fn founder_registration(
 /// store and returns a dummy S3 grant, exactly so `invite_member`'s access-grant
 /// step (irrelevant here — these tests are about the store-key rotation, not
 /// provider access control) does not stand in the way of building the chain.
+#[derive(Clone)]
 struct GrantingCloudHome(InMemoryCloudHome);
 
 #[async_trait]
@@ -139,6 +146,652 @@ impl CloudHome for GrantingCloudHome {
             absent => self.0.set_access(absent).await,
         }
     }
+}
+
+#[derive(Clone)]
+struct SerialMembershipFixture {
+    storage: Arc<CloudSyncStorage>,
+    home: GrantingCloudHome,
+    db: crate::database::Database,
+    _directory: Arc<tempfile::TempDir>,
+    db_path: std::path::PathBuf,
+    owner: UserKeypair,
+    member: UserKeypair,
+    device_id: String,
+    key: [u8; 32],
+}
+
+impl SerialMembershipFixture {
+    async fn create(key: [u8; 32]) -> Self {
+        let home = InMemoryCloudHome::new();
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let directory = Arc::new(tempfile::tempdir().expect("create Serial membership database"));
+        let db_path = directory.path().join("store.sqlite3");
+        let storage = Arc::new(
+            storage_for(&home, key, &owner).with_test_serial_coordination(Arc::new(home.clone())),
+        );
+        let (db, _stamper) = crate::database::Database::open(
+            &db_path,
+            test_synced_tables(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "test-device".to_string(),
+            &test_migrations(),
+        )
+        .expect("open file-backed Serial membership database");
+        create_test_store(&db, storage.as_ref(), &owner).await;
+        let device_id = local_store_device_id(&db).await;
+        Self {
+            storage,
+            home: GrantingCloudHome(home),
+            db,
+            _directory: directory,
+            db_path,
+            owner,
+            member,
+            device_id,
+            key,
+        }
+    }
+
+    async fn restart(self, encryption: EncryptionService) -> Self {
+        let Self {
+            storage,
+            home,
+            db,
+            _directory,
+            db_path,
+            owner,
+            member,
+            device_id,
+            key,
+        } = self;
+        drop(db);
+        drop(storage);
+
+        let (db, _stamper) = crate::database::Database::open(
+            &db_path,
+            test_synced_tables(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "test-device".to_string(),
+            &test_migrations(),
+        )
+        .expect("reopen file-backed Serial membership database");
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home.0.clone()),
+                CloudCipher::Encrypted(encryption),
+                BlobPathScheme::Hashed,
+                LIB_ID,
+                owner.clone(),
+            )
+            .expect("rebuild exact test cloud storage")
+            .with_test_serial_coordination(Arc::new(home.0.clone())),
+        );
+        crate::sync::cloud_storage::restore_pending_rotation(
+            &db,
+            storage.shared_pending_rotation().as_ref(),
+        )
+        .await
+        .expect("restore durable rotation gate");
+
+        Self {
+            storage,
+            home,
+            db,
+            _directory,
+            db_path,
+            owner,
+            member,
+            device_id,
+            key,
+        }
+    }
+
+    async fn invite(&self) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+        invite_member_with_coordination(
+            self.storage.as_ref(),
+            &self.home,
+            &self.owner,
+            &Hlc::new(DEVICE_ID.to_string()),
+            &pubkey_hex(&self.member),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key(self.key),
+            LIB_ID,
+            "Serial Store",
+            &self.db,
+            Some(crate::sync::membership_ops::SerialMembershipContext {
+                coordination: self.storage.serial_coordination().unwrap(),
+                device_id: self.device_id.clone(),
+            }),
+        )
+        .await
+    }
+
+    async fn remove(
+        &self,
+        custody: &dyn crate::keys::MasterKeyCustody,
+        cipher: &dyn CloudCipherAccess,
+    ) -> Result<String, MembershipOpsError> {
+        self.remove_with_coordination(custody, cipher, self.storage.serial_coordination().unwrap())
+            .await
+    }
+
+    async fn remove_with_coordination(
+        &self,
+        custody: &dyn crate::keys::MasterKeyCustody,
+        cipher: &dyn CloudCipherAccess,
+        coordination: &dyn CoordinationStorage,
+    ) -> Result<String, MembershipOpsError> {
+        remove_member_with_coordination(
+            self.storage.as_ref(),
+            &self.home,
+            &self.owner,
+            &Hlc::new(DEVICE_ID.to_string()),
+            &pubkey_hex(&self.member),
+            LIB_ID,
+            &EncryptionService::from_key(self.key),
+            custody,
+            cipher,
+            self.storage.shared_pending_rotation().as_ref(),
+            &self.db,
+            Some(crate::sync::membership_ops::SerialMembershipContext {
+                coordination,
+                device_id: self.device_id.clone(),
+            }),
+        )
+        .await
+    }
+}
+
+struct RefreshHeadVersionBeforeFirstReplace {
+    inner: Arc<CloudSyncStorage>,
+    refreshed: AtomicBool,
+    replacements: AtomicUsize,
+}
+
+#[async_trait]
+impl CoordinationStorage for RefreshHeadVersionBeforeFirstReplace {
+    async fn provider_binding(
+        &self,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError> {
+        CoordinationStorage::provider_binding(self.inner.as_ref()).await
+    }
+
+    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+        self.inner.read_head(key).await
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, CreateHeadError> {
+        self.inner.create_head(key, bytes).await
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &VersionToken,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, ReplaceHeadError> {
+        self.replacements.fetch_add(1, Ordering::SeqCst);
+        if !self.refreshed.swap(true, Ordering::SeqCst) {
+            let current = self.inner.read_head(key).await?;
+            self.inner
+                .replace_head(key, expected, &current.bytes)
+                .await?;
+            return Err(ReplaceHeadError::VersionMismatch);
+        }
+        self.inner.replace_head(key, expected, bytes).await
+    }
+
+    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
+        self.inner.delete_head(key).await
+    }
+}
+
+async fn activate_external_serial_member_role(
+    fixture: &SerialMembershipFixture,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    created_at: &str,
+) -> crate::sync::store_outbound::PreparedStoreOperationCommit {
+    let root = fixture
+        .db
+        .local_store_root_ref()
+        .await
+        .expect("read Serial Store root")
+        .expect("Serial Store root exists");
+    let authorization = crate::sync::store_outbound::current_serial_authorization(
+        &fixture.db,
+        fixture.storage.as_ref(),
+        fixture.storage.serial_coordination().unwrap(),
+    )
+    .await
+    .expect("load current Serial authorization");
+    assert_eq!(
+        authorization.key_generation,
+        encryption.current_generation()
+    );
+    let member_pubkey = pubkey_hex(&fixture.member);
+    let wrapped_key = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+        fixture.storage.as_ref(),
+        root.store_root_hash,
+        &member_pubkey,
+        crate::sync::invite::signed_serial_wrapped_key(
+            &root.store_root_id.to_string(),
+            &member_pubkey,
+            encryption,
+            &fixture.owner,
+        )
+        .expect("sign external Serial wrapped key"),
+    )
+    .await
+    .expect("prepare external Serial wrapped key");
+    let entry = authorization
+        .membership
+        .signed_set_member_with_wrapped_key(
+            &fixture.owner,
+            member_pubkey,
+            None,
+            role,
+            wrapped_key.reference.clone(),
+            created_at.to_string(),
+        )
+        .expect("prepare external Serial membership change");
+    crate::sync::store_outbound::activate_test_serial_control_candidate(
+        &fixture.db,
+        fixture.storage.as_ref(),
+        fixture.storage.serial_coordination().unwrap(),
+        &fixture.device_id,
+        &fixture.owner,
+        crate::sync::store_commit::StoreControl::SerialMembership { entry },
+        vec![wrapped_key],
+    )
+    .await
+    .expect("activate external Serial membership change")
+}
+
+#[tokio::test]
+async fn serial_invite_retries_after_head_cas_before_sqlite_materialization() {
+    let fixture = SerialMembershipFixture::create([0x30; 32]).await;
+    let (head_activated, _resume) = fixture
+        .db
+        .arm_test_pause(crate::database::DatabaseTestPoint::SerialStoreHeadActivated);
+    let mut task = {
+        let fixture = fixture.clone();
+        tokio::spawn(async move { fixture.invite().await })
+    };
+    tokio::select! {
+        () = head_activated.notified() => {}
+        result = &mut task => panic!("Serial invitation finished before its head pause: {result:?}"),
+    }
+    assert!(!fixture
+        .db
+        .serial_membership_state()
+        .await
+        .expect("read pre-materialization Serial membership")
+        .expect("Serial membership is initialized")
+        .can_write(&pubkey_hex(&fixture.member)));
+    task.abort();
+    task.await
+        .expect_err("simulate process loss after head CAS");
+    let key = fixture.key;
+    let fixture = fixture.restart(EncryptionService::from_key(key)).await;
+
+    let code = fixture
+        .invite()
+        .await
+        .expect("retry materializes the already-activated invitation");
+    assert!(matches!(
+        code.membership_floor,
+        crate::join_code::MembershipFloor::Serial(Some(_))
+    ));
+    assert!(fixture
+        .db
+        .serial_membership_state()
+        .await
+        .expect("read retried Serial membership")
+        .expect("Serial membership is initialized")
+        .can_write(&pubkey_hex(&fixture.member)));
+}
+
+#[tokio::test]
+async fn serial_materialization_records_activated_invite_progress_atomically() {
+    let fixture = SerialMembershipFixture::create([0x31; 32]).await;
+    let (materialized, _resume) = fixture
+        .db
+        .arm_test_pause(crate::database::DatabaseTestPoint::SerialStoreMaterialized);
+    let mut task = {
+        let fixture = fixture.clone();
+        tokio::spawn(async move { fixture.invite().await })
+    };
+    tokio::select! {
+        () = materialized.notified() => {}
+        result = &mut task => panic!("Serial invitation finished before materialization pause: {result:?}"),
+    }
+    let mutation = fixture
+        .db
+        .outbound_membership_mutation()
+        .await
+        .expect("read materialized Serial invitation")
+        .expect("materialized Serial invitation remains resumable");
+    let progress: serde_json::Value = serde_json::from_slice(&mutation.progress_bytes)
+        .expect("parse materialized Serial invitation progress");
+    assert_eq!(progress["state"], "activated");
+    task.abort();
+    task.await
+        .expect_err("simulate process loss after materialization");
+
+    let code = fixture
+        .invite()
+        .await
+        .expect("retry terminalizes the materialized invitation");
+    let receipt = fixture
+        .db
+        .terminal_serial_invite_mutation()
+        .await
+        .expect("read terminal Serial invitation")
+        .expect("terminal Serial invitation receipt exists");
+    let receipt_code: crate::join_code::InviteCode = serde_json::from_slice(&receipt.result_bytes)
+        .expect("parse terminal Serial invitation result");
+    assert_eq!(
+        crate::join_code::encode(&code),
+        crate::join_code::encode(&receipt_code)
+    );
+}
+
+#[tokio::test]
+async fn serial_removal_activation_retains_payload_and_committed_gate_until_adoption() {
+    let fixture = SerialMembershipFixture::create([0x32; 32]).await;
+    fixture.invite().await.expect("invite Serial member");
+    let custody = Arc::new(TestCustody::default());
+    custody.set_initial_key(fixture.key);
+    let cipher = fixture.storage.cipher_state().clone();
+    let (before_adoption, _resume) = fixture
+        .db
+        .arm_test_pause(crate::database::DatabaseTestPoint::SerialRemovalBeforeAdoption);
+    let mut task = {
+        let fixture = fixture.clone();
+        let custody = Arc::clone(&custody);
+        let cipher = cipher.clone();
+        tokio::spawn(async move { fixture.remove(custody.as_ref(), cipher.as_ref()).await })
+    };
+    tokio::select! {
+        () = before_adoption.notified() => {}
+        result = &mut task => panic!("Serial removal finished before adoption pause: {result:?}"),
+    }
+    let mutation = fixture
+        .db
+        .outbound_membership_mutation()
+        .await
+        .expect("read activated Serial removal")
+        .expect("activated Serial removal retains its journal");
+    let plan: serde_json::Value =
+        serde_json::from_slice(&mutation.plan_bytes).expect("parse activated Serial removal plan");
+    assert!(plan["keyring_payload"]
+        .as_array()
+        .is_some_and(|payload| !payload.is_empty()));
+    let progress: serde_json::Value = serde_json::from_slice(&mutation.progress_bytes)
+        .expect("parse activated Serial removal progress");
+    assert_eq!(progress["state"], "activated");
+    assert_eq!(
+        fixture
+            .storage
+            .shared_pending_rotation()
+            .pending_generation(),
+        Some(2)
+    );
+    task.abort();
+    task.await
+        .expect_err("simulate process loss before key adoption");
+    let key = fixture.key;
+    let fixture = fixture.restart(EncryptionService::from_key(key)).await;
+    assert!(matches!(
+        fixture.storage.store_blob_protection(),
+        Err(StorageError::RotationPending(_))
+    ));
+    let restarted_cipher = fixture.storage.cipher_state().clone();
+
+    fixture
+        .remove(custody.as_ref(), restarted_cipher.as_ref())
+        .await
+        .expect("retry adopts the activated Serial removal");
+    fixture
+        .storage
+        .store_blob_protection()
+        .expect("Store-encrypted sealing resumes after adoption");
+}
+
+#[tokio::test]
+async fn serial_removal_retry_returns_the_terminal_result_after_lost_response() {
+    let fixture = SerialMembershipFixture::create([0x33; 32]).await;
+    fixture.invite().await.expect("invite Serial member");
+    let custody = Arc::new(TestCustody::default());
+    custody.set_initial_key(fixture.key);
+    let cipher = fixture.storage.cipher_state().clone();
+    let (terminalized, _resume) = fixture
+        .db
+        .arm_test_pause(crate::database::DatabaseTestPoint::SerialMembershipTerminalized);
+    let mut task = {
+        let fixture = fixture.clone();
+        let custody = Arc::clone(&custody);
+        let cipher = cipher.clone();
+        tokio::spawn(async move { fixture.remove(custody.as_ref(), cipher.as_ref()).await })
+    };
+    tokio::select! {
+        () = terminalized.notified() => {}
+        result = &mut task => panic!("Serial removal finished before terminal pause: {result:?}"),
+    }
+    let expected = match cipher.snapshot() {
+        CloudCipher::Encrypted(encryption) => encryption.fingerprint(),
+        CloudCipher::Plaintext => panic!("Serial removal changed to plaintext"),
+    };
+    task.abort();
+    task.await
+        .expect_err("simulate a lost terminal removal response");
+    let persisted = crate::keys::MasterKeyCustody::unlock(custody.as_ref())
+        .expect("unlock persisted rotated keyring")
+        .expect("rotated keyring is persisted");
+    let fixture = fixture.restart(EncryptionService::from(persisted)).await;
+    let restarted_cipher = fixture.storage.cipher_state().clone();
+
+    let retried = fixture
+        .remove(custody.as_ref(), restarted_cipher.as_ref())
+        .await
+        .expect("retry returns the durable terminal removal result");
+    assert_eq!(retried, expected);
+    assert!(fixture
+        .db
+        .outbound_membership_mutation()
+        .await
+        .expect("read active membership journal")
+        .is_none());
+    assert_eq!(
+        fixture
+            .storage
+            .shared_pending_rotation()
+            .pending_generation(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn serial_removal_reprepare_replaces_the_exact_rotation_owner() {
+    let fixture = SerialMembershipFixture::create([0x36; 32]).await;
+    fixture.invite().await.expect("invite Serial member");
+    let custody = Arc::new(TestCustody::default());
+    custody.set_initial_key(fixture.key);
+    let cipher = fixture.storage.cipher_state().clone();
+    let coordination = RefreshHeadVersionBeforeFirstReplace {
+        inner: Arc::clone(&fixture.storage),
+        refreshed: AtomicBool::new(false),
+        replacements: AtomicUsize::new(0),
+    };
+    let (before_adoption, resume) = fixture
+        .db
+        .arm_test_pause(crate::database::DatabaseTestPoint::SerialRemovalBeforeAdoption);
+    let mut task = {
+        let fixture = fixture.clone();
+        let custody = Arc::clone(&custody);
+        let cipher = cipher.clone();
+        tokio::spawn(async move {
+            fixture
+                .remove_with_coordination(custody.as_ref(), cipher.as_ref(), &coordination)
+                .await
+                .map(|result| (result, coordination.replacements.load(Ordering::SeqCst)))
+        })
+    };
+    tokio::select! {
+        () = before_adoption.notified() => {}
+        result = &mut task => panic!("reprepared Serial removal finished before adoption pause: {result:?}"),
+    }
+    let mutation = fixture
+        .db
+        .outbound_membership_mutation()
+        .await
+        .expect("read activated reprepared removal")
+        .expect("reprepared removal remains resumable before adoption");
+    let gate: serde_json::Value = serde_json::from_str(
+        &fixture
+            .db
+            .get_protocol_state(crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY)
+            .await
+            .expect("read durable rotation gate")
+            .expect("committed rotation gate remains durable"),
+    )
+    .expect("parse durable rotation gate");
+    assert_eq!(
+        gate["local_committed"]["mutation"].as_str(),
+        Some(mutation.intent_hash.to_string().as_str())
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .shared_pending_rotation()
+            .pending_generation(),
+        Some(2)
+    );
+    resume.notify_one();
+    let (result, replacements) = task
+        .await
+        .expect("join reprepared Serial removal")
+        .expect("reprepared Serial removal activates and adopts");
+    assert_eq!(replacements, 2);
+    let receipt = fixture
+        .db
+        .terminal_serial_removal_mutation()
+        .await
+        .expect("read terminal reprepared removal")
+        .expect("reprepared removal terminal receipt exists");
+    let receipt_result: String =
+        serde_json::from_slice(&receipt.result_bytes).expect("parse terminal removal result");
+    assert_eq!(result, receipt_result);
+    assert!(fixture
+        .db
+        .outbound_membership_mutation()
+        .await
+        .expect("read completed membership journal")
+        .is_none());
+    assert_eq!(
+        fixture
+            .storage
+            .shared_pending_rotation()
+            .pending_generation(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn serial_invite_does_not_reuse_receipt_after_remote_role_change() {
+    let fixture = SerialMembershipFixture::create([0x34; 32]).await;
+    let first = fixture.invite().await.expect("invite Serial member");
+    activate_external_serial_member_role(
+        &fixture,
+        MemberRole::Follower,
+        &EncryptionService::from_key(fixture.key),
+        "0000000000002-0000-external",
+    )
+    .await;
+
+    let second = fixture
+        .invite()
+        .await
+        .expect("re-invite after external role change");
+
+    assert_ne!(
+        crate::join_code::encode(&first),
+        crate::join_code::encode(&second)
+    );
+    let authorization = crate::sync::store_outbound::current_serial_authorization(
+        &fixture.db,
+        fixture.storage.as_ref(),
+        fixture.storage.serial_coordination().unwrap(),
+    )
+    .await
+    .expect("load re-invited Serial authorization");
+    assert_eq!(
+        authorization
+            .membership
+            .current_members()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        std::collections::BTreeMap::from([
+            (pubkey_hex(&fixture.owner), MemberRole::Owner),
+            (pubkey_hex(&fixture.member), MemberRole::Member),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn serial_removal_does_not_reuse_receipt_after_remote_reinvite() {
+    let fixture = SerialMembershipFixture::create([0x35; 32]).await;
+    fixture.invite().await.expect("invite Serial member");
+    let custody = Arc::new(TestCustody::default());
+    custody.set_initial_key(fixture.key);
+    let cipher = fixture.storage.cipher_state().clone();
+    let first = fixture
+        .remove(custody.as_ref(), cipher.as_ref())
+        .await
+        .expect("remove Serial member");
+    let current_encryption = match cipher.snapshot() {
+        CloudCipher::Encrypted(encryption) => encryption,
+        CloudCipher::Plaintext => panic!("Serial removal changed to plaintext"),
+    };
+    activate_external_serial_member_role(
+        &fixture,
+        MemberRole::Member,
+        &current_encryption,
+        "0000000000003-0000-external",
+    )
+    .await;
+
+    let second = fixture
+        .remove(custody.as_ref(), cipher.as_ref())
+        .await
+        .expect("remove externally re-invited Serial member");
+
+    assert_ne!(first, second);
+    let authorization = crate::sync::store_outbound::current_serial_authorization(
+        &fixture.db,
+        fixture.storage.as_ref(),
+        fixture.storage.serial_coordination().unwrap(),
+    )
+    .await
+    .expect("load second Serial removal authorization");
+    assert_eq!(authorization.key_generation, 3);
+    assert!(!authorization
+        .membership
+        .current_members()
+        .iter()
+        .any(|(pubkey, _)| pubkey == &pubkey_hex(&fixture.member)));
 }
 
 #[tokio::test]
@@ -621,14 +1274,10 @@ async fn found_add_and_fail_to_adopt_a_removal(
     (storage, hlc, store_root)
 }
 
-/// The defect this closes: today, a device whose adoption fails keeps sealing
-/// new changesets under the superseded generation — the removed member's key
-/// still opens them. Driving `remove_member` into that failure, writing a row,
-/// and running a cycle must instead produce no cloud object at all, with the
-/// cycle reporting the rotation-pending state rather than silently sealing or
-/// hard-failing the whole cycle.
+/// A failed adoption remains a loud cycle failure and the durable rotation gate
+/// prevents the queued write from being sealed under the removed member's key.
 #[tokio::test]
-async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
+async fn failed_rotation_adoption_fails_the_cycle_before_sealing() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let old_key: [u8; 32] = [40u8; 32];
@@ -653,7 +1302,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     let (_tmp, store_dir) = temp_store_dir();
     let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
-    let result = run_single_sync_cycle(
+    run_single_sync_cycle(
         &storage,
         &device_id,
         &hlc,
@@ -668,12 +1317,18 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
         None,
     )
     .await
-    .expect("the cycle reports rotation-pending rather than hard-failing");
+    .expect_err("the cycle reports the failed key adoption");
 
-    let pending = result
-        .rotation_pending
-        .expect("the cycle reports the rotation-pending state");
-    assert_eq!(pending.committed_generation, 2);
+    let pending = pending_rotation
+        .check(&cipher_lock.snapshot())
+        .expect_err("the rotation gate remains armed");
+    assert_eq!(
+        pending.state,
+        super::cloud_storage::RotationPendingState::LocalCommittedAndPeer {
+            local_generation: 2,
+            peer_generation: 2,
+        }
+    );
     assert_eq!(pending.live_generation, 1);
 
     assert_eq!(
@@ -720,7 +1375,7 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
     let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
 
-    // Still stuck: a cycle now seals nothing.
+    // The failed refresh reports its error and seals nothing.
     run_single_sync_cycle(
         &storage,
         &device_id,
@@ -736,7 +1391,7 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
         None,
     )
     .await
-    .expect("still-pending cycle");
+    .expect_err("key persistence failure aborts the cycle");
     assert_eq!(
         db.latest_local_store_position().await.unwrap(),
         None,
@@ -795,11 +1450,11 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
     ));
 }
 
-/// The other remedy: without ever retrying the removal, the next sync cycle's
-/// own refresh reads the exact wrapped key named by the committed removal and
-/// adopts it, clearing the gate the same way.
+/// Authorization refresh may adopt the key bytes, but it cannot complete a local
+/// removal journal. Only retrying that exact membership operation owns the local
+/// completion transition.
 #[tokio::test]
-async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changeset() {
+async fn authorization_refresh_does_not_complete_a_local_removal() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let old_key: [u8; 32] = [42u8; 32];
@@ -840,15 +1495,15 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
         None,
     )
     .await
-    .expect("still-pending cycle");
+    .expect_err("key persistence failure aborts the cycle");
     assert_eq!(
         db.latest_local_store_position().await.unwrap(),
         None,
         "the queued Store write has no published commit while rotation is pending",
     );
 
-    // No retried removal — custody just becomes writable again, and the next
-    // cycle's own refresh adopts the rotation.
+    // The refresh can adopt the selected key, but the exact local removal still
+    // owns journal completion.
     custody.allow_writes();
     let result = run_single_sync_cycle(
         &storage,
@@ -865,14 +1520,16 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
         None,
     )
     .await
-    .expect("cycle that adopts the rotation");
-    assert!(result.rotation_pending.is_none());
-    assert_eq!(pending_rotation.pending_generation(), None);
-
-    db.latest_local_store_position()
-        .await
-        .expect("read published Store position")
-        .expect("published Store write has an exact commit reference");
+    .expect("cycle reports the still-open local rotation gate");
+    assert!(matches!(
+        result.rotation_pending.map(|pending| pending.state),
+        Some(super::cloud_storage::RotationPendingState::LocalCommitted { generation: 2 })
+    ));
+    assert_eq!(
+        db.latest_local_store_position().await.unwrap(),
+        None,
+        "the queued Store write remains unpublished until the removal completes",
+    );
     assert!(matches!(
         cipher_lock.snapshot(),
         CloudCipher::Encrypted(encryption) if encryption.current_generation() == 2

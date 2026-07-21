@@ -4835,28 +4835,24 @@ mod tests {
 
     #[tokio::test]
     async fn serial_circle_cannot_activate_from_authorization_before_a_removal_head() {
-        let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
         let successor = UserKeypair::generate();
-        let storage = serial_storage(&home, &founder, "circle-serial-authority-race");
         let db = open_serial_test_db();
-        let (storage, root) = create_exact_serial_store_in_its_own_task(
-            &db,
-            storage,
-            "circle-serial-authority-race",
-            &founder,
-        )
-        .await;
+        let store = TestStore::create(&db, "circle-serial-authority-race", founder.clone())
+            .await
+            .expect("create exact Serial Circle test Store");
+        let storage = &store.storage;
+        let root = store.root.clone();
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
 
         let authorization =
-            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+            super::super::store_outbound::current_serial_authorization(&db, storage, coordination)
                 .await
                 .expect("founder authorization");
         let successor_pubkey = keys::public_key_hex(&successor);
         let successor_wrap = prepare_serial_test_wrap(
-            &storage,
+            storage,
             &root,
             &founder,
             &successor_pubkey,
@@ -4870,14 +4866,14 @@ mod tests {
                 &founder,
                 successor_pubkey.clone(),
                 None,
-                MemberRole::Owner,
+                MemberRole::Member,
                 successor_wrap.reference.clone(),
                 "0000000000001-0000-founder".to_string(),
             )
-            .expect("add successor owner");
+            .expect("add successor member");
         super::super::store_outbound::activate_test_serial_control_candidate(
             &db,
-            &storage,
+            storage,
             coordination,
             &device_id,
             &founder,
@@ -4888,6 +4884,26 @@ mod tests {
         )
         .await
         .expect("activate successor addition");
+        let successor_db = open_serial_test_db();
+        install_active_device_fixture(
+            &store,
+            &db,
+            &successor_db,
+            &successor,
+            "0000000000500-0000-successor",
+        )
+        .await
+        .expect("activate successor device");
+        crate::sync::test_helpers::promote_active_member_fixture(
+            &store,
+            &db,
+            &successor_db,
+            &founder,
+            &successor,
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("promote active successor Owner");
         let authorization_head = coordination
             .read_head(serial_head_key())
             .await
@@ -4895,7 +4911,7 @@ mod tests {
             .bytes;
 
         let authorization =
-            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+            super::super::store_outbound::current_serial_authorization(&db, storage, coordination)
                 .await
                 .expect("authorization before removal");
         let remove_founder = authorization
@@ -4907,7 +4923,7 @@ mod tests {
             )
             .expect("remove founder");
         let removal_wrap = prepare_serial_test_wrap(
-            &storage,
+            storage,
             &root,
             &founder,
             &successor_pubkey,
@@ -4917,7 +4933,7 @@ mod tests {
         .await;
         super::super::store_outbound::activate_test_serial_control_candidate(
             &db,
-            &storage,
+            storage,
             coordination,
             &device_id,
             &founder,
@@ -4938,7 +4954,7 @@ mod tests {
         };
         let journal = prepare_circle_operation(
             &db,
-            &storage,
+            storage,
             Some(&changed),
             &device_id,
             "0000000001000-0000-founder",
@@ -4953,7 +4969,7 @@ mod tests {
 
         let error = publish_circle_operation(
             &db,
-            &storage,
+            storage,
             Some(coordination),
             &journal.operation_id,
             &founder,

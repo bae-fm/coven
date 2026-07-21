@@ -460,10 +460,6 @@ impl SyncLoopHandle {
             .await
     }
 
-    pub(crate) async fn persist_pending_rotation(&self) -> Result<(), crate::database::DbError> {
-        self.inner.components.persist_pending_rotation().await
-    }
-
     #[cfg(test)]
     pub(crate) fn adopt_key_rotation_for_test(
         &self,

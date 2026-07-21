@@ -24,7 +24,9 @@ use crate::sync::invite::{
     revoke_member_durable, signed_wrapped_keyring_for_test, unwrap_store_keyring_for_refs,
 };
 use crate::sync::membership::{MemberRole, MembershipChain};
-use crate::sync::membership_ops::{invite_member, remove_member, MembershipOpsError};
+use crate::sync::membership_ops::{
+    apply_key_rotation, invite_member, remove_member, MembershipOpsError,
+};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore,
@@ -461,6 +463,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &storage.root.store_root_id.to_string(),
         "0000000004000-0000-A",
         &encryption,
+        &PendingRotation::none(),
         &owner_db,
     )
     .await
@@ -530,6 +533,10 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         &initial,
     )
     .await;
+    let custody = TestCustody::default();
+    custody.set_initial_key(initial.key_bytes());
+    let cipher = RwLock::new(CloudCipher::Encrypted(initial.clone()));
+    let pending_rotation = PendingRotation::none();
     let rotated = revoke_member_durable(
         &storage.storage,
         storage.home.as_ref(),
@@ -540,10 +547,20 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         &storage.root.store_root_id.to_string(),
         "0000000004000-0000-owner",
         &initial,
+        &pending_rotation,
         &owner_db,
     )
     .await
     .expect("remove member and rotate the Store key");
+    apply_key_rotation(rotated.clone(), &custody, &cipher)
+        .expect("owner adopts the activated rotation");
+    super::invite::complete_revoke_rotation_adoption(
+        &owner_db,
+        &pending_rotation,
+        rotated.current_generation(),
+    )
+    .await
+    .expect("owner completes the activated removal journal");
 
     let chain = invite_exact_member(
         &storage,
@@ -716,6 +733,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         &storage.root.store_root_id.to_string(),
         "0000000004000-0000-A",
         &encryption,
+        &PendingRotation::none(),
         &owner_db,
     )
     .await
@@ -858,7 +876,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &owner_db,
         &founder,
         &second_owner,
-        MemberRole::Owner,
+        MemberRole::Member,
         &encryption,
     )
     .await;
@@ -871,7 +889,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &encryption,
     )
     .await;
-    let mut chain = invite_exact_member(
+    invite_exact_member(
         &storage,
         &owner_db,
         &founder,
@@ -880,12 +898,23 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &encryption,
     )
     .await;
-
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
     activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
     activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    crate::sync::test_helpers::promote_active_member_fixture(
+        &storage,
+        &owner_db,
+        &second_owner_db,
+        &founder,
+        &second_owner,
+        &encryption,
+    )
+    .await
+    .expect("promote active second Owner");
+    let mut chain = load_exact_chain(&storage, &owner_db).await;
+
+    let (_tmp_b, ld_b) = temp_store_dir();
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
@@ -900,6 +929,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &storage.root.store_root_id.to_string(),
         "0000000005000-0000-B",
         &encryption,
+        &PendingRotation::none(),
         &second_owner_db,
     ))
     .await
@@ -936,10 +966,22 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         &founder_db,
         &founder,
         &second_owner,
-        MemberRole::Owner,
+        MemberRole::Member,
         &initial,
     )
     .await;
+    let second_owner_db = open_test_db();
+    activate_joined_device(&storage, &founder_db, &second_owner_db, &second_owner).await;
+    crate::sync::test_helpers::promote_active_member_fixture(
+        &storage,
+        &founder_db,
+        &second_owner_db,
+        &founder,
+        &second_owner,
+        &initial,
+    )
+    .await
+    .expect("promote active second Owner");
     invite_exact_member(
         &storage,
         &founder_db,
@@ -968,10 +1010,9 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     )
     .await;
 
-    let second_owner_db = open_test_db();
-    activate_joined_device(&storage, &founder_db, &second_owner_db, &second_owner).await;
     let mut founder_fork = base_chain.clone();
     let mut second_owner_fork = base_chain;
+    let founder_pending_rotation = PendingRotation::none();
     let founder_rotation = Box::pin(revoke_member_durable(
         &storage.storage,
         storage.home.as_ref(),
@@ -982,6 +1023,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         &storage.root.store_root_id.to_string(),
         "0000000005000-0000-founder",
         &initial,
+        &founder_pending_rotation,
         &founder_db,
     ))
     .await
@@ -996,10 +1038,24 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         &storage.root.store_root_id.to_string(),
         "0000000005000-0000-second-owner",
         &initial,
+        &PendingRotation::none(),
         &second_owner_db,
     ))
     .await
     .expect("second owner publishes the concurrent rotation fork");
+
+    let founder_custody = TestCustody::default();
+    founder_custody.set_initial_key(initial.key_bytes());
+    let founder_cipher = RwLock::new(CloudCipher::Encrypted(initial.clone()));
+    apply_key_rotation(founder_rotation.clone(), &founder_custody, &founder_cipher)
+        .expect("founder adopts its activated rotation fork");
+    super::invite::complete_revoke_rotation_adoption(
+        &founder_db,
+        &founder_pending_rotation,
+        founder_rotation.current_generation(),
+    )
+    .await
+    .expect("founder completes its activated removal journal");
 
     let mut merged_chain = load_exact_chain(&storage, &founder_db).await;
     let authority_refs = merged_chain
@@ -1026,6 +1082,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         &storage.root.store_root_id.to_string(),
         "0000000006000-0000-founder",
         &founder_rotation,
+        &founder_pending_rotation,
         &founder_db,
     ))
     .await
@@ -1053,11 +1110,11 @@ async fn removed_owner_key_is_not_adopted() {
         &owner_db,
         &founder,
         &second_owner,
-        MemberRole::Owner,
+        MemberRole::Member,
         &encryption,
     )
     .await;
-    let mut chain = invite_exact_member(
+    invite_exact_member(
         &storage,
         &owner_db,
         &founder,
@@ -1068,9 +1125,20 @@ async fn removed_owner_key_is_not_adopted() {
     .await;
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
     activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
     activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    crate::sync::test_helpers::promote_active_member_fixture(
+        &storage,
+        &owner_db,
+        &second_owner_db,
+        &founder,
+        &second_owner,
+        &encryption,
+    )
+    .await
+    .expect("promote active second Owner");
+    let mut chain = load_exact_chain(&storage, &owner_db).await;
+    let (_tmp_b, ld_b) = temp_store_dir();
     let rotated = revoke_member_durable(
         &storage.storage,
         storage.home.as_ref(),
@@ -1081,6 +1149,7 @@ async fn removed_owner_key_is_not_adopted() {
         &storage.root.store_root_id.to_string(),
         "0000000004000-0000-B",
         &encryption,
+        &PendingRotation::none(),
         &second_owner_db,
     )
     .await
@@ -1215,7 +1284,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     .await
     .expect("load exact active membership head");
     storage
-        .delete_protocol_object(&head.entry.object)
+        .delete_protocol_object(&head.body.entry.object)
         .await
         .expect("remove exact membership entry before refresh");
     let ks_b = TestCustody::default();
@@ -1333,7 +1402,7 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
 /// sync cycle adopts the key from its own `keys/{self}` wrap, and retrying the
 /// removal re-derives and re-adopts it.
 #[tokio::test]
-async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remedies_converge() {
+async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let owner = UserKeypair::generate(); // this device — performs the removal
     let member = UserKeypair::generate(); // the member being removed
     let old_key: [u8; 32] = [11u8; 32];
@@ -1410,19 +1479,16 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         "the failed adoption did not persist a new key",
     );
 
-    // The failed adoption marks this device's own rotation-pending gate — the
-    // structural half of the fix: every seal for the cloud through this same
-    // storage now refuses until one of the two remedies below clears it (see
-    // `rotation_pending_tests` for the end-to-end proof that nothing seals in
-    // the meantime).
+    // The failed adoption leaves the exact durable gate armed, so every seal
+    // through this storage refuses until the removal operation completes.
     assert_eq!(
         pending_rotation.pending_generation(),
         Some(2),
         "the failed adoption marks the committed generation as pending",
     );
 
-    // Remedy 1 — the next sync cycle: a still-stale device (generation 1) adopts
-    // the exact wrapped key named by the committed removal, no retry needed.
+    // Authorization refresh may adopt the selected key bytes, but it leaves the
+    // local removal journal and its gate for the exact removal retry to complete.
     {
         let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);
@@ -1445,13 +1511,18 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         assert_eq!(
             cipher_generation(&cipher_refresh),
             2,
-            "the next sync cycle adopts the rotated key",
+            "authorization refresh adopts the rotated key",
         );
+        assert!(matches!(
+            pending_rotation_refresh
+                .check(&cipher_refresh.read().unwrap().clone())
+                .map_err(|pending| pending.state),
+            Err(super::cloud_storage::RotationPendingState::LocalCommitted { generation: 2 })
+        ));
     }
 
-    // Remedy 2 — retry the removal: the member is already removed, so the retry
-    // re-derives the rotated keyring from the current owner set and adopts it now
-    // that the keyring is writable again.
+    // Retrying the exact removal closes its journal and durable gate now that
+    // custody is writable.
     ks.allow_writes();
     let fingerprint = Box::pin(remove_member(
         &storage.storage,

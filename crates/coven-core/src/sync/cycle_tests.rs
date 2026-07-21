@@ -3353,248 +3353,303 @@ async fn initializing_serial_storage_uses_only_the_root_authorization_state() {
 #[tokio::test]
 async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_work() {
     tokio::spawn(async {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        Box::pin(async {
+            use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use crate::sync::membership::MemberRole;
-        use crate::sync::storage::{
-            CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError,
-            VersionToken, VersionedObject,
-        };
-        use crate::sync::store_commit::StoreControl;
-
-        struct HeadAdvancesAfterInitialAuthorization<'a> {
-            inner: &'a dyn CoordinationStorage,
-            initial: VersionedObject,
-            reads: AtomicUsize,
-        }
-
-        #[async_trait::async_trait]
-        impl CoordinationStorage for HeadAdvancesAfterInitialAuthorization<'_> {
-            async fn provider_binding(
-                &self,
-            ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError>
-            {
-                self.inner.provider_binding().await
-            }
-
-            async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-                if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Ok(self.initial.clone());
-                }
-                self.inner.read_head(key).await
-            }
-
-            async fn create_head(
-                &self,
-                key: &str,
-                bytes: &[u8],
-            ) -> Result<VersionedObject, CreateHeadError> {
-                self.inner.create_head(key, bytes).await
-            }
-
-            async fn replace_head(
-                &self,
-                key: &str,
-                expected: &VersionToken,
-                bytes: &[u8],
-            ) -> Result<VersionedObject, ReplaceHeadError> {
-                self.inner.replace_head(key, expected, bytes).await
-            }
-
-            async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-                self.inner.delete_head(key).await
-            }
-        }
-
-        let store_id = "serial-post-pull-authorization";
-        let home = InMemoryCloudHome::new();
-        let founder = UserKeypair::generate();
-        let successor = UserKeypair::generate();
-        let storage = cycle_cloud_storage(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            store_id,
-            founder.clone(),
-        )
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let local = open_serial_test_db();
-        let root = create_exact_test_store(&local, &storage, store_id, &founder)
-            .await
-            .expect("create exact Serial Store");
-        let initial_head = storage
-            .serial_coordination()
-            .expect("Serial coordination")
-            .read_head(crate::sync::store_commit::serial_head_key())
-            .await
-            .expect("read initial Serial head");
-        let local_device_id = local
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap()
-            .expect("Serial founder device exists");
-        let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
-            &storage, &local, store_id, &root, &founder,
-        ))
-        .await;
-        let coordination = storage.serial_coordination().unwrap();
-        let authorization = crate::sync::store_outbound::current_serial_authorization(
-            &remote,
-            &storage,
-            coordination,
-        )
-        .await
-        .unwrap();
-        let successor_pubkey = pubkey_hex(&successor);
-        let successor_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
-            &storage,
-            root.store_root_hash,
-            &successor_pubkey,
-            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
-                &root.store_root_id.to_string(),
-                &successor_pubkey,
-                1,
-                b"cycle Serial successor wrap".to_vec(),
-                &founder,
-            ),
-        )
-        .await
-        .unwrap();
-        let add_successor = authorization
-            .membership
-            .signed_set_member_with_wrapped_key(
-                &founder,
-                successor_pubkey,
-                None,
-                MemberRole::Owner,
-                successor_wrap.reference.clone(),
-                "0000000000002-0000-founder".to_string(),
-            )
-            .unwrap();
-        crate::sync::store_outbound::activate_test_serial_control_candidate(
-            &remote,
-            &storage,
-            coordination,
-            &remote_device_id,
-            &founder,
-            StoreControl::SerialMembership {
-                entry: add_successor,
-            },
-            vec![successor_wrap],
-        )
-        .await
-        .unwrap();
-        let authorization = crate::sync::store_outbound::current_serial_authorization(
-            &remote,
-            &storage,
-            coordination,
-        )
-        .await
-        .unwrap();
-        let founder_pubkey = pubkey_hex(&founder);
-        let founder_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
-            &storage,
-            root.store_root_hash,
-            &founder_pubkey,
-            crate::sync::wrapped_store_key::WrappedStoreKey::signed(
-                &root.store_root_id.to_string(),
-                &founder_pubkey,
-                1,
-                b"cycle Serial founder role wrap".to_vec(),
-                &founder,
-            ),
-        )
-        .await
-        .unwrap();
-        let demote_founder = authorization
-            .membership
-            .signed_set_member_with_wrapped_key(
-                &founder,
-                founder_pubkey,
-                None,
-                MemberRole::Follower,
-                founder_wrap.reference.clone(),
-                "0000000000003-0000-founder".to_string(),
-            )
-            .unwrap();
-        crate::sync::store_outbound::activate_test_serial_control_candidate(
-            &remote,
-            &storage,
-            coordination,
-            &remote_device_id,
-            &founder,
-            StoreControl::SerialMembership {
-                entry: demote_founder,
-            },
-            vec![founder_wrap],
-        )
-        .await
-        .unwrap();
-
-        let snapshot_before = local
-            .latest_local_store_snapshot()
-            .await
-            .unwrap()
-            .expect("Serial bootstrap snapshot was published locally")
-            .reference;
-        drop(remote);
-        drop(_remote_dir);
-        tokio::spawn(async move {
-            assert_eq!(local.local_store_root_ref().await.unwrap(), Some(root));
-            let coordination = storage.serial_coordination().unwrap();
-            let delayed = HeadAdvancesAfterInitialAuthorization {
-                inner: coordination,
-                initial: initial_head,
-                reads: AtomicUsize::new(0),
+            use crate::sync::membership::MemberRole;
+            use crate::sync::storage::{
+                CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError,
+                VersionToken, VersionedObject,
             };
-            let (_temp, store_dir) = temp_store_dir();
-            let cipher = storage.cipher_state().clone();
-            let pending_rotation = storage.shared_pending_rotation();
-            cycle::run_single_sync_cycle_with_coordination(
-                &storage,
-                Some(&delayed),
-                &local_device_id,
-                &Hlc::new(local_device_id.clone()),
-                &SystemClock,
-                &local,
-                cipher.as_ref(),
-                pending_rotation.as_ref(),
+            use crate::sync::store_commit::StoreControl;
+
+            struct HeadAdvancesAfterInitialAuthorization<'a> {
+                inner: &'a dyn CoordinationStorage,
+                initial: VersionedObject,
+                reads: AtomicUsize,
+            }
+
+            #[async_trait::async_trait]
+            impl CoordinationStorage for HeadAdvancesAfterInitialAuthorization<'_> {
+                async fn provider_binding(
+                    &self,
+                ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError>
+                {
+                    self.inner.provider_binding().await
+                }
+
+                async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+                    if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Ok(self.initial.clone());
+                    }
+                    self.inner.read_head(key).await
+                }
+
+                async fn create_head(
+                    &self,
+                    key: &str,
+                    bytes: &[u8],
+                ) -> Result<VersionedObject, CreateHeadError> {
+                    self.inner.create_head(key, bytes).await
+                }
+
+                async fn replace_head(
+                    &self,
+                    key: &str,
+                    expected: &VersionToken,
+                    bytes: &[u8],
+                ) -> Result<VersionedObject, ReplaceHeadError> {
+                    self.inner.replace_head(key, expected, bytes).await
+                }
+
+                async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
+                    self.inner.delete_head(key).await
+                }
+            }
+
+            let store_id = "serial-post-pull-authorization";
+            let founder = UserKeypair::generate();
+            let successor = UserKeypair::generate();
+            let local = open_serial_test_db();
+            let store = Arc::new(
+                TestStore::create(&local, store_id, founder.clone())
+                    .await
+                    .unwrap(),
+            );
+            let home = store.home.clone();
+            let storage = &store.storage;
+            let root = store.root.clone();
+            let encryption = EncryptionService::from_key([42; 32]);
+            let initial_head = storage
+                .serial_coordination()
+                .expect("Serial coordination")
+                .read_head(crate::sync::store_commit::serial_head_key())
+                .await
+                .expect("read initial Serial head");
+            let local_device_id = local
+                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await
+                .unwrap()
+                .expect("Serial founder device exists");
+            let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
+                storage, &local, store_id, &root, &founder,
+            ))
+            .await;
+            let coordination = storage.serial_coordination().unwrap();
+            let (_, remote_registration, remote_registration_value, _) =
+                crate::sync::store_outbound::load_local_store_authority(
+                    &remote,
+                    &remote_device_id,
+                    &founder,
+                )
+                .await
+                .expect("load recovered Owner device authority");
+            let founder_provider_admin = &store.protocol_root.descriptor.founder_provider_admin;
+            let provider_admin_plan = crate::sync::store_outbound::prepare_store_operation_commit(
+                &remote,
+                storage,
+                Some(coordination),
+                &remote_device_id,
                 &founder,
-                None,
-                None,
-                &store_dir,
-                Some(&home),
                 None,
             )
             .await
-            .expect("run cycle across a newly visible Serial control chain");
+            .expect("prepare recovered provider administrator control");
+            crate::sync::store_outbound::activate_store_operation_commit(
+                &remote,
+                storage,
+                Some(coordination),
+                provider_admin_plan,
+                crate::sync::store_outbound::StoreOperationBatch::Control(
+                    StoreControl::ProviderAdmin {
+                        change: crate::sync::provider::ProviderAdminChange::Set {
+                            administrator: remote_registration,
+                            provider: remote_registration_value.provider,
+                            access: founder_provider_admin.access.clone(),
+                            capability: founder_provider_admin.capability.clone(),
+                            grant_id:
+                                crate::sync::provider::ProviderAdminGrantId::from_random_bytes(
+                                    *crate::sync::store_commit::ObjectHash::digest(
+                                        b"serial post-pull recovered provider administrator",
+                                    )
+                                    .as_bytes(),
+                                ),
+                            replaces: std::collections::BTreeSet::from([founder_provider_admin
+                                .grant_id
+                                .clone()]),
+                        },
+                    },
+                ),
+            )
+            .await
+            .expect("transfer provider administrator authority to recovered Owner device");
+            crate::sync::membership_ops::invite_member_with_coordination(
+                storage,
+                home.as_ref(),
+                &founder,
+                &Hlc::new("serial-successor-member".to_string()),
+                &pubkey_hex(&successor),
+                None,
+                MemberRole::Member,
+                &encryption,
+                store_id,
+                "Serial post-pull authorization Store",
+                &remote,
+                Some(crate::sync::membership_ops::SerialMembershipContext {
+                    coordination,
+                    device_id: remote_device_id.clone(),
+                }),
+            )
+            .await
+            .expect("add successor as a Serial Member");
+            let successor_db = open_serial_test_db();
+            install_active_device_fixture(
+                store.as_ref(),
+                &remote,
+                &successor_db,
+                &successor,
+                "0000000002000-0000-successor",
+            )
+            .await
+            .expect("activate successor device");
+            let promotion_store = store.clone();
+            let promotion_remote = remote.clone();
+            let promotion_successor_db = successor_db.clone();
+            let promotion_founder = founder.clone();
+            let promotion_successor = successor.clone();
+            let promotion_encryption = encryption.clone();
+            tokio::spawn(async move {
+                Box::pin(promote_active_member_fixture(
+                    promotion_store.as_ref(),
+                    &promotion_remote,
+                    &promotion_successor_db,
+                    &promotion_founder,
+                    &promotion_successor,
+                    &promotion_encryption,
+                ))
+                .await
+            })
+            .await
+            .expect("successor promotion task")
+            .expect("promote active successor Owner");
+            let authorization = crate::sync::store_outbound::current_serial_authorization(
+                &remote,
+                storage,
+                coordination,
+            )
+            .await
+            .unwrap();
+            let founder_pubkey = pubkey_hex(&founder);
+            let founder_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
+                storage,
+                root.store_root_hash,
+                &founder_pubkey,
+                crate::sync::wrapped_store_key::WrappedStoreKey::signed(
+                    &root.store_root_id.to_string(),
+                    &founder_pubkey,
+                    1,
+                    b"cycle Serial founder role wrap".to_vec(),
+                    &founder,
+                ),
+            )
+            .await
+            .unwrap();
+            let demote_founder = authorization
+                .membership
+                .signed_set_member_with_wrapped_key(
+                    &founder,
+                    founder_pubkey,
+                    None,
+                    MemberRole::Follower,
+                    founder_wrap.reference.clone(),
+                    "0000000000003-0000-founder".to_string(),
+                )
+                .unwrap();
+            crate::sync::store_outbound::activate_test_serial_control_candidate(
+                &remote,
+                storage,
+                coordination,
+                &remote_device_id,
+                &founder,
+                StoreControl::SerialMembership {
+                    entry: demote_founder,
+                },
+                vec![founder_wrap],
+            )
+            .await
+            .unwrap();
 
-            let mut expected_members = vec![
-                (pubkey_hex(&founder), MemberRole::Follower),
-                (pubkey_hex(&successor), MemberRole::Owner),
-            ];
-            expected_members.sort_by(|left, right| left.0.cmp(&right.0));
-            assert_eq!(
-                local
-                    .serial_membership_state()
+            let snapshot_before = local
+                .latest_local_store_snapshot()
+                .await
+                .unwrap()
+                .expect("Serial bootstrap snapshot was published locally")
+                .reference;
+            drop(remote);
+            drop(_remote_dir);
+            let store = store.clone();
+            tokio::spawn(async move {
+                Box::pin(async move {
+                    let storage = &store.storage;
+                    assert_eq!(local.local_store_root_ref().await.unwrap(), Some(root));
+                    let coordination = storage.serial_coordination().unwrap();
+                    let delayed = HeadAdvancesAfterInitialAuthorization {
+                        inner: coordination,
+                        initial: initial_head,
+                        reads: AtomicUsize::new(0),
+                    };
+                    let (_temp, store_dir) = temp_store_dir();
+                    let cipher = storage.cipher_state().clone();
+                    let pending_rotation = storage.shared_pending_rotation();
+                    cycle::run_single_sync_cycle_with_coordination(
+                        storage,
+                        Some(&delayed),
+                        &local_device_id,
+                        &Hlc::new(local_device_id.clone()),
+                        &SystemClock,
+                        &local,
+                        cipher.as_ref(),
+                        pending_rotation.as_ref(),
+                        &founder,
+                        None,
+                        None,
+                        &store_dir,
+                        Some(home.as_ref()),
+                        None,
+                    )
                     .await
-                    .unwrap()
-                    .unwrap()
-                    .current_members(),
-                expected_members,
-            );
-            assert_eq!(
-                local
-                    .latest_local_store_snapshot()
-                    .await
-                    .unwrap()
-                    .expect("Serial bootstrap snapshot remains published")
-                    .reference,
-                snapshot_before,
-            );
+                    .expect("run cycle across a newly visible Serial control chain");
+
+                    let mut expected_members = vec![
+                        (pubkey_hex(&founder), MemberRole::Follower),
+                        (pubkey_hex(&successor), MemberRole::Owner),
+                    ];
+                    expected_members.sort_by(|left, right| left.0.cmp(&right.0));
+                    assert_eq!(
+                        local
+                            .serial_membership_state()
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .current_members(),
+                        expected_members,
+                    );
+                    assert_eq!(
+                        local
+                            .latest_local_store_snapshot()
+                            .await
+                            .unwrap()
+                            .expect("Serial bootstrap snapshot remains published")
+                            .reference,
+                        snapshot_before,
+                    );
+                })
+                .await;
+            })
+            .await
+            .expect("Serial post-pull cycle task");
         })
-        .await
-        .expect("Serial post-pull cycle task");
+        .await;
     })
     .await
     .expect("Serial post-pull cycle orchestration task");
@@ -4085,9 +4140,12 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "test-lib",
             owner.clone(),
         );
-        db.set_protocol_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY, "9")
-            .await
-            .unwrap();
+        db.set_protocol_state(
+            crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY,
+            "invalid rotation gate",
+        )
+        .await
+        .unwrap();
         let pending_rotation = storage.shared_pending_rotation();
 
         assert!(
@@ -4113,10 +4171,10 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "the in-memory pending-rotation marker is not restored",
         );
         assert_eq!(
-            db.get_protocol_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY)
+            db.get_protocol_state(crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY)
                 .await
                 .unwrap(),
-            Some("9".to_string()),
+            Some("invalid rotation gate".to_string()),
             "the durable pending-rotation state is unchanged",
         );
     }
@@ -4997,7 +5055,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .write_id;
 
     let pending_rotation = PendingRotation::none();
-    pending_rotation.mark_committed(2);
+    pending_rotation.mark_committed(2).unwrap();
     storage.open_into(&db).await.expect("open exact test Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -5177,7 +5235,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         .expect("queue the host-provided make_remote intent");
 
     let pending_rotation = PendingRotation::none();
-    pending_rotation.mark_committed(2);
+    pending_rotation.mark_committed(2).unwrap();
     storage.open_into(&db).await.expect("open exact test Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -7139,41 +7197,53 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
 
 #[tokio::test]
 async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() {
-    let founder = UserKeypair::generate();
-    let founder_db = open_test_db();
-    let storage = cycle_test_store(&founder_db, &founder).await;
-    let excluding_owner = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &founder,
-        &Hlc::new("excluding-owner".to_string()),
-        &pubkey_hex(&excluding_owner),
-        None,
-        crate::sync::membership::MemberRole::Owner,
-        &EncryptionService::from_key([62; 32]),
-        "test-lib",
-        "Test Store",
-        &founder_db,
-    )
-    .await
-    .expect("invite second exact Owner identity");
-    let excluding_db = open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &storage,
-        &founder_db,
-        &excluding_db,
-        &excluding_owner,
-        "2026-07-20T00:00:00Z",
-    )
-    .await
-    .expect("activate second Owner device");
-    let founder_registration = storage
-        .founder_device_authority()
+    Box::pin(async {
+        let founder = UserKeypair::generate();
+        let founder_db = open_test_db();
+        let storage = cycle_test_store(&founder_db, &founder).await;
+        let excluding_owner = UserKeypair::generate();
+        let encryption = EncryptionService::from_key([62; 32]);
+        crate::sync::membership_ops::invite_member(
+            &storage.storage,
+            storage.home.as_ref(),
+            &founder,
+            &Hlc::new("excluding-owner".to_string()),
+            &pubkey_hex(&excluding_owner),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            &encryption,
+            "test-lib",
+            "Test Store",
+            &founder_db,
+        )
         .await
-        .expect("load exact founder authority")
-        .0;
-    let proposal = match crate::sync::store_device_exclusion::propose_device_exclusion(
+        .expect("invite second exact Owner identity");
+        let excluding_db = open_test_db();
+        crate::sync::test_helpers::install_active_device_fixture(
+            &storage,
+            &founder_db,
+            &excluding_db,
+            &excluding_owner,
+            "2026-07-20T00:00:00Z",
+        )
+        .await
+        .expect("activate second Owner device");
+        crate::sync::test_helpers::promote_active_member_fixture(
+            &storage,
+            &founder_db,
+            &excluding_db,
+            &founder,
+            &excluding_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote active second Owner");
+        let founder_registration = storage
+            .founder_device_authority()
+            .await
+            .expect("load exact founder authority")
+            .0;
+        let proposal = match crate::sync::store_device_exclusion::propose_device_exclusion(
         &excluding_db,
         &storage.storage,
         None,
@@ -7190,72 +7260,74 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         result => panic!("unexpected exclusion proposal result: {result:?}"),
     };
 
-    let joining_member = UserKeypair::generate();
-    let approval = prepare_same_principal_approval_fixture(
-        &founder_db,
-        &storage,
-        &founder,
-        &joining_member,
-        "post-freeze-access",
-    )
-    .await;
+        let joining_member = UserKeypair::generate();
+        let approval = prepare_same_principal_approval_fixture(
+            &founder_db,
+            &storage,
+            &founder,
+            &joining_member,
+            "post-freeze-access",
+        )
+        .await;
 
-    let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        excluding_db.write_policy(),
-        excluding_db
-            .materialized_frontier()
-            .await
-            .expect("load exclusion frontier"),
-    )
-    .expect("shape exclusion frontier");
-    crate::sync::store_ack::stage_store_ack(
-        &excluding_db,
-        &storage.storage,
-        None,
-        frontier,
-        "2026-07-20T00:01:00Z".to_string(),
-        &excluding_owner,
-    )
-    .await
-    .expect("stage exclusion acknowledgement");
-    let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &excluding_db)
+        let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
+            excluding_db.write_policy(),
+            excluding_db
+                .materialized_frontier()
+                .await
+                .expect("load exclusion frontier"),
+        )
+        .expect("shape exclusion frontier");
+        crate::sync::store_ack::stage_store_ack(
+            &excluding_db,
+            &storage.storage,
+            None,
+            frontier,
+            "2026-07-20T00:01:00Z".to_string(),
+            &excluding_owner,
+        )
         .await
-        .expect("load exclusion membership");
-    crate::sync::store_ack::drain_outbound_store_acks(
-        &excluding_db,
-        &storage.storage,
-        None,
-        &excluding_owner,
-        membership.chain.as_ref(),
-    )
-    .await
-    .expect("publish exclusion acknowledgement");
-    match crate::sync::store_device_exclusion::finalize_device_exclusion(
-        &excluding_db,
-        &storage.storage,
-        None,
-        &excluding_owner,
-        &proposal,
-    )
-    .await
-    .expect("activate founder exclusion")
-    {
-        crate::sync::store_device_exclusion::StoreDeviceExclusionResult::OutcomeActivated {
-            ..
-        } => {}
-        result => panic!("unexpected exclusion outcome result: {result:?}"),
-    }
+        .expect("stage exclusion acknowledgement");
+        let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &excluding_db)
+            .await
+            .expect("load exclusion membership");
+        crate::sync::store_ack::drain_outbound_store_acks(
+            &excluding_db,
+            &storage.storage,
+            None,
+            &excluding_owner,
+            membership.chain.as_ref(),
+        )
+        .await
+        .expect("publish exclusion acknowledgement");
+        match crate::sync::store_device_exclusion::finalize_device_exclusion(
+            &excluding_db,
+            &storage.storage,
+            None,
+            &excluding_owner,
+            &proposal,
+        )
+        .await
+        .expect("activate founder exclusion")
+        {
+            crate::sync::store_device_exclusion::StoreDeviceExclusionResult::OutcomeActivated {
+                ..
+            } => {}
+            result => panic!("unexpected exclusion outcome result: {result:?}"),
+        }
 
-    crate::sync::device_join::prepare_device_registration_request(
-        &approval.pending,
-        &storage.storage,
-        None,
-        None,
-        &joining_member,
-        approval.approval,
-    )
-    .await
-    .expect_err("the excluded founder suffix cannot authorize provider access");
+        crate::sync::device_join::prepare_device_registration_request(
+            &approval.pending,
+            &storage.storage,
+            None,
+            None,
+            &joining_member,
+            approval.approval,
+        )
+        .await
+        .expect_err("the excluded founder suffix cannot authorize provider access");
+    })
+    .await;
 }
 
 #[tokio::test]

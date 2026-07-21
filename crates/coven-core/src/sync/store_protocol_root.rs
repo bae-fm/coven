@@ -811,8 +811,9 @@ async fn prepare_founder_graph(
     let membership = match (founder_anchor, founder_head_slot) {
         (Some(founder_anchor), Some(founder_head_slot)) => {
             let founder_grant = authority.founder_grant.clone();
-            let founder = super::membership::founder_entry(
+            let founder = super::membership::founder_entry_for_creation(
                 &root_id.to_string(),
+                root_value.descriptor.creation_id,
                 signer,
                 founder_grant.clone(),
                 founder_timestamp,
@@ -835,21 +836,24 @@ async fn prepare_founder_graph(
             };
             let head_value = AuthorHead::signed(
                 root_id.to_string(),
-                registration_ref.clone(),
-                entry_ref.clone(),
-                None,
-                Vec::new(),
-                SuccessorLink {
-                    activation: super::store_commit::StreamActivation::grant_authorized(
-                        root_ref.store_root_hash,
-                        registration_ref.clone(),
-                        founder_grant.clone(),
-                        founder_anchor.clone(),
-                    )
-                    .activation_id(),
+                super::membership::MembershipHeadBody {
+                    author_registration: registration_ref.clone(),
+                    entry: entry_ref.clone(),
                     predecessor: None,
-                    next_slot: next_head_slot.clone(),
+                    resolutions: Vec::new(),
+                    successor: SuccessorLink {
+                        activation: super::store_commit::StreamActivation::grant_authorized(
+                            root_ref.store_root_hash,
+                            registration_ref.clone(),
+                            founder_grant.clone(),
+                            founder_anchor.clone(),
+                        )
+                        .activation_id(),
+                        predecessor: None,
+                        next_slot: next_head_slot.clone(),
+                    },
                 },
+                super::membership::MembershipHeadActivation::Direct,
                 &device_signer,
             );
             let head_bytes = serde_json::to_vec(&head_value)

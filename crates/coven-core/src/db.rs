@@ -314,6 +314,16 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            terminal_membership_mutation,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    kind TEXT NOT NULL CHECK (kind IN ('serial_invite', 'serial_removal')),
+    intent_hash TEXT NOT NULL UNIQUE CHECK (length(intent_hash) = 64),
+    plan_bytes BLOB NOT NULL,
+    result_bytes BLOB NOT NULL
+"
+        );
+        $visit!(
             outbound_store_snapshot,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

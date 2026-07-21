@@ -1219,6 +1219,10 @@ pub enum CircleRosterError {
     MissingConflictHeads,
     #[error("Circle roster conflict resolution does not name exact validated conflict evidence")]
     InvalidConflictResolution,
+    #[error("checkpoint lacks the exact record for Circle grant {grant}")]
+    MissingCheckpointGrant { grant: MembershipGrantId },
+    #[error("checkpoint lacks retirement evidence for Circle grant {grant}")]
+    MissingCheckpointRetirementEvidence { grant: MembershipGrantId },
     #[error("Circle roster causal history: {0}")]
     Causal(String),
     #[error(
@@ -1451,7 +1455,7 @@ impl CircleRosterChain {
                     resolution_checkpoint
                         .as_ref()
                         .map(|checkpoint| &checkpoint.grants),
-                );
+                )?;
                 (Some(reduced), CircleRosterStatus::Resolved(resolved))
             }
             CausalGrantStatus::Conflict(CausalGrantConflict::ConcurrentMemberAssignments {
@@ -1483,13 +1487,13 @@ impl CircleRosterChain {
                                 resolution_checkpoint
                                     .as_ref()
                                     .map(|checkpoint| &checkpoint.grants),
-                            ),
+                            )?,
                             uncontested_grants: map_circle_grants(
                                 uncontested_grants,
                                 resolution_checkpoint
                                     .as_ref()
                                     .map(|checkpoint| &checkpoint.grants),
-                            ),
+                            )?,
                         },
                     ),
                 )
@@ -1509,7 +1513,7 @@ impl CircleRosterChain {
                             resolution_checkpoint
                                 .as_ref()
                                 .map(|checkpoint| &checkpoint.grants),
-                        );
+                        )?;
                         Ok(CircleRosterBranch {
                             heads: exact_circle_head_refs(&head_refs, &branch.raw_heads)?,
                             effective_frontier: branch.effective_frontier,
@@ -1651,13 +1655,13 @@ impl CircleRosterChain {
         let grants = reduced
             .grants
             .iter()
-            .map(|(grant, state)| {
-                (
+            .map(|(grant, state)| -> Result<_, CircleRosterError> {
+                Ok((
                     grant.clone(),
-                    map_circle_grant_state(grant, state, checkpoint_grants),
-                )
+                    map_circle_grant_state(grant, state, checkpoint_grants)?,
+                ))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         self.resolution_checkpoint = Some(CircleRosterResolutionCheckpoint {
             raw_heads: self.author_heads(),
             effective_frontier: self.effective_frontier(),
@@ -2193,19 +2197,20 @@ fn map_circle_grants(
     checkpoint: Option<
         &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     >,
-) -> BTreeMap<MembershipGrantId, CircleGrantRecord> {
+) -> Result<BTreeMap<MembershipGrantId, CircleGrantRecord>, CircleRosterError> {
     grants
         .into_iter()
-        .map(|(grant, record)| {
-            let creation_authority = circle_creation_authority(&grant, record.creation, checkpoint);
-            (
+        .map(|(grant, record)| -> Result<_, CircleRosterError> {
+            let creation_authority =
+                circle_creation_authority(&grant, record.creation, checkpoint)?;
+            Ok((
                 grant,
                 CircleGrantRecord {
                     member_pubkey: record.member_pubkey,
                     role: record.assignment,
                     creation_authority,
                 },
-            )
+            ))
         })
         .collect()
 }
@@ -2215,21 +2220,21 @@ fn resolved_circle_roster(
     checkpoint: Option<
         &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     >,
-) -> ResolvedCircleRoster {
+) -> Result<ResolvedCircleRoster, CircleRosterError> {
     let grants = reduced
         .grants
         .iter()
-        .map(|(grant, state)| {
-            (
+        .map(|(grant, state)| -> Result<_, CircleRosterError> {
+            Ok((
                 grant.clone(),
-                map_circle_grant_state(grant, state, checkpoint),
-            )
+                map_circle_grant_state(grant, state, checkpoint)?,
+            ))
         })
-        .collect::<BTreeMap<_, _>>();
-    ResolvedCircleRoster {
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(ResolvedCircleRoster {
         state_hash: circle_roster_state_hash(&grants),
         grants,
-    }
+    })
 }
 
 fn map_circle_grant_state(
@@ -2241,7 +2246,7 @@ fn map_circle_grant_state(
     checkpoint: Option<
         &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     >,
-) -> GrantState<CircleGrantRecord, CircleGrantRetirement> {
+) -> Result<GrantState<CircleGrantRecord, CircleGrantRetirement>, CircleRosterError> {
     let causal_record = state.record();
     let record = CircleGrantRecord {
         member_pubkey: causal_record.member_pubkey.clone(),
@@ -2250,19 +2255,24 @@ fn map_circle_grant_state(
             grant,
             causal_record.creation.clone(),
             checkpoint,
-        ),
+        )?,
     };
-    causal_grants::map_grant_state(
+    causal_grants::try_map_grant_state(
         state,
         record,
         checkpoint
             .and_then(|grants| grants.get(grant))
             .and_then(GrantState::retirements),
-        |coord, owner_barrier| CircleGrantRetirement::Entry {
-            authority: coord.clone(),
-            owner_barrier: owner_barrier.map(|barrier| CircleOwnerGrantBarrier {
-                observed_streams: barrier.observed_streams.values().cloned().collect(),
-            }),
+        || CircleRosterError::MissingCheckpointRetirementEvidence {
+            grant: grant.clone(),
+        },
+        |coord, owner_barrier| {
+            Ok(CircleGrantRetirement::Entry {
+                authority: coord.clone(),
+                owner_barrier: owner_barrier.map(|barrier| CircleOwnerGrantBarrier {
+                    observed_streams: barrier.observed_streams.values().cloned().collect(),
+                }),
+            })
         },
     )
 }
@@ -2273,17 +2283,17 @@ fn circle_creation_authority(
     checkpoint: Option<
         &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     >,
-) -> CircleGrantCreationAuthority {
+) -> Result<CircleGrantCreationAuthority, CircleRosterError> {
     match creation {
         causal_grants::CausalGrantCreation::Entry(coord) => {
-            CircleGrantCreationAuthority::Entry(coord)
+            Ok(CircleGrantCreationAuthority::Entry(coord))
         }
         causal_grants::CausalGrantCreation::Checkpoint => checkpoint
             .and_then(|grants| grants.get(grant))
-            .expect("checkpoint reducer only emits seeded Circle grants")
-            .record()
-            .creation_authority
-            .clone(),
+            .ok_or_else(|| CircleRosterError::MissingCheckpointGrant {
+                grant: grant.clone(),
+            })
+            .map(|state| state.record().creation_authority.clone()),
     }
 }
 
@@ -2354,6 +2364,45 @@ mod authority_tests {
 
     fn grant(label: &[u8]) -> MembershipGrantId {
         MembershipGrantId(ObjectHash::digest(label))
+    }
+
+    #[test]
+    fn circle_grant_mapping_rejects_missing_checkpoint_evidence() {
+        let grant = grant(b"missing Circle checkpoint evidence");
+        let coord = CircleRosterCoord {
+            author_pubkey: "owner".to_string(),
+            device_id: "owner-device".to_string(),
+            stream_id: AuthorStreamId::from_bytes([91; 32]),
+            author_owner_grant: grant.clone(),
+            seq: 1,
+            entry_hash: ObjectHash::digest(b"Circle grant creation"),
+        };
+        let checkpoint_creation = GrantState::Active {
+            record: causal_grants::GrantRecord {
+                member_pubkey: "owner".to_string(),
+                assignment: CircleRole::Owner,
+                creation: causal_grants::CausalGrantCreation::Checkpoint,
+            },
+        };
+        assert!(matches!(
+            map_circle_grant_state(&grant, &checkpoint_creation, None),
+            Err(CircleRosterError::MissingCheckpointGrant { grant: missing })
+                if missing == grant
+        ));
+
+        let checkpoint_retirement = GrantState::Tombstoned {
+            record: causal_grants::GrantRecord {
+                member_pubkey: "owner".to_string(),
+                assignment: CircleRole::Owner,
+                creation: causal_grants::CausalGrantCreation::Entry(coord),
+            },
+            retirements: GrantRetirements::new(causal_grants::CausalGrantRetirement::Checkpoint),
+        };
+        assert!(matches!(
+            map_circle_grant_state(&grant, &checkpoint_retirement, None),
+            Err(CircleRosterError::MissingCheckpointRetirementEvidence { grant: missing })
+                if missing == grant
+        ));
     }
 
     fn exact_object(logical_key: String, bytes: &[u8]) -> super::super::storage::ExactObjectRef {

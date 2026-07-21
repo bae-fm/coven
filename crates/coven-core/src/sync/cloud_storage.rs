@@ -175,32 +175,45 @@ impl CloudCipherAccess for RwLock<CloudCipher> {
     }
 }
 
-/// The cloud has committed the store key to `committed_generation`, and this
-/// device's live cipher is still sealing under `live_generation`. A member
-/// removal rotates the store key on the cloud before this device necessarily
-/// folds the new generation into its own cipher (custody can fail to persist it
-/// locally even though the cloud rotation is durable), so the two can
-/// transiently disagree. Every seal for the cloud refuses while this holds,
-/// rather than sealing new data under a generation the store has already
-/// superseded — the removed member still holds a key for it.
+/// Store-key work is in flight or committed but not fully adopted. Every cloud
+/// seal refuses while this holds, including while a local removal candidate may
+/// still publish and after a committed rotation whose key is not locally
+/// adopted or whose exact operation journal remains open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "the store key rotated to generation {committed_generation}, which this device has not \
-     adopted (still sealing under generation {live_generation}); refusing to seal for the \
-     cloud until adoption completes"
+    "store-key rotation is pending ({state:?}) while this device is sealing under generation \
+     {live_generation}; refusing to seal for the cloud until the pending state is completed"
 )]
 pub struct RotationPending {
-    pub committed_generation: u64,
+    pub state: RotationPendingState,
     pub live_generation: u64,
 }
 
-/// Whether the cloud has committed the store key to a generation this device's
-/// live cipher has not adopted. Set when a member removal commits its rotation
-/// but this device's own custody fails to persist the new key locally, or when a
-/// peer's rotation is discovered on refresh and can't be adopted the same way;
-/// cleared only alongside the cipher swap that adopts it (see
-/// [`crate::sync::membership_ops::apply_key_rotation`]). `None` — the default —
-/// means the live cipher already holds everything the store has committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationPendingState {
+    Candidate {
+        generation: u64,
+    },
+    LocalCommitted {
+        generation: u64,
+    },
+    PeerCommitted {
+        generation: u64,
+    },
+    CandidateAndPeer {
+        candidate_generation: u64,
+        peer_generation: u64,
+    },
+    LocalCommittedAndPeer {
+        local_generation: u64,
+        peer_generation: u64,
+    },
+}
+
+/// The exact store-key work that blocks sealing: a local candidate, an activated
+/// local removal awaiting adoption, a peer's committed generation awaiting
+/// adoption, or a local fact together with a peer fact. Durable database
+/// transitions and this in-memory copy move together at operation boundaries.
 ///
 /// Shared (behind one `Arc`, via [`CloudSyncStorage::shared_pending_rotation`])
 /// across every path that seals data for the cloud — changesets, heads, blobs,
@@ -208,7 +221,267 @@ pub struct RotationPending {
 /// them the same way, not just the removal call that discovered it. This is the
 /// structural half of the invariant: this device must never seal under a
 /// generation the store has already superseded.
-pub struct PendingRotation(std::sync::RwLock<Option<u64>>);
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RotationGate {
+    candidate: Option<RotationCandidateGate>,
+    local_committed: Option<RotationLocalCommittedGate>,
+    peer_committed_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotationCandidateGate {
+    generation: u64,
+    mutation: crate::sync::store_commit::ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotationLocalCommittedGate {
+    generation: u64,
+    mutation: crate::sync::store_commit::ObjectHash,
+}
+
+impl RotationGate {
+    pub(crate) fn empty() -> Self {
+        Self {
+            candidate: None,
+            local_committed: None,
+            peer_committed_generation: None,
+        }
+    }
+
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.candidate
+            .as_ref()
+            .map(|gate| gate.generation)
+            .into_iter()
+            .chain(self.local_committed.as_ref().map(|gate| gate.generation))
+            .chain(self.peer_committed_generation)
+            .max()
+    }
+
+    fn pending_state(&self) -> Result<RotationPendingState, String> {
+        self.validate()?;
+        match (
+            self.candidate.as_ref(),
+            self.local_committed.as_ref(),
+            self.peer_committed_generation,
+        ) {
+            (Some(candidate), None, None) => Ok(RotationPendingState::Candidate {
+                generation: candidate.generation,
+            }),
+            (None, Some(local), None) => Ok(RotationPendingState::LocalCommitted {
+                generation: local.generation,
+            }),
+            (None, None, Some(generation)) => {
+                Ok(RotationPendingState::PeerCommitted { generation })
+            }
+            (Some(candidate), None, Some(peer_generation)) => {
+                Ok(RotationPendingState::CandidateAndPeer {
+                    candidate_generation: candidate.generation,
+                    peer_generation,
+                })
+            }
+            (None, Some(local), Some(peer_generation)) => {
+                Ok(RotationPendingState::LocalCommittedAndPeer {
+                    local_generation: local.generation,
+                    peer_generation,
+                })
+            }
+            _ => Err("rotation gate has an impossible combination of states".to_string()),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.generation().is_none()
+            || self
+                .candidate
+                .as_ref()
+                .is_some_and(|gate| gate.generation == 0)
+            || self
+                .local_committed
+                .as_ref()
+                .is_some_and(|gate| gate.generation == 0)
+            || self.peer_committed_generation == Some(0)
+            || (self.candidate.is_some() && self.local_committed.is_some())
+        {
+            return Err("rotation gate is empty or names generation zero".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn with_candidate(
+        mut self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        let candidate = RotationCandidateGate {
+            generation,
+            mutation,
+        };
+        if generation == 0 {
+            return Err("rotation candidate names generation zero".to_string());
+        }
+        if self.local_committed.is_some() {
+            return Err("a committed local rotation already owns the gate".to_string());
+        }
+        match &self.candidate {
+            Some(existing) if existing != &candidate => {
+                return Err("another rotation candidate already owns the gate".to_string())
+            }
+            Some(_) => {}
+            None => self.candidate = Some(candidate),
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn commit_candidate(
+        mut self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        if self.candidate.is_none() {
+            match &self.local_committed {
+                Some(committed)
+                    if committed.generation == generation && committed.mutation == mutation =>
+                {
+                    return Ok(self);
+                }
+                _ => {}
+            }
+        }
+        if self.candidate
+            != Some(RotationCandidateGate {
+                generation,
+                mutation,
+            })
+        {
+            return Err("rotation commit does not own the pending candidate gate".to_string());
+        }
+        self.candidate = None;
+        let committed = RotationLocalCommittedGate {
+            generation,
+            mutation,
+        };
+        self.local_committed = Some(committed);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn merge_peer_commit(mut self, generation: u64) -> Result<Self, String> {
+        if generation == 0 {
+            return Err("committed rotation names generation zero".to_string());
+        }
+        if self
+            .peer_committed_generation
+            .is_none_or(|existing| generation > existing)
+        {
+            self.peer_committed_generation = Some(generation);
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn remove_candidate(
+        mut self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<Option<Self>, String> {
+        if self.candidate
+            != Some(RotationCandidateGate {
+                generation,
+                mutation,
+            })
+        {
+            return Err("rotation loss does not own the pending candidate gate".to_string());
+        }
+        self.candidate = None;
+        if self.local_committed.is_none() && self.peer_committed_generation.is_none() {
+            return Ok(None);
+        }
+        self.validate()?;
+        Ok(Some(self))
+    }
+
+    pub(crate) fn replace_candidate_mutation(
+        mut self,
+        generation: u64,
+        previous: crate::sync::store_commit::ObjectHash,
+        replacement: crate::sync::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        if self.candidate
+            != Some(RotationCandidateGate {
+                generation,
+                mutation: previous,
+            })
+        {
+            return Err("rotation candidate replacement lost its exact owner".to_string());
+        }
+        self.candidate = Some(RotationCandidateGate {
+            generation,
+            mutation: replacement,
+        });
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn complete_local_adoption(
+        mut self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<Option<Self>, String> {
+        if self.candidate.is_some() {
+            return Err("rotation adoption cannot close while a candidate is pending".to_string());
+        }
+        match &self.local_committed {
+            Some(committed)
+                if committed.generation == generation && committed.mutation == mutation =>
+            {
+                self.local_committed = None;
+            }
+            _ => return Err("rotation adoption does not own the committed gate".to_string()),
+        }
+        if self
+            .peer_committed_generation
+            .is_some_and(|peer| peer <= generation)
+        {
+            self.peer_committed_generation = None;
+        }
+        if self.peer_committed_generation.is_none() {
+            return Ok(None);
+        }
+        self.validate()?;
+        Ok(Some(self))
+    }
+
+    pub(crate) fn complete_peer_adoption(
+        mut self,
+        adopted_generation: u64,
+    ) -> Result<Option<Self>, String> {
+        if adopted_generation == 0 {
+            return Err("adopted rotation names generation zero".to_string());
+        }
+        if self
+            .peer_committed_generation
+            .is_some_and(|generation| generation <= adopted_generation)
+        {
+            self.peer_committed_generation = None;
+        }
+        if self.candidate.is_none()
+            && self.local_committed.is_none()
+            && self.peer_committed_generation.is_none()
+        {
+            return Ok(None);
+        }
+        self.validate()?;
+        Ok(Some(self))
+    }
+}
+
+pub struct PendingRotation(std::sync::RwLock<Option<RotationGate>>);
 
 impl Default for PendingRotation {
     fn default() -> Self {
@@ -226,33 +499,127 @@ impl PendingRotation {
     /// one already recorded leaves the recorded value untouched, so an older
     /// rediscovery (e.g. a decoy wrap from a non-rotating owner) can never erase
     /// a genuinely newer generation already known to be pending.
-    pub fn mark_committed(&self, generation: u64) {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn mark_committed(&self, generation: u64) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        if recorded.is_none_or(|g| generation > g) {
-            *recorded = Some(generation);
+        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
+        match gate.clone().merge_peer_commit(generation) {
+            Ok(next) => {
+                *recorded = Some(next);
+                Ok(())
+            }
+            Err(error) => {
+                *recorded = Some(gate);
+                Err(error)
+            }
         }
     }
 
-    /// Clear the marker: the live cipher now holds everything committed.
-    pub fn clear(&self) {
-        *self.0.write().unwrap() = None;
+    pub(crate) fn mark_candidate(
+        &self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        let mut recorded = self.0.write().unwrap();
+        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
+        match gate.clone().with_candidate(generation, mutation) {
+            Ok(next) => {
+                *recorded = Some(next);
+                Ok(())
+            }
+            Err(error) => {
+                *recorded = Some(gate);
+                Err(error)
+            }
+        }
     }
 
-    /// Clear the mark only if `cipher`'s live seal key now covers the committed
-    /// generation; a higher generation still pending stays marked. The adoption
-    /// counterpart of [`Self::mark_committed`] — a merge that adopts a same- or
-    /// higher-generation key resolves the pause, but one that leaves a strictly
-    /// newer committed generation unadopted does not.
-    pub fn resolve(&self, cipher: &CloudCipher) {
-        if self.check(cipher).is_ok() {
-            self.clear();
+    pub(crate) fn mark_committed_mutation(
+        &self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        let mut recorded = self.0.write().unwrap();
+        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
+        match gate.clone().commit_candidate(generation, mutation) {
+            Ok(next) => {
+                *recorded = Some(next);
+                Ok(())
+            }
+            Err(error) => {
+                *recorded = Some(gate);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn remove_candidate(
+        &self,
+        generation: u64,
+        mutation: crate::sync::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        let mut recorded = self.0.write().unwrap();
+        let gate = recorded.take().ok_or_else(|| {
+            "rotation candidate gate is absent during proven nonactivation".to_string()
+        })?;
+        match gate.clone().remove_candidate(generation, mutation) {
+            Ok(next) => {
+                *recorded = next;
+                Ok(())
+            }
+            Err(error) => {
+                *recorded = Some(gate);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn replace_candidate_mutation(
+        &self,
+        generation: u64,
+        previous: crate::sync::store_commit::ObjectHash,
+        replacement: crate::sync::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        let mut recorded = self.0.write().unwrap();
+        let gate = recorded.take().ok_or_else(|| {
+            "rotation candidate gate is absent during candidate replacement".to_string()
+        })?;
+        match gate
+            .clone()
+            .replace_candidate_mutation(generation, previous, replacement)
+        {
+            Ok(next) => {
+                *recorded = Some(next);
+                Ok(())
+            }
+            Err(error) => {
+                *recorded = Some(gate);
+                Err(error)
+            }
         }
     }
 
     /// The recorded committed generation, if any is pending — for status
     /// reporting independent of a specific cipher snapshot.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn pending_generation(&self) -> Option<u64> {
-        *self.0.read().unwrap()
+        self.0
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(RotationGate::generation)
+    }
+
+    pub(crate) fn gate(&self) -> Option<RotationGate> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub(crate) fn install_durable_gate(&self, gate: Option<RotationGate>) -> Result<(), String> {
+        if let Some(gate) = &gate {
+            gate.validate()?;
+        }
+        *self.0.write().unwrap() = gate;
+        Ok(())
     }
 
     /// Check `cipher` against the committed generation, if one is pending. A
@@ -263,26 +630,23 @@ impl PendingRotation {
             CloudCipher::Encrypted(enc) => enc.current_generation(),
             CloudCipher::Plaintext => return Ok(()),
         };
-        if let Some(committed_generation) = self.pending_generation() {
-            if committed_generation > live_generation {
-                return Err(RotationPending {
-                    committed_generation,
-                    live_generation,
-                });
-            }
+        if let Some(gate) = self.gate() {
+            let state = gate
+                .pending_state()
+                .expect("in-memory rotation gate must be validated before installation");
+            return Err(RotationPending {
+                state,
+                live_generation,
+            });
         }
         Ok(())
     }
 }
 
-/// The `protocol_state` key under which a device durably records that a committed
-/// store-key rotation is outstanding (the committed generation as decimal). Set
-/// when [`PendingRotation`] is marked, deleted when the mark resolves. Restored
-/// into the in-memory marker at open so a restart cannot forget an unadopted
-/// rotation and resume sealing under the superseded generation — the removed
-/// member still holds a key for it — even if a fresh cloud scan, lagging, does
-/// not re-surface the rotation.
-pub const PENDING_ROTATION_STATE_KEY: &str = "pending_rotation_generation";
+/// The `protocol_state` key for the serialized [`RotationGate`]. Restored before
+/// the first cycle so a restart cannot forget an unfinished candidate or an
+/// unadopted committed rotation and resume sealing under an unauthorized key.
+pub const ROTATION_GATE_STATE_KEY: &str = "rotation_gate";
 
 /// Restore the in-memory [`PendingRotation`] from its durable `protocol_state`
 /// record, if one is set. Called at open, before the first cycle seals anything.
@@ -290,31 +654,17 @@ pub async fn restore_pending_rotation(
     db: &crate::database::Database,
     pending_rotation: &PendingRotation,
 ) -> Result<(), crate::database::DbError> {
-    if let Some(value) = db.get_protocol_state(PENDING_ROTATION_STATE_KEY).await? {
-        let generation = value.parse::<u64>().map_err(|error| {
+    if let Some(value) = db.get_protocol_state(ROTATION_GATE_STATE_KEY).await? {
+        let gate: RotationGate = serde_json::from_str(&value).map_err(|error| {
             crate::database::DbError::Message(format!(
-                "persisted pending-rotation generation {value:?} is invalid: {error}"
+                "persisted rotation gate is invalid: {error}"
             ))
         })?;
-        pending_rotation.mark_committed(generation);
+        pending_rotation
+            .install_durable_gate(Some(gate))
+            .map_err(crate::database::DbError::Message)?;
     }
     Ok(())
-}
-
-/// Write the in-memory [`PendingRotation`]'s current state to its durable
-/// `protocol_state` record: the committed generation while a rotation is pending, or
-/// a delete once it has resolved.
-pub async fn persist_pending_rotation(
-    db: &crate::database::Database,
-    pending_rotation: &PendingRotation,
-) -> Result<(), crate::database::DbError> {
-    match pending_rotation.pending_generation() {
-        Some(generation) => {
-            db.set_protocol_state(PENDING_ROTATION_STATE_KEY, &generation.to_string())
-                .await
-        }
-        None => db.delete_protocol_state(PENDING_ROTATION_STATE_KEY).await,
-    }
 }
 
 /// How a cloud home names its blob objects. Paired with the at-rest
@@ -727,10 +1077,6 @@ impl CloudSyncStorage {
             }
             ProtocolObjectProtection::RecipientSealed => CloudCipher::Plaintext,
         }
-    }
-
-    fn aad_context(&self, key: &str) -> Vec<u8> {
-        cloud_aad_context(&self.store_id, key)
     }
 
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
@@ -1387,13 +1733,8 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
             }
             other => coordination_home_error(other),
         })?;
-        let bytes = self
-            .storage
-            .cipher()
-            .open(raw.bytes, &self.storage.aad_context(key))
-            .map_err(|error| CoordinationError::Open(error.to_string()))?;
         Ok(VersionedObject {
-            bytes,
+            bytes: raw.bytes,
             version: VersionToken::from_cloud(raw.version),
         })
     }
@@ -1403,39 +1744,25 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
         key: &str,
         bytes: &[u8],
     ) -> Result<VersionedObject, CreateHeadError> {
-        let stored = self
-            .storage
-            .cipher_for_seal()
-            .map_err(|error| {
-                CreateHeadError::Coordination(CoordinationError::Open(error.to_string()))
-            })?
-            .seal(bytes.to_vec(), &self.storage.aad_context(key));
-        let created = self
-            .raw
-            .create_head(key, stored)
-            .await
-            .map_err(|error| match error {
-                crate::storage::cloud::CloudHeadCreateError::AlreadyExists => {
-                    CreateHeadError::AlreadyExists
-                }
-                crate::storage::cloud::CloudHeadCreateError::Storage(error) => {
-                    CreateHeadError::Coordination(coordination_home_error(error))
-                }
-            })?;
-        let opened = self
-            .storage
-            .cipher()
-            .open(created.bytes, &self.storage.aad_context(key))
-            .map_err(|error| {
-                CreateHeadError::Coordination(CoordinationError::Open(error.to_string()))
-            })?;
-        if opened != bytes {
-            return Err(CreateHeadError::Coordination(CoordinationError::Open(
+        let created =
+            self.raw
+                .create_head(key, bytes.to_vec())
+                .await
+                .map_err(|error| match error {
+                    crate::storage::cloud::CloudHeadCreateError::AlreadyExists => {
+                        CreateHeadError::AlreadyExists
+                    }
+                    crate::storage::cloud::CloudHeadCreateError::Storage(error) => {
+                        CreateHeadError::Coordination(coordination_home_error(error))
+                    }
+                })?;
+        if created.bytes != bytes {
+            return Err(CreateHeadError::Coordination(CoordinationError::Integrity(
                 "created coordination head readback differs".to_string(),
             )));
         }
         Ok(VersionedObject {
-            bytes: opened,
+            bytes: created.bytes,
             version: VersionToken::from_cloud(created.version),
         })
     }
@@ -1446,16 +1773,9 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
         expected: &VersionToken,
         bytes: &[u8],
     ) -> Result<VersionedObject, ReplaceHeadError> {
-        let stored = self
-            .storage
-            .cipher_for_seal()
-            .map_err(|error| {
-                ReplaceHeadError::Coordination(CoordinationError::Open(error.to_string()))
-            })?
-            .seal(bytes.to_vec(), &self.storage.aad_context(key));
         let replaced = self
             .raw
-            .replace_head(key, expected.cloud(), stored)
+            .replace_head(key, expected.cloud(), bytes.to_vec())
             .await
             .map_err(|error| match error {
                 crate::storage::cloud::CloudHeadReplaceError::VersionMismatch => {
@@ -1465,20 +1785,15 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
                     ReplaceHeadError::Coordination(coordination_home_error(error))
                 }
             })?;
-        let opened = self
-            .storage
-            .cipher()
-            .open(replaced.bytes, &self.storage.aad_context(key))
-            .map_err(|error| {
-                ReplaceHeadError::Coordination(CoordinationError::Open(error.to_string()))
-            })?;
-        if opened != bytes {
-            return Err(ReplaceHeadError::Coordination(CoordinationError::Open(
-                "replaced coordination head readback differs".to_string(),
-            )));
+        if replaced.bytes != bytes {
+            return Err(ReplaceHeadError::Coordination(
+                CoordinationError::Integrity(
+                    "replaced coordination head readback differs".to_string(),
+                ),
+            ));
         }
         Ok(VersionedObject {
-            bytes: opened,
+            bytes: replaced.bytes,
             version: VersionToken::from_cloud(replaced.version),
         })
     }
@@ -2129,6 +2444,88 @@ mod tests {
     };
     use crate::sync::test_helpers::open_serial_test_db;
 
+    #[test]
+    fn peer_rotation_cannot_stand_in_for_the_exact_local_candidate() {
+        let mutation = ObjectHash::digest(b"local rotation mutation");
+        let gate = RotationGate::empty()
+            .merge_peer_commit(2)
+            .expect("record peer rotation");
+
+        assert!(gate.commit_candidate(2, mutation).is_err());
+    }
+
+    #[test]
+    fn local_adoption_cannot_close_another_local_rotation() {
+        let adopted = ObjectHash::digest(b"adopted local rotation");
+        let other = ObjectHash::digest(b"other local rotation");
+        let gate = RotationGate {
+            candidate: None,
+            local_committed: Some(RotationLocalCommittedGate {
+                generation: 3,
+                mutation: other,
+            }),
+            peer_committed_generation: None,
+        };
+
+        assert!(gate.complete_local_adoption(2, adopted).is_err());
+    }
+
+    #[test]
+    fn rotation_gate_rejects_empty_zero_and_two_local_owners() {
+        assert!(RotationGate::empty().validate().is_err());
+        assert!(RotationGate {
+            candidate: None,
+            local_committed: None,
+            peer_committed_generation: Some(0),
+        }
+        .validate()
+        .is_err());
+        let mutation = ObjectHash::digest(b"rotation owner");
+        assert!(RotationGate {
+            candidate: Some(RotationCandidateGate {
+                generation: 2,
+                mutation,
+            }),
+            local_committed: Some(RotationLocalCommittedGate {
+                generation: 2,
+                mutation,
+            }),
+            peer_committed_generation: None,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn local_adoption_clears_the_same_peer_fact_but_preserves_a_newer_one() {
+        let mutation = ObjectHash::digest(b"local removal");
+        let committed = RotationGate::empty()
+            .with_candidate(2, mutation)
+            .unwrap()
+            .commit_candidate(2, mutation)
+            .unwrap();
+        assert_eq!(
+            committed
+                .clone()
+                .merge_peer_commit(2)
+                .unwrap()
+                .complete_local_adoption(2, mutation)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            committed
+                .merge_peer_commit(3)
+                .unwrap()
+                .complete_local_adoption(2, mutation)
+                .unwrap()
+                .unwrap()
+                .pending_state()
+                .unwrap(),
+            RotationPendingState::PeerCommitted { generation: 3 }
+        );
+    }
+
     async fn blob_write_registration(
         storage: &CloudSyncStorage,
         label: &str,
@@ -2753,6 +3150,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordination_values_are_stored_as_exact_control_bytes() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([23; 32])),
+            BlobPathScheme::Hashed,
+            "coordination-control-bytes",
+            UserKeypair::generate(),
+        )
+        .expect("construct encrypted storage")
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let coordination = storage
+            .serial_coordination()
+            .expect("serial coordination is configured");
+
+        let created = coordination
+            .create_head("store-head", b"signed head one")
+            .await
+            .expect("create coordination value");
+        assert_eq!(home.get("store-head"), Some(b"signed head one".to_vec()));
+        let replaced = coordination
+            .replace_head("store-head", &created.version, b"signed head two")
+            .await
+            .expect("replace coordination value");
+        assert_eq!(home.get("store-head"), Some(b"signed head two".to_vec()));
+        assert_eq!(replaced.bytes, b"signed head two");
+        assert_eq!(
+            coordination
+                .read_head("store-head")
+                .await
+                .expect("read coordination value")
+                .bytes,
+            b"signed head two",
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_rotation_allows_coordination_compare_and_swap() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([24; 32])),
+            BlobPathScheme::Hashed,
+            "coordination-during-rotation",
+            UserKeypair::generate(),
+        )
+        .expect("construct encrypted storage")
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let coordination = storage
+            .serial_coordination()
+            .expect("serial coordination is configured");
+        let created = coordination
+            .create_head("store-head", b"signed head one")
+            .await
+            .expect("create coordination value");
+        storage
+            .shared_pending_rotation()
+            .mark_candidate(2, ObjectHash::digest(b"member removal"))
+            .expect("arm candidate rotation gate");
+
+        let replaced = coordination
+            .replace_head("store-head", &created.version, b"signed head two")
+            .await
+            .expect("replace coordination value while rotation is pending");
+
+        assert_eq!(replaced.bytes, b"signed head two");
+        assert_eq!(home.get("store-head"), Some(b"signed head two".to_vec()));
+    }
+
+    #[tokio::test]
     async fn coordination_probe_observes_one_create_and_replace_winner() {
         let home = InMemoryCloudHome::new();
         let first = CloudSyncStorage::new(
@@ -2854,7 +3321,7 @@ mod tests {
             .await
             .expect("read pending-rotation Store root")
             .expect("pending-rotation Store root exists");
-        db.set_protocol_state(PENDING_ROTATION_STATE_KEY, "not-a-generation")
+        db.set_protocol_state(ROTATION_GATE_STATE_KEY, "not-a-rotation-gate")
             .await
             .expect("persist malformed pending rotation");
         drop(components);

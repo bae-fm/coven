@@ -1507,17 +1507,57 @@ pub fn install_active_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     let future = async move {
-        let authorization = Box::new(
-            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                Box::pin(store.open_into(observer_db)).await?,
+        let coordination = match observer_db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => None,
+            crate::WritePolicy::Serial => Some(
+                store
+                    .storage
+                    .serial_coordination()
+                    .map_err(|error| error.to_string())?,
             ),
+        };
+        let authorization = Box::new(
+            crate::sync::device_join::load_current_device_join_authorization(
+                observer_db,
+                &store.storage,
+                coordination,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
         );
-        let provider_admin_grant = store
-            .protocol_root
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
+        let observer_device_id = observer_db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "provider administrator device id is absent".to_string())?;
+        let (_, observer_registration, _, _) =
+            crate::sync::store_outbound::load_local_store_authority(
+                observer_db,
+                &observer_device_id,
+                &store.signer,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let provider_admin = match authorization.as_ref() {
+            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(membership) => {
+                let crate::sync::membership::MembershipStatus::Resolved(resolved) =
+                    membership.status()
+                else {
+                    return Err("provider administrator membership is unresolved".to_string());
+                };
+                resolved.provider_admin.combined_state()
+            }
+            crate::sync::device_join::DeviceJoinAuthorization::Serial(authorization) => {
+                &authorization.provider_admin
+            }
+        };
+        let provider_admin_grant = provider_admin
+            .active()
+            .into_iter()
+            .find(|grant| provider_admin.authorizes(grant, &observer_registration))
+            .ok_or_else(|| {
+                "local Store device is not an effective provider administrator".to_string()
+            })?;
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1553,7 +1593,7 @@ pub fn install_active_device_fixture<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 observer_db,
                 &store.storage,
-                None,
+                coordination,
                 None,
                 None,
                 &authorization,
@@ -1568,7 +1608,7 @@ pub fn install_active_device_fixture<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &store.storage,
-                    None,
+                    coordination,
                     None,
                     identity,
                     *approval,
@@ -1582,7 +1622,7 @@ pub fn install_active_device_fixture<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     observer_db,
                     &store.storage,
-                    None,
+                    coordination,
                     &authorization,
                     &store.signer,
                     *registration_request,
@@ -1601,16 +1641,35 @@ pub fn install_active_device_fixture<'a>(
             .await
             .map_err(|error| error.to_string())?,
         );
-        let membership = Box::pin(store.open_into(local_db)).await?;
+        let membership = match local_db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => Some(Box::pin(store.open_into(local_db)).await?),
+            crate::WritePolicy::Serial => {
+                let root = crate::sync::store_protocol_root::open_store(
+                    local_db,
+                    &store.storage,
+                    &store.root,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                crate::sync::cycle::ensure_serial_founder_authorization(
+                    &store.storage,
+                    local_db,
+                    &store.root,
+                    &root,
+                )
+                .await?;
+                None
+            }
+        };
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let bootstrap_pull = Box::pin(crate::sync::store_pull::pull_store_commits_with_identity(
             local_db,
             local_db.synced_tables(),
             &store.storage,
-            None,
+            coordination,
             store.root.store_root_hash,
             &bootstrap_store_dir,
-            Some(&membership),
+            membership.as_ref(),
             Some(identity),
         ))
         .await
@@ -1650,7 +1709,7 @@ pub fn install_active_device_fixture<'a>(
             Box::pin(crate::sync::device_join::finalize_device_join(
                 observer_db,
                 &store.storage,
-                None,
+                coordination,
                 &authorization,
                 &store.signer,
                 *completion,
@@ -1669,6 +1728,102 @@ pub fn install_active_device_fixture<'a>(
         Ok(())
     };
     Box::pin(future)
+}
+
+pub async fn promote_active_member_fixture(
+    store: &TestStore,
+    owner_db: &Database,
+    member_db: &Database,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+    encryption: &crate::encryption::EncryptionService,
+) -> Result<crate::sync::circle_control::StoreMembershipStateRef, String> {
+    let coordination = match owner_db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => None,
+        crate::WritePolicy::Serial => Some(
+            store
+                .storage
+                .serial_coordination()
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+    let owner_device_id = owner_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Owner Store device id is absent".to_string())?;
+    let member_device_id = member_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Member Store device id is absent".to_string())?;
+    let (_, member_registration, _, _) = crate::sync::store_outbound::load_local_store_authority(
+        member_db,
+        &member_device_id,
+        member,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let request = Box::pin(crate::sync::owner_promotion::begin_owner_promotion(
+        owner_db,
+        &store.storage,
+        coordination,
+        &owner_device_id,
+        owner,
+        member_registration,
+    ))
+    .await
+    .map_err(|error| format!("begin Owner promotion: {error}"))?;
+    let acceptance = Box::pin(crate::sync::owner_promotion::accept_owner_promotion(
+        member_db,
+        &store.storage,
+        coordination,
+        &member_device_id,
+        member,
+        request,
+    ))
+    .await
+    .map_err(|error| format!("accept Owner promotion: {error}"))?;
+    let finalized = Box::pin(crate::sync::owner_promotion::finalize_owner_promotion(
+        owner_db,
+        &store.storage,
+        coordination,
+        &owner_device_id,
+        owner,
+        encryption,
+        acceptance,
+    ))
+    .await
+    .map_err(|error| format!("finalize Owner promotion: {error}"))?;
+    let membership = match member_db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            crate::sync::pull::load_cycle_membership(&store.storage, member_db)
+                .await
+                .map_err(|error| error.to_string())?
+                .chain
+        }
+        crate::WritePolicy::Serial => None,
+    };
+    let (_temp, store_dir) = temp_store_dir();
+    let pull = Box::pin(crate::sync::store_pull::pull_store_commits_with_identity(
+        member_db,
+        member_db.synced_tables(),
+        &store.storage,
+        coordination,
+        store.root.store_root_hash,
+        &store_dir,
+        membership.as_ref(),
+        Some(member),
+    ))
+    .await
+    .map_err(|error| error.to_string())?;
+    if !pull.held_positions.is_empty() {
+        return Err(format!(
+            "Owner promotion pull held signed positions: {:?}",
+            pull.held_positions
+        ));
+    }
+    Ok(finalized)
 }
 
 #[cfg(test)]

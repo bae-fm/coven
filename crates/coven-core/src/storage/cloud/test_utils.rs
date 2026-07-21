@@ -57,7 +57,7 @@ impl Drop for ExactStreamReadGuard {
 pub struct InMemoryCloudHome {
     provider_binding: crate::sync::storage::ResolvedProviderBinding,
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    exact_slot_allocations: Arc<Mutex<HashMap<String, usize>>>,
+    exact_slot_allocations: Arc<AtomicUsize>,
     head_versions: Arc<Mutex<HashMap<String, u64>>>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
@@ -103,7 +103,7 @@ impl InMemoryCloudHome {
                 },
             },
             writes: Arc::new(Mutex::new(HashMap::new())),
-            exact_slot_allocations: Arc::new(Mutex::new(HashMap::new())),
+            exact_slot_allocations: Arc::new(AtomicUsize::new(0)),
             head_versions: Arc::new(Mutex::new(HashMap::new())),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
@@ -787,12 +787,7 @@ impl ExactSlotStorage for InMemoryCloudHome {
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
         match &self.provider_binding.store {
             crate::sync::storage::StoreProviderBinding::GoogleDrive { .. } => {
-                let allocation = {
-                    let mut allocations = self.exact_slot_allocations.lock().unwrap();
-                    let allocation = allocations.entry(logical_key.to_string()).or_insert(0);
-                    *allocation += 1;
-                    *allocation
-                };
+                let allocation = self.exact_slot_allocations.fetch_add(1, Ordering::SeqCst) + 1;
                 ObjectSlot::opaque(logical_key.to_string(), format!("in-memory-{allocation}"))
             }
             crate::sync::storage::StoreProviderBinding::S3 { .. }
@@ -1085,6 +1080,30 @@ mod tests {
             Err(CloudHomeError::NotFound(_))
         ));
         assert_eq!(h.read_at(&second).await.unwrap(), b"second");
+    }
+
+    #[tokio::test]
+    async fn google_drive_exact_slots_with_different_logical_keys_have_distinct_file_ids() {
+        let h = InMemoryCloudHome::new().with_provider_binding(
+            crate::sync::storage::ResolvedProviderBinding {
+                store: crate::sync::storage::StoreProviderBinding::GoogleDrive {
+                    corpus: crate::sync::storage::GoogleDriveCorpus::SharedDrive {
+                        drive_id: "drive-id".to_string(),
+                        folder_id: "folder-id".to_string(),
+                    },
+                },
+                device: crate::sync::storage::ProviderDeviceBinding {
+                    principal: crate::sync::storage::ProviderPrincipalId::GoogleDrive {
+                        permission_id: "permission-id".to_string(),
+                    },
+                },
+            },
+        );
+
+        let first = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+        let second = h.allocate_slot("store-v1/test/two.json").await.unwrap();
+
+        assert_ne!(first.physical(), second.physical());
     }
 
     #[tokio::test]

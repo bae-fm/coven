@@ -1149,8 +1149,8 @@ pub enum CoordinationError {
     NotFound(String),
     #[error("coordination storage failed: {0}")]
     Storage(String),
-    #[error("coordination object could not be opened: {0}")]
-    Open(String),
+    #[error("coordination storage violated exact readback integrity: {0}")]
+    Integrity(String),
 }
 
 #[derive(Debug, thiserror::Error)]

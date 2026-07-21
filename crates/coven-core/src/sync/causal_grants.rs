@@ -158,19 +158,20 @@ impl<R: Clone + Eq, T: Clone + Ord> GrantState<R, T> {
     }
 }
 
-pub(crate) fn map_grant_state<C, A, R, T>(
+pub(crate) fn try_map_grant_state<C, A, R, T, E>(
     state: &GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>,
     record: R,
     checkpoint_retirements: Option<&GrantRetirements<T>>,
-    map_entry: impl Fn(&C, Option<&OwnerGrantBarrier<C>>) -> T,
-) -> GrantState<R, T>
+    missing_checkpoint_retirements: impl Fn() -> E,
+    map_entry: impl Fn(&C, Option<&OwnerGrantBarrier<C>>) -> Result<T, E>,
+) -> Result<GrantState<R, T>, E>
 where
     C: CausalCoordinate,
     A: CausalAssignment,
     T: Clone + Ord,
 {
     let GrantState::Tombstoned { retirements, .. } = state else {
-        return GrantState::Active { record };
+        return Ok(GrantState::Active { record });
     };
     let mut mapped: Option<GrantRetirements<T>> = None;
     let mut add = |retirement| match &mut mapped {
@@ -184,20 +185,20 @@ where
             CausalGrantRetirement::Entry {
                 coord,
                 owner_barrier,
-            } => add(map_entry(coord, owner_barrier.as_ref())),
+            } => add(map_entry(coord, owner_barrier.as_ref())?),
             CausalGrantRetirement::Checkpoint => {
-                let checkpoint_retirements = checkpoint_retirements
-                    .expect("checkpoint tombstone requires exact retirement evidence");
+                let checkpoint_retirements =
+                    checkpoint_retirements.ok_or_else(&missing_checkpoint_retirements)?;
                 for retirement in checkpoint_retirements.iter().cloned() {
                     add(retirement);
                 }
             }
         }
     }
-    GrantState::Tombstoned {
+    Ok(GrantState::Tombstoned {
         record,
         retirements: mapped.expect("causal tombstone has retirement evidence"),
-    }
+    })
 }
 
 pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
@@ -226,7 +227,7 @@ impl AuthorStreamId {
         Self(*digest.as_bytes())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }

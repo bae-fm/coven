@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::membership::{
     verify_membership_entry, AuthorStreamId, MembershipChange, MembershipCoord, MembershipEntry,
-    MembershipGrantCreationAuthority, MembershipGrantId,
+    MembershipGrantCreationAuthority, MembershipGrantId, MembershipHeadRef,
 };
 use super::storage::{ExactObjectRef, ProviderDeviceBinding};
 use crate::keys::{self, UserKeypair};
@@ -1140,6 +1140,9 @@ pub struct StorePackageInput<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreControl {
+    MergeMembership {
+        transition: super::membership::MergeMembershipHeadTransition,
+    },
     SerialMembership {
         entry: super::membership::SerialMembershipEntry,
     },
@@ -1161,18 +1164,539 @@ pub struct SerialRecoveryActivation {
     pub registration: ActivatedStoreDeviceRegistrationRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerPromotionId(ObjectHash);
+
+impl OwnerPromotionId {
+    pub fn from_generated(value: String) -> Self {
+        Self(ObjectHash::digest(
+            &[
+                b"coven.owner-promotion-id.v1\0".as_slice(),
+                value.as_bytes(),
+            ]
+            .concat(),
+        ))
+    }
+}
+
+impl fmt::Display for OwnerPromotionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerPromotionFinalization {
+    MergeConcurrent {
+        author_stream: AuthorStreamId,
+        seq: u64,
+        previous_hash: Option<ObjectHash>,
+    },
+    Serial,
+}
+
+impl OwnerPromotionFinalization {
+    pub fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+            Self::Serial => WritePolicy::Serial,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerPromotionRequest {
+    pub version: u32,
+    pub promotion_id: OwnerPromotionId,
+    pub store_root_hash: ObjectHash,
+    pub promoter_registration: StoreDeviceRegistrationRef,
+    pub promoter_owner_grant: MembershipGrantId,
+    pub member_pubkey: String,
+    pub member_grant: MembershipGrantId,
+    pub member_registration: StoreDeviceRegistrationRef,
+    pub intended_owner_grant: MembershipGrantId,
+    pub predecessor_membership: StoreMembershipStateRef,
+    pub predecessor_devices: StoreDeviceStateRef,
+    pub finalization: OwnerPromotionFinalization,
+    pub signature: String,
+}
+
+impl OwnerPromotionRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        promotion_id: OwnerPromotionId,
+        root: &StoreRootRef,
+        promoter_registration: StoreDeviceRegistrationRef,
+        promoter: &StoreDeviceRegistration,
+        promoter_owner_grant: MembershipGrantId,
+        member_pubkey: String,
+        member_grant: MembershipGrantId,
+        member_registration: StoreDeviceRegistrationRef,
+        predecessor_membership: StoreMembershipStateRef,
+        predecessor_devices: StoreDeviceStateRef,
+        finalization: OwnerPromotionFinalization,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let intended_owner_grant =
+            derive_owner_promotion_grant(root.store_root_hash, promotion_id, &member_pubkey);
+        let mut request = Self {
+            version: STORE_PROTOCOL_VERSION,
+            promotion_id,
+            store_root_hash: root.store_root_hash,
+            promoter_registration,
+            promoter_owner_grant,
+            member_pubkey,
+            member_grant,
+            member_registration,
+            intended_owner_grant,
+            predecessor_membership,
+            predecessor_devices,
+            finalization,
+            signature: String::new(),
+        };
+        request.validate_shape(root, promoter)?;
+        let device_signer = promoter.device_signer(signer)?;
+        request.signature = keys::sign_hex(&device_signer, &request.canonical_bytes()).1;
+        Ok(request)
+    }
+
+    pub fn verify(
+        &self,
+        root: &StoreRootRef,
+        promoter: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.validate_shape(root, promoter)?;
+        if !keys::verify_signature_hex(
+            &promoter.device_signing_pubkey,
+            &self.signature,
+            &self.canonical_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(
+        &self,
+        root: &StoreRootRef,
+        promoter: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        require_version(self.version)?;
+        self.promoter_registration.verify_registration(promoter)?;
+        if self.store_root_hash != root.store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: root.store_root_hash,
+                actual: self.store_root_hash,
+            });
+        }
+        if promoter.store_root != *root
+            || promoter.author_pubkey == self.member_pubkey
+            || self.member_pubkey.is_empty()
+            || self.predecessor_membership.write_policy() != self.finalization.policy()
+            || self.predecessor_devices.write_policy() != self.finalization.policy()
+            || self.intended_owner_grant
+                != derive_owner_promotion_grant(
+                    self.store_root_hash,
+                    self.promotion_id,
+                    &self.member_pubkey,
+                )
+            || matches!(
+                self.finalization,
+                OwnerPromotionFinalization::MergeConcurrent { seq: 0, .. }
+            )
+        {
+            return Err(StoreProtocolError::OwnerPromotionMismatch);
+        }
+        Ok(())
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            version: u32,
+            promotion_id: OwnerPromotionId,
+            store_root_hash: ObjectHash,
+            promoter_registration: &'a StoreDeviceRegistrationRef,
+            promoter_owner_grant: &'a MembershipGrantId,
+            member_pubkey: &'a str,
+            member_grant: &'a MembershipGrantId,
+            member_registration: &'a StoreDeviceRegistrationRef,
+            intended_owner_grant: &'a MembershipGrantId,
+            predecessor_membership: &'a StoreMembershipStateRef,
+            predecessor_devices: &'a StoreDeviceStateRef,
+            finalization: &'a OwnerPromotionFinalization,
+        }
+        domain_json(
+            b"coven.owner-promotion-request.v1\0",
+            &Signed {
+                version: self.version,
+                promotion_id: self.promotion_id,
+                store_root_hash: self.store_root_hash,
+                promoter_registration: &self.promoter_registration,
+                promoter_owner_grant: &self.promoter_owner_grant,
+                member_pubkey: &self.member_pubkey,
+                member_grant: &self.member_grant,
+                member_registration: &self.member_registration,
+                intended_owner_grant: &self.intended_owner_grant,
+                predecessor_membership: &self.predecessor_membership,
+                predecessor_devices: &self.predecessor_devices,
+                finalization: &self.finalization,
+            },
+        )
+    }
+}
+
+pub fn derive_owner_promotion_grant(
+    store_root_hash: ObjectHash,
+    promotion_id: OwnerPromotionId,
+    member_pubkey: &str,
+) -> MembershipGrantId {
+    MembershipGrantId(ObjectHash::digest(&domain_json(
+        b"coven.owner-promotion-grant.v1\0",
+        &(store_root_hash, promotion_id, member_pubkey),
+    )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerPromotionRequestActivation {
+    MergeConcurrent {
+        commit: StoreBatchCommitRef,
+        head: StoreDeviceHeadRef,
+    },
+    Serial {
+        commit: StoreBatchCommitRef,
+    },
+}
+
+impl OwnerPromotionRequestActivation {
+    pub fn commit(&self) -> &StoreBatchCommitRef {
+        match self {
+            Self::MergeConcurrent { commit, .. } | Self::Serial { commit } => commit,
+        }
+    }
+
+    pub fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+            Self::Serial { .. } => WritePolicy::Serial,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerPromotionAnchors {
+    MergeConcurrent {
+        membership: GrantStreamAnchor,
+        recovery: GrantStreamAnchor,
+    },
+    Serial {
+        recovery: GrantStreamAnchor,
+    },
+}
+
+impl OwnerPromotionAnchors {
+    pub fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+            Self::Serial { .. } => WritePolicy::Serial,
+        }
+    }
+
+    pub fn recovery(&self) -> &GrantStreamAnchor {
+        match self {
+            Self::MergeConcurrent { recovery, .. } | Self::Serial { recovery } => recovery,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerPromotionAcceptance {
+    pub request: Box<OwnerPromotionRequest>,
+    pub activation: OwnerPromotionRequestActivation,
+    pub anchors: OwnerPromotionAnchors,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerPromotionStatus {
+    Preparing {
+        member_registration: StoreDeviceRegistrationRef,
+    },
+    RequestPending {
+        request: OwnerPromotionRequest,
+    },
+    AwaitingAcceptance {
+        request: OwnerPromotionRequest,
+        activation: OwnerPromotionRequestActivation,
+    },
+    AcceptanceReady {
+        acceptance: OwnerPromotionAcceptance,
+    },
+    FinalizationPending {
+        acceptance: OwnerPromotionAcceptance,
+    },
+    Finalized {
+        membership: StoreMembershipStateRef,
+    },
+    Nonactivated {
+        request: OwnerPromotionRequest,
+    },
+    Stale {
+        acceptance: OwnerPromotionAcceptance,
+        reason: OwnerPromotionStaleReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerPromotionStaleReason {
+    MergeFinalizationPointOccupied { winner: MembershipHeadRef },
+    MergeActivationRejected,
+    SerialHeadAdvanced { current: SerialStorePosition },
+}
+
+impl OwnerPromotionAcceptance {
+    pub fn signed(
+        request: OwnerPromotionRequest,
+        activation: OwnerPromotionRequestActivation,
+        anchors: OwnerPromotionAnchors,
+        candidate: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let mut acceptance = Self {
+            request: Box::new(request),
+            activation,
+            anchors,
+            signature: String::new(),
+        };
+        acceptance.validate_shape(candidate)?;
+        let device_signer = candidate.device_signer(signer)?;
+        acceptance.signature = keys::sign_hex(&device_signer, &acceptance.canonical_bytes()).1;
+        Ok(acceptance)
+    }
+
+    pub fn verify(&self, candidate: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
+        self.validate_shape(candidate)?;
+        if !keys::verify_signature_hex(
+            &candidate.device_signing_pubkey,
+            &self.signature,
+            &self.canonical_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(
+        &self,
+        candidate: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.request
+            .member_registration
+            .verify_registration(candidate)?;
+        if candidate.store_root.store_root_hash != self.request.store_root_hash
+            || candidate.author_pubkey != self.request.member_pubkey
+            || self.activation.policy() != self.request.finalization.policy()
+            || self.anchors.policy() != self.request.finalization.policy()
+            || self.activation.commit().coord.policy() != self.request.finalization.policy()
+            || !matches!(
+                self.anchors.recovery(),
+                GrantStreamAnchor::OwnerRecovery { .. }
+            )
+        {
+            return Err(StoreProtocolError::OwnerPromotionMismatch);
+        }
+        match &self.anchors {
+            OwnerPromotionAnchors::MergeConcurrent {
+                membership,
+                recovery,
+            } => {
+                if !matches!(membership, GrantStreamAnchor::StoreMembership { .. }) {
+                    return Err(StoreProtocolError::OwnerPromotionMismatch);
+                }
+                let membership_stream = StreamActivation::grant_authorized_stream_id(
+                    self.request.store_root_hash,
+                    &self.request.member_registration,
+                    &self.request.intended_owner_grant,
+                    StreamAnchorDomain::StoreMembership,
+                );
+                let membership_key = format!(
+                    "{}.json",
+                    membership_head_slot_prefix(
+                        &self.request.member_pubkey,
+                        &self.request.intended_owner_grant,
+                        membership_stream,
+                        1,
+                    )
+                );
+                let recovery_key = format!(
+                    "{}.json",
+                    owner_recovery_semantic_prefix(
+                        &self.request.member_pubkey,
+                        self.request.intended_owner_grant.clone(),
+                        1,
+                    )
+                );
+                if membership.first_slot().logical_key() != membership_key
+                    || recovery.first_slot().logical_key() != recovery_key
+                    || matches!(
+                        (membership.first_slot().physical(), recovery.first_slot().physical()),
+                        (
+                            crate::storage::cloud::PhysicalObjectLocator::Opaque(left),
+                            crate::storage::cloud::PhysicalObjectLocator::Opaque(right),
+                        ) if left == right
+                    )
+                {
+                    return Err(StoreProtocolError::OwnerPromotionMismatch);
+                }
+            }
+            OwnerPromotionAnchors::Serial { recovery } => {
+                let recovery_key = format!(
+                    "{}.json",
+                    owner_recovery_semantic_prefix(
+                        &self.request.member_pubkey,
+                        self.request.intended_owner_grant.clone(),
+                        1,
+                    )
+                );
+                if recovery.first_slot().logical_key() != recovery_key {
+                    return Err(StoreProtocolError::OwnerPromotionMismatch);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        domain_json(
+            b"coven.owner-promotion-acceptance.v1\0",
+            &(&self.request, &self.activation, &self.anchors),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerConflictResolutionAcceptance {
+    pub store_root_hash: ObjectHash,
+    pub owner_grant: MembershipGrantId,
+    pub owner_registration: StoreDeviceRegistrationRef,
+    pub provider: ProviderDeviceBinding,
+    pub membership: GrantStreamAnchor,
+    pub recovery: GrantStreamAnchor,
+    pub device_state: StoreDeviceStateRef,
+    pub signature: String,
+}
+
+impl OwnerConflictResolutionAcceptance {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        owner_grant: MembershipGrantId,
+        owner_registration: StoreDeviceRegistrationRef,
+        membership: GrantStreamAnchor,
+        recovery: GrantStreamAnchor,
+        device_state: StoreDeviceStateRef,
+        registration: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let mut acceptance = Self {
+            store_root_hash,
+            owner_grant,
+            owner_registration,
+            provider: registration.provider.clone(),
+            membership,
+            recovery,
+            device_state,
+            signature: String::new(),
+        };
+        acceptance.validate_shape(registration)?;
+        let device_signer = registration.device_signer(signer)?;
+        acceptance.signature = keys::sign_hex(&device_signer, &acceptance.canonical_bytes()).1;
+        Ok(acceptance)
+    }
+
+    pub fn verify(&self, registration: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
+        self.validate_shape(registration)?;
+        if !keys::verify_signature_hex(
+            &registration.device_signing_pubkey,
+            &self.signature,
+            &self.canonical_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(
+        &self,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.owner_registration.verify_registration(registration)?;
+        if registration.store_root.store_root_hash != self.store_root_hash
+            || registration.provider != self.provider
+            || !matches!(
+                registration.store_commits,
+                StoreCommitAnchor::MergeConcurrent { .. }
+            )
+            || !matches!(self.membership, GrantStreamAnchor::StoreMembership { .. })
+            || !matches!(self.recovery, GrantStreamAnchor::OwnerRecovery { .. })
+            || !matches!(
+                self.device_state,
+                StoreDeviceStateRef::MergeConcurrent { .. }
+            )
+        {
+            return Err(StoreProtocolError::OwnerRecoveryMismatch);
+        }
+        Ok(())
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        domain_json(
+            b"coven.owner-conflict-resolution-acceptance.v1\0",
+            &(
+                self.store_root_hash,
+                &self.owner_grant,
+                &self.owner_registration,
+                &self.provider,
+                &self.membership,
+                &self.recovery,
+                &self.device_state,
+            ),
+        )
+    }
+}
+
 impl StoreControl {
     pub fn serial_membership_entry(&self) -> Option<&super::membership::SerialMembershipEntry> {
         match self {
             Self::SerialMembership { entry }
             | Self::SerialMembershipAndKeyRotation { entry, .. } => Some(entry),
-            Self::ProviderAdmin { .. } => None,
+            Self::MergeMembership { .. } | Self::ProviderAdmin { .. } => None,
+        }
+    }
+
+    pub fn merge_membership_transition(
+        &self,
+    ) -> Option<&super::membership::MergeMembershipHeadTransition> {
+        match self {
+            Self::MergeMembership { transition } => Some(transition),
+            Self::SerialMembership { .. }
+            | Self::SerialMembershipAndKeyRotation { .. }
+            | Self::ProviderAdmin { .. } => None,
         }
     }
 
     pub fn key_generation(&self) -> Option<u64> {
         match self {
-            Self::SerialMembership { .. } => None,
+            Self::MergeMembership { .. } | Self::SerialMembership { .. } => None,
             Self::SerialMembershipAndKeyRotation { generation, .. } => Some(*generation),
             Self::ProviderAdmin { .. } => None,
         }
@@ -1182,6 +1706,7 @@ impl StoreControl {
         &self,
     ) -> Vec<&super::wrapped_store_key::WrappedStoreKeyRef> {
         match self {
+            Self::MergeMembership { .. } => Vec::new(),
             Self::SerialMembership { entry } => match &entry.change {
                 super::membership::SerialMembershipChange::SetMember { wrapped_key, .. } => {
                     vec![wrapped_key]
@@ -1309,6 +1834,9 @@ pub enum StoreCommitBody {
     SerialRecoveryActivation {
         activation: SerialRecoveryActivation,
     },
+    OwnerPromotionRequest {
+        request: Box<OwnerPromotionRequest>,
+    },
     AbandonCandidates {
         manifests: Vec<CandidateCleanupManifest>,
     },
@@ -1423,6 +1951,7 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -1470,6 +1999,7 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -1481,6 +2011,7 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -1492,7 +2023,8 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
         }
     }
 
@@ -1503,6 +2035,7 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -1514,6 +2047,7 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -1559,7 +2093,8 @@ impl StoreBatchCommit {
             }
             StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. } => &[],
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
     }
@@ -1587,8 +2122,21 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
+        }
+    }
+
+    pub fn owner_promotion_request(&self) -> Option<&OwnerPromotionRequest> {
+        match &self.body {
+            StoreCommitBody::OwnerPromotionRequest { request } => Some(request),
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
 
@@ -1864,6 +2412,62 @@ impl StoreBatchCommit {
             device_state,
             None,
             StoreCommitBody::SerialRecoveryActivation { activation },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_owner_promotion_request(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        request: OwnerPromotionRequest,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        if membership_authority.policy() != order.policy() {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: order.policy(),
+                actual: membership_authority.policy(),
+            });
+        }
+        let membership_authority = membership_authority.into_commit_authority();
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            membership_authority.as_ref(),
+            signer,
+        )?;
+        validate_owner_promotion_request_for_commit(
+            &request,
+            store_root_hash,
+            &author_registration,
+            author,
+            &membership_state,
+            &device_state,
+            order.policy(),
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitBody::OwnerPromotionRequest {
+                request: Box::new(request),
+            },
             signer,
         )
     }
@@ -2284,7 +2888,9 @@ impl StoreBatchCommit {
         validate_control(
             order.policy(),
             store_root_hash,
+            &author_registration,
             &author.author_pubkey,
+            &membership_state,
             control.as_ref(),
         )?;
         validate_commit_acknowledgement(&acknowledgement, &author_registration)?;
@@ -2318,6 +2924,7 @@ impl StoreBatchCommit {
             store_root_hash,
             &author_registration,
             order.policy(),
+            control.as_ref(),
             &stream_activations,
         )?;
         let mut seen_circles = BTreeSet::new();
@@ -2551,6 +3158,17 @@ impl StoreBatchCommit {
                 author,
             )?;
         }
+        if let StoreCommitBody::OwnerPromotionRequest { request } = &self.body {
+            validate_owner_promotion_request_for_commit(
+                request,
+                self.store_root_hash,
+                &self.author_registration,
+                author,
+                &self.membership_state,
+                &self.device_state,
+                self.policy(),
+            )?;
+        }
         self.verified_candidate_objects()?;
         validate_commit_order(&self.order)?;
         validate_commit_predecessor_states(
@@ -2661,6 +3279,7 @@ fn validate_commit_body(
                 store_root_hash,
                 author,
                 order.policy(),
+                operations.control.as_ref(),
                 &operations.stream_activations,
             )?;
         }
@@ -2677,6 +3296,14 @@ fn validate_commit_body(
         StoreCommitBody::SerialRecoveryActivation { activation } => {
             validate_serial_recovery_activation(order, activation, author)?;
         }
+        StoreCommitBody::OwnerPromotionRequest { request } => {
+            if request.store_root_hash != store_root_hash
+                || request.promoter_registration != *author
+                || request.finalization.policy() != order.policy()
+            {
+                return Err(StoreProtocolError::OwnerPromotionMismatch);
+            }
+        }
         StoreCommitBody::AbandonCandidates { manifests } => {
             if manifests.is_empty() {
                 return Err(StoreProtocolError::Malformed(
@@ -2688,10 +3315,32 @@ fn validate_commit_body(
     Ok(())
 }
 
+fn validate_owner_promotion_request_for_commit(
+    request: &OwnerPromotionRequest,
+    store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
+    author: &StoreDeviceRegistration,
+    membership_state: &StoreMembershipStateRef,
+    device_state: &StoreDeviceStateRef,
+    policy: WritePolicy,
+) -> Result<(), StoreProtocolError> {
+    request.verify(&author.store_root, author)?;
+    if request.store_root_hash != store_root_hash
+        || request.promoter_registration != *author_registration
+        || request.predecessor_membership != *membership_state
+        || request.predecessor_devices != *device_state
+        || request.finalization.policy() != policy
+    {
+        return Err(StoreProtocolError::OwnerPromotionMismatch);
+    }
+    Ok(())
+}
+
 fn validate_stream_activations(
     store_root_hash: ObjectHash,
     author: &StoreDeviceRegistrationRef,
     policy: WritePolicy,
+    control: Option<&StoreControl>,
     activations: &[StreamActivation],
 ) -> Result<(), StoreProtocolError> {
     if activations.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -2709,7 +3358,8 @@ fn validate_stream_activations(
                 actual: activation.store_root_hash(),
             });
         }
-        if activation.author_registration() != author {
+        let owner_promotion = matches!(control, Some(StoreControl::MergeMembership { .. }));
+        if activation.author_registration() != author && !owner_promotion {
             return Err(StoreProtocolError::Malformed(
                 "stream activation registration differs from its commit author".to_string(),
             ));
@@ -2719,15 +3369,26 @@ fn validate_stream_activations(
                 "Serial Store commit contains a stream activation".to_string(),
             ));
         }
-        if !matches!(
-            activation,
-            StreamActivation::GrantAuthorized {
-                anchor: GrantStreamAnchor::CircleControl { .. }
-                    | GrantStreamAnchor::CircleRoster { .. }
-                    | GrantStreamAnchor::CircleMetadata { .. },
-                ..
-            }
-        ) {
+        let allowed_anchor = matches!(
+            (control, activation),
+            (
+                Some(StoreControl::MergeMembership { .. }),
+                StreamActivation::GrantAuthorized {
+                    anchor: GrantStreamAnchor::StoreMembership { .. }
+                        | GrantStreamAnchor::OwnerRecovery { .. },
+                    ..
+                }
+            ) | (
+                _,
+                StreamActivation::GrantAuthorized {
+                    anchor: GrantStreamAnchor::CircleControl { .. }
+                        | GrantStreamAnchor::CircleRoster { .. }
+                        | GrantStreamAnchor::CircleMetadata { .. },
+                    ..
+                }
+            )
+        );
+        if !allowed_anchor {
             return Err(StoreProtocolError::Malformed(
                 "Store commit contains a root- or registration-authorized stream anchor"
                     .to_string(),
@@ -2851,6 +3512,7 @@ fn candidate_manifest(
             ));
         }
         StoreCommitBody::SerialRecoveryActivation { .. }
+        | StoreCommitBody::OwnerPromotionRequest { .. }
         | StoreCommitBody::AbandonCandidates { .. } => {}
     }
     objects.sort_by_cached_key(|object| {
@@ -3046,12 +3708,30 @@ fn verify_package_ref(
 fn validate_control(
     policy: WritePolicy,
     store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
     author_pubkey: &str,
+    membership_state: &StoreMembershipStateRef,
     control: Option<&StoreControl>,
 ) -> Result<(), StoreProtocolError> {
     let Some(control) = control else {
         return Ok(());
     };
+    if let StoreControl::MergeMembership { transition } = control {
+        let StoreMembershipStateRef::MergeConcurrent(_) = membership_state else {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: WritePolicy::MergeConcurrent,
+                actual: membership_state.write_policy(),
+            });
+        };
+        if policy != WritePolicy::MergeConcurrent
+            || transition.body.author_registration != *author_registration
+            || transition.body.entry.coord.author_pubkey != author_pubkey
+            || transition.body.entry.coord.seq == 0
+        {
+            return Err(StoreProtocolError::InvalidMergeMembershipControl);
+        }
+        return Ok(());
+    }
     if policy != WritePolicy::Serial {
         return Err(StoreProtocolError::ControlRequiresSerial);
     }
@@ -3100,7 +3780,9 @@ fn validate_parsed_control(
     validate_control(
         commit.policy(),
         commit.store_root_hash,
+        &commit.author_registration,
         &author.author_pubkey,
+        &commit.membership_state,
         commit.control(),
     )
 }
@@ -3596,7 +4278,7 @@ impl StoreCreationId {
         Self(ObjectHash::from_digest(bytes))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn from_nonce(nonce: &str) -> Self {
         Self(ObjectHash::digest(nonce.as_bytes()))
     }
@@ -5548,6 +6230,26 @@ impl ResolvedStoreDeviceState {
         Self::from_parts(devices, cursors)
     }
 
+    pub fn activate_owner_recovery(
+        &self,
+        owner_grant: MembershipGrantId,
+        activation: OwnerRecoveryActivationId,
+    ) -> Result<Self, StoreProtocolError> {
+        if self
+            .recovery
+            .iter()
+            .any(|cursor| cursor.owner_grant == owner_grant)
+        {
+            return Err(StoreProtocolError::OwnerRecoveryMismatch);
+        }
+        let mut recovery = self.recovery.clone();
+        recovery.push(OwnerRecoveryCursor {
+            owner_grant,
+            position: OwnerRecoveryPosition::BeforeFirst { activation },
+        });
+        Self::from_parts(self.devices.clone(), recovery)
+    }
+
     pub fn propose_exclusion(
         &self,
         reference: StoreDeviceExclusionProposalRef,
@@ -6984,6 +7686,7 @@ impl StoreCreationDescriptor {
             return Err(StoreProtocolError::InvalidFounder);
         };
         let MembershipChange::Founder {
+            creation_id,
             owner_pubkey,
             owner_grant_id,
             membership,
@@ -6993,6 +7696,7 @@ impl StoreCreationDescriptor {
             return Err(StoreProtocolError::InvalidFounder);
         };
         if founder.store_id != self.store_root_id().to_string()
+            || creation_id != &self.creation_id
             || founder.author_pubkey != self.founder_pubkey
             || founder.author_owner_grant != self.founder_grant
             || owner_pubkey != &self.founder_pubkey
@@ -7168,6 +7872,8 @@ pub enum StoreProtocolError {
     Malformed(String),
     #[error("Store protocol signature is invalid")]
     InvalidSignature,
+    #[error("Owner promotion evidence does not match its exact Store authority")]
+    OwnerPromotionMismatch,
     #[error("Store protocol object is in slot {actual:?}, expected {expected:?}")]
     RelocatedSlot { expected: String, actual: String },
     #[error("Store package names key {actual:?}, expected {expected:?}")]
@@ -7204,6 +7910,8 @@ pub enum StoreProtocolError {
     ControlRequiresSerial,
     #[error("Store Serial control is invalid or signed by a different commit author")]
     InvalidSerialControl,
+    #[error("Store Merge membership control is invalid or signed by a different device")]
+    InvalidMergeMembershipControl,
     #[error("Store batch has no Store package, circle package, or control")]
     EmptyBatch,
     #[error("Store batch has no Store package")]
@@ -7946,6 +8654,121 @@ mod tests {
         )
     }
 
+    fn joined_registration(
+        fixture: &Fixture,
+        identity: &UserKeypair,
+        label: &str,
+    ) -> (StoreDeviceRegistration, StoreDeviceRegistrationRef) {
+        let registration = StoreDeviceRegistration::signed(
+            fixture.root_ref.clone(),
+            StoreDeviceRegistrationOrigin::Join {
+                attempt_id: DeviceJoinAttemptId::from_hash(ObjectHash::digest(label.as_bytes())),
+                attempt_slot: slot(format!("store-v1/tests/{label}/join-attempt.json")),
+                outcome_slot: slot(format!("store-v1/tests/{label}/join-outcome.json")),
+            },
+            crate::sync::storage::ProviderDeviceBinding {
+                principal: crate::sync::storage::ProviderPrincipalId::CustomS3Credential {
+                    access_key_id_hash: ObjectHash::digest(label.as_bytes()),
+                },
+            },
+            StoreCommitAnchor::Serial,
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: slot(format!("store-v1/tests/{label}/acks/1.json")),
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: slot(format!("store-v1/tests/{label}/snapshots/1.json")),
+            },
+            identity,
+        )
+        .expect("sign joined registration");
+        let bytes = registration.to_bytes();
+        let reference = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            exact(
+                format!(
+                    "{}.json",
+                    registration_semantic_prefix(&registration.device_id.to_string())
+                ),
+                &bytes,
+            ),
+        );
+        (registration, reference)
+    }
+
+    #[test]
+    fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
+        let fixture = fixture();
+        let candidate_identity = UserKeypair::generate();
+        let candidate_pubkey = keys::public_key_hex(&candidate_identity);
+        let (candidate, candidate_ref) =
+            joined_registration(&fixture, &candidate_identity, "promotion-candidate");
+        let request = OwnerPromotionRequest::signed(
+            OwnerPromotionId::from_generated("promotion-1".to_string()),
+            &fixture.root_ref,
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.root.descriptor.founder_grant.clone(),
+            candidate_pubkey,
+            MembershipGrantId(ObjectHash::digest(b"candidate Member grant")),
+            candidate_ref,
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            OwnerPromotionFinalization::Serial,
+            &fixture.signer,
+        )
+        .expect("sign promotion request");
+        request
+            .verify(&fixture.root_ref, &fixture.registration)
+            .expect("verify promotion request");
+        let acceptance = OwnerPromotionAcceptance::signed(
+            request.clone(),
+            OwnerPromotionRequestActivation::Serial {
+                commit: fixture.commit_ref.clone(),
+            },
+            OwnerPromotionAnchors::Serial {
+                recovery: GrantStreamAnchor::OwnerRecovery {
+                    first_slot: slot(format!(
+                        "{}.json",
+                        owner_recovery_semantic_prefix(
+                            &request.member_pubkey,
+                            request.intended_owner_grant.clone(),
+                            1,
+                        )
+                    )),
+                },
+            },
+            &candidate,
+            &candidate_identity,
+        )
+        .expect("sign promotion acceptance");
+        acceptance
+            .verify(&candidate)
+            .expect("verify promotion acceptance");
+        assert!(OwnerPromotionAcceptance::signed(
+            request.clone(),
+            OwnerPromotionRequestActivation::Serial {
+                commit: fixture.commit_ref.clone(),
+            },
+            OwnerPromotionAnchors::Serial {
+                recovery: GrantStreamAnchor::OwnerRecovery {
+                    first_slot: slot(
+                        "store-v1/recovery/another-owner/another-grant/1.json".to_string(),
+                    ),
+                },
+            },
+            &candidate,
+            &candidate_identity,
+        )
+        .is_err());
+
+        let mut substituted = request;
+        substituted.member_grant = MembershipGrantId(ObjectHash::digest(b"other Member grant"));
+        assert!(matches!(
+            substituted.verify(&fixture.root_ref, &fixture.registration),
+            Err(StoreProtocolError::InvalidSignature)
+        ));
+    }
+
     #[test]
     fn stream_activation_descriptor_and_locator_derivations_are_identical() {
         let fixture = fixture();
@@ -8053,6 +8876,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::Serial,
+            None,
             std::slice::from_ref(&control),
         )
         .is_err());
@@ -8069,6 +8893,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &[wrong_root],
         )
         .is_err());
@@ -8086,6 +8911,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &[wrong_registration],
         )
         .is_err());
@@ -8102,6 +8928,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &[non_circle],
         )
         .is_err());
@@ -8123,6 +8950,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &unsorted,
         )
         .is_err());
@@ -8130,6 +8958,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &[control.clone(), control.clone()],
         )
         .is_err());
@@ -8150,6 +8979,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &duplicate_stream,
         )
         .is_err());
@@ -8182,6 +9012,7 @@ mod tests {
             fixture.root_ref.store_root_hash,
             &fixture.registration_ref,
             WritePolicy::MergeConcurrent,
+            None,
             &duplicate_slot,
         )
         .is_err());

@@ -654,7 +654,11 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
     let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("rotate01", b"bytes")], false).await;
-    fixture.storage.shared_pending_rotation().mark_committed(2);
+    fixture
+        .storage
+        .shared_pending_rotation()
+        .mark_committed(2)
+        .unwrap();
 
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
@@ -662,7 +666,7 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
     assert_eq!(outcome.uploaded, 0);
     assert_eq!(fixture.home.create_calls(), 0);
     let (_, error, _) = journal_attempt(&fixture, "rotate01").await;
-    assert!(error.unwrap().contains("rotated to generation 2"));
+    assert!(error.unwrap().contains("PeerCommitted { generation: 2 }"));
 }
 
 #[tokio::test]

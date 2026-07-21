@@ -35,10 +35,9 @@ impl SyncLoopAlerts {
     pub fn primary_message(&self) -> Option<String> {
         if let Some(pending) = &self.rotation_pending {
             Some(format!(
-                "Sync is paused: the store key rotated to generation {}, which this device \
-                 has not adopted yet (still on generation {}). Remove the member again, or \
-                 wait for the next sync cycle to adopt the key.",
-                pending.committed_generation, pending.live_generation,
+                "Sync is paused: store-key rotation work is incomplete ({:?}) while this device \
+                 is on generation {}. Retry the membership operation or reconnect with key custody.",
+                pending.state, pending.live_generation,
             ))
         } else if !self.held_positions.is_empty() {
             Some(format!(
@@ -284,7 +283,9 @@ mod tests {
     fn rotation_pending_alert_takes_priority_over_every_other_alert() {
         let alerts = SyncLoopAlerts {
             rotation_pending: Some(RotationPending {
-                committed_generation: 2,
+                state: crate::sync::cloud_storage::RotationPendingState::LocalCommitted {
+                    generation: 2,
+                },
                 live_generation: 1,
             }),
             held_positions: held(4),
@@ -294,7 +295,7 @@ mod tests {
 
         let message = alerts.primary_message().expect("rotation pending alert");
         assert!(
-            message.contains("generation 2") && message.contains("generation 1"),
+            message.contains("generation: 2") && message.contains("generation 1"),
             "message names both generations: {message}",
         );
     }

@@ -20,6 +20,33 @@ pub(crate) enum RemoteObjectRecord {
 }
 
 impl RemoteObjectRecord {
+    fn candidate_exclusive_retained_authority(
+        family: CandidateFamilyId,
+        domain: CandidateExclusiveObjectDomain,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = domain.object().clone();
+        let record = Self::CandidateExclusive(CandidateObjectRecord {
+            identity: CandidateExclusiveTarget {
+                family,
+                domain,
+                semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
+                object: object.clone(),
+            },
+            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            state: CandidateObjectState::Prepared {
+                ownership: PendingCandidateOwnership {
+                    pending: BTreeSet::from([owner]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
     fn candidate_activated_retained_authority(
         domain: RetainedAuthorityObjectDomain,
         semantic_hash: ObjectHash,
@@ -106,6 +133,72 @@ impl RemoteObjectRecord {
             RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { reference },
             ObjectHash::digest(&canonical_signed_bytes),
             object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_store_membership_resolution(
+        reference: super::membership::StoreMembershipConflictResolutionRef,
+        canonical_semantic_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let semantic_hash = ObjectHash::digest(&canonical_semantic_bytes);
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
+            semantic_hash,
+            object,
+            canonical_semantic_bytes,
+            stored_bytes,
+            candidate,
+        )
+    }
+
+    pub(crate) fn candidate_exclusive_merge_membership_entry(
+        family: CandidateFamilyId,
+        reference: super::membership::MembershipEntryRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        Self::candidate_exclusive_retained_authority(
+            family,
+            CandidateExclusiveObjectDomain::MergeMembershipEntry { family, reference },
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_exclusive_merge_membership_head(
+        family: CandidateFamilyId,
+        reference: super::membership::MembershipHeadRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        Self::candidate_exclusive_retained_authority(
+            family,
+            CandidateExclusiveObjectDomain::MergeMembershipHead { family, reference },
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_exclusive_merge_membership_wrapped_store_key(
+        family: CandidateFamilyId,
+        reference: super::wrapped_store_key::WrappedStoreKeyRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        Self::candidate_exclusive_retained_authority(
+            family,
+            CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { family, reference },
             canonical_signed_bytes,
             stored_bytes,
             owner,
@@ -468,6 +561,7 @@ impl RemoteObjectRecord {
         if !matches!(
             nonactivation.proof,
             CandidateNonactivationProof::AuthorExclusion { .. }
+                | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
         ) {
             return Err(RemoteObjectRecordError::InvalidProof(
                 "activated candidate retraction requires terminal author exclusion".to_string(),
@@ -758,6 +852,16 @@ impl RemoteObjectRecord {
                     &record.identity,
                     record.bytes.canonical_semantic_bytes(),
                 )?;
+                if matches!(
+                    record.state,
+                    RetainedAuthorityObjectState::CleanupPending { .. }
+                        | RetainedAuthorityObjectState::AbsentVerified { .. }
+                ) && !matches!(
+                    record.identity.domain,
+                    RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
+                ) {
+                    return Err(RemoteObjectRecordError::DomainMismatch);
+                }
                 if let RetainedAuthorityObjectDomain::DeviceHead { .. } = &record.identity.domain {
                     let head: super::store_commit::StoreDeviceHead = serde_json::from_slice(
                         record.bytes.canonical_semantic_bytes(),
@@ -771,7 +875,9 @@ impl RemoteObjectRecord {
                             ownership.pending.contains(&head.commit)
                                 || ownership.activated.contains(&head.commit)
                         }
-                        RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                        RetainedAuthorityObjectState::CleanupPending { former_candidates }
+                        | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
+                        | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                             ensure_candidate_nonactivation(former_candidates, &head.commit).is_ok()
                         }
                     };
@@ -986,7 +1092,9 @@ impl RemoteObjectRecord {
                     };
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {}
-                RetainedAuthorityObjectState::UncreatedVerified { .. } => {
+                RetainedAuthorityObjectState::CleanupPending { .. }
+                | RetainedAuthorityObjectState::AbsentVerified { .. }
+                | RetainedAuthorityObjectState::UncreatedVerified { .. } => {
                     return Err(RemoteObjectRecordError::InvalidUploadTransition);
                 }
             },
@@ -1029,6 +1137,76 @@ impl RemoteObjectRecord {
             || !ownership.pending.insert(candidate)
         {
             return Err(RemoteObjectRecordError::OverlappingOwnership);
+        }
+        self.validate()
+    }
+
+    pub(crate) fn merge_retained_authority_activation(
+        &mut self,
+        expected: &Self,
+        owner: &StoreBatchCommitRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let Self::RetainedAuthority(expected) = expected else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        let RetainedAuthorityObjectState::UploadedVerified {
+            ownership: expected_ownership,
+        } = &expected.state
+        else {
+            return Err(RemoteObjectRecordError::InvalidActivation);
+        };
+        if !expected_ownership.pending.is_empty()
+            || !expected_ownership.nonactivated.is_empty()
+            || expected_ownership.activated != BTreeSet::from([owner.clone()])
+        {
+            return Err(RemoteObjectRecordError::InvalidActivation);
+        }
+        match self {
+            Self::CandidateExclusive(current) => {
+                if current.identity.domain.retained_destination()
+                    != Some(expected.identity.domain.clone())
+                    || current.identity.semantic_hash != expected.identity.semantic_hash
+                    || current.identity.object != expected.identity.object
+                    || current.bytes != expected.bytes
+                {
+                    return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                }
+                let owns_activation = match &current.state {
+                    CandidateObjectState::Prepared { ownership }
+                    | CandidateObjectState::UploadedVerified { ownership } => {
+                        ownership.pending == BTreeSet::from([owner.clone()])
+                    }
+                    CandidateObjectState::CleanupPending { .. }
+                    | CandidateObjectState::AbsentVerified { .. } => false,
+                };
+                if !owns_activation {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
+                }
+                let mut activated = Self::CandidateExclusive(current.clone());
+                activated.mark_uploaded_verified()?;
+                *self = activated.into_activated(owner)?;
+            }
+            Self::RetainedAuthority(current) => {
+                if current.identity != expected.identity || current.bytes != expected.bytes {
+                    return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                }
+                if matches!(current.state, RetainedAuthorityObjectState::Prepared { .. }) {
+                    self.mark_uploaded_verified()?;
+                }
+                let Self::RetainedAuthority(current) = self else {
+                    unreachable!("retained authority remains in its domain")
+                };
+                let RetainedAuthorityObjectState::UploadedVerified { ownership } =
+                    &mut current.state
+                else {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
+                };
+                ownership.pending.remove(owner);
+                ownership.activated.insert(owner.clone());
+            }
+            Self::CandidateCommit(_) | Self::SharedLiveSet(_) => {
+                return Err(RemoteObjectRecordError::DomainMismatch);
+            }
         }
         self.validate()
     }
@@ -1201,6 +1379,7 @@ impl RemoteObjectRecord {
                             if !matches!(
                                 nonactivation.proof,
                                 CandidateNonactivationProof::AuthorExclusion { .. }
+                                    | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
                             ) || head_nonactivation.candidate != candidate
                                 || head_nonactivation.head.object() != &record.identity.object
                             {
@@ -1268,15 +1447,27 @@ impl RemoteObjectRecord {
                         return Ok(None);
                     }
                     ownership.nonactivated.push(nonactivation);
-                    if ownership.pending.is_empty() && ownership.activated.is_empty() {
-                        return ProtocolInertObject::new(
-                            record.identity.clone(),
-                            record.bytes.canonical_semantic_bytes().to_vec(),
-                            ownership.nonactivated,
-                        )
-                        .map(Some);
+                    match uploaded_retained_nonactivation_disposition(
+                        &record.identity.domain,
+                        ownership,
+                    ) {
+                        UploadedRetainedNonactivation::Cleanup(former_candidates) => {
+                            record.state =
+                                RetainedAuthorityObjectState::CleanupPending { former_candidates };
+                        }
+                        UploadedRetainedNonactivation::Inert(former_candidates) => {
+                            return ProtocolInertObject::new(
+                                record.identity.clone(),
+                                record.bytes.canonical_semantic_bytes().to_vec(),
+                                former_candidates,
+                            )
+                            .map(Some);
+                        }
+                        UploadedRetainedNonactivation::Retain(ownership) => {
+                            record.state =
+                                RetainedAuthorityObjectState::UploadedVerified { ownership };
+                        }
                     }
-                    record.state = RetainedAuthorityObjectState::UploadedVerified { ownership };
                 }
                 RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                     if matches!(
@@ -1290,6 +1481,10 @@ impl RemoteObjectRecord {
                             "excluded-author head is present but is marked uncreated".to_string(),
                         ));
                     }
+                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
+                }
+                RetainedAuthorityObjectState::CleanupPending { former_candidates }
+                | RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
                     ensure_candidate_nonactivation(former_candidates, &candidate)?;
                 }
             },
@@ -1334,6 +1529,10 @@ impl RemoteObjectRecord {
             | Self::CandidateExclusive(CandidateObjectRecord {
                 state: CandidateObjectState::CleanupPending { .. },
                 ..
+            })
+            | Self::RetainedAuthority(RetainedAuthorityRecord {
+                state: RetainedAuthorityObjectState::CleanupPending { .. },
+                ..
             }) => Some(self.object()),
             _ => None,
         }
@@ -1359,8 +1558,17 @@ impl RemoteObjectRecord {
                 CandidateObjectState::AbsentVerified { .. } => {}
                 _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
             },
-            Self::RetainedAuthority(_) | Self::SharedLiveSet(_) => {
-                return Err(RemoteObjectRecordError::InvalidCleanupTransition);
+            Self::RetainedAuthority(record) => match &record.state {
+                RetainedAuthorityObjectState::CleanupPending { former_candidates } => {
+                    record.state = RetainedAuthorityObjectState::AbsentVerified {
+                        former_candidates: former_candidates.clone(),
+                    };
+                }
+                RetainedAuthorityObjectState::AbsentVerified { .. } => {}
+                _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
+            },
+            Self::SharedLiveSet(_) => {
+                return Err(RemoteObjectRecordError::InvalidCleanupTransition)
             }
         }
         self.validate()
@@ -1403,6 +1611,10 @@ impl RemoteObjectRecord {
                     Ok(!ownership.pending.contains(candidate)
                         && !ownership.activated.contains(candidate)
                         && contains(&ownership.nonactivated)?)
+                }
+                RetainedAuthorityObjectState::CleanupPending { .. } => Ok(false),
+                RetainedAuthorityObjectState::AbsentVerified { former_candidates } => {
+                    contains(former_candidates)
                 }
                 RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                     contains(former_candidates)
@@ -1462,7 +1674,9 @@ impl RemoteObjectRecord {
                 RetainedAuthorityObjectState::UploadedVerified { ownership } => {
                     find_nonactivation_proof(&ownership.nonactivated, candidate)
                 }
-                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                RetainedAuthorityObjectState::CleanupPending { former_candidates }
+                | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
+                | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                     find_nonactivation_proof(former_candidates, candidate)
                 }
             },
@@ -1506,7 +1720,9 @@ impl RemoteObjectRecord {
                 RetainedAuthorityObjectState::UploadedVerified { ownership } => {
                     nonactivation_proofs(&ownership.nonactivated)
                 }
-                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                RetainedAuthorityObjectState::CleanupPending { former_candidates }
+                | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
+                | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                     nonactivation_proofs(former_candidates)
                 }
             },
@@ -1555,6 +1771,29 @@ pub(crate) struct RetainedAuthorityRecord {
     pub(crate) state: RetainedAuthorityObjectState,
 }
 
+enum UploadedRetainedNonactivation {
+    Cleanup(Vec<CandidateNonactivation>),
+    Inert(Vec<CandidateNonactivation>),
+    Retain(CandidateOwnership),
+}
+
+fn uploaded_retained_nonactivation_disposition(
+    domain: &RetainedAuthorityObjectDomain,
+    ownership: CandidateOwnership,
+) -> UploadedRetainedNonactivation {
+    if !ownership.pending.is_empty() || !ownership.activated.is_empty() {
+        return UploadedRetainedNonactivation::Retain(ownership);
+    }
+    if matches!(
+        domain,
+        RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
+    ) {
+        UploadedRetainedNonactivation::Cleanup(ownership.nonactivated)
+    } else {
+        UploadedRetainedNonactivation::Inert(ownership.nonactivated)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RetainedAuthorityObjectState {
@@ -1564,17 +1803,25 @@ pub(crate) enum RetainedAuthorityObjectState {
     UploadedVerified {
         ownership: CandidateOwnership,
     },
+    CleanupPending {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
+    AbsentVerified {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
     UncreatedVerified {
         former_candidates: Vec<CandidateNonactivation>,
     },
 }
 
 impl RetainedAuthorityObjectState {
-    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         match self {
             Self::Prepared { ownership } => ownership.validate(),
             Self::UploadedVerified { ownership } => ownership.validate(),
-            Self::UncreatedVerified { former_candidates } => {
+            Self::CleanupPending { former_candidates }
+            | Self::AbsentVerified { former_candidates }
+            | Self::UncreatedVerified { former_candidates } => {
                 validate_nonactivations(former_candidates)
             }
         }
@@ -1913,6 +2160,18 @@ impl CandidateExclusiveTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CandidateExclusiveObjectDomain {
+    MergeMembershipEntry {
+        family: CandidateFamilyId,
+        reference: super::membership::MembershipEntryRef,
+    },
+    MergeMembershipHead {
+        family: CandidateFamilyId,
+        reference: super::membership::MembershipHeadRef,
+    },
+    MergeMembershipWrappedStoreKey {
+        family: CandidateFamilyId,
+        reference: super::wrapped_store_key::WrappedStoreKeyRef,
+    },
     StorePackage {
         reference: super::store_commit::StorePackageRef,
     },
@@ -1937,6 +2196,9 @@ pub(crate) enum CandidateExclusiveObjectDomain {
 impl CandidateExclusiveObjectDomain {
     fn family(&self) -> CandidateFamilyId {
         match self {
+            Self::MergeMembershipEntry { family, .. }
+            | Self::MergeMembershipHead { family, .. }
+            | Self::MergeMembershipWrappedStoreKey { family, .. } => *family,
             Self::StorePackage { reference } => reference.candidate_family,
             Self::CirclePackage { reference } => reference.package.candidate_family,
             Self::CircleAccessLeaf { family, .. } | Self::CircleAccessEnvelope { family, .. } => {
@@ -1948,6 +2210,9 @@ impl CandidateExclusiveObjectDomain {
 
     fn object(&self) -> &ExactObjectRef {
         match self {
+            Self::MergeMembershipEntry { reference, .. } => &reference.object,
+            Self::MergeMembershipHead { reference, .. } => &reference.object,
+            Self::MergeMembershipWrappedStoreKey { reference, .. } => &reference.object,
             Self::StorePackage { reference } => &reference.object,
             Self::CirclePackage { reference } => &reference.package.object,
             Self::CircleAccessLeaf { reference, .. } => &reference.object,
@@ -1964,7 +2229,10 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => Some(SharedLiveSetObjectDomain::CirclePackage {
                 reference: reference.clone(),
             }),
-            Self::CircleAccessLeaf { .. }
+            Self::MergeMembershipEntry { .. }
+            | Self::MergeMembershipHead { .. }
+            | Self::MergeMembershipWrappedStoreKey { .. }
+            | Self::CircleAccessLeaf { .. }
             | Self::CircleAccessEnvelope { .. }
             | Self::SelfRetirement { .. } => None,
         }
@@ -1972,6 +2240,21 @@ impl CandidateExclusiveObjectDomain {
 
     pub(crate) fn retained_destination(&self) -> Option<RetainedAuthorityObjectDomain> {
         match self {
+            Self::MergeMembershipEntry { reference, .. } => {
+                Some(RetainedAuthorityObjectDomain::MergeMembershipEntry {
+                    reference: reference.clone(),
+                })
+            }
+            Self::MergeMembershipHead { reference, .. } => {
+                Some(RetainedAuthorityObjectDomain::MergeMembershipHead {
+                    reference: reference.clone(),
+                })
+            }
+            Self::MergeMembershipWrappedStoreKey { reference, .. } => Some(
+                RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey {
+                    reference: reference.clone(),
+                },
+            ),
             Self::CircleAccessLeaf {
                 family,
                 circle_id,
@@ -2198,6 +2481,42 @@ fn validate_candidate_exclusive_identity(
         return Err(RemoteObjectRecordError::StoredReferenceMismatch);
     }
     match &identity.domain {
+        CandidateExclusiveObjectDomain::MergeMembershipEntry { reference, .. } => {
+            validate_retained_authority_identity(
+                &RetainedAuthorityObjectRef {
+                    domain: RetainedAuthorityObjectDomain::MergeMembershipEntry {
+                        reference: reference.clone(),
+                    },
+                    semantic_hash: identity.semantic_hash,
+                    object: identity.object.clone(),
+                },
+                canonical_semantic_bytes,
+            )
+        }
+        CandidateExclusiveObjectDomain::MergeMembershipHead { reference, .. } => {
+            validate_retained_authority_identity(
+                &RetainedAuthorityObjectRef {
+                    domain: RetainedAuthorityObjectDomain::MergeMembershipHead {
+                        reference: reference.clone(),
+                    },
+                    semantic_hash: identity.semantic_hash,
+                    object: identity.object.clone(),
+                },
+                canonical_semantic_bytes,
+            )
+        }
+        CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { reference, .. } => {
+            validate_retained_authority_identity(
+                &RetainedAuthorityObjectRef {
+                    domain: RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey {
+                        reference: reference.clone(),
+                    },
+                    semantic_hash: identity.semantic_hash,
+                    object: identity.object.clone(),
+                },
+                canonical_semantic_bytes,
+            )
+        }
         CandidateExclusiveObjectDomain::StorePackage { reference } => {
             validate_package_reference(reference, None, canonical_semantic_bytes, &identity.object)
         }
@@ -2445,7 +2764,7 @@ impl ProtocolInertObject {
         nonactivation_proofs(&self.former_candidates)
     }
 
-    pub(crate) fn is_author_exclusion_head_for(
+    pub(crate) fn is_terminal_head_for(
         &self,
         candidate: &StoreBatchCommitRef,
         object: &ExactObjectRef,
@@ -2463,7 +2782,10 @@ impl ProtocolInertObject {
             )
             && matches!(
                 self.candidate_nonactivation_proof(candidate)?,
-                Some(CandidateNonactivationProof::AuthorExclusion { .. })
+                Some(
+                    CandidateNonactivationProof::AuthorExclusion { .. }
+                        | CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+                )
             ))
     }
 }
@@ -2497,6 +2819,15 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     },
     MembershipControlWrappedStoreKey {
         reference: super::wrapped_store_key::WrappedStoreKeyRef,
+    },
+    StoreMembershipResolution {
+        reference: super::membership::StoreMembershipConflictResolutionRef,
+    },
+    MergeMembershipEntry {
+        reference: super::membership::MembershipEntryRef,
+    },
+    MergeMembershipHead {
+        reference: super::membership::MembershipHeadRef,
     },
     DeviceExclusionProposal {
         reference: super::store_commit::StoreDeviceExclusionProposalRef,
@@ -2573,6 +2904,46 @@ fn validate_retained_authority_identity(
                 .validate_value(&wrapped, canonical_semantic_bytes)
                 .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
             if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::StoreMembershipResolution { reference } => {
+            let resolution: super::membership::StoreMembershipConflictResolution =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            let expected_key = format!(
+                "{}.json",
+                super::store_commit::membership_resolution_semantic_prefix(
+                    reference.conflict_hash,
+                    &reference.resolver_pubkey,
+                    reference.resolution_hash,
+                )
+            );
+            if resolution.conflict_hash != reference.conflict_hash
+                || resolution.resolver_pubkey != reference.resolver_pubkey
+                || resolution.resolution_hash() != reference.resolution_hash
+                || reference.object != identity.object
+                || reference.object.slot().logical_key() != expected_key
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::MergeMembershipEntry { reference } => {
+            let entry: super::membership::MembershipEntry =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if entry.coord() != reference.coord || reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::MergeMembershipHead { reference } => {
+            let head: super::membership::AuthorHead =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if head.entry_coord() != reference.coord
+                || head.head_hash() != reference.head_hash
+                || reference.object != identity.object
+            {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
@@ -2744,7 +3115,7 @@ impl CandidateNonactivation {
         value.validate()
     }
 
-    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         let commit: super::store_commit::StoreBatchCommit =
             serde_json::from_slice(&self.candidate.canonical_signed_bytes)
                 .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
@@ -2792,6 +3163,10 @@ enum VerifiedCandidateNonactivationEvidence {
         durable: CandidateNonactivation,
     },
     AuthorExclusion {
+        durable: CandidateNonactivation,
+        head_nonactivation: VerifiedCandidateHeadNonactivation,
+    },
+    MembershipGrantRevocation {
         durable: CandidateNonactivation,
         head_nonactivation: VerifiedCandidateHeadNonactivation,
     },
@@ -2942,6 +3317,50 @@ impl VerifiedCandidateNonactivation {
         Ok(value)
     }
 
+    pub(crate) fn membership_grant_revocation(
+        observation: &super::store_pull::VerifiedMembershipGrantRevocationActivation,
+        candidate: StoreBatchCommitDeletionTarget,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let commit = candidate
+            .verify_nonactivation_candidate(
+                observation.store_root_hash(),
+                observation.candidate_author(),
+            )
+            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        if observation.candidate() != &candidate_reference {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "membership-grant revocation names another candidate".to_string(),
+            ));
+        }
+        let value = Self {
+            evidence: Box::new(
+                VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
+                    durable: CandidateNonactivation {
+                        candidate,
+                        proof: CandidateNonactivationProof::MergeMembershipGrantRevocation {
+                            grant_id: observation.grant_id().clone(),
+                            membership: observation.membership().clone(),
+                            activation_commit: observation.activation_commit().clone(),
+                            activation_head: observation.activation_head().clone(),
+                        },
+                    },
+                    head_nonactivation: VerifiedCandidateHeadNonactivation {
+                        candidate: candidate_reference,
+                        head: observation.candidate_head().clone(),
+                    },
+                },
+            ),
+        };
+        value.durable().validate()?;
+        Ok(value)
+    }
+
     pub(crate) fn candidate_reference(
         &self,
     ) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
@@ -2969,6 +3388,11 @@ impl VerifiedCandidateNonactivation {
                     "author-exclusion nonactivation has no Merge slot winner".to_string(),
                 ))
             }
+            VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation { .. } => {
+                Err(RemoteObjectRecordError::InvalidProof(
+                    "membership-grant revocation has no Merge slot winner".to_string(),
+                ))
+            }
         }
     }
 
@@ -2976,16 +3400,23 @@ impl VerifiedCandidateNonactivation {
         match *self.evidence {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
             | VerifiedCandidateNonactivationEvidence::Serial { durable }
-            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. } => durable,
+            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
+            | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
+                durable, ..
+            } => durable,
         }
     }
 
-    pub(crate) fn into_author_exclusion(
+    pub(crate) fn into_terminal_head_nonactivation(
         self,
     ) -> Result<(CandidateNonactivation, VerifiedCandidateHeadNonactivation), RemoteObjectRecordError>
     {
         match *self.evidence {
             VerifiedCandidateNonactivationEvidence::AuthorExclusion {
+                durable,
+                head_nonactivation,
+            } => Ok((durable, head_nonactivation)),
+            VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
                 durable,
                 head_nonactivation,
             } => Ok((durable, head_nonactivation)),
@@ -3003,7 +3434,10 @@ impl VerifiedCandidateNonactivation {
         match self.evidence.as_ref() {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
             | VerifiedCandidateNonactivationEvidence::Serial { durable }
-            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. } => durable,
+            | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
+            | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
+                durable, ..
+            } => durable,
         }
     }
 }
@@ -3023,10 +3457,16 @@ pub(crate) enum CandidateNonactivationProof {
         accepted_cut: BTreeMap<super::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
         activation_head: super::store_commit::StoreDeviceHeadRef,
     },
+    MergeMembershipGrantRevocation {
+        grant_id: super::membership::MembershipGrantId,
+        membership: super::circle_control::MergeStoreMembershipStateRef,
+        activation_commit: StoreBatchCommitRef,
+        activation_head: super::store_commit::StoreDeviceHeadRef,
+    },
 }
 
 impl CandidateNonactivationProof {
-    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+    pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         match self {
             Self::MergeWinner { .. } => Ok(()),
             Self::SerialImmediateSuccessor {
@@ -3041,6 +3481,25 @@ impl CandidateNonactivationProof {
                     &super::store_commit::StoreHistoryCut::merge_concurrent(accepted_cut.clone()),
                 )
                 .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
+            }
+            Self::MergeMembershipGrantRevocation {
+                membership,
+                activation_commit,
+                ..
+            } => {
+                if !membership.heads.windows(2).all(|pair| pair[0] < pair[1])
+                    || !membership
+                        .resolutions
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                    || activation_commit.coord.policy() != crate::WritePolicy::MergeConcurrent
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "membership-grant revocation names a noncanonical membership state"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
             }
         }
     }
@@ -3112,6 +3571,14 @@ impl CandidateNonactivationProof {
                 if stream_id != expected_stream || !beyond_cutoff {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "candidate is not strictly beyond its excluded author cutoff".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::MergeMembershipGrantRevocation { .. } => {
+                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "membership-grant revocation names a non-Merge candidate".to_string(),
                     ));
                 }
                 Ok(())
@@ -3442,6 +3909,149 @@ mod tests {
         .expect("valid stored blob")
     }
 
+    fn test_membership_resolution() -> (
+        super::super::membership::StoreMembershipConflictResolutionRef,
+        Vec<u8>,
+    ) {
+        let conflict_hash = ObjectHash::digest(b"remote-object membership conflict");
+        let resolver_pubkey = "22".repeat(crate::keys::SIGN_PUBLICKEYBYTES);
+        let replacement_grant = super::super::membership::derive_store_resolution_grant(
+            &conflict_hash,
+            &resolver_pubkey,
+        );
+        let registration_bytes = b"resolution registration";
+        let registration = super::super::store_commit::StoreDeviceRegistrationRef {
+            device_id: "33".repeat(32).parse().expect("valid resolution device id"),
+            registration_hash: ObjectHash::digest(registration_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/devices/resolution-registration.json".to_string())
+                    .expect("valid resolution registration slot"),
+                registration_bytes.len() as u64,
+                ObjectHash::digest(registration_bytes),
+            ),
+        };
+        let membership = super::super::store_commit::GrantStreamAnchor::StoreMembership {
+            first_slot: ObjectSlot::logical(
+                "store-v1/membership/heads/resolver/replacement/stream/1.json".to_string(),
+            )
+            .expect("valid resolution membership slot"),
+        };
+        let recovery = super::super::store_commit::GrantStreamAnchor::OwnerRecovery {
+            first_slot: ObjectSlot::logical(
+                "store-v1/recovery/resolver/replacement/1.json".to_string(),
+            )
+            .expect("valid resolution recovery slot"),
+        };
+        let resolution = super::super::membership::StoreMembershipConflictResolution {
+            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
+            store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
+            conflict_hash,
+            conflicting_heads: Vec::new(),
+            retired_owner_grants: BTreeSet::new(),
+            retirement_barriers: BTreeMap::new(),
+            resolver_pubkey: resolver_pubkey.clone(),
+            resolver_branch_heads: Vec::new(),
+            replacement_grant: replacement_grant.clone(),
+            replacement_membership: membership.clone(),
+            replacement_acceptance: super::super::store_commit::OwnerConflictResolutionAcceptance {
+                store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
+                owner_grant: replacement_grant,
+                owner_registration: registration,
+                provider: super::super::storage::ProviderDeviceBinding {
+                    principal: super::super::storage::ProviderPrincipalId::CustomS3Credential {
+                        access_key_id_hash: ObjectHash::digest(b"resolution provider credential"),
+                    },
+                },
+                membership,
+                recovery,
+                device_state: super::super::store_commit::StoreDeviceStateRef::MergeConcurrent {
+                    frontier: super::super::store_commit::CommitFrontier::MergeConcurrent(
+                        BTreeMap::new(),
+                    ),
+                    recovery: Vec::new(),
+                    state_hash: ObjectHash::digest(b"resolution device state"),
+                },
+                signature: "resolution acceptance signature".to_string(),
+            },
+            signature: "resolution signature".to_string(),
+        };
+        let canonical = serde_json::to_vec(&resolution).expect("serialize membership resolution");
+        let resolution_hash = resolution.resolution_hash();
+        let object = ExactObjectRef::new(
+            ObjectSlot::logical(format!(
+                "{}.json",
+                super::super::store_commit::membership_resolution_semantic_prefix(
+                    conflict_hash,
+                    &resolver_pubkey,
+                    resolution_hash,
+                )
+            ))
+            .expect("valid membership resolution slot"),
+            canonical.len() as u64,
+            ObjectHash::digest(&canonical),
+        );
+        (resolution.resolution_ref(object), canonical)
+    }
+
+    fn test_membership_resolution_record(
+        reference: super::super::membership::StoreMembershipConflictResolutionRef,
+        canonical: Vec<u8>,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<RemoteObjectRecord, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        RemoteObjectRecord::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
+            ObjectHash::digest(&canonical),
+            object,
+            canonical.clone(),
+            canonical,
+            candidate,
+        )
+    }
+
+    fn activate_test_retained_authority(
+        mut record: RemoteObjectRecord,
+        owner: &StoreBatchCommitRef,
+    ) -> RemoteObjectRecord {
+        record
+            .mark_uploaded_verified()
+            .expect("mark retained authority uploaded");
+        record
+            .into_activated(owner)
+            .expect("activate retained authority")
+    }
+
+    #[test]
+    fn pulled_retained_authority_merges_an_exact_additional_commit_owner() {
+        let (reference, canonical) = test_membership_resolution();
+        let first = test_commit_ref("first-resolution-owner", 1);
+        let second = test_commit_ref("second-resolution-owner", 1);
+        let mut existing = activate_test_retained_authority(
+            test_membership_resolution_record(reference.clone(), canonical.clone(), first.clone())
+                .expect("prepare first retained authority"),
+            &first,
+        );
+        let expected = activate_test_retained_authority(
+            test_membership_resolution_record(reference, canonical, second.clone())
+                .expect("prepare second retained authority"),
+            &second,
+        );
+
+        existing
+            .merge_retained_authority_activation(&expected, &second)
+            .expect("merge pulled retained authority activation");
+
+        let RemoteObjectRecord::RetainedAuthority(record) = existing else {
+            panic!("merged membership resolution changed domain")
+        };
+        let RetainedAuthorityObjectState::UploadedVerified { ownership } = record.state else {
+            panic!("merged membership resolution lost uploaded state")
+        };
+        assert_eq!(ownership.activated, BTreeSet::from([first, second]));
+        assert!(ownership.pending.is_empty());
+        assert!(ownership.nonactivated.is_empty());
+    }
+
     #[test]
     fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner() {
         let commit = test_commit_ref("external-package", 1);
@@ -3707,6 +4317,172 @@ mod tests {
                 state: RetainedAuthorityObjectState::Prepared { ownership },
                 ..
             }) if ownership.pending == BTreeSet::from([candidate])
+        ));
+    }
+
+    #[test]
+    fn membership_resolution_is_candidate_activated_retained_authority() {
+        let (reference, canonical) = test_membership_resolution();
+        let candidate = test_commit_ref("membership-resolution-owner", 1);
+
+        let record = test_membership_resolution_record(reference, canonical, candidate.clone())
+            .expect("close membership-resolution ownership");
+        let encoded = serde_json::to_vec(&record).expect("serialize retained resolution authority");
+        let record: RemoteObjectRecord =
+            serde_json::from_slice(&encoded).expect("deserialize retained resolution authority");
+
+        assert!(record.validate().is_ok());
+        assert!(matches!(
+            record,
+            RemoteObjectRecord::RetainedAuthority(RetainedAuthorityRecord {
+                identity: RetainedAuthorityObjectRef {
+                    domain: RetainedAuthorityObjectDomain::StoreMembershipResolution { .. },
+                    ..
+                },
+                state: RetainedAuthorityObjectState::Prepared { ownership },
+                ..
+            }) if ownership.pending == BTreeSet::from([candidate])
+        ));
+    }
+
+    #[test]
+    fn membership_resolution_authority_rejects_a_different_semantic_reference() {
+        let (reference, canonical) = test_membership_resolution();
+        let candidate = test_commit_ref("membership-resolution-mismatch", 1);
+        let mut record = test_membership_resolution_record(reference, canonical, candidate)
+            .expect("close membership-resolution ownership");
+        let RemoteObjectRecord::RetainedAuthority(inner) = &mut record else {
+            panic!("membership resolution must use retained authority ownership")
+        };
+        let RetainedAuthorityObjectDomain::StoreMembershipResolution { reference } =
+            &mut inner.identity.domain
+        else {
+            panic!("membership resolution must retain its exact domain")
+        };
+        reference.conflict_hash = ObjectHash::digest(b"another membership conflict");
+
+        assert!(matches!(
+            record.validate(),
+            Err(RemoteObjectRecordError::StoredReferenceMismatch)
+        ));
+    }
+
+    #[test]
+    fn membership_resolution_authority_rejects_a_relocated_object() {
+        let (mut reference, canonical) = test_membership_resolution();
+        let stored_hash = reference.object.stored_hash();
+        reference.object = ExactObjectRef::new(
+            ObjectSlot::logical("store-v1/membership/resolutions/relocated.json".to_string())
+                .expect("valid relocated resolution slot"),
+            canonical.len() as u64,
+            stored_hash,
+        );
+        let candidate = test_commit_ref("membership-resolution-relocation", 1);
+
+        let error = test_membership_resolution_record(reference, canonical, candidate)
+            .expect_err("relocated resolution must not enter retained authority");
+
+        assert!(matches!(
+            error,
+            RemoteObjectRecordError::StoredReferenceMismatch
+        ));
+    }
+
+    #[test]
+    fn sole_losing_membership_resolution_becomes_exact_cleanable() {
+        let (reference, _) = test_membership_resolution();
+        let disposition = uploaded_retained_nonactivation_disposition(
+            &RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
+            CandidateOwnership {
+                pending: BTreeSet::new(),
+                activated: BTreeSet::new(),
+                nonactivated: Vec::new(),
+            },
+        );
+
+        assert!(matches!(
+            disposition,
+            UploadedRetainedNonactivation::Cleanup(_)
+        ));
+    }
+
+    #[test]
+    fn shared_membership_resolution_retains_its_remaining_candidate_owner() {
+        let (reference, _) = test_membership_resolution();
+        let remaining = test_commit_ref("shared-resolution-owner", 2);
+        let disposition = uploaded_retained_nonactivation_disposition(
+            &RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
+            CandidateOwnership {
+                pending: BTreeSet::from([remaining.clone()]),
+                activated: BTreeSet::new(),
+                nonactivated: Vec::new(),
+            },
+        );
+
+        assert!(matches!(
+            disposition,
+            UploadedRetainedNonactivation::Retain(CandidateOwnership { pending, .. })
+                if pending == BTreeSet::from([remaining])
+        ));
+    }
+
+    #[test]
+    fn deserialized_device_head_rejects_resolution_cleanup_state() {
+        let (_, resolution_bytes) = test_membership_resolution();
+        let resolution: super::super::membership::StoreMembershipConflictResolution =
+            serde_json::from_slice(&resolution_bytes).expect("parse resolution fixture");
+        let candidate = test_commit_ref("invalid-head-cleanup-state", 1);
+        let head = super::super::store_commit::StoreDeviceHead {
+            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
+            store_root_hash: resolution.store_root_hash,
+            author_registration: resolution.replacement_acceptance.owner_registration.clone(),
+            commit: candidate.clone(),
+            successor: super::super::store_commit::SuccessorLink {
+                activation: super::super::store_commit::StreamActivation::grant_authorized(
+                    resolution.store_root_hash,
+                    resolution.replacement_acceptance.owner_registration,
+                    resolution.replacement_grant,
+                    resolution.replacement_membership,
+                )
+                .activation_id(),
+                predecessor: None,
+                next_slot: ObjectSlot::logical(
+                    "store-v1/heads/invalid-cleanup-successor.json".to_string(),
+                )
+                .expect("valid successor slot"),
+            },
+            signature: "head signature is not checked by remote ownership".to_string(),
+        };
+        let bytes = head.to_bytes();
+        let object = ExactObjectRef::new(
+            ObjectSlot::logical("store-v1/heads/invalid-cleanup.json".to_string())
+                .expect("valid head slot"),
+            bytes.len() as u64,
+            ObjectHash::digest(&bytes),
+        );
+        let mut record = RemoteObjectRecord::candidate_activated_store_head(
+            super::super::store_commit::StoreDeviceHeadRef {
+                head_hash: head.head_hash(),
+                object,
+            },
+            bytes.clone(),
+            bytes,
+            candidate,
+        )
+        .expect("prepare retained Store head");
+        let RemoteObjectRecord::RetainedAuthority(retained) = &mut record else {
+            panic!("Store head must use retained authority")
+        };
+        retained.state = RetainedAuthorityObjectState::CleanupPending {
+            former_candidates: Vec::new(),
+        };
+        let encoded = serde_json::to_vec(&record).expect("serialize invalid retained state");
+        let decoded: RemoteObjectRecord =
+            serde_json::from_slice(&encoded).expect("deserialize invalid retained state");
+
+        assert!(matches!(
+            decoded.validate(),
+            Err(RemoteObjectRecordError::DomainMismatch)
         ));
     }
 }

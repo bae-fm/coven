@@ -3289,7 +3289,7 @@ mod tests {
                     .validate()
                     .expect("mismatched inert head remains internally valid");
                 assert!(!mismatched
-                    .is_author_exclusion_head_for(&candidate_ref, mismatched_prepared.reference(),)
+                    .is_terminal_head_for(&candidate_ref, mismatched_prepared.reference(),)
                     .expect("check candidate binding on mismatched inert head"));
             }
             ExcludedCandidateHeadPublication::AfterCommitUpload => {
