@@ -655,7 +655,6 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     let pending_rotation = storage.shared_pending_rotation();
     let result = run_single_sync_cycle(
         &storage,
-        LIB_ID,
         &device_id,
         &hlc,
         &SystemClock,
@@ -724,7 +723,6 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
     // Still stuck: a cycle now seals nothing.
     run_single_sync_cycle(
         &storage,
-        LIB_ID,
         &device_id,
         &hlc,
         &SystemClock,
@@ -771,7 +769,6 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
     // The queued changeset now drains, sealed under the rotated generation.
     let result = run_single_sync_cycle(
         &storage,
-        LIB_ID,
         &device_id,
         &hlc,
         &SystemClock,
@@ -830,7 +827,6 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
 
     run_single_sync_cycle(
         &storage,
-        LIB_ID,
         &device_id,
         &hlc,
         &SystemClock,
@@ -856,7 +852,6 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     custody.allow_writes();
     let result = run_single_sync_cycle(
         &storage,
-        LIB_ID,
         &device_id,
         &hlc,
         &SystemClock,

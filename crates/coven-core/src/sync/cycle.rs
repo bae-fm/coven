@@ -8,8 +8,10 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
+#[cfg(test)]
 use std::future::Future;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::pin::Pin;
 use std::str::FromStr;
 
@@ -26,6 +28,7 @@ use super::cloud_storage::{
     BlobPathScheme, CloudCipherAccess, CloudCipherState, CloudSyncStorage, PendingRotation,
     RotationPending,
 };
+use super::cycle_engine::{AuthorizedCycleEngine, CycleEngine, PostPullCycleEngine};
 use super::hlc::Hlc;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
@@ -405,56 +408,9 @@ async fn capture_snapshot_cut(
 /// device's own changes.
 /// Loads/persists all cycle state (local_seq, positions, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
-struct CycleAuthorization {
-    store_root: super::store_commit::StoreRootRef,
-    merge_membership: Option<super::pull::CycleMembership>,
-    serial_authorization: Option<super::store_pull::SerialCycleAuthorization>,
-}
-
-async fn load_cycle_authorization(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    db: &Database,
-) -> Result<CycleAuthorization, SyncCycleFailure> {
-    let store_root = db
-        .local_store_root_ref()
-        .await
-        .map_err(|error| format!("read Store root reference: {error}"))?
-        .ok_or_else(|| "Store root reference is absent".to_string())?;
-    let (merge_membership, serial_authorization) = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => (
-            Some(
-                super::pull::load_cycle_membership(storage, db)
-                    .await
-                    .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?,
-            ),
-            None,
-        ),
-        crate::WritePolicy::Serial => (
-            None,
-            Some(
-                super::store_pull::load_serial_cycle_authorization(
-                    storage,
-                    serial_coordination
-                        .ok_or_else(|| "Serial coordination capability is absent".to_string())?,
-                    &store_root,
-                )
-                .await
-                .map_err(|error| SyncCycleFailure::operation("load Serial authorization", error))?,
-            ),
-        ),
-    };
-    Ok(CycleAuthorization {
-        store_root,
-        merge_membership,
-        serial_authorization,
-    })
-}
-
 #[cfg(test)]
 pub(crate) async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
-    store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -467,15 +423,14 @@ pub(crate) async fn run_single_sync_cycle(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = load_cycle_authorization(storage, None, db).await?;
+    let authorization = CycleEngine::load(storage, None, db)
+        .await?
+        .authorize()
+        .await?;
     Box::pin(run_single_sync_cycle_with_authorization(
-        storage,
-        None,
-        store_id,
         device_id,
         hlc,
         clock,
-        db,
         cipher,
         pending_rotation,
         user_keypair,
@@ -490,10 +445,10 @@ pub(crate) async fn run_single_sync_cycle(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn run_single_sync_cycle_with_coordination(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    _store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -507,16 +462,15 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = load_cycle_authorization(storage, serial_coordination, db).await?;
+    let authorization = CycleEngine::load(storage, serial_coordination, db)
+        .await?
+        .authorize()
+        .await?;
     let cycle_future: Pin<Box<dyn Future<Output = _> + Send + '_>> =
         Box::pin(run_single_sync_cycle_with_authorization(
-            storage,
-            serial_coordination,
-            _store_id,
             device_id,
             hlc,
             clock,
-            db,
             cipher,
             pending_rotation,
             user_keypair,
@@ -532,13 +486,9 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_single_sync_cycle_with_authorization(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    _store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
-    db: &Database,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
@@ -547,15 +497,12 @@ async fn run_single_sync_cycle_with_authorization(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: CycleAuthorization,
+    authorization: AuthorizedCycleEngine<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let prepared = match Box::pin(prepare_cycle_before_pull(
-        storage,
-        serial_coordination,
         device_id,
         hlc,
         clock,
-        db,
         cipher,
         pending_rotation,
         user_keypair,
@@ -571,71 +518,25 @@ async fn run_single_sync_cycle_with_authorization(
         CycleBeforePull::Continue(prepared) => prepared,
         CycleBeforePull::Complete(result) => return Ok(result),
     };
-    let merge_chain = authorization
-        .merge_membership
-        .as_ref()
-        .and_then(|membership| membership.chain.as_ref());
-    let store_pull_future: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-        Box::pin(super::store_pull::pull_store_commits_with_identity(
-            db,
-            db.synced_tables(),
-            storage,
-            serial_coordination,
-            authorization.store_root.store_root_hash,
-            store_dir,
-            merge_chain,
-            Some(user_keypair),
-        ));
-    let store_pull = store_pull_future
-        .await
-        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+    let store_pull = authorization.pull(store_dir, user_keypair).await?;
+    let post_pull = authorization.after_pull().await?;
     let completed = Box::pin(complete_cycle_after_pull(
-        storage,
-        serial_coordination,
         device_id,
         hlc,
         clock,
-        db,
         user_keypair,
         store_dir,
         &authorization,
+        &post_pull,
         prepared,
         store_pull,
     ))
     .await?;
     if completed.rotation_pending.is_none() {
-        let merge_chain = authorization
-            .merge_membership
-            .as_ref()
-            .and_then(|membership| membership.chain.as_ref());
-        Box::pin(stage_cycle_ack(
-            storage,
-            serial_coordination,
-            db,
-            user_keypair,
-            merge_chain,
-            &completed.sync_time,
-        ))
-        .await?;
-        Box::pin(super::store_ack::drain_outbound_store_acks(
-            db,
-            storage,
-            serial_coordination,
-            user_keypair,
-            merge_chain,
-        ))
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
-        Box::pin(reclaim_cycle_packages(
-            storage,
-            serial_coordination,
-            db,
-            device_id,
-            user_keypair,
-            &authorization,
-            completed.serial_membership_after_pull.as_ref(),
-        ))
-        .await?;
+        authorization
+            .stage_and_publish_ack(user_keypair, &completed.sync_time)
+            .await?;
+        Box::pin(reclaim_cycle_packages(device_id, user_keypair, &post_pull)).await?;
     }
     let core_status = super::status::build_sync_status(
         &completed.store_pull.visible_heads,
@@ -671,7 +572,6 @@ enum CycleBeforePull {
 
 struct CompletedPullCycle {
     store_pull: super::store_pull::StorePullResult,
-    serial_membership_after_pull: Option<super::membership::SerialMembershipState>,
     local_blob_cleanup_pending: bool,
     sync_time: String,
     resume_drain_promptly: bool,
@@ -680,12 +580,9 @@ struct CompletedPullCycle {
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_cycle_before_pull(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
-    db: &Database,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
@@ -694,18 +591,13 @@ async fn prepare_cycle_before_pull(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: &CycleAuthorization,
+    authorization: &AuthorizedCycleEngine<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
-    let CycleAuthorization {
-        store_root,
-        merge_membership,
-        serial_authorization,
-    } = authorization;
+    let db = authorization.db();
+    let storage = authorization.storage();
+    let store_root = authorization.store_root();
     let store_root_hash = store_root.store_root_hash;
     let protocol_store_id = store_root.store_root_id.to_string();
-    let merge_chain = merge_membership
-        .as_ref()
-        .and_then(|membership| membership.chain.as_ref());
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
     // judges, or decrypts. Membership and the rotatable store key are
@@ -717,36 +609,7 @@ async fn prepare_cycle_before_pull(
     // not also corrupt state. Adoption itself failing is not this kind of failure —
     // see `rotation_pending` below.
     let recipient = crate::keys::public_key_hex(user_keypair);
-    let wrapped_keys = match (merge_membership.as_ref(), serial_authorization.as_ref()) {
-        (Some(membership), None) => {
-            let chain = match (
-                membership.pinned_owner.as_deref(),
-                membership.chain.as_ref(),
-            ) {
-                (Some(_), Some(chain)) => chain,
-                (None, _) => {
-                    return Err("MergeConcurrent cycle has no pinned membership founder"
-                        .to_string()
-                        .into())
-                }
-                (Some(owner), None) => {
-                    return Err(format!(
-                        "owner {owner} is pinned but the cycle has no membership chain"
-                    )
-                    .into())
-                }
-            };
-            chain
-                .wrapped_key_authority_for(&recipient)
-                .map_err(|error| error.to_string())?
-        }
-        (None, Some(serial)) => serial.authorization.active_wrapped_keys_for(&recipient),
-        _ => {
-            return Err("cycle has no single policy-shaped membership state"
-                .to_string()
-                .into())
-        }
-    };
+    let wrapped_keys = authorization.wrapped_keys(&recipient)?;
     refresh_authorization_state(
         storage,
         store_root_hash,
@@ -798,22 +661,17 @@ async fn prepare_cycle_before_pull(
                 info!(count = drained, "Drained blob tombstones");
             }
         }
-        let reclaimed = crate::blob::delete::gc_tombstones(
-            db,
-            home,
-            storage,
-            cipher,
-            &protocol_store_id,
-            &hex::encode(user_keypair.public_key()),
-            merge_chain,
-            serial_authorization
-                .as_ref()
-                .map(|serial| &serial.authorization.membership),
-            clock,
-            db.blob_tombstone_grace(),
-        )
-        .await
-        .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
+        let reclaimed = authorization
+            .gc_tombstones(
+                home,
+                cipher,
+                &protocol_store_id,
+                &hex::encode(user_keypair.public_key()),
+                clock,
+                db.blob_tombstone_grace(),
+            )
+            .await
+            .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
         if reclaimed > 0 {
             info!(count = reclaimed, "Reclaimed tombstoned blobs");
         }
@@ -834,49 +692,11 @@ async fn prepare_cycle_before_pull(
         .map_err(|error| format!("read latest exact Store snapshot: {error}"))?;
     let last_snapshot_position = match last_snapshot.as_ref() {
         None => None,
-        Some(snapshot) => {
-            let write_policy = db.write_policy();
-            if snapshot.meta.coverage.policy() != write_policy {
-                return Err(
-                    "latest local Store snapshot coverage has the wrong write policy"
-                        .to_string()
-                        .into(),
-                );
-            }
-            let local_stream_id = match write_policy {
-                crate::WritePolicy::MergeConcurrent => {
-                    let (root, registration, _, _) =
-                        super::store_outbound::load_local_store_authority(
-                            db,
-                            device_id,
-                            user_keypair,
-                        )
-                        .await
-                        .map_err(|error| {
-                            format!("load local Store snapshot cadence authority: {error}")
-                        })?;
-                    super::store_commit::StreamActivation::device_authorized_stream_id(
-                        root.store_root_hash,
-                        &registration,
-                        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                    )
-                    .to_string()
-                }
-                crate::WritePolicy::Serial => super::store_commit::SERIAL_STREAM_ID.to_string(),
-            };
-            // A published snapshot with no local-stream coverage is a snapshot
-            // of that stream at genesis, not an absent snapshot.
-            Some(
-                snapshot
-                    .meta
-                    .coverage
-                    .clone()
-                    .into_refs()
-                    .remove(&local_stream_id)
-                    .map(|reference| reference.coord.sequence())
-                    .unwrap_or(0),
-            )
-        }
+        Some(snapshot) => Some(
+            authorization
+                .snapshot_position(snapshot, device_id, user_keypair)
+                .await?,
+        ),
     };
     let has_snapshot = last_snapshot.is_some();
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
@@ -912,68 +732,27 @@ async fn prepare_cycle_before_pull(
     }
 
     if rotation_pending.is_none() {
-        let published = Box::pin(super::store_outbound::drain_store_writes_with_coordination(
-            db,
-            storage,
-            serial_coordination,
-        ))
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish queued Store writes", error))?;
+        let published = authorization
+            .drain_store_writes()
+            .await
+            .map_err(|error| SyncCycleFailure::operation("publish queued Store writes", error))?;
         if published > 0 {
             info!(published, "Published queued Store writes");
         }
     }
 
-    let serial_head_after_publish = match serial_authorization.as_ref() {
-        Some(_) => Some(
-            super::store_pull::load_serial_cycle_authorization(
-                storage,
-                serial_coordination
-                    .ok_or_else(|| "Serial coordination capability is absent".to_string())?,
-                store_root,
-            )
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("reload Serial authorization after publication", error)
-            })?
-            .head,
-        ),
-        None => None,
-    };
-
-    if let (Some(authoritative_head), Some(branch)) = (
-        serial_head_after_publish,
-        db.unresolved_serial_branch()
-            .await
-            .map_err(|error| format!("read unresolved Serial branch: {error}"))?,
-    ) {
-        let stale = branch.base != authoritative_head;
-        if !branch.conflicted && stale {
-            let authoritative_predecessor =
-                db.exact_serial_predecessor(authoritative_head)
-                    .await
-                    .map_err(|error| format!("resolve exact Serial head: {error}"))?;
-            db.mark_serial_branch_conflict(
-                branch.branch_id,
-                branch.base,
-                authoritative_predecessor,
-            )
-            .await
-            .map_err(|error| format!("record Serial branch conflict: {error}"))?;
-        }
-        if branch.conflicted || stale {
-            return Ok(CycleBeforePull::Complete(SyncCycleResult {
-                changesets_applied: 0,
-                held_positions: Vec::new(),
-                device_activity: Vec::new(),
-                sync_time,
-                asset_downloads_failed: false,
-                local_blob_cleanup_pending: false,
-                row_changes: Vec::new(),
-                resume_drain_promptly: false,
-                rotation_pending,
-            }));
-        }
+    if authorization.should_stop_before_pull().await? {
+        return Ok(CycleBeforePull::Complete(SyncCycleResult {
+            changesets_applied: 0,
+            held_positions: Vec::new(),
+            device_activity: Vec::new(),
+            sync_time,
+            asset_downloads_failed: false,
+            local_blob_cleanup_pending: false,
+            row_changes: Vec::new(),
+            resume_drain_promptly: false,
+            rotation_pending,
+        }));
     }
 
     Ok(CycleBeforePull::Continue(PreparedCycle {
@@ -988,18 +767,18 @@ async fn prepare_cycle_before_pull(
 
 #[allow(clippy::too_many_arguments)]
 async fn complete_cycle_after_pull(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
-    db: &Database,
     user_keypair: &UserKeypair,
     store_dir: &StoreDir,
-    authorization: &CycleAuthorization,
+    authorization: &AuthorizedCycleEngine<'_>,
+    post_pull: &PostPullCycleEngine<'_, '_>,
     prepared: PreparedCycle,
     store_pull: super::store_pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
+    let db = authorization.db();
+    let storage = authorization.storage();
     let PreparedCycle {
         last_snapshot_time,
         last_snapshot_position,
@@ -1009,67 +788,31 @@ async fn complete_cycle_after_pull(
         rotation_pending,
     } = prepared;
     let tables = db.synced_tables();
-    let store_root_hash = authorization.store_root.store_root_hash;
-    let merge_membership = authorization.merge_membership.as_ref();
-    let merge_chain = merge_membership.and_then(|membership| membership.chain.as_ref());
-    let serial_membership_after_pull = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => None,
-        crate::WritePolicy::Serial => Some(
-            db.serial_authorization_state()
-                .await
-                .map_err(|error| format!("read materialized Serial membership: {error}"))?
-                .ok_or_else(|| "materialized Serial authorization is absent".to_string())?
-                .membership,
-        ),
-    };
 
     // A Serial registration appends to the exact global predecessor. Materialize
     // the selected global prefix first so the registration commit and its durable
     // predecessor enter one continuous local chain. The same pull also installs
     // the membership state that decides whether this active member may register.
     if rotation_pending.is_none() {
-        Box::pin(
-            super::store_registration::ensure_active_registration_with_coordination(
-                db,
-                storage,
-                serial_coordination,
-                user_keypair,
-                merge_chain,
-                &sync_time,
-            ),
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish Store device registration", error))?;
+        authorization
+            .ensure_active_registration(user_keypair, &sync_time)
+            .await?;
     }
 
     let staged_store_batch = if rotation_pending.is_none() {
         let mut staged_any = false;
         loop {
-            let staged = Box::pin(
-                super::store_outbound::prepare_pending_store_write_with_coordination(
-                    db,
-                    storage,
-                    serial_coordination,
-                    device_id,
-                    &sync_time,
-                    user_keypair,
-                    store_dir,
-                    merge_chain,
-                ),
-            )
-            .await
-            .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))?;
+            let staged = authorization
+                .prepare_pending_store_write(device_id, &sync_time, user_keypair, store_dir)
+                .await?;
             if !staged {
                 break;
             }
             staged_any = true;
-            let published = Box::pin(super::store_outbound::drain_store_writes_with_coordination(
-                db,
-                storage,
-                serial_coordination,
-            ))
-            .await
-            .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
+            let published = authorization
+                .drain_store_writes()
+                .await
+                .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
             if published > 0 {
                 info!(published, "Published Store writes");
             }
@@ -1138,30 +881,13 @@ async fn complete_cycle_after_pull(
         // exactly the kind of new cloud content the pending rotation must block.
         false
     } else if snapshot_due {
-        // Judge against the cycle's once-loaded chain, the same acceptance-side rule
-        // the readers apply: an initialized store requires a current Owner. A caller
-        // before initialization can have no chain and is accepted on its verified
-        // identity alone. The chain was already listed, anchored, and (for an
-        // owner-pinned store) fail-closed at the top of the cycle, so the only
-        // outcome here is authorized-or-not: an unauthorized result skips the
-        // snapshot.
+        // Judge against the policy-shaped post-pull membership authority using the
+        // same current-Owner rule as readers. Merge retains the chain verified at
+        // cycle authorization; Serial uses the authorization materialized by this
+        // pull. Loading either authority fails the cycle, while a verified non-owner
+        // skips the snapshot.
         let our_pk = hex::encode(user_keypair.public_key());
-        let authorized = match (
-            merge_membership.as_ref(),
-            serial_membership_after_pull.as_ref(),
-        ) {
-            (Some(_), None) => super::membership_ops::authorize_loaded_membership_author(
-                merge_chain,
-                &our_pk,
-                super::membership_ops::MembershipAuthorRequirement::Owner,
-            )
-            .map_err(|error| error.to_string()),
-            (None, Some(serial)) => serial
-                .is_owner(&our_pk)
-                .then_some(())
-                .ok_or_else(|| "not a current Serial Owner".to_string()),
-            _ => Err("cycle has no single policy-shaped membership state".to_string()),
-        };
+        let authorized = post_pull.may_author_snapshot(&our_pk);
         match authorized {
             Ok(()) => true,
             Err(reason) => {
@@ -1189,19 +915,15 @@ async fn complete_cycle_after_pull(
 
         match snapshot_result {
             Ok(cut) => {
-                let meta = super::store_snapshot::push_store_snapshot(
-                    storage,
-                    store_root_hash,
-                    cut.snapshot,
-                    cut.coverage,
-                    db.schema_version(),
-                    user_keypair,
-                    sync_time.clone(),
-                    merge_chain,
-                    db,
-                )
-                .await
-                .map_err(|error| SyncCycleFailure::operation("publish Store snapshot", error))?;
+                let meta = authorization
+                    .push_snapshot(
+                        cut.snapshot,
+                        cut.coverage,
+                        db.schema_version(),
+                        user_keypair,
+                        sync_time.clone(),
+                    )
+                    .await?;
                 info!(local_seq, snapshot = %meta.snapshot_hash(), "Snapshot created and pushed");
             }
             Err(e) => warn!("Failed to create snapshot: {e}"),
@@ -1210,7 +932,6 @@ async fn complete_cycle_after_pull(
 
     Ok(CompletedPullCycle {
         store_pull,
-        serial_membership_after_pull,
         local_blob_cleanup_pending,
         sync_time,
         resume_drain_promptly,
@@ -1218,79 +939,12 @@ async fn complete_cycle_after_pull(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn stage_cycle_ack(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    db: &Database,
-    user_keypair: &UserKeypair,
-    merge_chain: Option<&super::membership::MembershipChain>,
-    sync_time: &str,
-) -> Result<(), SyncCycleFailure> {
-    super::store_ack::drain_outbound_store_acks(
-        db,
-        storage,
-        serial_coordination,
-        user_keypair,
-        merge_chain,
-    )
-    .await
-    .map_err(|error| SyncCycleFailure::operation("publish queued Store acknowledgement", error))?;
-    let frontier = db
-        .materialized_frontier()
-        .await
-        .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
-    let frontier = super::store_commit::CommitFrontier::from_refs(db.write_policy(), frontier)
-        .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-    super::store_ack::stage_store_ack(
-        db,
-        storage,
-        serial_coordination,
-        frontier,
-        sync_time.to_owned(),
-        user_keypair,
-    )
-    .await
-    .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-    Ok(())
-}
-
 async fn reclaim_cycle_packages(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    db: &Database,
     device_id: &str,
     user_keypair: &UserKeypair,
-    authorization: &CycleAuthorization,
-    serial_membership_after_pull: Option<&super::membership::SerialMembershipState>,
+    post_pull: &PostPullCycleEngine<'_, '_>,
 ) -> Result<(), SyncCycleFailure> {
-    let merge_membership = authorization.merge_membership.as_ref();
-    let reclaim_membership = match (merge_membership, serial_membership_after_pull) {
-        (Some(membership), None) => super::store_reclaim::ReclaimMembership::MergeConcurrent {
-            membership: membership
-                .chain
-                .as_ref()
-                .ok_or_else(|| "MergeConcurrent cycle has no membership chain".to_string())?,
-            discovery_proof: membership.discovery_proof,
-        },
-        (None, Some(serial)) => super::store_reclaim::ReclaimMembership::Serial(serial),
-        _ => {
-            return Err("cycle has no single policy-shaped membership state"
-                .to_string()
-                .into())
-        }
-    };
-    match Box::pin(super::store_reclaim::reclaim_store_packages(
-        db,
-        storage,
-        serial_coordination,
-        device_id,
-        user_keypair,
-        authorization.store_root.store_root_hash,
-        reclaim_membership,
-    ))
-    .await
-    {
+    match post_pull.reclaim_packages(device_id, user_keypair).await {
         Ok(result) if result.packages_deleted > 0 => info!(
             packages = result.packages_deleted,
             copies = result.physical_copies_deleted,
@@ -1347,8 +1001,8 @@ async fn refresh_authorization_state(
     store_id: &str,
     wrapped_keys: &[super::wrapped_store_key::WrappedStoreKeyRef],
 ) -> Result<(), AuthorizationRefreshError> {
-    // A plaintext home has no encrypted store key to rotate. Its membership
-    // chain remains load-bearing elsewhere in the cycle.
+    // A plaintext home has no encrypted store key to rotate. Its policy-shaped
+    // membership authority remains load-bearing elsewhere in the cycle.
     if cipher.snapshot().is_plaintext() {
         debug!("refresh: plaintext home, nothing to refresh");
         return Ok(());
@@ -2024,30 +1678,13 @@ impl SyncComponents {
                 })?)
             }
         };
-        super::store_device_exclusion::resume_device_exclusion(
-            &self.db,
-            &*self.storage,
-            serial_coordination,
-            &self.user_keypair,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
-        super::circle_ops::resume_circle_operations(
-            &self.db,
-            &*self.storage,
-            serial_coordination,
-            &self.user_keypair,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))?;
-        run_single_sync_cycle_with_coordination(
-            &*self.storage,
-            serial_coordination,
-            &self.store_id,
+        let engine = CycleEngine::load(&*self.storage, serial_coordination, &self.db).await?;
+        engine.resume_operations(&self.user_keypair).await?;
+        let authorization = engine.authorize().await?;
+        run_single_sync_cycle_with_authorization(
             &self.device_id,
             &self.hlc,
             clock,
-            &self.db,
             &self.cipher,
             &self.pending_rotation,
             &self.user_keypair,
@@ -2056,6 +1693,7 @@ impl SyncComponents {
             store_dir,
             Some(self.storage.cloud_home()),
             observer,
+            authorization,
         )
         .await
     }

@@ -804,7 +804,6 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
 
     let result = run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         &device_id,
         &hlc,
         &SystemClock,

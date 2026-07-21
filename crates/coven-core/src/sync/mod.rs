@@ -17,6 +17,7 @@ pub mod circle_roster;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
+pub(crate) mod cycle_engine;
 pub mod device_join;
 pub mod gate;
 pub mod hlc;

@@ -108,6 +108,99 @@ async fn cycle_test_store(db: &Database, signer: &UserKeypair) -> TestStore {
         .expect("create exact cycle test Store")
 }
 
+#[tokio::test]
+async fn serial_cycle_engine_requires_coordination_before_loading_store_authority() {
+    let db = open_serial_test_db();
+    let signer = UserKeypair::generate();
+    let storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::new(
+        cycle_test_store(&db, &signer).await,
+    )));
+
+    let error = crate::sync::cycle_engine::CycleEngine::load(&*storage, None, &db)
+        .await
+        .err()
+        .expect("Serial cycle engine requires coordination");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coordination capability is absent"),
+        "{error}"
+    );
+    assert_eq!(storage.protocol_read_calls(), 0);
+}
+
+#[tokio::test]
+async fn cycle_engine_rejects_local_policy_that_differs_from_verified_root() {
+    let source = open_test_db();
+    let signer = UserKeypair::generate();
+    let store = cycle_test_store(&source, &signer).await;
+    let local = open_serial_test_db();
+    local
+        .install_store_root_authority(store.root.clone(), store.protocol_root.to_bytes())
+        .await
+        .expect("install exact MergeConcurrent root into Serial database");
+
+    let error = crate::sync::cycle_engine::CycleEngine::load(
+        &store.storage,
+        Some(
+            store
+                .storage
+                .serial_coordination()
+                .expect("test Store provides Serial coordination"),
+        ),
+        &local,
+    )
+    .await
+    .err()
+    .expect("verified root policy must match the local database policy");
+
+    assert!(error.to_string().contains("write policy"), "{error}");
+    assert!(error.to_string().contains("MergeConcurrent"), "{error}");
+    assert!(error.to_string().contains("Serial"), "{error}");
+}
+
+#[tokio::test]
+async fn serial_post_pull_engine_rejects_partial_materialized_authorization() {
+    let db = open_serial_test_db();
+    let signer = UserKeypair::generate();
+    let store = cycle_test_store(&db, &signer).await;
+    let engine = crate::sync::cycle_engine::CycleEngine::load(
+        &store.storage,
+        Some(
+            store
+                .storage
+                .serial_coordination()
+                .expect("test Store provides Serial coordination"),
+        ),
+        &db,
+    )
+    .await
+    .expect("load Serial cycle engine")
+    .authorize()
+    .await
+    .expect("authorize Serial cycle engine");
+    host_exec(
+        &db,
+        "DELETE FROM protocol_state WHERE key = 'serial_membership_state'",
+    )
+    .await;
+
+    let error = engine
+        .after_pull()
+        .await
+        .err()
+        .expect("partial Serial authorization must fail the cycle");
+
+    assert!(
+        error
+            .to_string()
+            .contains("read materialized Serial membership"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("partially durable"), "{error}");
+}
+
 async fn recover_serial_owner_state(
     storage: &CloudSyncStorage,
     source: &Database,
@@ -286,7 +379,6 @@ async fn run_cycle_m_result(
         .ok_or_else(|| "exact test Store has no local device id".to_string())?;
     run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         &device_id,
         hlc,
         &SystemClock,
@@ -317,7 +409,6 @@ async fn run_cycle_in_task(
     tokio::spawn(async move {
         run_single_sync_cycle(
             storage.as_ref(),
-            "test-lib",
             &device_id,
             hlc.as_ref(),
             &SystemClock,
@@ -362,7 +453,6 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let cipher = RwLock::new(CloudCipher::Plaintext);
     let result = run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         "M",
         &Hlc::new("M".to_string()),
         &SystemClock,
@@ -3463,7 +3553,6 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
             cycle::run_single_sync_cycle_with_coordination(
                 &storage,
                 Some(&delayed),
-                store_id,
                 &local_device_id,
                 &Hlc::new(local_device_id.clone()),
                 &SystemClock,
@@ -3585,7 +3674,6 @@ async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remo
         cycle::run_single_sync_cycle_with_coordination(
             &storage,
             Some(storage.serial_coordination().unwrap()),
-            store_id,
             &local_device_id,
             &Hlc::new(local_device_id.clone()),
             &SystemClock,
@@ -3702,7 +3790,6 @@ async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
         cycle::run_single_sync_cycle_with_coordination(
             &storage,
             Some(storage.serial_coordination().unwrap()),
-            store_id,
             &device_id,
             &Hlc::new(device_id.clone()),
             &SystemClock,
@@ -4037,7 +4124,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
 
 // ---- Host writes journal; applies never do ----
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
@@ -4056,6 +4143,7 @@ use crate::sync::storage::StorageError;
 struct CycleStorageInterceptor {
     inner: Arc<TestStore>,
     interception: CycleStorageInterception,
+    protocol_read_calls: AtomicUsize,
 }
 
 enum CycleStorageInterception {
@@ -4081,6 +4169,7 @@ impl CycleStorageInterceptor {
         Self {
             inner,
             interception: CycleStorageInterception::PassThrough,
+            protocol_read_calls: AtomicUsize::new(0),
         }
     }
 
@@ -4088,6 +4177,7 @@ impl CycleStorageInterceptor {
         Self {
             inner,
             interception: CycleStorageInterception::RejectAckCreate,
+            protocol_read_calls: AtomicUsize::new(0),
         }
     }
 
@@ -4099,6 +4189,7 @@ impl CycleStorageInterceptor {
                 write_sql: write_sql.to_string(),
                 fired: AtomicBool::new(false),
             },
+            protocol_read_calls: AtomicUsize::new(0),
         }
     }
 
@@ -4118,6 +4209,7 @@ impl CycleStorageInterceptor {
                 create_calls: std::sync::atomic::AtomicUsize::new(0),
                 attempted: std::sync::Mutex::new(Vec::new()),
             },
+            protocol_read_calls: AtomicUsize::new(0),
         }
     }
 
@@ -4132,6 +4224,7 @@ impl CycleStorageInterceptor {
                 create_calls: std::sync::atomic::AtomicUsize::new(0),
                 attempted: std::sync::Mutex::new(Vec::new()),
             },
+            protocol_read_calls: AtomicUsize::new(0),
         }
     }
 
@@ -4167,6 +4260,10 @@ impl CycleStorageInterceptor {
                 panic!("storage interception does not record blob writes")
             }
         }
+    }
+
+    fn protocol_read_calls(&self) -> usize {
+        self.protocol_read_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -4234,6 +4331,7 @@ impl SyncStorage for CycleStorageInterceptor {
         object: &crate::sync::storage::ExactObjectRef,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
+        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
         if semantic_prefix.starts_with("store-v1/candidates/")
             && semantic_prefix.contains("/packages/")
         {
@@ -4260,6 +4358,7 @@ impl SyncStorage for CycleStorageInterceptor {
         slot: &crate::storage::cloud::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<(Vec<u8>, crate::sync::storage::ExactObjectRef), StorageError> {
+        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
         self.inner
             .storage
             .read_protocol_slot(context, slot, semantic_prefix)
@@ -4272,6 +4371,7 @@ impl SyncStorage for CycleStorageInterceptor {
         slot: &crate::storage::cloud::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<(Vec<u8>, crate::sync::storage::PreparedExactObject), StorageError> {
+        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
         self.inner
             .storage
             .read_prepared_protocol_slot(context, slot, semantic_prefix)
@@ -4907,7 +5007,6 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 
     run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         "M",
         hlc.as_ref(),
         &SystemClock,
@@ -5088,7 +5187,6 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
 
     run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         "M",
         hlc.as_ref(),
         &SystemClock,
@@ -5195,7 +5293,6 @@ async fn ready_make_remote_provider_transport_is_offline() {
 
     let failed = run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         "M",
         &hlc,
         &SystemClock,
@@ -6239,7 +6336,6 @@ async fn run_cycle_m_storage(
         .expect("exact test device id exists");
     run_single_sync_cycle(
         storage,
-        "test-lib",
         &device_id,
         hlc,
         &SystemClock,

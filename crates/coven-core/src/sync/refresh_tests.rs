@@ -175,7 +175,6 @@ async fn run_cycle_with_storage(
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
         sync_storage,
-        LIB_ID,
         &exact_device_id,
         &hlc,
         &SystemClock,

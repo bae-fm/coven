@@ -274,7 +274,6 @@ async fn run_cycle(
     let pending_rotation = PendingRotation::none();
     let result = run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         &store_device_id,
         hlc,
         &SystemClock,
@@ -313,7 +312,6 @@ async fn try_run_cycle(
     let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         &storage.storage,
-        "test-lib",
         &store_device_id,
         hlc,
         &SystemClock,
