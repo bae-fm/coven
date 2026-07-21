@@ -213,6 +213,8 @@ pub enum StorePullMembershipError {
     Message(String),
 }
 
+type StorePullFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorePullError>> + Send + 'a>>;
+
 impl From<DbError> for StorePullError {
     fn from(error: DbError) -> Self {
         Self::Database(error.into_message())
@@ -572,7 +574,7 @@ async fn load_merge_predecessor_membership(
             "Merge registration lifecycle commit carries Serial membership state".to_string(),
         ));
     };
-    let root_value = Box::pin(load_store_protocol_root(storage, root))
+    let root_value = load_store_protocol_root(storage, root)
         .await
         .map_err(RegistrationLoadError::Object)?
         .value;
@@ -606,9 +608,7 @@ pub(crate) fn load_device_join_authorization<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     state: &'a StoreMembershipStateRef,
-) -> Pin<
-    Box<dyn Future<Output = Result<DeviceJoinBootstrapAuthorization, StorePullError>> + Send + 'a>,
-> {
+) -> StorePullFuture<'a, DeviceJoinBootstrapAuthorization> {
     Box::pin(async move {
         match state {
             StoreMembershipStateRef::MergeConcurrent(_) => {
@@ -659,24 +659,16 @@ pub(crate) async fn verify_device_join_cleanup_activation(
     root: &StoreRootRef,
     activation: &super::device_join::DeviceJoinCleanupActivation,
 ) -> Result<super::device_join::JoinerJoinTerminal, StorePullError> {
-    let root_value = Box::pin(load_store_protocol_root(storage, root))
-        .await?
-        .value;
-    let (commit, author) = Box::pin(load_commit_with_author_at_root(
-        storage,
-        root,
-        &root_value,
-        &activation.activation,
-    ))
-    .await?;
+    let root_value = load_store_protocol_root(storage, root).await?.value;
+    let (commit, author) =
+        load_commit_with_author_at_root(storage, root, &root_value, &activation.activation).await?;
     if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
         return Err(StorePullError::Database(
             "device join cleanup activation does not contain its exact sole receipt".to_string(),
         ));
     }
-    let authorization_future =
-        load_device_join_authorization(storage, root, &commit.membership_state);
-    let authorization = Box::pin(authorization_future).await?;
+    let authorization =
+        load_device_join_authorization(storage, root, &commit.membership_state).await?;
     let predecessor = match &authorization {
         DeviceJoinBootstrapAuthorization::MergeConcurrent { chain, .. } => {
             RegistrationPredecessorAuthority::MergeConcurrent(chain)
@@ -728,10 +720,15 @@ async fn validate_commit_acknowledgement(
     let Some(reference) = commit.acknowledgement() else {
         return Ok(None);
     };
-    let ack = load_store_ack_ref(storage, root, reference, activating_author)
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
+    let ack = Box::pin(load_store_ack_ref(
+        storage,
+        root,
+        reference,
+        activating_author,
+    ))
+    .await
+    .map_err(RegistrationLoadError::Object)?
+    .value;
     let predecessor_cut = commit
         .order
         .predecessor_cut()
@@ -748,13 +745,13 @@ async fn validate_commit_acknowledgement(
         let snapshot_author = load_registration_ref(storage, root, &snapshot.author_registration)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        let (_, metadata) = super::store_snapshot::load_store_snapshot_ref(
+        let (_, metadata) = Box::pin(super::store_snapshot::load_store_snapshot_ref(
             storage,
             root,
             &snapshot.author_registration,
             &snapshot_author.value,
             &snapshot.snapshot,
-        )
+        ))
         .await
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
         if !ack.store_cut.frontier().covers(&metadata.coverage) {
@@ -890,7 +887,7 @@ async fn load_commit_registrations(
     accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
-    let root_value = Box::pin(load_store_protocol_root(storage, root))
+    let root_value = load_store_protocol_root(storage, root)
         .await
         .map_err(RegistrationLoadError::Object)?
         .value;
@@ -2200,7 +2197,7 @@ pub(crate) async fn predecessor_commit_matching(
     order: &super::store_commit::StoreCommitOrder,
     matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<(StoreBatchCommitRef, StoreBatchCommit)>, RegistrationLoadError> {
-    let root_value = Box::pin(load_store_protocol_root(storage, root))
+    let root_value = load_store_protocol_root(storage, root)
         .await
         .map_err(RegistrationLoadError::Object)?
         .value;
@@ -2245,11 +2242,9 @@ async fn predecessor_commit_matching_at_root(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let (commit, _) = Box::pin(load_commit_with_author_at_root(
-            storage, root, root_value, &reference,
-        ))
-        .await
-        .map_err(RegistrationLoadError::Object)?;
+        let (commit, _) = load_commit_with_author_at_root(storage, root, root_value, &reference)
+            .await
+            .map_err(RegistrationLoadError::Object)?;
         if matches(&reference, &commit) {
             return Ok(Some((reference, commit)));
         }
@@ -3166,16 +3161,8 @@ pub(crate) async fn load_commit_with_author(
     root: &StoreRootRef,
     reference: &StoreBatchCommitRef,
 ) -> Result<(StoreBatchCommit, StoreDeviceRegistration), StoreObjectError> {
-    let root_value = Box::pin(load_store_protocol_root(storage, root))
-        .await?
-        .value;
-    Box::pin(load_commit_with_author_at_root(
-        storage,
-        root,
-        &root_value,
-        reference,
-    ))
-    .await
+    let root_value = load_store_protocol_root(storage, root).await?.value;
+    load_commit_with_author_at_root(storage, root, &root_value, reference).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3260,16 +3247,36 @@ pub(crate) async fn history_cut_covers(
     }
 }
 
-async fn verify_provider_access_evidence(
+fn verify_provider_access_evidence<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    verified_root: &'a super::store_commit::StoreProtocolRoot,
+    access: &'a super::provider::ActivatedStoreMemberProviderAccessGrant,
+    provider_admin: &'a super::provider::ProviderAdminGrantRecord,
+    administrator: &'a StoreDeviceRegistration,
+) -> StorePullFuture<'a, StoreBatchCommit> {
+    Box::pin(verify_provider_access_evidence_impl(
+        storage,
+        root,
+        verified_root,
+        access,
+        provider_admin,
+        administrator,
+    ))
+}
+
+async fn verify_provider_access_evidence_impl(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    verified_root: &super::store_commit::StoreProtocolRoot,
     access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
 ) -> Result<StoreBatchCommit, StorePullError> {
-    let grant = super::store_objects::load_provider_access_grant_ref(
+    let grant = super::store_objects::load_provider_access_grant_ref_with_root(
         storage,
         root,
+        verified_root,
         &access.grant_ref,
         administrator,
     )
@@ -3280,7 +3287,8 @@ async fn verify_provider_access_evidence(
                 .to_string(),
         ));
     }
-    let (activation, author) = load_commit_with_author(storage, root, &access.activation).await?;
+    let (activation, author) =
+        load_commit_with_author_at_root(storage, root, verified_root, &access.activation).await?;
     if activation.provider_access_grants() != std::slice::from_ref(&access.grant_ref)
         || activation.author_registration != access.grant.administrator
         || author != *administrator
@@ -3324,13 +3332,7 @@ fn load_verified_device_join_attempt_evidence_ref<'a>(
     root: &'a StoreRootRef,
     reference: &'a super::store_commit::DeviceJoinAttemptRef,
     owner: &'a StoreDeviceRegistration,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<VerifiedObject<DeviceJoinAttempt>, StorePullError>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
         let attempt =
             load_owner_signed_device_join_attempt_ref(storage, root, reference, owner).await?;
@@ -3350,13 +3352,14 @@ fn load_verified_device_join_attempt_evidence_ref<'a>(
             .provider_approval
             .verify(&verified_root, owner, &administrator)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        Box::pin(verify_provider_access_evidence(
+        verify_provider_access_evidence(
             storage,
             root,
+            &verified_root.value,
             &attempt.value.provider_approval.access_grant,
             &offer.provider_admin,
             &administrator,
-        ))
+        )
         .await?;
         if !history_cut_covers(
             storage,
@@ -3380,13 +3383,7 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
     root: &'a StoreRootRef,
     reference: &'a super::store_commit::DeviceJoinAttemptRef,
     owner: &'a StoreDeviceRegistration,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<VerifiedObject<DeviceJoinAttempt>, StorePullError>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
         let attempt =
             load_verified_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
@@ -3431,10 +3428,16 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
 ) -> Result<(), StorePullError> {
-    let activation =
-        verify_provider_access_evidence(storage, root, access, provider_admin, administrator)
-            .await?;
     let root_value = load_store_protocol_root(storage, root).await?;
+    let activation = verify_provider_access_evidence(
+        storage,
+        root,
+        &root_value.value,
+        access,
+        provider_admin,
+        administrator,
+    )
+    .await?;
     let accepted = match root_value.value.descriptor.write_policy {
         crate::WritePolicy::MergeConcurrent => {
             if coordination.is_some() {
@@ -3615,7 +3618,18 @@ async fn load_state_registrations(
     Ok(())
 }
 
-async fn load_commit_with_author_at_root(
+fn load_commit_with_author_at_root<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    reference: &'a StoreBatchCommitRef,
+) -> super::store_objects::StoreObjectFuture<'a, (StoreBatchCommit, StoreDeviceRegistration)> {
+    Box::pin(load_commit_with_author_at_root_impl(
+        storage, root, root_value, reference,
+    ))
+}
+
+async fn load_commit_with_author_at_root_impl(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &super::store_commit::StoreProtocolRoot,
@@ -3900,14 +3914,21 @@ struct VerifiedMergeHistory {
     commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 }
 
-async fn verify_merge_history_refs(
+fn verify_merge_history_refs<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    tips: impl IntoIterator<Item = StoreBatchCommitRef>,
+) -> StorePullFuture<'a, VerifiedMergeHistory> {
+    let pending = tips.into_iter().collect::<Vec<_>>();
+    Box::pin(verify_merge_history_refs_impl(storage, root, pending))
+}
+
+async fn verify_merge_history_refs_impl(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    tips: impl IntoIterator<Item = StoreBatchCommitRef>,
+    mut pending: Vec<StoreBatchCommitRef>,
 ) -> Result<VerifiedMergeHistory, StorePullError> {
-    let verified_root = Box::pin(load_store_protocol_root(storage, root))
-        .await?
-        .value;
+    let verified_root = load_store_protocol_root(storage, root).await?.value;
     if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
         return Err(StorePullError::Database(
             "Merge history belongs to a non-Merge Store".to_string(),
@@ -3930,7 +3951,6 @@ async fn verify_merge_history_refs(
     )
     .map_err(|error| StorePullError::Database(error.to_string()))?;
 
-    let mut pending = tips.into_iter().collect::<Vec<_>>();
     let mut loaded =
         BTreeMap::<StoreBatchCommitRef, (StoreBatchCommit, StoreDeviceRegistration)>::new();
     while let Some(reference) = pending.pop() {
@@ -3942,13 +3962,8 @@ async fn verify_merge_history_refs(
                 "Merge history contains a Serial commit".to_string(),
             ));
         }
-        let (commit, author) = Box::pin(load_commit_with_author_at_root(
-            storage,
-            root,
-            &verified_root,
-            &reference,
-        ))
-        .await?;
+        let (commit, author) =
+            load_commit_with_author_at_root(storage, root, &verified_root, &reference).await?;
         pending.extend(commit_predecessor_references(&commit));
         loaded.insert(reference, (commit, author));
     }
@@ -4096,7 +4111,7 @@ async fn replay_merge_device_history(
     ),
     StorePullError,
 > {
-    let history = Box::pin(verify_merge_history_refs(storage, root, [tip.clone()])).await?;
+    let history = verify_merge_history_refs(storage, root, [tip.clone()]).await?;
     let verified = history.commits.get(tip).ok_or_else(|| {
         StorePullError::Database(
             "author exclusion activation is absent from its verified history".to_string(),
@@ -4174,7 +4189,23 @@ async fn load_active_history_registrations(
     Ok(active)
 }
 
-pub(crate) async fn verify_store_history_state(
+pub(crate) fn verify_store_history_state<'a>(
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
+    root: &'a StoreRootRef,
+    cut: &'a StoreHistoryCut,
+    membership_ref: &'a StoreMembershipStateRef,
+) -> StorePullFuture<'a, VerifiedStoreHistoryState> {
+    Box::pin(verify_store_history_state_impl(
+        storage,
+        serial_coordination,
+        root,
+        cut,
+        membership_ref,
+    ))
+}
+
+async fn verify_store_history_state_impl(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
@@ -4440,7 +4471,21 @@ async fn accepted_history_cut_for_snapshot_stability(
     }
 }
 
-async fn activated_acknowledgements_through_cut(
+fn activated_acknowledgements_through_cut<'a>(
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
+    root: &'a StoreRootRef,
+    cut: &'a StoreHistoryCut,
+) -> StorePullFuture<'a, Vec<VerifiedActivatedStoreAck>> {
+    Box::pin(activated_acknowledgements_through_cut_impl(
+        storage,
+        serial_coordination,
+        root,
+        cut,
+    ))
+}
+
+async fn activated_acknowledgements_through_cut_impl(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
@@ -4530,7 +4575,21 @@ async fn activated_acknowledgements_through_cut(
     }
 }
 
-async fn verify_store_snapshot_authority(
+fn verify_store_snapshot_authority<'a>(
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
+    root: &'a StoreRootRef,
+    snapshot: &'a crate::database::PublishedStoreSnapshot,
+) -> StorePullFuture<'a, VerifiedStoreHistoryState> {
+    Box::pin(verify_store_snapshot_authority_impl(
+        storage,
+        serial_coordination,
+        root,
+        snapshot,
+    ))
+}
+
+async fn verify_store_snapshot_authority_impl(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
@@ -4574,7 +4633,21 @@ pub(crate) async fn verify_store_snapshot_for_acknowledgement(
         .map(|_| ())
 }
 
-pub(crate) async fn verify_store_snapshot_stability(
+pub(crate) fn verify_store_snapshot_stability<'a>(
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
+    root: &'a StoreRootRef,
+    snapshot: &'a crate::database::PublishedStoreSnapshot,
+) -> StorePullFuture<'a, VerifiedStoreSnapshotStability> {
+    Box::pin(verify_store_snapshot_stability_impl(
+        storage,
+        serial_coordination,
+        root,
+        snapshot,
+    ))
+}
+
+async fn verify_store_snapshot_stability_impl(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
@@ -4584,12 +4657,12 @@ pub(crate) async fn verify_store_snapshot_stability(
         verify_store_snapshot_authority(storage, serial_coordination, root, snapshot).await?;
     let snapshot_cut = snapshot_state.cut.clone();
 
-    let accepted_cut = accepted_history_cut_for_snapshot_stability(
+    let accepted_cut = Box::pin(accepted_history_cut_for_snapshot_stability(
         storage,
         serial_coordination,
         root,
         &snapshot_state,
-    )
+    ))
     .await?;
     let accepted_acknowledgements =
         activated_acknowledgements_through_cut(storage, serial_coordination, root, &accepted_cut)
@@ -4685,12 +4758,7 @@ pub(crate) async fn verify_author_exclusion_activation(
             "author exclusion head differs from its durable exact hash".to_string(),
         ));
     }
-    let author = Box::pin(load_registration_ref(
-        storage,
-        root,
-        &unverified.author_registration,
-    ))
-    .await?;
+    let author = load_registration_ref(storage, root, &unverified.author_registration).await?;
     let opened = Box::pin(super::store_objects::load_head_ref(
         storage,
         root.store_root_hash,
@@ -4719,12 +4787,8 @@ pub(crate) async fn verify_author_exclusion_activation(
         &unverified.commit,
     ))
     .await?;
-    let target_registration = Box::pin(load_registration_ref(
-        storage,
-        root,
-        &locator.exclusion().proposal.target,
-    ))
-    .await?;
+    let target_registration =
+        load_registration_ref(storage, root, &locator.exclusion().proposal.target).await?;
     if candidate_head.commit != *candidate
         || candidate_head.author_registration != locator.exclusion().proposal.target
         || candidate_commit.author_registration != candidate_head.author_registration
@@ -4877,9 +4941,7 @@ pub(crate) async fn prepare_device_join_bootstrap(
             "device join bootstrap cut and attempt activation use different policies".to_string(),
         ));
     }
-    let verified_root = Box::pin(load_store_protocol_root(storage, root))
-        .await?
-        .value;
+    let verified_root = load_store_protocol_root(storage, root).await?.value;
     let founder = Box::pin(load_founder_registration(storage, root)).await?;
     let founder_reference =
         StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
@@ -5321,13 +5383,8 @@ async fn load_authorized_serial_prefix(
                 "global predecessor chain contains a Merge commit reference".to_string(),
             ));
         }
-        let (commit, author) = Box::pin(load_commit_with_author_at_root(
-            storage,
-            root,
-            &root_value,
-            &reference,
-        ))
-        .await?;
+        let (commit, author) =
+            load_commit_with_author_at_root(storage, root, &root_value, &reference).await?;
         expected = commit.order.predecessor().cloned();
         reverse.push((reference, commit, author));
     }

@@ -120,7 +120,13 @@ async fn load_current_exact_chain(
             .map_err(MembershipOpsError::Database)?,
         None => Vec::new(),
     };
-    let chain = load_exact_anchored_chain(storage, root, &cursors, owner_pubkey).await?;
+    let chain = Box::pin(load_exact_anchored_chain(
+        storage,
+        root,
+        &cursors,
+        owner_pubkey,
+    ))
+    .await?;
     if let Some(db) = db {
         persist_head_cursors(db, chain.head_refs())
             .await
@@ -251,20 +257,26 @@ pub async fn get_members(
 /// public key, and uploads everything to the sync storage.
 ///
 /// Returns the JoinInfo for building an invite code.
-pub async fn invite_member(
-    storage: &dyn SyncStorage,
-    cloud_home: &dyn crate::storage::cloud::CloudHome,
-    user_keypair: &UserKeypair,
-    hlc: &Hlc,
-    public_key_hex: &str,
-    invitee_email: Option<&str>,
+pub fn invite_member<'a>(
+    storage: &'a dyn SyncStorage,
+    cloud_home: &'a dyn crate::storage::cloud::CloudHome,
+    user_keypair: &'a UserKeypair,
+    hlc: &'a Hlc,
+    public_key_hex: &'a str,
+    invitee_email: Option<&'a str>,
     role: MemberRole,
-    encryption: &EncryptionService,
-    store_id: &str,
-    store_name: &str,
-    db: &Database,
-) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
-    invite_member_with_coordination(
+    encryption: &'a EncryptionService,
+    store_id: &'a str,
+    store_name: &'a str,
+    db: &'a Database,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<crate::join_code::InviteCode, MembershipOpsError>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(invite_member_with_coordination(
         storage,
         cloud_home,
         user_keypair,
@@ -277,8 +289,7 @@ pub async fn invite_member(
         store_name,
         db,
         None,
-    )
-    .await
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,28 +348,34 @@ pub async fn invite_member_with_coordination(
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let mut chain =
-        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(db)).await?;
+    let mut chain = Box::pin(load_current_exact_chain(
+        storage,
+        &root_ref,
+        Some(&pinned_owner),
+        Some(db),
+    ))
+    .await?;
     require_resolved_membership(&chain)?;
     let protocol_store_id = root_ref.store_root_id.to_string();
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
-    let (join_info, wrapped_key) = super::invite::create_invitation_with_encryption_durable(
-        storage,
-        cloud_home,
-        store_root_hash,
-        &mut chain,
-        user_keypair,
-        public_key_hex,
-        invitee_email,
-        role,
-        encryption,
-        &protocol_store_id,
-        &invite_ts,
-        db,
-    )
-    .await?;
+    let (join_info, wrapped_key) =
+        Box::pin(super::invite::create_invitation_with_encryption_durable(
+            storage,
+            cloud_home,
+            store_root_hash,
+            &mut chain,
+            user_keypair,
+            public_key_hex,
+            invitee_email,
+            role,
+            encryption,
+            &protocol_store_id,
+            &invite_ts,
+            db,
+        ))
+        .await?;
 
     info!(
         "Invited member {}...",
@@ -1628,7 +1645,7 @@ pub(crate) async fn load_exact_anchored_chain(
             && cursor.coord.author_owner_grant == root_value.descriptor.founder_grant
             && cursor.coord.stream_id == founder_stream
     });
-    let founder_loaded = traverse_exact_membership_stream(
+    let founder_loaded = Box::pin(traverse_exact_membership_stream(
         storage,
         root,
         &root_value.descriptor.founder_pubkey,
@@ -1636,7 +1653,7 @@ pub(crate) async fn load_exact_anchored_chain(
         founder_stream,
         anchor,
         cursor,
-    )
+    ))
     .await?;
     let founder_latest = founder_loaded.heads.last().cloned().ok_or_else(|| {
         AnchoredChainError::LoadFailed("founder membership head is absent".to_string())
@@ -1671,13 +1688,13 @@ pub(crate) async fn load_exact_anchored_chain(
             .map(|(reference, _)| reference.clone())
             .collect::<Vec<_>>();
         let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
-        let chain = load_anchored_chain_at_exact_heads(
+        let chain = Box::pin(load_anchored_chain_at_exact_heads(
             storage,
             root,
             &root_value.descriptor.founder_pubkey,
             &exact_heads,
             &resolution_refs,
-        )
+        ))
         .await?;
         let pending = chain
             .activated_membership_streams()
@@ -1698,7 +1715,7 @@ pub(crate) async fn load_exact_anchored_chain(
             let cursor = cursors
                 .iter()
                 .find(|cursor| cursor.coord.stream_key() == stream);
-            let loaded = traverse_exact_membership_stream(
+            let loaded = Box::pin(traverse_exact_membership_stream(
                 storage,
                 root,
                 &stream.author_pubkey,
@@ -1706,7 +1723,7 @@ pub(crate) async fn load_exact_anchored_chain(
                 stream.stream_id,
                 &anchor,
                 cursor,
-            )
+            ))
             .await?;
             if let Some(cursor) = cursor {
                 consumed_cursors.insert(cursor.clone());
@@ -1726,12 +1743,10 @@ pub(crate) async fn load_exact_membership_head(
     root: &StoreRootRef,
     reference: &MembershipHeadRef,
 ) -> Result<AuthorHead, AnchoredChainError> {
-    let root_value = Box::pin(super::store_objects::load_store_protocol_root(
-        storage, root,
-    ))
-    .await
-    .map_err(map_membership_object_error)?
-    .value;
+    let root_value = super::store_objects::load_store_protocol_root(storage, root)
+        .await
+        .map_err(map_membership_object_error)?
+        .value;
     Box::pin(load_exact_membership_head_with_root(
         storage,
         root,
@@ -1800,12 +1815,10 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root_value = Box::pin(super::store_objects::load_store_protocol_root(
-        storage, root,
-    ))
-    .await
-    .map_err(map_membership_object_error)?
-    .value;
+    let root_value = super::store_objects::load_store_protocol_root(storage, root)
+        .await
+        .map_err(map_membership_object_error)?
+        .value;
     Box::pin(load_anchored_chain_at_exact_heads_with_root(
         storage,
         root,

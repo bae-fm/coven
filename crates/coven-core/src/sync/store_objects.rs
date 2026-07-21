@@ -1,5 +1,8 @@
 //! Exact-reference access to Store protocol objects.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
@@ -65,36 +68,52 @@ pub async fn load_provider_access_grant_ref(
     reference: &super::provider::StoreMemberProviderAccessGrantRef,
     administrator: &StoreDeviceRegistration,
 ) -> Result<VerifiedObject<super::provider::StoreMemberProviderAccessGrant>, StoreObjectError> {
-    let store = load_store_protocol_root(storage, store_root)
-        .await?
-        .value
-        .descriptor
-        .provider;
-    let context = ProtocolObjectContext::signed_plaintext(
-        store_root.store_root_hash,
-        ProtocolObjectDomain::ProviderAccessGrant,
-    );
-    let semantic_prefix = provider_access_grant_semantic_prefix(&reference.grant_id);
-    let expected = reference.clone();
-    let administrator = administrator.clone();
-    load_exact_object(
+    let verified_root = load_store_protocol_root(storage, store_root).await?;
+    load_provider_access_grant_ref_with_root(
         storage,
-        &context,
-        &reference.object,
-        &semantic_prefix,
-        reference.grant_hash,
-        move |bytes| {
-            let grant: super::provider::StoreMemberProviderAccessGrant =
-                serde_json::from_slice(bytes)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            expected
-                .verify(&grant)
-                .and_then(|()| grant.verify(&store, &administrator))
-                .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
-            Ok(grant)
-        },
+        store_root,
+        &verified_root.value,
+        reference,
+        administrator,
     )
     .await
+}
+
+pub(crate) fn load_provider_access_grant_ref_with_root<'a>(
+    storage: &'a dyn SyncStorage,
+    store_root: &'a StoreRootRef,
+    verified_root: &'a StoreProtocolRoot,
+    reference: &'a super::provider::StoreMemberProviderAccessGrantRef,
+    administrator: &'a StoreDeviceRegistration,
+) -> StoreObjectFuture<'a, VerifiedObject<super::provider::StoreMemberProviderAccessGrant>> {
+    let store = verified_root.descriptor.provider.clone();
+    Box::pin(async move {
+        let context = ProtocolObjectContext::signed_plaintext(
+            store_root.store_root_hash,
+            ProtocolObjectDomain::ProviderAccessGrant,
+        );
+        let semantic_prefix = provider_access_grant_semantic_prefix(&reference.grant_id);
+        let expected = reference.clone();
+        let administrator = administrator.clone();
+        load_exact_object(
+            storage,
+            &context,
+            &reference.object,
+            &semantic_prefix,
+            reference.grant_hash,
+            move |bytes| {
+                let grant: super::provider::StoreMemberProviderAccessGrant =
+                    serde_json::from_slice(bytes)
+                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                expected
+                    .verify(&grant)
+                    .and_then(|()| grant.verify(&store, &administrator))
+                    .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
+                Ok(grant)
+            },
+        )
+        .await
+    })
 }
 
 pub async fn load_provider_access_withdrawal_ref(
@@ -150,6 +169,9 @@ pub enum StoreObjectError {
     },
 }
 
+pub(crate) type StoreObjectFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, StoreObjectError>> + Send + 'a>>;
+
 /// Create bytes already sealed for one reserved exact object.
 pub async fn create_exact_object(
     storage: &dyn SyncStorage,
@@ -175,11 +197,11 @@ where
         .read_protocol_object(context, object, semantic_prefix)
         .await?;
     let verify_bytes = bytes.clone();
-    let value = run_blocking_object_verification(
+    let value = Box::pin(run_blocking_object_verification(
         semantic_prefix,
         object,
         Box::new(move || verify(&verify_bytes)),
-    )
+    ))
     .await?;
     Ok(VerifiedObject {
         value,
@@ -220,34 +242,38 @@ pub async fn delete_exact_object(
     Ok(())
 }
 
-pub async fn load_store_protocol_root(
-    storage: &dyn SyncStorage,
-    reference: &StoreRootRef,
-) -> Result<VerifiedObject<StoreProtocolRoot>, StoreObjectError> {
+pub fn load_store_protocol_root<'a>(
+    storage: &'a dyn SyncStorage,
+    reference: &'a StoreRootRef,
+) -> StoreObjectFuture<'a, VerifiedObject<StoreProtocolRoot>> {
     let context = ProtocolObjectContext::signed_plaintext(
         reference.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
     let semantic_prefix = store_protocol_root_logical_key();
     let expected = reference.clone();
-    load_exact_object(
-        storage,
-        &context,
-        &reference.object,
-        semantic_prefix,
-        reference.store_root_hash,
-        move |bytes| StoreProtocolRoot::parse_pinned(bytes, &expected),
-    )
-    .await
+    Box::pin(async move {
+        load_exact_object(
+            storage,
+            &context,
+            &reference.object,
+            semantic_prefix,
+            reference.store_root_hash,
+            move |bytes| StoreProtocolRoot::parse_pinned(bytes, &expected),
+        )
+        .await
+    })
 }
 
-pub async fn load_registration_ref(
-    storage: &dyn SyncStorage,
-    store_root: &StoreRootRef,
-    reference: &StoreDeviceRegistrationRef,
-) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
-    let pinned_root = load_store_protocol_root(storage, store_root).await?.value;
-    load_registration_ref_with_root(storage, store_root, &pinned_root, reference).await
+pub fn load_registration_ref<'a>(
+    storage: &'a dyn SyncStorage,
+    store_root: &'a StoreRootRef,
+    reference: &'a StoreDeviceRegistrationRef,
+) -> StoreObjectFuture<'a, VerifiedObject<StoreDeviceRegistration>> {
+    Box::pin(async move {
+        let pinned_root = load_store_protocol_root(storage, store_root).await?.value;
+        load_registration_ref_with_root(storage, store_root, &pinned_root, reference).await
+    })
 }
 
 pub(crate) async fn load_registration_ref_with_root(
@@ -714,13 +740,9 @@ pub async fn load_reclaim_receipt_ref(
             key: reference.object.slot().logical_key().to_string(),
             source: Box::new(StoreProtocolError::Malformed(error.to_string())),
         })?;
-    let executor = Box::pin(load_registration_ref(
-        storage,
-        store_root,
-        &unverified.executor,
-    ))
-    .await?
-    .value;
+    let executor = load_registration_ref(storage, store_root, &unverified.executor)
+        .await?
+        .value;
     let receipt = reference
         .verify(&unverified, &executor)
         .and_then(|()| {

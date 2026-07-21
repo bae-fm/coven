@@ -527,19 +527,23 @@ async fn build_invite_mutation(
         encryption,
     )
     .await?;
-    let wrapped_key = prepare_wrapped_store_key(
-        storage,
-        store_root_hash,
-        invitee_ed25519_pubkey,
+    let signing_store_id = store_id.to_string();
+    let signing_recipient = invitee_ed25519_pubkey.to_string();
+    let signing_keyring = authorized_keyring.clone();
+    let signing_owner = owner_keypair.clone();
+    let signed = super::blocking::run(move || {
         signed_wrapped_key(
-            store_id,
-            invitee_ed25519_pubkey,
+            &signing_store_id,
+            &signing_recipient,
             &invitee_x25519_pk,
-            &authorized_keyring,
-            owner_keypair,
-        )?,
-    )
-    .await?;
+            &signing_keyring,
+            &signing_owner,
+        )
+    })
+    .await
+    .map_err(|error| InviteError::Crypto(format!("seal invited member Store key: {error}")))??;
+    let wrapped_key =
+        prepare_wrapped_store_key(storage, store_root_hash, invitee_ed25519_pubkey, signed).await?;
     let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
         owner_keypair,
         stream_id,
@@ -744,7 +748,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         }
         None => {
             let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
-            let plan = build_invite_mutation(
+            let plan = Box::pin(build_invite_mutation(
                 storage,
                 db,
                 store_root_hash,
@@ -757,7 +761,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
                 encryption,
                 store_id,
                 timestamp,
-            )
+            ))
             .await?;
             let encoded =
                 encode_membership_mutation(&MembershipMutationPlan::Invite(plan.clone()))?;
@@ -768,7 +772,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             (plan, progress, intent_hash)
         }
     };
-    execute_invite_mutation(
+    Box::pin(execute_invite_mutation(
         storage,
         cloud_home,
         store_root_hash,
@@ -776,7 +780,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         plan,
         progress,
         MutationPersistence { db, intent_hash },
-    )
+    ))
     .await
 }
 

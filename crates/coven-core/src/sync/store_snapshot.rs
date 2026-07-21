@@ -958,15 +958,19 @@ pub(crate) async fn select_store_snapshot(
             load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?,
         );
     }
-    let selected =
-        select_maximal_stable_store_snapshot(storage, serial_coordination, root, authorized)
-            .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
-            .ok_or_else(|| {
-                SnapshotError::Bucket(super::storage::StorageError::NotFound(
-                    "Store snapshot stream".to_string(),
-                ))
-            })?;
+    let selected = Box::pin(select_maximal_stable_store_snapshot(
+        storage,
+        serial_coordination,
+        root,
+        authorized,
+    ))
+    .await
+    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
+    .ok_or_else(|| {
+        SnapshotError::Bucket(super::storage::StorageError::NotFound(
+            "Store snapshot stream".to_string(),
+        ))
+    })?;
     let chosen = selected.snapshot;
     if chosen.meta.schema_version > binary_schema_version {
         return Err(SnapshotError::SchemaTooNew {

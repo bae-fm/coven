@@ -762,13 +762,13 @@ pub async fn bootstrap_from_snapshot(
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
     let (store_root, write_policy, snapshot, plaintext, stability) =
-        super::store_snapshot::select_store_snapshot(
+        Box::pin(super::store_snapshot::select_store_snapshot(
             storage,
             serial_coordination,
             &expected_store_root,
             membership_floor,
             binary_schema_version,
-        )
+        ))
         .await?;
     let coverage = snapshot.meta.coverage.clone();
     if coverage.policy() != write_policy {
