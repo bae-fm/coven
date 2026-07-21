@@ -531,9 +531,7 @@ async fn run_single_sync_cycle_with_authorization(
     ))
     .await?;
     if completed.rotation_pending.is_none() {
-        authorization
-            .stage_and_publish_ack(user_keypair, &completed.sync_time)
-            .await?;
+        Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
         Box::pin(reclaim_cycle_packages(device_id, user_keypair, &post_pull)).await?;
     }
     let core_status = super::status::build_sync_status(

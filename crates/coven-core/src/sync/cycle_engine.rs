@@ -556,23 +556,23 @@ impl<'engine> AuthorizedCycleEngine<'engine> {
     ) -> Result<(), SyncCycleFailure> {
         match self {
             Self::Merge(engine) => {
-                stage_and_publish_ack(
+                Box::pin(stage_and_publish_ack(
                     engine.engine.db,
                     engine.engine.storage,
                     AckAuthority::Merge(&engine.membership),
                     identity,
                     sync_time,
-                )
+                ))
                 .await
             }
             Self::Serial(engine) => {
-                stage_and_publish_ack(
+                Box::pin(stage_and_publish_ack(
                     engine.engine.db,
                     engine.engine.storage,
                     AckAuthority::Serial(engine.engine.coordination),
                     identity,
                     sync_time,
-                )
+                ))
                 .await
             }
         }
