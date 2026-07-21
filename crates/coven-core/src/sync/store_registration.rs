@@ -131,32 +131,11 @@ impl DurableRetirement {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 pub async fn ensure_active_registration(
     db: &Database,
     storage: &dyn SyncStorage,
-    signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
-    ensure_active_registration_with_coordination(
-        db,
-        storage,
-        None,
-        signer,
-        None,
-        "1970-01-01T00:00:00Z",
-    )
-    .await
-}
-
-pub async fn ensure_active_registration_with_coordination(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    signer: &UserKeypair,
-    membership: Option<&MembershipChain>,
-    published_at: &str,
-) -> Result<(), StoreRegistrationError> {
-    drain_registration_outbox(db, storage, coordination, signer, membership, published_at).await?;
+    drain_registration_outbox(db, storage).await?;
     match db
         .latest_local_store_device_registration()
         .await
@@ -295,7 +274,7 @@ pub async fn retire_registration_with_coordination(
     membership: Option<&MembershipChain>,
     _published_at: &str,
 ) -> Result<bool, StoreRegistrationError> {
-    drain_registration_outbox(db, storage, coordination, signer, membership, _published_at).await?;
+    drain_registration_outbox(db, storage).await?;
     let Some(registration) = db
         .latest_local_store_device_registration()
         .await
@@ -2543,15 +2522,7 @@ pub(crate) async fn bootstrap_pending_device(
         .await
         .map_err(database_error)?;
     }
-    Box::pin(drain_registration_outbox(
-        db,
-        storage,
-        None,
-        identity_signer,
-        None,
-        published_at,
-    ))
-    .await?;
+    Box::pin(drain_registration_outbox(db, storage)).await?;
     let durable = Box::pin(db.latest_local_store_device_registration())
         .await
         .map_err(database_error)?
@@ -2590,12 +2561,7 @@ pub(crate) async fn bootstrap_pending_device(
 pub async fn drain_registration_outbox(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    signer: &UserKeypair,
-    membership: Option<&MembershipChain>,
-    published_at: &str,
 ) -> Result<u64, StoreRegistrationError> {
-    let _ = (coordination, signer, membership, published_at);
     let store_root = db
         .local_store_root_ref()
         .await
@@ -2895,19 +2861,10 @@ mod tests {
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
-        let signer = UserKeypair::generate();
         let store = TestStore::for_store("registration-missing-root-storage").await;
 
         assert!(matches!(
-            drain_registration_outbox(
-                &db,
-                &store.storage,
-                None,
-                &signer,
-                None,
-                "2026-01-01T00:00:00Z",
-            )
-            .await,
+            drain_registration_outbox(&db, &store.storage).await,
             Err(StoreRegistrationError::ExactRootAuthorityMissing)
         ));
     }
@@ -2915,7 +2872,7 @@ mod tests {
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
         let (store, db) = initialized().await;
-        ensure_active_registration(&db, &store.storage, &store.signer)
+        ensure_active_registration(&db, &store.storage)
             .await
             .expect("founder registration remains active");
         let activated = db.activated_store_device_registrations().await.unwrap();
@@ -2944,7 +2901,7 @@ mod tests {
             .expect("replacement registration exists");
         assert_eq!(durable.device_id, registration.device_id);
         assert!(durable.is_activated());
-        ensure_active_registration(&db, &store.storage, &store.signer)
+        ensure_active_registration(&db, &store.storage)
             .await
             .expect("replacement registration is usable");
     }
@@ -3254,7 +3211,7 @@ mod tests {
             .expect("retirement is idempotent"));
         }
         assert!(matches!(
-            ensure_active_registration(&db, &store.storage, &store.signer).await,
+            ensure_active_registration(&db, &store.storage).await,
             Err(StoreRegistrationError::RetiredDevice { .. })
         ));
         assert!(db.local_store_device_retirement().await.unwrap().unwrap().1);

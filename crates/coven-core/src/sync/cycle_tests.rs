@@ -109,14 +109,14 @@ async fn cycle_test_store(db: &Database, signer: &UserKeypair) -> TestStore {
 }
 
 #[tokio::test]
-async fn serial_cycle_engine_requires_coordination_before_loading_store_authority() {
+async fn serial_store_engine_requires_coordination_before_loading_store_authority() {
     let db = open_serial_test_db();
     let signer = UserKeypair::generate();
     let storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::new(
         cycle_test_store(&db, &signer).await,
     )));
 
-    let error = crate::sync::cycle_engine::CycleEngine::load(&*storage, None, &db)
+    let error = crate::sync::store_engine::StoreEngine::authorize_borrowed(&*storage, None, &db)
         .await
         .err()
         .expect("Serial cycle engine requires coordination");
@@ -131,7 +131,7 @@ async fn serial_cycle_engine_requires_coordination_before_loading_store_authorit
 }
 
 #[tokio::test]
-async fn cycle_engine_rejects_local_policy_that_differs_from_verified_root() {
+async fn store_engine_rejects_local_policy_that_differs_from_verified_root() {
     let source = open_test_db();
     let signer = UserKeypair::generate();
     let store = cycle_test_store(&source, &signer).await;
@@ -141,7 +141,7 @@ async fn cycle_engine_rejects_local_policy_that_differs_from_verified_root() {
         .await
         .expect("install exact MergeConcurrent root into Serial database");
 
-    let error = crate::sync::cycle_engine::CycleEngine::load(
+    let error = crate::sync::store_engine::StoreEngine::authorize_borrowed(
         &store.storage,
         Some(
             store
@@ -165,7 +165,7 @@ async fn serial_post_pull_engine_rejects_partial_materialized_authorization() {
     let db = open_serial_test_db();
     let signer = UserKeypair::generate();
     let store = cycle_test_store(&db, &signer).await;
-    let engine = crate::sync::cycle_engine::CycleEngine::load(
+    let engine = crate::sync::store_engine::StoreEngine::authorize_borrowed(
         &store.storage,
         Some(
             store
@@ -175,9 +175,6 @@ async fn serial_post_pull_engine_rejects_partial_materialized_authorization() {
         ),
         &db,
     )
-    .await
-    .expect("load Serial cycle engine")
-    .authorize()
     .await
     .expect("authorize Serial cycle engine");
     host_exec(

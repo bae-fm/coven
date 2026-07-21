@@ -427,13 +427,9 @@ async fn seed_remote_release(
         .expect("build exact remote fixture source path");
     register_external_blob(db, "note_photos", photo_id, &source).await;
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store_registration::ensure_active_registration(
-        db,
-        &storage.storage,
-        &storage.signer,
-    )
-    .await
-    .expect("activate exact fixture writer");
+    crate::sync::store_registration::ensure_active_registration(db, &storage.storage)
+        .await
+        .expect("activate exact fixture writer");
     make_remote(db, store_dir, hlc, "notes", note_id, false)
         .await
         .expect("queue exact remote fixture upload");

@@ -2806,6 +2806,25 @@ enum ApplyOutcome {
     Held(HeldStorePositionReason),
 }
 
+async fn required_pull_root(
+    db: &Database,
+    requested_hash: ObjectHash,
+) -> Result<StoreRootRef, StorePullError> {
+    let root = db
+        .local_store_root_ref()
+        .await
+        .map_err(|error| StorePullError::Database(format!("load exact Store root: {error}")))?
+        .ok_or_else(|| {
+            StorePullError::Database("Store root exact reference is absent".to_string())
+        })?;
+    if root.store_root_hash != requested_hash {
+        return Err(StorePullError::Database(
+            "requested Store root differs from the durable exact root reference".to_string(),
+        ));
+    }
+    Ok(root)
+}
+
 /// Discover every visible immutable head, then repeatedly materialize any commit
 /// whose exact predecessor and dependency positions are already durable.
 #[allow(clippy::too_many_arguments)]
@@ -2817,11 +2836,13 @@ pub async fn pull_store_commits(
     store_dir: &StoreDir,
     membership: Option<&MembershipChain>,
 ) -> Result<StorePullResult, StorePullError> {
-    Box::pin(pull_store_commits_with_identity(
+    let membership = membership.ok_or_else(|| {
+        StorePullError::Database("Merge pull has no exact membership state".to_string())
+    })?;
+    Box::pin(pull_merge_store_commits_with_identity(
         db,
         tables,
         storage,
-        None,
         store_root_hash,
         store_dir,
         membership,
@@ -2841,17 +2862,37 @@ pub async fn pull_store_commits_with_coordination(
     store_dir: &StoreDir,
     membership: Option<&MembershipChain>,
 ) -> Result<StorePullResult, StorePullError> {
-    Box::pin(pull_store_commits_with_identity(
-        db,
-        tables,
-        storage,
-        serial_coordination,
-        store_root_hash,
-        store_dir,
-        membership,
-        None,
-    ))
-    .await
+    match db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            let membership = membership.ok_or_else(|| {
+                StorePullError::Database("Merge pull has no exact membership state".to_string())
+            })?;
+            pull_merge_store_commits_with_identity(
+                db,
+                tables,
+                storage,
+                store_root_hash,
+                store_dir,
+                membership,
+                None,
+            )
+            .await
+        }
+        crate::WritePolicy::Serial => {
+            pull_serial_store_commits_with_identity(
+                db,
+                tables,
+                storage,
+                serial_coordination.ok_or_else(|| {
+                    StorePullError::Serial("coordination capability is absent".to_string())
+                })?,
+                store_root_hash,
+                store_dir,
+                None,
+            )
+            .await
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2866,35 +2907,85 @@ pub fn pull_store_commits_with_identity<'a>(
     identity: Option<&'a crate::keys::UserKeypair>,
 ) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
-        let root = db
-            .local_store_root_ref()
-            .await
-            .map_err(|error| StorePullError::Database(format!("load exact Store root: {error}")))?
-            .ok_or_else(|| {
-                StorePullError::Database("Store root exact reference is absent".to_string())
-            })?;
-        if root.store_root_hash != store_root_hash {
-            return Err(StorePullError::Database(
-                "requested Store root differs from the durable exact root reference".to_string(),
-            ));
-        }
-        let verified_root = load_store_protocol_root(storage, &root).await?.value;
-        if db.write_policy() == crate::WritePolicy::Serial {
-            let serial_pull: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-                Box::pin(pull_serial_store_commits(
+        match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                let membership = membership.ok_or_else(|| {
+                    StorePullError::Database("Merge pull has no exact membership state".to_string())
+                })?;
+                pull_merge_store_commits_with_identity(
+                    db,
+                    tables,
+                    storage,
+                    store_root_hash,
+                    store_dir,
+                    membership,
+                    identity,
+                )
+                .await
+            }
+            crate::WritePolicy::Serial => {
+                pull_serial_store_commits_with_identity(
                     db,
                     tables,
                     storage,
                     serial_coordination.ok_or_else(|| {
                         StorePullError::Serial("coordination capability is absent".to_string())
                     })?,
-                    &root,
-                    verified_root,
+                    store_root_hash,
                     store_dir,
                     identity,
-                ));
-            return serial_pull.await;
+                )
+                .await
+            }
         }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pull_serial_store_commits_with_identity<'a>(
+    db: &'a Database,
+    tables: &'a [SyncedTable],
+    storage: &'a dyn SyncStorage,
+    coordination: &'a dyn CoordinationStorage,
+    store_root_hash: ObjectHash,
+    store_dir: &'a StoreDir,
+    identity: Option<&'a crate::keys::UserKeypair>,
+) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
+    Box::pin(async move {
+        let root = required_pull_root(db, store_root_hash).await?;
+        let verified_root = load_store_protocol_root(storage, &root).await?.value;
+        if verified_root.descriptor.write_policy != crate::WritePolicy::Serial {
+            return Err(StorePullError::Database(
+                "durable write policy differs from the signed Store root".to_string(),
+            ));
+        }
+        pull_serial_store_commits(
+            db,
+            tables,
+            storage,
+            coordination,
+            &root,
+            verified_root,
+            store_dir,
+            identity,
+        )
+        .await
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pull_merge_store_commits_with_identity<'a>(
+    db: &'a Database,
+    tables: &'a [SyncedTable],
+    storage: &'a dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    store_dir: &'a StoreDir,
+    membership: &'a MembershipChain,
+    identity: Option<&'a crate::keys::UserKeypair>,
+) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
+    Box::pin(async move {
+        let root = required_pull_root(db, store_root_hash).await?;
+        let verified_root = load_store_protocol_root(storage, &root).await?.value;
         if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
             return Err(StorePullError::Database(
                 "durable write policy differs from the signed Store root".to_string(),
@@ -2923,16 +3014,14 @@ pub fn pull_store_commits_with_identity<'a>(
             .map_err(|error| {
                 StorePullError::Database(format!("load active Merge registrations: {error}"))
             })?;
-        if let Some(membership) = membership {
-            for recovered in
-                discover_merge_owner_recoveries(storage, &root, &verified_root, membership).await?
+        for recovered in
+            discover_merge_owner_recoveries(storage, &root, &verified_root, membership).await?
+        {
+            if active
+                .iter()
+                .all(|(reference, _)| reference != &recovered.0)
             {
-                if active
-                    .iter()
-                    .all(|(reference, _)| reference != &recovered.0)
-                {
-                    active.push(recovered);
-                }
+                active.push(recovered);
             }
         }
         let mut candidates = BTreeMap::new();

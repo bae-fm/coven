@@ -1265,15 +1265,7 @@ pub(crate) async fn create_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleId, CircleOperationError> {
-    super::store_registration::ensure_active_registration_with_coordination(
-        db,
-        storage,
-        coordination,
-        signer,
-        None,
-        metadata_stamp,
-    )
-    .await?;
+    super::store_registration::ensure_active_registration(db, storage).await?;
     let journal = Box::pin(prepare_circle_operation(
         db,
         storage,
@@ -1308,15 +1300,7 @@ pub(crate) async fn rename_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    super::store_registration::ensure_active_registration_with_coordination(
-        db,
-        storage,
-        coordination,
-        signer,
-        None,
-        metadata_stamp,
-    )
-    .await?;
+    super::store_registration::ensure_active_registration(db, storage).await?;
     let identity_pubkey = keys::public_key_hex(signer);
     let (current, activation_commit_ref) = db
         .circle_authoring_context(circle_id, &identity_pubkey)
@@ -4270,14 +4254,18 @@ mod tests {
         );
 
         let (_store_temp, store_dir) = temp_store_dir();
-        let pull = super::super::store_pull::pull_store_commits_with_identity(
+        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            .await
+            .expect("load exact membership for Merge pull")
+            .chain
+            .expect("Merge Store has a membership chain");
+        let pull = super::super::store_pull::pull_merge_store_commits_with_identity(
             &db,
             &test_synced_tables(),
             &store.storage,
-            None,
             store.root.store_root_hash,
             &store_dir,
-            None,
+            &membership,
             Some(&signer),
         )
         .await

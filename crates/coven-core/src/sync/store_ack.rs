@@ -386,7 +386,7 @@ mod tests {
         super::super::store_protocol_root::create_store(db, storage, "ack-exact-store", signer)
             .await
             .expect("create acknowledgement test Store");
-        super::super::store_registration::ensure_active_registration(db, storage, signer)
+        super::super::store_registration::ensure_active_registration(db, storage)
             .await
             .expect("activate acknowledgement test registration");
     }

@@ -1094,7 +1094,7 @@ mod tests {
         )
         .await
         .expect("create snapshot test Store");
-        super::super::store_registration::ensure_active_registration(db, storage, signer)
+        super::super::store_registration::ensure_active_registration(db, storage)
             .await
             .expect("activate snapshot test registration");
         let root_ref = db

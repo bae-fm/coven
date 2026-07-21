@@ -333,6 +333,7 @@ async fn reject_excluded_merge_candidate(
 /// Prepare the oldest pending write as exact signed bytes. A blocked or already
 /// prepared oldest write holds later writes behind it.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn prepare_pending_store_write(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -342,13 +343,19 @@ pub async fn prepare_pending_store_write(
     store_dir: &StoreDir,
     membership: Option<&MembershipChain>,
 ) -> Result<bool, StoreOutboundError> {
-    prepare_pending_store_write_with_coordination(
-        db, storage, None, device_id, timestamp, keypair, store_dir, membership,
+    let membership = membership.ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound(
+            "Merge Store write has no exact membership state".to_string(),
+        )
+    })?;
+    prepare_pending_merge_store_write(
+        db, storage, device_id, timestamp, keypair, store_dir, membership,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn prepare_pending_store_write_with_coordination(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -360,7 +367,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
     membership: Option<&MembershipChain>,
 ) -> Result<bool, StoreOutboundError> {
     if db.write_policy() == crate::WritePolicy::Serial {
-        return prepare_serial_store_branch(
+        return prepare_pending_serial_store_write(
             db,
             storage,
             coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?,
@@ -370,6 +377,39 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         )
         .await;
     }
+    let membership = membership.ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound(
+            "Merge Store write has no exact membership state".to_string(),
+        )
+    })?;
+    prepare_pending_merge_store_write(
+        db, storage, device_id, _timestamp, keypair, store_dir, membership,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_pending_serial_store_write(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    keypair: &UserKeypair,
+    store_dir: &StoreDir,
+) -> Result<bool, StoreOutboundError> {
+    prepare_serial_store_branch(db, storage, coordination, device_id, keypair, store_dir).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_pending_merge_store_write(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    _timestamp: &str,
+    keypair: &UserKeypair,
+    store_dir: &StoreDir,
+    membership: &MembershipChain,
+) -> Result<bool, StoreOutboundError> {
     let Some(PreparedStoreWrite {
         write_id,
         changeset,
@@ -423,11 +463,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             predecessor: previous.clone(),
             dependencies,
         };
-        let candidate_membership = membership.ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "Merge Store write has no exact membership state".to_string(),
-            )
-        })?;
+        let candidate_membership = membership;
         let authorization = super::store_pull::load_retained_merge_outbound_authorization(
             db,
             storage,
@@ -1912,7 +1948,7 @@ pub async fn abandon_merge_candidate(
             return Ok(MergeCandidateAbandonment::Abandoned);
         }
     }
-    drain_store_writes(db, storage).await?;
+    drain_merge_store_writes(db, storage).await?;
     if !db.merge_candidate_cleanup_pending(&write_id).await? {
         return Err(StoreOutboundError::InvalidOutbound(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
@@ -1938,7 +1974,7 @@ async fn finish_merge_abandonment(
         }
         crate::database::MergeAbandonmentState::CandidateWon => {
             db.resume_winning_merge_candidate(write_id).await?;
-            drain_store_writes(db, storage).await?;
+            drain_merge_store_writes(db, storage).await?;
             Ok(MergeCandidateAbandonment::CandidateActivated)
         }
         crate::database::MergeAbandonmentState::Prepared => {
@@ -2215,26 +2251,43 @@ async fn read_occupied_merge_head(
     })
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn drain_store_writes(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreOutboundError> {
-    drain_store_writes_with_coordination(db, storage, None).await
+    drain_merge_store_writes(db, storage).await
 }
 
+#[cfg(test)]
 pub(crate) async fn drain_store_writes_with_coordination(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn CoordinationStorage>,
 ) -> Result<u64, StoreOutboundError> {
     if db.write_policy() == crate::WritePolicy::Serial {
-        return drain_serial_store_branch(
+        return drain_serial_store_writes(
             db,
             storage,
             coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?,
         )
         .await;
     }
+    drain_merge_store_writes(db, storage).await
+}
+
+pub(crate) async fn drain_serial_store_writes(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+) -> Result<u64, StoreOutboundError> {
+    drain_serial_store_branch(db, storage, coordination).await
+}
+
+pub(crate) async fn drain_merge_store_writes(
+    db: &Database,
+    storage: &dyn SyncStorage,
+) -> Result<u64, StoreOutboundError> {
     let mut published = 0_u64;
     while let Some(batch) = db.oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();

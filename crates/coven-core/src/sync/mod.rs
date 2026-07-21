@@ -17,10 +17,10 @@ pub mod circle_roster;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
-pub(crate) mod cycle_engine;
 pub mod device_join;
 pub mod gate;
 pub mod hlc;
+pub(crate) mod store_engine;
 // Exercises the register clock through `Database::hlc()`.
 #[cfg(test)]
 mod cycle_tests;
