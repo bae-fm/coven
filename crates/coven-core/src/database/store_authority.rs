@@ -1,0 +1,535 @@
+use super::*;
+
+impl Database {
+    pub async fn local_store_root_ref(
+        &self,
+    ) -> Result<Option<crate::sync::store_commit::StoreRootRef>, DbError> {
+        self.call(|conn| {
+            load_store_root_authority_on(conn)
+                .map(|authority| authority.map(|(reference, _)| reference))
+        })
+        .await
+    }
+
+    pub(crate) async fn install_store_root_authority(
+        &self,
+        reference: crate::sync::store_commit::StoreRootRef,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            install_store_root_authority_on(&tx, &reference, &bytes)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn install_store_owner_anchor(
+        &self,
+        root: crate::sync::store_commit::StoreRootRef,
+        founder_reference: StoreDeviceRegistrationRef,
+        founder: StoreDeviceRegistration,
+        founder_bytes: Vec<u8>,
+        genesis: ResolvedStoreDeviceState,
+        owner: String,
+        membership: InitialStoreMembershipAuthority,
+    ) -> Result<(), DbError> {
+        if founder.author_pubkey != owner {
+            return Err(DbError::Message(
+                "Store founder registration author differs from the owner anchor".to_string(),
+            ));
+        }
+        let write_policy = self.write_policy();
+        let schema_version = self.schema_version();
+        let routing_hash = self.sync_routing_hash();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            install_store_founder_state_on(
+                &tx,
+                &root,
+                &founder_reference,
+                &founder,
+                &founder_bytes,
+                &genesis,
+            )?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner,],
+            )
+            .map_err(DbError::from)?;
+            match membership {
+                InitialStoreMembershipAuthority::MergeConcurrent { head_refs } => {
+                    if write_policy != crate::WritePolicy::MergeConcurrent {
+                        return Err(DbError::Message(
+                            "Merge founder membership cannot initialize a Serial database"
+                                .to_string(),
+                        ));
+                    }
+                    for reference in &head_refs {
+                        crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
+                    }
+                }
+                InitialStoreMembershipAuthority::Serial { authorization } => {
+                    if write_policy != crate::WritePolicy::Serial {
+                        return Err(DbError::Message(
+                            "Serial founder membership cannot initialize a Merge database"
+                                .to_string(),
+                        ));
+                    }
+                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
+                }
+            }
+            ensure_founder_replay_baseline_on(
+                &tx,
+                write_policy,
+                schema_version,
+                routing_hash,
+                RetainedReplayGenesisAuthority {
+                    store_root: root,
+                    founder_registration: founder_reference,
+                },
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn local_store_founder_graph(
+        &self,
+    ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
+        self.call(load_local_store_founder_graph_on).await
+    }
+
+    pub(crate) async fn stage_store_founder_graph(
+        &self,
+        graph: Box<DurableFounderGraph>,
+    ) -> Result<(), DbError> {
+        validate_founder_graph(&graph)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            if let Some(existing) = load_local_store_founder_graph_on(&tx)? {
+                validate_founder_graph(&existing)?;
+                if founder_graph_identity(&existing) == founder_graph_identity(&graph) {
+                    return Ok(());
+                }
+                return Err(DbError::Message(
+                    "local Store founder graph already owns different exact objects".to_string(),
+                ));
+            }
+            consume_store_creation_probes_on(&tx, &graph)?;
+            tx.execute(
+                "INSERT INTO local_store_protocol_root \
+                 (singleton, store_root_hash, store_protocol_root_bytes, prepared_object) \
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![
+                    graph.root.value.object_hash().to_string(),
+                    graph.root.bytes,
+                    serde_json::to_string(&graph.root.prepared).map_err(|error| {
+                        DbError::Message(format!("serialize prepared Store root: {error}"))
+                    })?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO local_store_device_registration \
+                 (singleton, device_id, registration_hash, registration_bytes, prepared_object, \
+                  initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    graph.registration.value.device_id.to_string(),
+                    graph.registration.value.registration_hash().to_string(),
+                    graph.registration.bytes,
+                    serde_json::to_string(&graph.registration.prepared).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize prepared founder registration: {error}"
+                        ))
+                    })?,
+                    serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                    })?,
+                    graph.initial_ack.bytes,
+                    serde_json::to_string(&graph.initial_ack.prepared).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack object: {error}"))
+                    })?,
+                    serde_json::to_string(&LocalDeviceRegistrationState::Prepared).map_err(
+                        |error| DbError::Message(format!(
+                            "serialize registration journal state: {error}"
+                        ))
+                    )?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO local_store_founder_graph \
+                 (singleton, membership_graph) VALUES (1, ?1)",
+                rusqlite::params![serde_json::to_string(
+                    &DurableFounderMembershipJournal::from_graph(&graph.membership,)
+                )
+                .map_err(|error| DbError::Message(format!(
+                    "serialize founder membership graph: {error}"
+                )))?,],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_store_founder_graph(
+        &self,
+        expected_root: crate::sync::store_commit::StoreRootRef,
+        expected_registration: StoreDeviceRegistrationRef,
+        expected_initial_ack: StoreAckRef,
+        expected_membership: FounderMembershipRefs,
+    ) -> Result<(), DbError> {
+        let write_policy = self.write_policy();
+        let schema_version = self.schema_version();
+        let routing_hash = self.sync_routing_hash();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let graph = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
+                DbError::Message("local Store founder graph is absent".to_string())
+            })?;
+            let root = crate::sync::store_commit::StoreRootRef {
+                store_root_id: graph.root.value.descriptor.store_root_id(),
+                store_root_hash: graph.root.value.object_hash(),
+                object: graph.root.object.clone(),
+            };
+            let registration = StoreDeviceRegistrationRef::from_registration(
+                &graph.registration.value,
+                graph.registration.object.clone(),
+            );
+            if root != expected_root
+                || registration != expected_registration
+                || graph.initial_ack_ref != expected_initial_ack
+                || match (&graph.membership, &expected_membership) {
+                    (
+                        DurableFounderMembership::MergeConcurrent {
+                            entry_ref,
+                            head_ref,
+                            ..
+                        },
+                        FounderMembershipRefs::MergeConcurrent { entry, head },
+                    ) => entry_ref != entry || head_ref != head,
+                    (DurableFounderMembership::Serial { .. }, FounderMembershipRefs::Serial) => {
+                        false
+                    }
+                    _ => true,
+                }
+            {
+                return Err(DbError::Message(
+                    "verified founder graph differs from its durable exact references".to_string(),
+                ));
+            }
+            let founder_authority =
+                crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                    root: root.clone(),
+                };
+            let device_genesis = ResolvedStoreDeviceState::founder(
+                &root,
+                registration.clone(),
+                &graph.root.value.descriptor.founder_pubkey,
+                graph.root.value.descriptor.founder_grant.clone(),
+                &graph.root.value.descriptor.founder_recovery,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            let device_genesis_json = serde_json::to_string(&device_genesis).map_err(|error| {
+                DbError::Message(format!("serialize Store device genesis state: {error}"))
+            })?;
+            let device_id = registration.device_id.to_string();
+            let registration_hash = registration.registration_hash.to_string();
+            match &graph.registration_state {
+                LocalDeviceRegistrationState::Prepared => {
+                    return Err(DbError::Message(
+                        "founder registration and initial acknowledgement are not exact-created"
+                            .to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Created => {}
+                LocalDeviceRegistrationState::Activated { authority } => {
+                    if authority != &founder_authority {
+                        return Err(DbError::Message(
+                            "founder registration journal carries another activation authority"
+                                .to_string(),
+                        ));
+                    }
+                    let installed = load_store_root_authority_on(&tx)?;
+                    let stored: Option<(String, String, String)> = tx
+                        .query_row(
+                            "SELECT registration_object, activation_authority, registration_hash \
+                             FROM store_device_registration_activations WHERE device_id = ?1",
+                            [&device_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    let ack: Option<String> = tx
+                        .query_row(
+                            "SELECT ack_ref FROM published_store_acks WHERE singleton = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    let stored_device_genesis: Option<String> = tx
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [STORE_DEVICE_GENESIS_STATE_KEY],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    if installed
+                        .as_ref()
+                        .map(|(reference, value)| (reference, value))
+                        != Some((&root, &graph.root.value))
+                        || stored
+                            != Some((
+                                serde_json::to_string(&registration).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize founder registration ref: {error}"
+                                    ))
+                                })?,
+                                serde_json::to_string(&founder_authority).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize founder authority: {error}"
+                                    ))
+                                })?,
+                                registration.registration_hash.to_string(),
+                            ))
+                        || ack
+                            != Some(serde_json::to_string(&graph.initial_ack_ref).map_err(
+                                |error| {
+                                    DbError::Message(format!("serialize founder ack ref: {error}"))
+                                },
+                            )?)
+                        || stored_device_genesis.as_deref() != Some(&device_genesis_json)
+                    {
+                        return Err(DbError::Message(
+                            "activated founder journal differs from installed exact authority"
+                                .to_string(),
+                        ));
+                    }
+                    let baseline = load_generation_zero_replay_baseline_on(&tx)?.ok_or_else(|| {
+                        DbError::Message(
+                            "activated founder state has no generation-zero replay baseline"
+                                .to_string(),
+                        )
+                    })?;
+                    if baseline.generation != GENERATION_ZERO
+                        || baseline.write_policy != write_policy
+                        || baseline.schema_version != schema_version
+                        || baseline.routing_hash != routing_hash
+                        || baseline.authority
+                            != RetainedReplayAuthority::Genesis(RetainedReplayGenesisAuthority {
+                                store_root: root.clone(),
+                                founder_registration: registration.clone(),
+                            })
+                    {
+                        return Err(DbError::Message(
+                            "activated founder state differs from its generation-zero replay baseline"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                LocalDeviceRegistrationState::Retired { .. } => {
+                    return Err(DbError::Message(
+                        "founder graph cannot complete through a retired local registration".into(),
+                    ));
+                }
+            }
+            install_store_root_authority_on(&tx, &root, &graph.root.bytes)?;
+            let activation = serde_json::to_string(
+                &crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                    root: root.clone(),
+                },
+            )
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "serialize founder registration activation: {error}"
+                ))
+            })?;
+            let journal_state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
+                authority: founder_authority,
+            })
+            .map_err(|error| {
+                DbError::Message(format!("serialize founder registration journal: {error}"))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE local_store_device_registration SET state = ?1 \
+                     WHERE singleton = 1 AND device_id = ?2 AND registration_hash = ?3 \
+                       AND initial_ack_ref = ?4 AND state = ?5",
+                    rusqlite::params![
+                        journal_state,
+                        &device_id,
+                        &registration_hash,
+                        serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                            DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                        })?,
+                        serde_json::to_string(&LocalDeviceRegistrationState::Created).map_err(
+                            |error| DbError::Message(format!(
+                                "serialize created journal state: {error}"
+                            ))
+                        )?,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "founder registration journal did not activate".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO store_device_registration_activations \
+                 (device_id, registration_hash, author_pubkey, device_signing_pubkey, \
+                  registration_bytes, registration_object, activation_authority) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &device_id,
+                    &registration_hash,
+                    graph.registration.value.author_pubkey,
+                    graph.registration.value.device_signing_pubkey,
+                    graph.registration.bytes,
+                    serde_json::to_string(&registration).map_err(|error| {
+                        DbError::Message(format!("serialize founder registration ref: {error}"))
+                    })?,
+                    activation,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO published_store_acks \
+                 (singleton, ack_ref, successor_slot) VALUES (1, ?1, ?2)",
+                rusqlite::params![
+                    serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                    })?,
+                    serde_json::to_string(&graph.initial_ack.value.successor.next_slot).map_err(
+                        |error| DbError::Message(format!(
+                            "serialize founder ack successor: {error}"
+                        ))
+                    )?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            for (key, value) in [
+                (LOCAL_DEVICE_ID_STATE_KEY, device_id),
+                (STORE_DEVICE_GENESIS_STATE_KEY, device_genesis_json),
+            ] {
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+                .map_err(DbError::from)?;
+            }
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                    &graph.root.value.descriptor.founder_pubkey,
+                ),
+            )
+            .map_err(DbError::from)?;
+            match &graph.membership {
+                DurableFounderMembership::MergeConcurrent { head_ref, .. } => {
+                    crate::sync::membership_ops::upsert_head_cursor_on(&tx, head_ref)?;
+                }
+                DurableFounderMembership::Serial { .. } => {
+                    let authorization = SerialAuthorizationState::from_founder(
+                        &root,
+                        &graph.root.value,
+                        &registration,
+                        &graph.registration.value,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
+                }
+            }
+            install_generation_zero_replay_baseline_on(
+                &tx,
+                write_policy,
+                schema_version,
+                routing_hash,
+                RetainedReplayGenesisAuthority {
+                    store_root: root,
+                    founder_registration: registration,
+                },
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn reset_store_founder_graph_publication(
+        &self,
+        expected: &DurableFounderGraph,
+    ) -> Result<(), DbError> {
+        validate_founder_graph(expected)?;
+        let expected_identity = founder_graph_identity(expected);
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let durable = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
+                DbError::Message("local Store founder graph is absent".to_string())
+            })?;
+            if founder_graph_identity(&durable) != expected_identity {
+                return Err(DbError::Message(
+                    "local Store founder graph changed before publication rollback".to_string(),
+                ));
+            }
+            match durable.registration_state {
+                LocalDeviceRegistrationState::Prepared => {}
+                LocalDeviceRegistrationState::Created => {
+                    let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
+                        .map_err(|error| {
+                            DbError::Message(format!("serialize created journal state: {error}"))
+                        })?;
+                    let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
+                        .map_err(|error| {
+                        DbError::Message(format!("serialize prepared journal state: {error}"))
+                    })?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE local_store_device_registration SET state = ?1 \
+                             WHERE singleton = 1 AND state = ?2",
+                            (prepared, created),
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError::Message(
+                            "created founder journal did not reset after exact rollback"
+                                .to_string(),
+                        ));
+                    }
+                }
+                LocalDeviceRegistrationState::Activated { .. } => {
+                    return Err(DbError::Message(
+                        "activated founder graph cannot be rolled back".to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Retired { .. } => {
+                    return Err(DbError::Message(
+                        "retired founder graph cannot be rolled back".to_string(),
+                    ));
+                }
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(super) fn required_store_root_hash_on(conn: &Connection) -> Result<ObjectHash, DbError> {
+        load_store_root_authority_on(conn)?
+            .map(|(reference, _)| reference.store_root_hash)
+            .ok_or_else(DbError::missing_store_root_hash)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn required_store_root_hash(&self) -> Result<ObjectHash, DbError> {
+        self.call(Self::required_store_root_hash_on).await
+    }
+}

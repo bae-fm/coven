@@ -1,3 +1,9 @@
+use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
+use crate::database::remote_object_records::load_protocol_inert_object_on;
+use crate::database::remote_object_records::load_remote_object_on;
+use crate::database::remote_object_records::persist_exact_remote_object_on;
+use crate::database::stream_activation_records::load_registered_stream_activation_on;
+
 use super::*;
 
 impl Database {

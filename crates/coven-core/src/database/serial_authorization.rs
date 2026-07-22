@@ -1,3 +1,5 @@
+use crate::database::store_reclaim_records::store_reclaim_journal_error;
+
 use super::*;
 
 impl Database {

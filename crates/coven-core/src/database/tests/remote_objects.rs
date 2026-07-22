@@ -1,3 +1,5 @@
+use crate::database::remote_object_records::merge_prepared_remote_object;
+
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
 
@@ -221,12 +223,13 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         },
     );
     let blob_remote_id = blob_remote.object_id();
-    let prepared_blob = PreparedAudienceBlob {
-        remote_object_id: blob_remote_id,
-        audience: RemoteAudience::Store,
-        blob: binding.blob().clone(),
-        spool_path: Some(spool.clone()),
-    };
+    let prepared_blob = PreparedAudienceBlob::from_remote(
+        RemoteAudience::Store,
+        &binding.blob().locator().locator_hash().to_string(),
+        blob_remote.clone(),
+        Some(spool.clone()),
+    )
+    .expect("prepare blob");
     let second_blob_remote = crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(
         crate::sync::remote_object::SharedObjectRecord {
             identity: crate::sync::remote_object::SharedLiveSetObjectRef {
@@ -248,12 +251,13 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         },
     );
     let second_blob_remote_id = second_blob_remote.object_id();
-    let second_prepared_blob = PreparedAudienceBlob {
-        remote_object_id: second_blob_remote_id,
-        audience: RemoteAudience::Store,
-        blob: second_blob,
-        spool_path: Some(spool.clone()),
-    };
+    let second_prepared_blob = PreparedAudienceBlob::from_remote(
+        RemoteAudience::Store,
+        &second_blob.locator().locator_hash().to_string(),
+        second_blob_remote.clone(),
+        Some(spool.clone()),
+    )
+    .expect("prepare second blob");
     let persisted_write_id = write_id.clone();
     let package_state = serde_json::to_string(&package_remote).expect("package remote state");
     let blob_state = serde_json::to_string(&blob_remote).expect("blob remote state");

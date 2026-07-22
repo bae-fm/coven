@@ -1,3 +1,14 @@
+use crate::database::store_device_state::apply_store_device_exclusion_freezes_on;
+use crate::database::store_device_state::load_declared_store_device_state_on;
+
+use crate::database::blob_records::load_activated_registration_on;
+use crate::database::remote_object_records::load_remote_object_on;
+use crate::database::remote_object_records::update_remote_object_on;
+use crate::database::store_ack_records::record_activated_store_ack_on;
+use crate::database::store_reclaim_records::record_store_reclaim_activation_on;
+use crate::database::store_reclaim_records::store_reclaim_journal_error;
+use crate::database::stream_activation_records::record_verified_stream_activations_on;
+
 use super::*;
 
 impl Database {
@@ -43,30 +54,30 @@ impl Database {
     ) -> Result<(), DbError> {
         Self::record_author_exclusion_activations_on(
             conn,
-            materialization.commit,
-            materialization.commit_ref,
-            materialization.device_operations,
-            materialization.activation_head,
-            materialization.activation_head_object,
+            materialization.commit(),
+            materialization.commit_ref(),
+            materialization.device_operations(),
+            materialization.activation_head(),
+            materialization.activation_head_object(),
         )?;
         let root = required_store_root_authority_on(conn)?;
         let state_after = Self::derive_materialized_store_device_state_on(
             conn,
             &root,
-            materialization.commit,
-            materialization.device_operations,
+            materialization.commit(),
+            materialization.device_operations(),
         )?;
         let expected_post_state = crate::sync::store_commit::StoreDeviceStateRef::merge_concurrent(
             CommitFrontier::MergeConcurrent(
                 materialization
-                    .history_summary
+                    .history_summary()
                     .frontier()
                     .map_err(|error| DbError::Message(error.to_string()))?,
             ),
             &state_after,
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
-        if materialization.history_summary.post_state != expected_post_state {
+        if materialization.history_summary().post_state != expected_post_state {
             return Err(DbError::Message(
                 "retained Merge history summary differs from the derived post-commit device state"
                     .to_string(),
@@ -74,19 +85,19 @@ impl Database {
         }
         let retained_commit_ref = Self::retain_merge_materialization_on(conn, &materialization)?;
         let activation = ReclaimCommitActivation::merge_concurrent(
-            materialization.commit_ref.clone(),
+            materialization.commit_ref().clone(),
             crate::sync::store_commit::StoreDeviceHeadRef {
-                head_hash: materialization.activation_head.head_hash(),
-                object: materialization.activation_head_object.clone(),
+                head_hash: materialization.activation_head().head_hash(),
+                object: materialization.activation_head_object().clone(),
             },
         )
         .map_err(store_reclaim_journal_error)?;
         Self::record_materialized_commit_with_device_operations_on(
             conn,
-            materialization.commit,
-            materialization.commit_ref,
-            materialization.device_operations,
-            materialization.circle_activations.stream_activations(),
+            materialization.commit(),
+            materialization.commit_ref(),
+            materialization.device_operations(),
+            materialization.circle_activations().stream_activations(),
             MaterializedCommitRetention::MergeConcurrent(&retained_commit_ref),
             &activation,
         )

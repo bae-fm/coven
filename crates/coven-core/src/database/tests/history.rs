@@ -72,14 +72,16 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
         commit_hash: ObjectHash::digest(format!("{label} commit").as_bytes()),
         object: reclaim_test_object(&format!("store-v1/test/{label}/commit.json")),
     };
-    let locator = |exclusion, sequence, label: &str| AuthorExclusionActivationLocator {
-        exclusion,
-        accepted_cut: BTreeMap::from([(stream, commit(sequence, label))]),
-        activation_commit: commit(sequence + 1, &format!("{label}-activation")),
-        activation_head: crate::sync::store_commit::StoreDeviceHeadRef {
-            head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
-            object: reclaim_test_object(&format!("store-v1/test/{label}/head.json")),
-        },
+    let locator = |exclusion, sequence, label: &str| {
+        AuthorExclusionActivationLocator::verified(
+            exclusion,
+            BTreeMap::from([(stream, commit(sequence, label))]),
+            commit(sequence + 1, &format!("{label}-activation")),
+            crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
+                object: reclaim_test_object(&format!("store-v1/test/{label}/head.json")),
+            },
+        )
     };
     let high_locator = locator(high.clone(), 5, "high");
     let low_locator = locator(low.clone(), 2, "low");

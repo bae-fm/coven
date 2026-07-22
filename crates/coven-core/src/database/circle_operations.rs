@@ -1,3 +1,8 @@
+use crate::database::blob_records::load_activated_registration_on;
+use crate::database::remote_object_records::candidate_graph_exact_objects;
+use crate::database::remote_object_records::mark_remote_object_uploaded_on;
+use crate::database::remote_object_records::persist_exact_remote_object_on;
+
 use super::*;
 
 impl Database {

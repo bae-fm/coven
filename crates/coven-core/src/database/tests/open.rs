@@ -1,3 +1,6 @@
+use crate::database::connection_io::attach_session;
+use crate::database::connection_io::capture_changeset;
+
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
 

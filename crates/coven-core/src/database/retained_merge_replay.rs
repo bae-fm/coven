@@ -1,3 +1,16 @@
+use crate::database::store_device_state::load_store_device_exclusion_freezes_on;
+use crate::database::store_device_state::load_store_device_snapshot_on;
+use crate::database::store_device_state::replace_store_device_exclusion_freezes_on;
+use crate::database::store_device_state::store_device_state_for_history_cut_on;
+
+use crate::database::blob_records::load_activated_registration_on;
+use crate::database::local_store_identity::local_activated_registration_ref_on;
+use crate::database::remote_object_records::candidate_graph_exact_objects;
+use crate::database::remote_object_records::finish_remote_candidate_nonactivation_on;
+use crate::database::remote_object_records::index_retained_replay_owner_on;
+use crate::database::remote_object_records::load_remote_object_on;
+use crate::database::remote_object_records::update_remote_object_on;
+
 use super::*;
 
 impl Database {
@@ -480,7 +493,7 @@ impl Database {
             let materialization =
                 Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
             required.insert(reference);
-            match &materialization.commit.order {
+            match &materialization.commit().order {
                 crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
                     predecessor,
                     dependencies,
@@ -757,12 +770,13 @@ impl Database {
         }
         if let Some(objects) = &input.membership_objects {
             let entry_remote =
-                load_remote_object_on(conn, remote_object_id(&objects.entry.object))?;
+                load_remote_object_on(conn, remote_object_id(&objects.entry().object))?;
             let entry: MembershipEntry = serde_json::from_slice(
                 entry_remote.bytes().canonical_semantic_bytes(),
             )
             .map_err(|error| DbError::Message(format!("retained membership entry: {error}")))?;
-            let head_remote = load_remote_object_on(conn, remote_object_id(&objects.head.object))?;
+            let head_remote =
+                load_remote_object_on(conn, remote_object_id(&objects.head().object))?;
             let head_value: AuthorHead = serde_json::from_slice(
                 head_remote.bytes().canonical_semantic_bytes(),
             )
@@ -772,14 +786,14 @@ impl Database {
                 commit_ref,
                 &entry,
                 &head_value,
-                objects.head.clone(),
+                objects.head().clone(),
             )?;
-            if &verified_objects != objects || entry_remote.object() != &objects.entry.object {
+            if &verified_objects != objects || entry_remote.object() != &objects.entry().object {
                 return Err(DbError::Message(
                     "retained membership objects differ from their exact authority".to_string(),
                 ));
             }
-            if let Some(reference) = &objects.resolution {
+            if let Some(reference) = objects.resolution() {
                 let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
                 let resolution: crate::sync::membership::StoreMembershipConflictResolution =
                     serde_json::from_slice(remote.bytes().canonical_semantic_bytes()).map_err(
@@ -797,21 +811,21 @@ impl Database {
                 }
             }
         }
-        Ok(OwnedVerifiedMergeMaterialization {
+        OwnedVerifiedMergeMaterialization::verify(
             root,
             commit,
-            commit_ref: commit_ref.clone(),
+            commit_ref.clone(),
             registrations,
             device_operations,
             circle_activations,
-            activation_head: head,
-            activation_head_object: input.activation_head.reference().clone(),
-            history_summary: input.history_summary.clone(),
-            membership_objects: input.membership_objects.clone(),
-            packages: package_values,
-            package_application: input.activation.package_application,
+            head,
+            input.activation_head.reference().clone(),
+            input.history_summary.clone(),
+            input.membership_objects.clone(),
+            package_values,
+            input.activation.package_application,
             input_hash,
-        })
+        )
     }
 
     pub(super) fn retain_merge_materialization_on(
@@ -819,37 +833,37 @@ impl Database {
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<RetainedMergeMaterializationKey, DbError> {
         let packages = Self::canonical_retained_merge_packages(
-            materialization.commit,
-            materialization.commit_ref,
-            materialization.packages,
+            materialization.commit(),
+            materialization.commit_ref(),
+            materialization.packages(),
         )?;
         let input = RetainedMergeMaterializationInput {
             commit: PreparedExactObject::new(
-                materialization.commit_ref.object.clone(),
-                materialization.commit.to_bytes(),
+                materialization.commit_ref().object.clone(),
+                materialization.commit().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
             activation_head: PreparedExactObject::new(
-                materialization.activation_head_object.clone(),
-                materialization.activation_head.to_bytes(),
+                materialization.activation_head_object().clone(),
+                materialization.activation_head().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
-            history_summary: materialization.history_summary.clone(),
-            membership_objects: materialization.membership_objects.cloned(),
+            history_summary: materialization.history_summary().clone(),
+            membership_objects: materialization.membership_objects().cloned(),
             packages,
             activation: RetainedCommitActivationInput {
                 registrations: RetainedStoreDeviceRegistrationActivations::from_verified(
                     &required_store_root_authority_on(conn)?,
-                    materialization.commit,
-                    materialization.registrations,
+                    materialization.commit(),
+                    materialization.registrations(),
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?,
-                device_operations: materialization.device_operations.to_retained(),
+                device_operations: materialization.device_operations().to_retained(),
                 circle_activations: materialization
-                    .circle_activations
+                    .circle_activations()
                     .to_retained()
                     .map_err(|error| DbError::Message(error.to_string()))?,
-                package_application: materialization.package_application,
+                package_application: materialization.package_application(),
             },
         };
         let canonical_input = serde_json::to_vec(&input).map_err(|error| {
@@ -858,14 +872,14 @@ impl Database {
         let input_hash = ObjectHash::digest(&canonical_input);
         Self::open_retained_merge_materialization_input_on(
             conn,
-            materialization.commit_ref,
+            materialization.commit_ref(),
             &input,
             input_hash,
         )?;
         let StoreCommitCoord::MergeConcurrent {
             stream_id,
             sequence,
-        } = &materialization.commit_ref.coord
+        } = &materialization.commit_ref().coord
         else {
             return Err(DbError::Message(
                 "retained Merge materialization names a Serial coordinate".to_string(),
@@ -874,7 +888,7 @@ impl Database {
         let stream_id = stream_id.to_string();
         let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
         let commit_ref_json =
-            serde_json::to_string(materialization.commit_ref).map_err(|error| {
+            serde_json::to_string(materialization.commit_ref()).map_err(|error| {
                 DbError::Message(format!("serialize retained Merge commit ref: {error}"))
             })?;
         let inserted = conn
@@ -911,12 +925,12 @@ impl Database {
             {
                 return Err(DbError::Message(format!(
                     "retained Merge coordinate {stream_id}/{} already contains different exact input",
-                    materialization.commit_ref.coord.sequence()
+                    materialization.commit_ref().coord.sequence()
                 )));
             }
         }
         let replay_owner = RetainedReplayOwner::Commit {
-            commit: materialization.commit_ref.clone(),
+            commit: materialization.commit_ref().clone(),
             input_hash,
         };
         Self::pin_retained_merge_objects_on(conn, &input, &replay_owner)?;
@@ -1141,16 +1155,16 @@ impl Database {
             &input_hash,
         )?;
         let head_ref = crate::sync::store_commit::StoreDeviceHeadRef {
-            head_hash: retained.activation_head.head_hash(),
-            object: retained.activation_head_object.clone(),
+            head_hash: retained.activation_head().head_hash(),
+            object: retained.activation_head_object().clone(),
         };
         let state = load_store_device_snapshot_on(conn, reference)?;
         retained
-            .history_summary
+            .history_summary()
             .open(
-                &retained.commit,
+                retained.commit(),
                 reference,
-                &retained.activation_head,
+                retained.activation_head(),
                 &head_ref,
                 &state,
             )
@@ -1441,7 +1455,7 @@ impl Database {
         let StoreCommitCoord::MergeConcurrent {
             stream_id,
             sequence,
-        } = &retained.commit_ref.coord
+        } = &retained.commit_ref().coord
         else {
             return Err(DbError::Message(
                 "Merge retraction cleanup names a Serial commit".to_string(),
@@ -1449,13 +1463,13 @@ impl Database {
         };
         let input = MergeRetractionCleanupInput {
             commit: PreparedExactObject::new(
-                retained.commit_ref.object.clone(),
-                retained.commit.to_bytes(),
+                retained.commit_ref().object.clone(),
+                retained.commit().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
             activation_head: PreparedExactObject::new(
-                retained.activation_head_object.clone(),
-                retained.activation_head.to_bytes(),
+                retained.activation_head_object().clone(),
+                retained.activation_head().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
         };
@@ -1465,7 +1479,7 @@ impl Database {
         let cleanup_hash = ObjectHash::digest(&canonical_cleanup);
         let stream_id = stream_id.to_string();
         let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
-        let encoded_ref = serde_json::to_string(&retained.commit_ref).map_err(|error| {
+        let encoded_ref = serde_json::to_string(&retained.commit_ref()).map_err(|error| {
             DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
         })?;
         conn.execute(
@@ -1481,7 +1495,7 @@ impl Database {
             ],
         )
         .map_err(DbError::from)?;
-        Self::load_merge_retraction_cleanup_on(conn, &retained.commit_ref)?;
+        Self::load_merge_retraction_cleanup_on(conn, retained.commit_ref())?;
         Ok(())
     }
 
@@ -1539,12 +1553,12 @@ impl Database {
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(
                 conn,
-                &retained.commit_ref,
-                &retained.commit.author_registration,
+                retained.commit_ref(),
+                &retained.commit().author_registration,
             )?
             .is_some()
             {
-                required.insert(retained.commit_ref.clone());
+                required.insert(retained.commit_ref().clone());
             }
         }
         for retraction in &retractions {
@@ -1563,17 +1577,17 @@ impl Database {
             .iter()
             .map(|retained| {
                 let mut direct = retained
-                    .commit
+                    .commit()
                     .order
                     .dependencies()
                     .into_iter()
                     .flat_map(|dependencies| dependencies.values())
                     .cloned()
                     .collect::<BTreeSet<_>>();
-                if let Some(predecessor) = retained.commit.order.predecessor() {
+                if let Some(predecessor) = retained.commit().order.predecessor() {
                     direct.insert(predecessor.clone());
                 }
-                (retained.commit_ref.clone(), direct)
+                (retained.commit_ref().clone(), direct)
             })
             .collect::<BTreeMap<_, _>>();
         Self::require_exact_merge_retraction_closure(&direct_dependencies, required, &provided)?;
@@ -1641,8 +1655,8 @@ impl Database {
                 &candidate,
                 &input_hash,
             )?;
-            if retained.commit.to_bytes() != nonactivation.candidate().canonical_signed_bytes
-                || retained.activation_head_object != *head_nonactivation.head().object()
+            if retained.commit().to_bytes() != nonactivation.candidate().canonical_signed_bytes
+                || retained.activation_head_object() != head_nonactivation.head().object()
             {
                 return Err(DbError::Message(
                     "terminal retraction differs from its retained materialization".to_string(),
@@ -1675,8 +1689,8 @@ impl Database {
                 })
                 .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
             drop(replay_statement);
-            let head_object_id = remote_object_id(&retained.activation_head_object);
-            let mut activated_object_ids = candidate_graph_exact_objects(&retained.commit)?
+            let head_object_id = remote_object_id(retained.activation_head_object());
+            let mut activated_object_ids = candidate_graph_exact_objects(retained.commit())?
                 .iter()
                 .map(remote_object_id)
                 .collect::<BTreeSet<_>>();
@@ -1765,7 +1779,7 @@ impl Database {
             let raw_status: Option<String> = conn
                 .query_row(
                     "SELECT status FROM store_writes WHERE write_id = ?1",
-                    [retained.commit.write_id.as_str()],
+                    [retained.commit().write_id.as_str()],
                     |row| row.get(0),
                 )
                 .optional()
@@ -1781,7 +1795,7 @@ impl Database {
                     }
                     WriteStatus::Publishing | WriteStatus::Blocked(_) => {
                         PublishedPosition::MergeConcurrent {
-                            device_id: retained.commit.author_registration.device_id.to_string(),
+                            device_id: retained.commit().author_registration.device_id.to_string(),
                             commit: candidate.clone(),
                         }
                     }
@@ -1804,21 +1818,21 @@ impl Database {
                 let status = WriteStatus::Resolved(WriteResolution::Retracted { witness });
                 conn.execute(
                     "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-                    [retained.commit.write_id.as_str()],
+                    [retained.commit().write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
                 conn.execute(
                     "DELETE FROM store_write_packages WHERE write_id = ?1",
-                    [retained.commit.write_id.as_str()],
+                    [retained.commit().write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
                 conn.execute(
                     "DELETE FROM store_write_blobs WHERE write_id = ?1",
-                    [retained.commit.write_id.as_str()],
+                    [retained.commit().write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-                Self::set_write_status_on(conn, &retained.commit.write_id, &status)?;
-                notifications.push((retained.commit.write_id.clone(), status));
+                Self::set_write_status_on(conn, &retained.commit().write_id, &status)?;
+                notifications.push((retained.commit().write_id.clone(), status));
             }
         }
         Ok(notifications)
