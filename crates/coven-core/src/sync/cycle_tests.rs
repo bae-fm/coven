@@ -7102,7 +7102,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         attempt_hash: attempt.attempt_hash(),
         object: prepared.reference().clone(),
     };
-    crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    crate::sync::store_engine::load_verified_device_join_attempt_ref(
         &storage.storage,
         &offer.store_root,
         &attempt_ref,

@@ -40,6 +40,7 @@ use crate::sync::{
 };
 
 mod application;
+mod device_join_attempt;
 mod device_operations;
 mod history;
 mod join_bootstrap;
@@ -50,6 +51,7 @@ mod resolution;
 mod snapshot_authority;
 
 pub(crate) use application::*;
+pub(in crate::sync::store_engine) use device_join_attempt::verify_device_join_attempt_evidence;
 pub(crate) use device_operations::load_local_commit_device_operations;
 pub(crate) use history::*;
 pub(in crate::sync::store_engine) use join_bootstrap::{

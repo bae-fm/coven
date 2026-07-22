@@ -44,6 +44,7 @@ use crate::sync::{
     store_commit, store_objects, store_outbound,
 };
 
+mod device_join_attempt;
 mod device_operations;
 mod discovery;
 mod history;
@@ -59,6 +60,7 @@ mod snapshot_authority;
 mod terminal_authority;
 mod terminal_cleanup;
 
+pub(in crate::sync::store_engine) use device_join_attempt::verify_device_join_attempt_evidence;
 pub(crate) use device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,
 };

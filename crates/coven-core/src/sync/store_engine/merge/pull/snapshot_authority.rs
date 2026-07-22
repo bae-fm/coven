@@ -6,15 +6,21 @@ struct VerifiedMergeSnapshotState {
     checkpoints: Vec<OpenedRetainedMergeHistorySummary>,
 }
 
-async fn verify_history_state(
+pub(super) struct VerifiedMergeHistoryAuthority {
+    pub(super) history: VerifiedMergeHistory,
+    device_state: ResolvedStoreDeviceState,
+    membership: MembershipChain,
+}
+
+pub(super) async fn verify_merge_history_authority(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
     membership_ref: &StoreMembershipStateRef,
-) -> Result<VerifiedMergeSnapshotState, StorePullError> {
+) -> Result<VerifiedMergeHistoryAuthority, StorePullError> {
     let StoreMembershipStateRef::MergeConcurrent(_) = membership_ref else {
         return Err(StorePullError::Database(
-            "Merge snapshot carries Serial membership state".to_string(),
+            "Merge history carries Serial membership state".to_string(),
         ));
     };
     let history = Box::pin(verify_merge_history_refs(
@@ -36,7 +42,7 @@ async fn verify_history_state(
                         .map(|commit| commit.state_after.clone())
                         .ok_or_else(|| {
                             StorePullError::Database(
-                                "Merge snapshot frontier is absent from its verified graph"
+                                "Merge history frontier is absent from its verified graph"
                                     .to_string(),
                             )
                         })
@@ -63,12 +69,27 @@ async fn verify_history_state(
         .validate_complete_membership(&membership)
         .map_err(StorePullError::Database)?;
     verify_merge_membership_state_ref(membership_ref, &membership, &device_state)?;
+    Ok(VerifiedMergeHistoryAuthority {
+        history,
+        device_state,
+        membership,
+    })
+}
+
+async fn verify_history_state(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
+    membership_ref: &StoreMembershipStateRef,
+) -> Result<VerifiedMergeSnapshotState, StorePullError> {
+    let authority = verify_merge_history_authority(storage, root, frontier, membership_ref).await?;
     let active_registrations =
-        load_active_history_registrations(storage, root, &device_state).await?;
+        load_active_history_registrations(storage, root, &authority.device_state).await?;
     let checkpoints = frontier
         .values()
         .map(|reference| {
-            history
+            authority
+                .history
                 .commits
                 .get(reference)
                 .map(|commit| commit.history.clone())
@@ -81,10 +102,10 @@ async fn verify_history_state(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(VerifiedMergeSnapshotState {
         common: VerifiedSnapshotState {
-            device_state,
+            device_state: authority.device_state,
             active_registrations,
         },
-        membership,
+        membership: authority.membership,
         checkpoints,
     })
 }
@@ -100,7 +121,7 @@ pub(in crate::sync::store_engine) async fn verify_history_authority(
             "Merge history verification received a Serial cut".to_string(),
         ));
     };
-    verify_history_state(storage, root, frontier, membership_ref)
+    verify_merge_history_authority(storage, root, frontier, membership_ref)
         .await
         .map(|_| ())
 }

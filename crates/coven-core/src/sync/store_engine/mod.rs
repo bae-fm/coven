@@ -413,6 +413,31 @@ pub(crate) async fn load_device_join_authorization(
     }
 }
 
+pub(crate) fn load_verified_device_join_attempt_ref<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    reference: &'a super::store_commit::DeviceJoinAttemptRef,
+    owner: &'a super::store_commit::StoreDeviceRegistration,
+) -> super::store_pull::StorePullFuture<
+    'a,
+    super::store_objects::VerifiedObject<super::store_commit::DeviceJoinAttempt>,
+> {
+    Box::pin(async move {
+        let evidence = super::store_pull::load_device_join_attempt_evidence_ref(
+            storage, root, reference, owner,
+        )
+        .await?;
+        match evidence.write_policy {
+            crate::WritePolicy::MergeConcurrent => {
+                merge::pull::verify_device_join_attempt_evidence(storage, root, evidence).await
+            }
+            crate::WritePolicy::Serial => {
+                serial::pull::verify_device_join_attempt_evidence(storage, root, evidence).await
+            }
+        }
+    })
+}
+
 pub(crate) async fn verify_accepted_provider_access_activation(
     storage: &dyn SyncStorage,
     coordination: Option<&dyn CoordinationStorage>,

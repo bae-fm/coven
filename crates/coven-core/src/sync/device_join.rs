@@ -2566,7 +2566,7 @@ pub async fn bootstrap_pending_device(
     .await?
     .value;
     let verified_attempt = Box::pin(
-        crate::sync::store_pull::load_verified_device_join_attempt_ref(
+        crate::sync::store_engine::load_verified_device_join_attempt_ref(
             storage,
             &offer.store_root,
             &bootstrap.bootstrap.publication_authorization.attempt,
@@ -2912,7 +2912,7 @@ pub async fn cancel_device_join(
         .await
         .map_err(database_error)?;
     let attempt = Box::pin(
-        crate::sync::store_pull::load_verified_device_join_attempt_ref(
+        crate::sync::store_engine::load_verified_device_join_attempt_ref(
             storage,
             &root,
             &attempt_ref,
@@ -3121,7 +3121,7 @@ async fn prepare_device_join_cleanup_inner(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         &root,
         &attempt_ref,
@@ -3356,7 +3356,7 @@ pub async fn close_device_provider_admission(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         &root,
         &attempt_ref,
@@ -3542,7 +3542,7 @@ pub async fn close_joining_device(
     )
     .await?
     .value;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         root,
         &attempt_ref,
@@ -3678,7 +3678,7 @@ async fn sign_device_join_producer_write_revocation(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         &root,
         &attempt_ref,
@@ -4640,7 +4640,7 @@ pub async fn finalize_device_join(
         .await
         .map_err(database_error)?;
     let owner_signer = owner.device_signer(identity_signer)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         &offer.store_root,
         &attempt_ref,
@@ -4877,7 +4877,7 @@ pub async fn materialize_device_join_activation(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store_pull::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
         storage,
         &root,
         &attempt_ref,
