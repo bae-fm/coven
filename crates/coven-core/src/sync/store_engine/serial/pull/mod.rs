@@ -40,6 +40,7 @@ use crate::sync::{
 };
 
 mod application;
+mod device_operations;
 mod history;
 mod join_bootstrap;
 mod owner_promotion;
@@ -48,6 +49,7 @@ mod resolution;
 mod snapshot_authority;
 
 pub(crate) use application::*;
+pub(crate) use device_operations::load_local_commit_device_operations;
 pub(crate) use history::*;
 pub(in crate::sync::store_engine) use join_bootstrap::{
     materialize_device_join_activation, prepare_device_join_bootstrap,

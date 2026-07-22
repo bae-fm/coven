@@ -180,16 +180,14 @@ pub(crate) async fn prepare_candidate(
         )
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
     };
-    let state_after = Box::pin(
-        crate::sync::store_pull::derive_local_merge_post_device_state(
-            storage,
-            plan.root(),
-            &common.commit,
-            plan.predecessor_state().clone(),
-            &registrations,
-            device_operations,
-        ),
-    )
+    let state_after = Box::pin(super::pull::derive_local_post_device_state(
+        storage,
+        plan.root(),
+        &common.commit,
+        plan.predecessor_state().clone(),
+        &registrations,
+        device_operations,
+    ))
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let head_context = ProtocolObjectContext::signed_plaintext(
@@ -385,17 +383,15 @@ pub(crate) fn publish<'a>(
         ))
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let device_operations = Box::pin(
-            crate::sync::store_pull::load_local_commit_device_operations_with_merge_membership(
-                db,
-                storage,
-                &root,
-                &commit,
-                &authorization.membership,
-                &authorization.device_state_ref,
-                authorization.device_state,
-            ),
-        )
+        let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
+            db,
+            storage,
+            &root,
+            &commit,
+            &authorization.membership,
+            &authorization.device_state_ref,
+            authorization.device_state,
+        ))
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         let has_tracked_remote_objects =

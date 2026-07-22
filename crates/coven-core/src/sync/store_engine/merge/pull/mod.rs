@@ -44,6 +44,7 @@ use crate::sync::{
     store_commit, store_objects, store_outbound,
 };
 
+mod device_operations;
 mod discovery;
 mod history;
 mod join_bootstrap;
@@ -57,6 +58,9 @@ mod snapshot_authority;
 mod terminal_authority;
 mod terminal_cleanup;
 
+pub(crate) use device_operations::{
+    derive_local_post_device_state, load_local_commit_device_operations,
+};
 pub(crate) use discovery::*;
 pub(crate) use history::*;
 pub(in crate::sync::store_engine) use join_bootstrap::{

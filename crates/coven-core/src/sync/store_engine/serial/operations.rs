@@ -513,7 +513,7 @@ async fn reload_uploaded_device_operations(
             "Serial Store operation exact readback differs from its signed bytes".to_string(),
         ));
     }
-    crate::sync::store_pull::load_local_commit_device_operations(db, storage, root, commit)
+    super::pull::load_local_commit_device_operations(db, storage, root, commit)
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
 }

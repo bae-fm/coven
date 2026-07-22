@@ -106,11 +106,9 @@ pub(crate) async fn activate_serial_commit_head(
             ));
         }
         let root = required_store_root(db).await?;
-        return crate::sync::store_pull::load_local_commit_device_operations(
-            db, storage, &root, commit,
-        )
-        .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()));
+        return super::pull::load_local_commit_device_operations(db, storage, &root, commit)
+            .await
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()));
     }
     if observed.versioned().as_ref() != Some(base_head) {
         let StoreCommitOrder::Serial {
@@ -152,7 +150,7 @@ pub(crate) async fn activate_serial_commit_head(
     }
     let root = required_store_root(db).await?;
     let device_operations =
-        crate::sync::store_pull::load_local_commit_device_operations(db, storage, &root, commit)
+        super::pull::load_local_commit_device_operations(db, storage, &root, commit)
             .await
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let activation = match observed.version() {
