@@ -11,7 +11,6 @@ use crate::database::remote_object_records::validate_prepared_blob_on;
 use crate::database::remote_object_records::validate_prepared_package_on;
 use crate::database::remote_object_records::validate_remote_object_on;
 use crate::database::remote_object_records::RemoteStoredRepresentationRef;
-use crate::database::store_device_exclusion_records::store_device_exclusion_journal_error;
 
 use super::*;
 
@@ -502,62 +501,6 @@ impl Database {
     ) -> Result<RemoteObjectRecord, DbError> {
         self.call(move |conn| mark_reusable_retained_authority_uploaded_on(conn, expected))
             .await
-    }
-
-    pub(crate) async fn mark_store_device_exclusion_authority_uploaded(
-        &self,
-        operation: DurableStoreDeviceExclusionOperation,
-    ) -> Result<(), DbError> {
-        let expected = operation
-            .authority_remote_object()
-            .map_err(store_device_exclusion_journal_error)?;
-        let candidate = operation
-            .candidate()
-            .ok_or_else(|| {
-                DbError::Message(
-                    "Store-device exclusion authority has no current candidate".to_string(),
-                )
-            })?
-            .reference
-            .clone();
-        self.call(move |conn| {
-            let object_id = expected.object_id();
-            let current = load_remote_object_on(conn, object_id)?;
-            let (
-                RemoteObjectRecord::RetainedAuthority(expected_record),
-                RemoteObjectRecord::RetainedAuthority(current_record),
-            ) = (&expected, &current)
-            else {
-                return Err(DbError::Message(
-                    "Store-device exclusion authority is not retained authority".to_string(),
-                ));
-            };
-            if expected_record.identity != current_record.identity
-                || expected_record.bytes != current_record.bytes
-            {
-                return Err(DbError::Message(
-                    "Store-device exclusion authority changed before upload completion".to_string(),
-                ));
-            }
-            match &current_record.state {
-                crate::sync::remote_object::RetainedAuthorityObjectState::Prepared {
-                    ownership,
-                } if ownership.pending.contains(&candidate) => {
-                    mark_remote_object_uploaded_on(conn, current)?;
-                }
-                crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified {
-                    ownership,
-                } if ownership.pending.contains(&candidate) => {}
-                _ => {
-                    return Err(DbError::Message(
-                        "Store-device exclusion authority does not belong to its current candidate"
-                            .to_string(),
-                    ));
-                }
-            }
-            Ok(())
-        })
-        .await
     }
 
     #[cfg(test)]

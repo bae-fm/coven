@@ -625,7 +625,7 @@ pub(crate) fn replace_prepared_merge_head_remote_on(
     persist_exact_remote_object_on(conn, &winner_remote, "alternate Merge head")
 }
 
-pub(super) fn mark_remote_object_uploaded_on(
+pub(crate) fn mark_remote_object_uploaded_on(
     conn: &Connection,
     expected: RemoteObjectRecord,
 ) -> Result<RemoteObjectRecord, DbError> {

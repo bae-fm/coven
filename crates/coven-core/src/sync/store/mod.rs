@@ -30,8 +30,8 @@ pub(crate) mod snapshot;
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
 pub(crate) use device_exclusion::{
-    DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
-    StoreDeviceExclusionJournalError,
+    DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
+    StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
 pub use device_exclusion::{
     StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo,

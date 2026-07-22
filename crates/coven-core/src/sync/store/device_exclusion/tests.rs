@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::*;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     StoreAckExclusionState, StoreBatchCommit, StoreCommitCoord, StoreDeviceExclusionRef,
     StoreDeviceHead, StoreDeviceRegistrationRef,
@@ -3013,7 +3014,7 @@ async fn stage_uploaded_proposal(
         candidate,
     )
     .expect("close exclusion journal");
-    let durable = db
+    let durable = StoreDatabase::new(db)
         .begin_outbound_store_device_exclusion(operation)
         .await
         .expect("persist exclusion journal");
@@ -3021,7 +3022,8 @@ async fn stage_uploaded_proposal(
         .create_exact_object(storage)
         .await
         .expect("upload exclusion proposal before simulated restart");
-    db.mark_store_device_exclusion_authority_uploaded(durable)
+    StoreDatabase::new(db)
+        .mark_store_device_exclusion_authority_uploaded(durable)
         .await
         .expect("persist proposal upload");
     reference
@@ -3047,7 +3049,7 @@ async fn resume_proposal_and_publish_freeze_ack(
         StoreDeviceExclusionResult::ProposalActivated { proposal, .. }
             if proposal == *reference
     ));
-    assert!(reopened
+    assert!(StoreDatabase::new(&reopened)
         .active_outbound_store_device_exclusion()
         .await
         .expect("read exclusion journal")

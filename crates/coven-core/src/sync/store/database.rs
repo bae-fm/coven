@@ -1,4 +1,5 @@
 mod acknowledgements;
+mod device_exclusion;
 
 use crate::database::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,

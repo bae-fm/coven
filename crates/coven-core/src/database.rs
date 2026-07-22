@@ -21,14 +21,14 @@ use crate::database::remote_object_records::begin_remote_candidate_nonactivation
 pub(crate) use crate::database::remote_object_records::candidate_graph_exact_objects;
 pub(crate) use crate::database::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
+pub(crate) use crate::database::remote_object_records::mark_remote_object_uploaded_on;
 pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
 pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
+pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -65,10 +65,6 @@ use crate::sync::retained_replay::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::store::{
-    DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
-    StoreDeviceExclusionJournalError,
-};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
     CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
@@ -126,8 +122,6 @@ mod store_authority;
 mod store_authority_records;
 mod store_coordinates;
 mod store_creation_attempts;
-mod store_device_exclusion_records;
-mod store_device_exclusions;
 mod store_device_state;
 mod store_reclaim_records;
 mod store_reclamation;
