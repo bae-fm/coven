@@ -127,33 +127,3 @@ pub(super) fn validate_provider_access_refs(
     }
     Ok(())
 }
-
-pub(super) fn validate_device_retirement_refs(
-    retirements: &[StoreDeviceSelfRetirementRef],
-    candidate_family: CandidateFamilyId,
-    author: &StoreDeviceRegistrationRef,
-    order: &StoreCommitOrder,
-) -> Result<(), StoreProtocolError> {
-    if retirements.len() > 1 {
-        return Err(StoreProtocolError::DeviceStateMismatch);
-    }
-    let mut cut = order.dependencies.clone();
-    if let Some(predecessor) = &order.predecessor {
-        if cut
-            .insert(predecessor.coord.stream_id, predecessor.clone())
-            .is_some_and(|existing| existing != *predecessor)
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-    }
-    let expected_cut = StoreHistoryCut(cut);
-    for retirement in retirements {
-        if retirement.candidate_family != candidate_family
-            || retirement.target != *author
-            || retirement.retiring_cut != expected_cut
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-    }
-    Ok(())
-}

@@ -78,10 +78,7 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
     };
     let high_locator = locator(high.clone(), 5, "high");
     let low_locator = locator(low.clone(), 2, "low");
-    let terminals = vec![
-        crate::sync::store_commit::StoreDeviceTerminalRef::Excluded(high.clone()),
-        crate::sync::store_commit::StoreDeviceTerminalRef::Excluded(low.clone()),
-    ];
+    let terminals = vec![high.clone(), low.clone()];
 
     let selected =
         select_author_exclusion_activation_locator(&terminals, &stream, 4, |candidate| {

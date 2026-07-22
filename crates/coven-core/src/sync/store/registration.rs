@@ -1,26 +1,25 @@
-//! Durable append-only Store device registration and retirement.
+//! Durable append-only Store device registration and recovery.
 
 use std::collections::BTreeMap;
 
 use crate::database::Database;
 use crate::keys::UserKeypair;
 
-use super::membership::MembershipChain;
-use super::storage::{PreparedExactObject, ProtocolObjectDomain, SyncStorage};
-use super::store_commit::{
-    ack_slot_prefix, commit_semantic_prefix, device_self_retirement_semantic_prefix,
-    head_slot_prefix, owner_recovery_semantic_prefix, registration_semantic_prefix,
-    snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId, CommitFrontier,
+use crate::sync::membership::MembershipChain;
+use crate::sync::storage::{PreparedExactObject, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store_commit::{
+    ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
+    registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptRef, DeviceReadinessProof,
     DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
     OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck, StoreAckExclusionState, StoreAckRef,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreDeviceHead,
     StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef,
-    StoreDeviceStateRef, StoreHistoryCut, StoreOperationMembershipAuthority, SuccessorLink,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
+    StoreOperationMembershipAuthority, SuccessorLink,
 };
-use super::store_objects::StoreObjectError;
+use crate::sync::store_objects::StoreObjectError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
@@ -34,70 +33,22 @@ pub enum StoreRegistrationError {
     Invalid(String),
     #[error("this Store installation requires an activated Join or Recovery registration")]
     ActivationRequired,
-    #[error("retired Store device {device_id:?} cannot become active again")]
-    RetiredDevice { device_id: String },
     #[error("Store device registration activation: {0}")]
-    Outbound(#[from] super::store::StoreError),
+    Outbound(#[from] crate::sync::store::StoreError),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DurableRetirement {
-    retirement_bytes: Vec<u8>,
-    retirement_prepared: PreparedExactObject,
-    commit_bytes: Vec<u8>,
-    commit_prepared: PreparedExactObject,
-    commit_ref: StoreBatchCommitRef,
-    head_bytes: Vec<u8>,
-    head_prepared: PreparedExactObject,
-    history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
-}
-
-impl DurableRetirement {
-    fn closed_remote_objects(
+impl super::AuthorizedStore<'_> {
+    pub(crate) async fn ensure_active_registration(
         &self,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreRegistrationError> {
-        let commit: StoreBatchCommit = serde_json::from_slice(&self.commit_bytes)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        self.commit_ref
-            .verify_commit(&commit)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let mut remotes = super::remote_object::CandidateObjectGraph::from_commit(&commit)
-            .and_then(|graph| {
-                graph.close(
-                    &commit,
-                    &self.commit_ref,
-                    vec![super::remote_object::CandidateObjectMaterial {
-                        object: self.retirement_prepared.reference().clone(),
-                        canonical_semantic_bytes: self.retirement_bytes.clone(),
-                        stored_bytes: self.retirement_prepared.stored_bytes().to_vec(),
-                    }],
+    ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
+        ensure_active_registration(self.db(), self.storage())
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "publish Store device registration",
+                    error,
                 )
             })
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        remotes.push(
-            super::remote_object::RemoteObjectRecord::candidate_commit(
-                self.commit_ref.clone(),
-                self.commit_bytes.clone(),
-                self.commit_prepared.stored_bytes().to_vec(),
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
-        );
-        let head: StoreDeviceHead = serde_json::from_slice(&self.head_bytes)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        remotes.push(
-            super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                super::store_commit::StoreDeviceHeadRef {
-                    head_hash: head.head_hash(),
-                    object: self.head_prepared.reference().clone(),
-                },
-                self.head_bytes.clone(),
-                self.head_prepared.stored_bytes().to_vec(),
-                self.commit_ref.clone(),
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
-        );
-        Ok(remotes)
     }
 }
 
@@ -115,11 +66,6 @@ pub async fn ensure_active_registration(
             require_activated_registration(db, storage, &registration).await?;
             return Ok(());
         }
-        Some(registration) if registration.is_retired() => {
-            return Err(StoreRegistrationError::RetiredDevice {
-                device_id: registration.device_id.to_string(),
-            });
-        }
         Some(_) => return Err(StoreRegistrationError::ActivationRequired),
         None => {}
     }
@@ -134,10 +80,10 @@ pub async fn ensure_active_registration(
 pub(crate) async fn install_existing_founder_device(
     db: &Database,
     storage: &dyn SyncStorage,
-    root: &super::store_commit::StoreRootRef,
+    root: &crate::sync::store_commit::StoreRootRef,
     signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
-    let founder = super::store_objects::load_founder_registration(storage, root).await?;
+    let founder = crate::sync::store_objects::load_founder_registration(storage, root).await?;
     if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
         return Err(StoreRegistrationError::Invalid(
             "Store founder registration belongs to another identity".to_string(),
@@ -159,19 +105,20 @@ pub(crate) async fn install_existing_founder_device(
         .device_signer(signer)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
 
-    let registration_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let registration_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
-    let registration_prefix =
-        super::store_commit::founder_registration_semantic_prefix(match founder.value.origin {
+    let registration_prefix = crate::sync::store_commit::founder_registration_semantic_prefix(
+        match founder.value.origin {
             StoreDeviceRegistrationOrigin::Founder { creation_id } => creation_id,
             _ => {
                 return Err(StoreRegistrationError::Invalid(
                     "Store founder registration has a non-founder origin".to_string(),
                 ))
             }
-        });
+        },
+    );
     let (registration_bytes, registration_prepared) = storage
         .read_prepared_protocol_slot(
             &registration_context,
@@ -193,7 +140,7 @@ pub(crate) async fn install_existing_founder_device(
             "Store founder registration has no acknowledgement anchor".to_string(),
         ));
     };
-    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
@@ -236,450 +183,13 @@ pub(crate) async fn install_existing_founder_device(
     .map_err(database_error)
 }
 
-pub async fn retire_registration(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    signer: &UserKeypair,
-    membership: &MembershipChain,
-    _published_at: &str,
-) -> Result<bool, StoreRegistrationError> {
-    drain_registration_outbox(db, storage).await?;
-    let Some(registration) = db
-        .latest_local_store_device_registration()
-        .await
-        .map_err(database_error)?
-    else {
-        return Ok(false);
-    };
-    if !registration.is_activated() && !registration.is_retired() {
-        return Err(StoreRegistrationError::ActivationRequired);
-    }
-    if db
-        .local_store_device_retirement()
-        .await
-        .map_err(database_error)?
-        .is_none()
-    {
-        if registration.is_retired() {
-            return Err(StoreRegistrationError::Database(
-                "retired local registration has no exact retirement journal".into(),
-            ));
-        }
-        let durable = prepare_self_retirement(db, storage, signer, membership).await?;
-        let payload = serde_json::to_vec(&durable)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let remotes = durable.closed_remote_objects()?;
-        db.stage_local_store_device_retirement(payload, remotes)
-            .await
-            .map_err(database_error)?;
-    }
-    publish_self_retirement(db, storage).await?;
-    Ok(true)
-}
-
-async fn prepare_self_retirement(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    signer: &UserKeypair,
-    membership: &MembershipChain,
-) -> Result<DurableRetirement, StoreRegistrationError> {
-    let device_id = db
-        .latest_local_store_device_registration()
-        .await
-        .map_err(database_error)?
-        .ok_or(StoreRegistrationError::ActivationRequired)?
-        .device_id
-        .to_string();
-    let (root, registration_ref, registration, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(db, &device_id, signer).await?;
-    let write_id = db.new_write_id();
-    let previous = db
-        .latest_local_store_position()
-        .await
-        .map_err(database_error)?;
-    let dependencies =
-        CommitFrontier::from_refs(db.materialized_frontier().await.map_err(database_error)?)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
-            .0;
-    let seq = previous
-        .as_ref()
-        .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-    let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
-        root.store_root_hash,
-        &registration_ref,
-        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-    );
-    let coord = StoreCommitCoord {
-        stream_id,
-        sequence: seq,
-    };
-    let order = StoreCommitOrder {
-        seq,
-        predecessor: previous.clone(),
-        dependencies,
-    };
-    let (device_state, predecessor_state) = db
-        .store_device_state_for_order(&order)
-        .await
-        .map_err(database_error)?;
-    if !predecessor_state
-        .devices
-        .get(&registration_ref.device_id)
-        .is_some_and(|record| {
-            record.registration == registration_ref
-                && matches!(
-                    record.status,
-                    super::store_commit::StoreDeviceStatus::Active
-                )
-        })
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "local registration is not active at the exact retirement cut".into(),
-        ));
-    }
-    let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
-        return Err(StoreRegistrationError::Invalid(
-            "self-retirement requires resolved membership".into(),
-        ));
-    };
-    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
-        membership.head_refs().to_vec(),
-        membership.resolution_refs().to_vec(),
-        predecessor_state.recovery.clone(),
-        resolved.state_hash,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let candidate_family =
-        CandidateFamilyId::derive(root.store_root_hash, &registration_ref, &write_id, &order);
-    let retiring_cut = order
-        .predecessor_cut()
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let retirement = StoreDeviceSelfRetirement::signed(
-        root.store_root_hash,
-        candidate_family,
-        registration_ref.clone(),
-        retiring_cut,
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let retirement_prefix = device_self_retirement_semantic_prefix(
-        candidate_family,
-        &registration_ref.device_id,
-        retirement.retirement_hash(),
-    );
-    let retirement_context = super::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceSelfRetirement,
-    );
-    let retirement_slot = storage
-        .allocate_protocol_slot(&retirement_context, &retirement_prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let retirement_prepared = storage
-        .prepare_protocol_object(
-            &retirement_context,
-            retirement_slot,
-            &retirement_prefix,
-            retirement.to_bytes(),
-        )
-        .map_err(StoreObjectError::from)?;
-    let retirement_ref = StoreDeviceSelfRetirementRef::from_retirement(
-        &retirement,
-        retirement_prepared.reference().clone(),
-    );
-    let commit_context = super::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let stream = coord.stream_id.to_string();
-    let commit = StoreBatchCommit::signed_with_self_retirement(
-        root.store_root_hash,
-        write_id,
-        coord.clone(),
-        registration_ref.clone(),
-        &registration,
-        order,
-        membership_state,
-        device_state,
-        None,
-        retirement_ref.clone(),
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let commit_prefix = commit_semantic_prefix(
-        commit.candidate_family(),
-        &stream,
-        commit.seq(),
-        commit.commit_hash(),
-    );
-    let commit_slot = storage
-        .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let commit_prepared = storage
-        .prepare_protocol_object(
-            &commit_context,
-            commit_slot,
-            &commit_prefix,
-            commit.to_bytes(),
-        )
-        .map_err(StoreObjectError::from)?;
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let state_after = predecessor_state
-        .self_retire(retirement_ref.clone())
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store::pull::prepare_merge_history_successor(
-        db,
-        &root,
-        &commit,
-        &commit_ref,
-        membership,
-        &registration,
-        None,
-        state_after,
-        super::store::pull::MergeHistorySuccessorEvidence::none(),
-    )
-    .await
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let next_prefix = head_slot_prefix(
-        &registration_ref.device_id.to_string(),
-        commit.seq().saturating_add(1),
-    );
-    let next_slot = storage
-        .allocate_protocol_slot(&head_context, &next_prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let head = StoreDeviceHead::signed(
-        root.store_root_hash,
-        registration_ref.clone(),
-        commit_ref.clone(),
-        history.summary.digest(),
-        SuccessorLink {
-            activation: registration
-                .store_announcement_activation(&registration_ref)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
-                .activation_id(),
-            predecessor: history.predecessor_head.map(|head| head.object),
-            next_slot,
-        },
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let head_prefix = head_slot_prefix(&registration_ref.device_id.to_string(), commit.seq());
-    let head_prepared = storage
-        .prepare_protocol_object(
-            &head_context,
-            history.head_slot,
-            &head_prefix,
-            head.to_bytes(),
-        )
-        .map_err(StoreObjectError::from)?;
-    Ok(DurableRetirement {
-        retirement_bytes: retirement.to_bytes(),
-        retirement_prepared,
-        commit_bytes: commit.to_bytes(),
-        commit_prepared,
-        commit_ref,
-        head_bytes: head.to_bytes(),
-        head_prepared,
-        history_summary: history.summary,
-    })
-}
-
-async fn publish_self_retirement(
-    db: &Database,
-    storage: &dyn SyncStorage,
-) -> Result<(), StoreRegistrationError> {
-    let Some((payload, published)) = db
-        .local_store_device_retirement()
-        .await
-        .map_err(database_error)?
-    else {
-        return Ok(());
-    };
-    if published {
-        return Ok(());
-    }
-    let durable: DurableRetirement = serde_json::from_slice(&payload)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let closed_remotes = durable.closed_remote_objects()?;
-    let root = db
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(StoreRegistrationError::ExactRootAuthorityMissing)?;
-    let unverified: StoreBatchCommit = serde_json::from_slice(&durable.commit_bytes)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let registration = db
-        .activated_store_device_registration(unverified.author_registration.clone())
-        .await
-        .map_err(database_error)?;
-    let commit = StoreBatchCommit::parse_at(
-        &durable.commit_bytes,
-        root.store_root_hash,
-        &durable.commit_ref.coord,
-        &registration,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    durable
-        .commit_ref
-        .verify_commit(&commit)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let [retirement_ref] = commit.device_retirements() else {
-        return Err(StoreRegistrationError::Invalid(
-            "retirement commit does not carry exactly one terminal".into(),
-        ));
-    };
-    let retirement = StoreDeviceSelfRetirement::parse_at(
-        &durable.retirement_bytes,
-        retirement_ref,
-        &registration,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    if durable.retirement_prepared.reference() != &retirement_ref.object
-        || durable.commit_prepared.reference() != &durable.commit_ref.object
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "durable retirement refs differ from their prepared objects".into(),
-        ));
-    }
-    storage
-        .create_protocol_object(&durable.retirement_prepared)
-        .await
-        .map_err(StoreObjectError::from)?;
-    let retirement_context = super::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceSelfRetirement,
-    );
-    let opened = storage
-        .read_protocol_object(
-            &retirement_context,
-            &retirement_ref.object,
-            &device_self_retirement_semantic_prefix(
-                retirement_ref.candidate_family,
-                &retirement_ref.target.device_id,
-                retirement_ref.retirement_hash,
-            ),
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened != durable.retirement_bytes || retirement.to_bytes() != durable.retirement_bytes {
-        return Err(StoreRegistrationError::Invalid(
-            "retirement exact readback differs from its signed bytes".into(),
-        ));
-    }
-    let retirement_remote = closed_remotes
-        .iter()
-        .find(|remote| remote.object() == &retirement_ref.object)
-        .cloned()
-        .ok_or_else(|| {
-            StoreRegistrationError::Invalid(
-                "retirement object is absent from its closed candidate graph".to_string(),
-            )
-        })?;
-    db.mark_remote_object_uploaded(retirement_remote)
-        .await
-        .map_err(database_error)?;
-    storage
-        .create_protocol_object(&durable.commit_prepared)
-        .await
-        .map_err(StoreObjectError::from)?;
-    storage
-        .create_protocol_object(&durable.head_prepared)
-        .await
-        .map_err(StoreObjectError::from)?;
-    let opened_commit = storage
-        .read_protocol_object(
-            &super::storage::ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreCommit,
-            ),
-            &durable.commit_ref.object,
-            &commit_semantic_prefix(
-                commit.candidate_family(),
-                &durable.commit_ref.coord.stream_id.to_string(),
-                commit.seq(),
-                commit.commit_hash(),
-            ),
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    let opened_head = storage
-        .read_protocol_object(
-            &super::storage::ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            ),
-            durable.head_prepared.reference(),
-            &head_slot_prefix(
-                &commit.author_registration.device_id.to_string(),
-                commit.seq(),
-            ),
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened_commit != durable.commit_bytes || opened_head != durable.head_bytes {
-        return Err(StoreRegistrationError::Invalid(
-            "retirement commit or head exact readback differs".into(),
-        ));
-    }
-    let head = StoreDeviceHead::parse_at(
-        &durable.head_bytes,
-        root.store_root_hash,
-        &registration,
-        &durable.commit_ref,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    for object in [
-        durable.commit_prepared.reference(),
-        durable.head_prepared.reference(),
-    ] {
-        let remote = closed_remotes
-            .iter()
-            .find(|remote| remote.object() == object)
-            .cloned()
-            .ok_or_else(|| {
-                StoreRegistrationError::Invalid(
-                    "retirement publication object is absent from its closed graph".to_string(),
-                )
-            })?;
-        db.mark_remote_object_uploaded(remote)
-            .await
-            .map_err(database_error)?;
-    }
-    let materialization = crate::database::LocalRetirementMaterialization {
-        head,
-        head_object: durable.head_prepared.reference().clone(),
-        history_summary: durable.history_summary.clone(),
-    };
-    db.complete_local_store_device_retirement(
-        payload,
-        retirement_ref.clone(),
-        commit,
-        durable.commit_ref,
-        materialization,
-        closed_remotes
-            .iter()
-            .map(|remote| remote.object_id())
-            .collect(),
-    )
-    .await
-    .map_err(database_error)
-}
-
 pub(crate) async fn prepare_registration_for_origin(
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
-    store_root: super::store_commit::StoreRootRef,
+    store_root: crate::sync::store_commit::StoreRootRef,
     origin: StoreDeviceRegistrationOrigin,
     reserved_slot: crate::storage::cloud::ObjectSlot,
-    expected_provider: super::storage::ProviderDeviceBinding,
+    expected_provider: crate::sync::storage::ProviderDeviceBinding,
     store_commits: DeviceStreamAnchor,
     acknowledgements: DeviceStreamAnchor,
     snapshots: DeviceStreamAnchor,
@@ -722,7 +232,7 @@ fn prepare_registration_object(
             )
         })?
         .to_string();
-    let context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         registration.store_root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
@@ -734,7 +244,7 @@ fn prepare_registration_object(
 
 async fn prepare_or_load_recovery_registration(
     storage: &dyn SyncStorage,
-    root: &super::store_commit::StoreRootRef,
+    root: &crate::sync::store_commit::StoreRootRef,
     expected: StoreDeviceRegistration,
     slot: crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
@@ -747,7 +257,7 @@ async fn prepare_or_load_recovery_registration(
     ),
     StoreRegistrationError,
 > {
-    let context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
@@ -769,7 +279,7 @@ async fn prepare_or_load_recovery_registration(
             );
             Ok((registration, reference, prepared, true))
         }
-        Err(super::storage::StorageError::NotFound(_)) => {
+        Err(crate::sync::storage::StorageError::NotFound(_)) => {
             let prepared = storage
                 .prepare_protocol_object(&context, slot, semantic_prefix, expected.to_bytes())
                 .map_err(StoreObjectError::from)?;
@@ -785,7 +295,7 @@ async fn prepare_or_load_recovery_registration(
 
 async fn prepared_protocol_object_exists(
     storage: &dyn SyncStorage,
-    context: &super::storage::ProtocolObjectContext,
+    context: &crate::sync::storage::ProtocolObjectContext,
     prepared: &PreparedExactObject,
     semantic_prefix: &str,
     expected_bytes: &[u8],
@@ -802,14 +312,14 @@ async fn prepared_protocol_object_exists(
         Ok(_) => Err(StoreRegistrationError::Invalid(format!(
             "exact object {semantic_prefix:?} differs from its staged Owner recovery bytes"
         ))),
-        Err(super::storage::StorageError::NotFound(_)) => Ok(false),
+        Err(crate::sync::storage::StorageError::NotFound(_)) => Ok(false),
         Err(error) => Err(StoreObjectError::from(error).into()),
     }
 }
 
 async fn prepare_or_load_initial_recovery_ack(
     storage: &dyn SyncStorage,
-    root: &super::store_commit::StoreRootRef,
+    root: &crate::sync::store_commit::StoreRootRef,
     registration: &StoreDeviceRegistration,
     registration_ref: &StoreDeviceRegistrationRef,
     first_slot: crate::storage::cloud::ObjectSlot,
@@ -818,7 +328,7 @@ async fn prepare_or_load_initial_recovery_ack(
     published_at: &str,
     device_signer: &UserKeypair,
 ) -> Result<(StoreAck, Vec<u8>, StoreAckRef, PreparedExactObject, bool), StoreRegistrationError> {
-    let context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
@@ -859,7 +369,7 @@ async fn prepare_or_load_initial_recovery_ack(
             }
             Ok((ack, bytes, reference, prepared, true))
         }
-        Err(super::storage::StorageError::NotFound(_)) => {
+        Err(crate::sync::storage::StorageError::NotFound(_)) => {
             let next_slot = storage
                 .allocate_protocol_slot(
                     &context,
@@ -909,13 +419,13 @@ async fn prepare_or_load_initial_recovery_ack(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_or_load_owner_recovery_node(
     storage: &dyn SyncStorage,
-    root: &super::store_commit::StoreRootRef,
+    root: &crate::sync::store_commit::StoreRootRef,
     recovery_slot: crate::storage::cloud::ObjectSlot,
     owner_pubkey: &str,
-    owner_grant: &super::membership::MembershipGrantId,
+    owner_grant: &crate::sync::membership::MembershipGrantId,
     sequence: u64,
     recovery_id: DeviceRecoveryId,
-    membership: &super::circle_control::StoreMembershipStateRef,
+    membership: &crate::sync::circle_control::StoreMembershipStateRef,
     predecessor: &Option<OwnerRecoveryNodeRef>,
     readiness: &DeviceRecoveryReadiness,
     identity_signer: &UserKeypair,
@@ -928,7 +438,7 @@ async fn prepare_or_load_owner_recovery_node(
     ),
     StoreRegistrationError,
 > {
-    let context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
@@ -965,7 +475,7 @@ async fn prepare_or_load_owner_recovery_node(
             }
             Ok((node, reference, prepared, true))
         }
-        Err(super::storage::StorageError::NotFound(_)) => {
+        Err(crate::sync::storage::StorageError::NotFound(_)) => {
             let next_sequence = sequence.checked_add(1).ok_or_else(|| {
                 StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
             })?;
@@ -1013,13 +523,13 @@ async fn prepare_or_load_owner_recovery_node(
 async fn install_activated_owner_recovery(
     db: &Database,
     storage: &dyn SyncStorage,
-    root: &super::store_commit::StoreRootRef,
+    root: &crate::sync::store_commit::StoreRootRef,
     origin: &StoreDeviceRegistrationOrigin,
-    device_id: super::store_commit::StoreDeviceId,
+    device_id: crate::sync::store_commit::StoreDeviceId,
     recovery_id: DeviceRecoveryId,
     recovery_slot: &crate::storage::cloud::ObjectSlot,
     owner_pubkey: &str,
-    owner_grant: &super::membership::MembershipGrantId,
+    owner_grant: &crate::sync::membership::MembershipGrantId,
     sequence: u64,
     predecessor: &Option<OwnerRecoveryNodeRef>,
 ) -> Result<Option<StoreDeviceRegistrationRef>, StoreRegistrationError> {
@@ -1061,7 +571,8 @@ async fn install_activated_owner_recovery(
             "activated Owner recovery registration belongs to another provider principal".into(),
         ));
     }
-    let node = super::store_objects::load_owner_recovery_node_ref(storage, root, &node_ref).await?;
+    let node =
+        crate::sync::store_objects::load_owner_recovery_node_ref(storage, root, &node_ref).await?;
     if node.value.recovery_id != recovery_id
         || node.value.predecessor != *predecessor
         || node.value.readiness.registration != registration_ref
@@ -1071,16 +582,20 @@ async fn install_activated_owner_recovery(
         ));
     }
     let initial_ack_ref = node.value.readiness.initial_ack;
-    let initial_ack =
-        super::store_objects::load_store_ack_ref(storage, root, &initial_ack_ref, &registration)
-            .await?;
+    let initial_ack = crate::sync::store_objects::load_store_ack_ref(
+        storage,
+        root,
+        &initial_ack_ref,
+        &registration,
+    )
+    .await?;
     if initial_ack.value.store_cut != node.value.readiness.bootstrap_cut {
         return Err(StoreRegistrationError::Invalid(
             "activated Owner recovery acknowledgement differs from its recovery node".into(),
         ));
     }
 
-    let registration_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let registration_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
@@ -1099,7 +614,7 @@ async fn install_activated_owner_recovery(
             "activated Owner recovery registration differs from its prepared exact object".into(),
         ));
     }
-    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
@@ -1149,11 +664,11 @@ async fn install_activated_owner_recovery(
     Ok(Some(registration_ref))
 }
 
-pub async fn recover_owner_device_merge(
+pub async fn recover_owner_device(
     db: &Database,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
-    authority: &super::restore_code::OwnerRecoveryAuthority,
+    authority: &crate::sync::restore_code::OwnerRecoveryAuthority,
     membership: &MembershipChain,
 ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
     let root = db
@@ -1161,7 +676,7 @@ pub async fn recover_owner_device_merge(
         .await
         .map_err(database_error)?
         .ok_or(StoreRegistrationError::ExactRootAuthorityMissing)?;
-    let protocol = super::store_objects::load_store_protocol_root(storage, &root)
+    let protocol = crate::sync::store_objects::load_store_protocol_root(storage, &root)
         .await?
         .value;
     let owner_pubkey = crate::keys::public_key_hex(identity_signer);
@@ -1174,7 +689,7 @@ pub async fn recover_owner_device_merge(
             "Owner recovery authority differs from the active root founder grant".into(),
         ));
     }
-    let super::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
+    let crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
         &protocol.descriptor.founder_recovery
     else {
         return Err(StoreRegistrationError::Invalid(
@@ -1183,7 +698,7 @@ pub async fn recover_owner_device_merge(
     };
     let (recovery_slot, predecessor, sequence) = match &authority.recovery.position {
         OwnerRecoveryPosition::BeforeFirst { activation } => {
-            let expected = super::store_commit::OwnerRecoveryActivationId::derive(
+            let expected = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
                 &root,
                 &owner_pubkey,
                 &authority.owner_grant,
@@ -1199,7 +714,8 @@ pub async fn recover_owner_device_merge(
         }
         OwnerRecoveryPosition::At { node } => {
             let loaded =
-                super::store_objects::load_owner_recovery_node_ref(storage, &root, node).await?;
+                crate::sync::store_objects::load_owner_recovery_node_ref(storage, &root, node)
+                    .await?;
             if loaded.value.owner_pubkey != owner_pubkey
                 || loaded.value.owner_grant != authority.owner_grant
             {
@@ -1229,7 +745,7 @@ pub async fn recover_owner_device_merge(
         recovery_slot: recovery_slot.clone(),
         owner_grant: authority.owner_grant.clone(),
     };
-    let device_id = super::store_commit::StoreDeviceId::derive(&root, &origin);
+    let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root, &origin);
     if let Some(registration) = install_activated_owner_recovery(
         db,
         storage,
@@ -1248,7 +764,7 @@ pub async fn recover_owner_device_merge(
         return Ok(registration);
     }
     let context = |domain| {
-        super::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
+        crate::sync::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
     };
     let commit_context = context(ProtocolObjectDomain::StoreCommit);
     let staged = db
@@ -1301,7 +817,7 @@ pub async fn recover_owner_device_merge(
         }
         let registration_exists = prepared_protocol_object_exists(
             storage,
-            &context(super::storage::ProtocolObjectDomain::StoreDeviceRegistration),
+            &context(crate::sync::storage::ProtocolObjectDomain::StoreDeviceRegistration),
             &durable.prepared,
             &registration_semantic_prefix(&device_id.to_string()),
             &durable.registration_bytes,
@@ -1309,7 +825,7 @@ pub async fn recover_owner_device_merge(
         .await?;
         let initial_ack_exists = prepared_protocol_object_exists(
             storage,
-            &context(super::storage::ProtocolObjectDomain::StoreAck),
+            &context(crate::sync::storage::ProtocolObjectDomain::StoreAck),
             &durable.initial_ack.prepared,
             &ack_slot_prefix(&device_id.to_string(), 1),
             &durable.initial_ack.bytes,
@@ -1327,11 +843,12 @@ pub async fn recover_owner_device_merge(
             initial_ack_exists,
         )
     } else {
-        let head_context = context(super::storage::ProtocolObjectDomain::StoreHead);
-        let ack_context = context(super::storage::ProtocolObjectDomain::StoreAck);
-        let snapshot_context = context(super::storage::ProtocolObjectDomain::StoreSnapshotMeta);
+        let head_context = context(crate::sync::storage::ProtocolObjectDomain::StoreHead);
+        let ack_context = context(crate::sync::storage::ProtocolObjectDomain::StoreAck);
+        let snapshot_context =
+            context(crate::sync::storage::ProtocolObjectDomain::StoreSnapshotMeta);
         let registration_context =
-            context(super::storage::ProtocolObjectDomain::StoreDeviceRegistration);
+            context(crate::sync::storage::ProtocolObjectDomain::StoreDeviceRegistration);
         let first_head = storage
             .allocate_protocol_slot(
                 &head_context,
@@ -1450,12 +967,12 @@ pub async fn recover_owner_device_merge(
         .device_signer(identity_signer)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let bootstrap_cut = initial_ack.store_cut.clone();
-    let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+    let crate::sync::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
         return Err(StoreRegistrationError::Invalid(
             "Owner recovery requires resolved membership".into(),
         ));
     };
-    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
+    let membership_state = crate::sync::circle_control::StoreMembershipStateRef::from_parts(
         membership.head_refs().to_vec(),
         membership.resolution_refs().to_vec(),
         vec![authority.recovery.clone()],
@@ -1543,10 +1060,10 @@ pub async fn recover_owner_device_merge(
     .await
     .map_err(database_error)?;
 
-    let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+    let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
         root.store_root_hash,
         &registration_ref,
-        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
     let order = StoreCommitOrder {
         seq: 1,
@@ -1616,7 +1133,7 @@ pub async fn recover_owner_device_merge(
     let state_after = predecessor_state
         .activate_registration(
             registration_ref.clone(),
-            Some(super::store_commit::OwnerRecoveryCursor {
+            Some(crate::sync::store_commit::OwnerRecoveryCursor {
                 owner_grant: authority.owner_grant.clone(),
                 position: OwnerRecoveryPosition::At {
                     node: node_ref.clone(),
@@ -1624,7 +1141,7 @@ pub async fn recover_owner_device_merge(
             }),
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store::pull::prepare_merge_history_successor(
+    let history = crate::sync::store::pull::prepare_merge_history_successor(
         db,
         &root,
         &commit,
@@ -1633,8 +1150,8 @@ pub async fn recover_owner_device_merge(
         &registration,
         Some(&registration_ref),
         state_after,
-        super::store::pull::MergeHistorySuccessorEvidence {
-            registrations: vec![super::store_commit::RetainedVerifiedRegistration {
+        crate::sync::store::pull::MergeHistorySuccessorEvidence {
+            registrations: vec![crate::sync::store_commit::RetainedVerifiedRegistration {
                 reference: registration_ref.clone(),
                 value: registration.clone(),
             }],
@@ -1644,11 +1161,11 @@ pub async fn recover_owner_device_merge(
     )
     .await
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let head_context = context(super::storage::ProtocolObjectDomain::StoreHead);
+    let head_context = context(crate::sync::storage::ProtocolObjectDomain::StoreHead);
     let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } = &registration.store_commits
     else {
         return Err(StoreRegistrationError::Invalid(
-            "Merge Owner recovery registration has no announcement stream anchor".into(),
+            "Owner recovery registration has no announcement stream anchor".into(),
         ));
     };
     let next_head = storage
@@ -1710,8 +1227,8 @@ pub(crate) async fn bootstrap_pending_device(
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
-    verified_attempt: super::store_objects::VerifiedObject<DeviceJoinAttempt>,
-    bootstrap_plan: super::store_pull::DeviceJoinBootstrapPlan,
+    verified_attempt: crate::sync::store_objects::VerifiedObject<DeviceJoinAttempt>,
+    bootstrap_plan: crate::sync::store_pull::DeviceJoinBootstrapPlan,
     attempt_activation: StoreBatchCommitRef,
     owner: &StoreDeviceRegistration,
     published_at: &str,
@@ -1737,7 +1254,7 @@ pub(crate) async fn bootstrap_pending_device(
         return Err(StoreRegistrationError::ActivationRequired);
     }
     let (activation_commit, activation_author) =
-        Box::pin(super::store_pull::load_commit_with_author(
+        Box::pin(crate::sync::store_pull::load_commit_with_author(
             storage,
             &attempt.store_root,
             &attempt_activation,
@@ -1798,10 +1315,11 @@ pub(crate) async fn bootstrap_pending_device(
             &expected_registration,
             attempt.registration_slot.clone(),
         )?;
-        let registration_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
-            &expected_registration,
-            registration_prepared.reference().clone(),
-        );
+        let registration_ref =
+            crate::sync::store_commit::StoreDeviceRegistrationRef::from_registration(
+                &expected_registration,
+                registration_prepared.reference().clone(),
+            );
         let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
             &expected_registration.acknowledgements
         else {
@@ -1809,7 +1327,7 @@ pub(crate) async fn bootstrap_pending_device(
                 "join registration has no acknowledgement anchor".to_string(),
             ));
         };
-        let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             attempt.store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -1899,7 +1417,7 @@ pub(crate) async fn bootstrap_pending_device(
         durable.device_id,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let registration_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
+    let registration_ref = crate::sync::store_commit::StoreDeviceRegistrationRef::from_registration(
         &registration,
         durable.prepared.reference().clone(),
     );
@@ -1917,7 +1435,7 @@ pub(crate) async fn bootstrap_pending_device(
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))
 }
 
-pub async fn drain_registration_outbox(
+async fn drain_registration_outbox(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreRegistrationError> {
@@ -1943,7 +1461,7 @@ pub async fn drain_registration_outbox(
                 "durable registration columns differ from its exact signed bytes".to_string(),
             ));
         }
-        let context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             store_root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
@@ -1961,7 +1479,7 @@ pub async fn drain_registration_outbox(
                 "Store registration exact readback differs from its durable bytes".to_string(),
             ));
         }
-        let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -2023,7 +1541,7 @@ async fn require_activated_registration(
             "local registration differs from its durable hash".to_string(),
         ));
     }
-    let exact_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
+    let exact_ref = crate::sync::store_commit::StoreDeviceRegistrationRef::from_registration(
         &registration,
         durable.prepared.reference().clone(),
     );
@@ -2063,19 +1581,19 @@ mod tests {
 
     fn founder_recovery_authority(
         store: &TestStore,
-    ) -> super::super::restore_code::OwnerRecoveryAuthority {
+    ) -> crate::sync::restore_code::OwnerRecoveryAuthority {
         let owner_grant = store.protocol_root.descriptor.founder_grant.clone();
-        let activation = super::super::store_commit::OwnerRecoveryActivationId::derive(
+        let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
             &store.root,
             &crate::keys::public_key_hex(&store.signer),
             &owner_grant,
             &store.protocol_root.descriptor.founder_recovery,
         )
         .expect("derive founder recovery activation");
-        super::super::restore_code::OwnerRecoveryAuthority {
+        crate::sync::restore_code::OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(store.signer.to_keypair_bytes()),
             owner_grant: owner_grant.clone(),
-            recovery: super::super::store_commit::OwnerRecoveryCursor {
+            recovery: crate::sync::store_commit::OwnerRecoveryCursor {
                 owner_grant,
                 position: OwnerRecoveryPosition::BeforeFirst { activation },
             },
@@ -2092,21 +1610,21 @@ mod tests {
         (store, db)
     }
 
-    async fn recovered_merge_author() -> (
+    async fn recovered_author() -> (
         TestStore,
         Database,
         StoreDeviceRegistrationRef,
         StoreBatchCommitRef,
     ) {
         let (store, db) = initialized().await;
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+        let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load exact membership")
             .chain
             .expect("resolved founder membership");
         let authority = founder_recovery_authority(&store);
         let registration =
-            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
+            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
                 .await
                 .expect("recover Owner device");
         for reference in db
@@ -2115,7 +1633,7 @@ mod tests {
             .expect("load materialized Store frontier")
             .into_values()
         {
-            let (commit, _) = super::super::store_pull::load_commit_with_author(
+            let (commit, _) = crate::sync::store_pull::load_commit_with_author(
                 &store.storage,
                 &store.root,
                 &reference,
@@ -2237,16 +1755,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_owner_recovery_publishes_and_activates_replacement_device() {
+    async fn owner_recovery_publishes_and_activates_replacement_device() {
         let (store, db) = initialized().await;
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+        let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load exact membership")
             .chain
             .expect("resolved founder membership");
         let authority = founder_recovery_authority(&store);
         let registration =
-            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
+            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
                 .await
                 .expect("recover Owner device");
 
@@ -2264,7 +1782,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_materialization_reopens_its_retained_introduced_author() {
-        let (_store, db, registration, reference) = recovered_merge_author().await;
+        let (_store, db, registration, reference) = recovered_author().await;
         let device_id = registration.device_id.to_string();
         let registration_hash = registration.registration_hash.to_string();
         db.call(move |conn| {
@@ -2290,7 +1808,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_bytes() {
-        let (_store, db, _registration, reference) = recovered_merge_author().await;
+        let (_store, db, _registration, reference) = recovered_author().await;
         tamper_retained_recovery_registration(
             &db,
             &reference,
@@ -2305,7 +1823,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_authority() {
-        let (_store, db, _registration, reference) = recovered_merge_author().await;
+        let (_store, db, _registration, reference) = recovered_author().await;
         tamper_retained_recovery_registration(
             &db,
             &reference,
@@ -2319,15 +1837,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_owner_recovery_retry_reuses_each_published_readiness_prefix() {
+    async fn owner_recovery_retry_reuses_each_published_readiness_prefix() {
         for failed_call in [2, 3, 4] {
             let signer = UserKeypair::generate();
             let db = open_test_db();
-            let store =
-                TestStore::create(&db, &format!("merge-recovery-prefix-{failed_call}"), signer)
-                    .await
-                    .expect("create recovery prefix Store");
-            let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+            let store = TestStore::create(&db, &format!("recovery-prefix-{failed_call}"), signer)
+                .await
+                .expect("create recovery prefix Store");
+            let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
                 .await
                 .expect("load exact membership")
                 .chain
@@ -2335,15 +1852,9 @@ mod tests {
             let authority = founder_recovery_authority(&store);
             store.home.fail_exact_create_before_call(failed_call);
             assert!(
-                recover_owner_device_merge(
-                    &db,
-                    &store.storage,
-                    &store.signer,
-                    &authority,
-                    &membership,
-                )
-                .await
-                .is_err(),
+                recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership,)
+                    .await
+                    .is_err(),
                 "failure before exact create {failed_call} interrupts recovery",
             );
 
@@ -2364,7 +1875,7 @@ mod tests {
                 else {
                     panic!("interrupted registration is not a Recovery registration");
                 };
-                let context = super::super::storage::ProtocolObjectContext::signed_plaintext(
+                let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
@@ -2388,7 +1899,7 @@ mod tests {
                 None
             };
 
-            recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
+            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
                 .await
                 .expect("retry completes absent recovery suffix");
             assert_eq!(
@@ -2431,7 +1942,7 @@ mod tests {
                 else {
                     panic!("completed registration is not a Recovery registration");
                 };
-                let context = super::super::storage::ProtocolObjectContext::signed_plaintext(
+                let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
@@ -2456,77 +1967,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn failed_retirement_create_retries_the_owned_exact_graph() {
-        let (store, db) = initialized().await;
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
-            .await
-            .expect("load exact membership")
-            .chain
-            .expect("resolved membership");
-        store.home.fail_exact_create_before_call(1);
-        assert!(retire_registration(
-            &db,
-            &store.storage,
-            &store.signer,
-            &membership,
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .is_err());
-        let pending = db
-            .local_store_device_retirement()
-            .await
-            .unwrap()
-            .expect("retirement graph remains durably owned");
-        assert!(!pending.1);
-        let owned = pending.0;
-
-        retire_registration(
-            &db,
-            &store.storage,
-            &store.signer,
-            &membership,
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .expect("retry publishes the owned retirement graph");
-        let published = db.local_store_device_retirement().await.unwrap().unwrap();
-        assert!(published.1);
-        assert_eq!(published.0, owned);
-        assert!(db
-            .latest_local_store_device_registration()
-            .await
-            .unwrap()
-            .unwrap()
-            .is_retired());
-    }
-
-    #[tokio::test]
-    async fn retirement_is_idempotent_and_prevents_reactivation() {
-        let (store, db) = initialized().await;
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
-            .await
-            .expect("load exact membership")
-            .chain
-            .expect("resolved membership");
-        for _ in 0..2 {
-            assert!(retire_registration(
-                &db,
-                &store.storage,
-                &store.signer,
-                &membership,
-                "2026-07-16T00:00:00Z",
-            )
-            .await
-            .expect("retirement is idempotent"));
-        }
-        assert!(matches!(
-            ensure_active_registration(&db, &store.storage).await,
-            Err(StoreRegistrationError::RetiredDevice { .. })
-        ));
-        assert!(db.local_store_device_retirement().await.unwrap().unwrap().1);
     }
 }

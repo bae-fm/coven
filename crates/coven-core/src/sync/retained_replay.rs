@@ -58,10 +58,6 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     (
-        "local_store_device_retirement",
-        ReplayTableDisposition::Preserve,
-    ),
-    (
         "local_store_founder_graph",
         ReplayTableDisposition::Preserve,
     ),

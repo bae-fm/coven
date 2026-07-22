@@ -55,7 +55,7 @@ impl StoreDeviceStateRef {
 pub enum StoreDeviceStatus {
     Active,
     Inactive {
-        terminals: Vec<StoreDeviceTerminalRef>,
+        terminals: Vec<StoreDeviceExclusionRef>,
         accepted_cut: StoreHistoryCut,
     },
 }
@@ -1186,138 +1186,6 @@ fn validate_device_exclusion_proof(
     validate_store_history_cut(&proof.cutoff)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceSelfRetirementRef {
-    pub candidate_family: CandidateFamilyId,
-    pub target: StoreDeviceRegistrationRef,
-    pub retiring_cut: StoreHistoryCut,
-    pub retirement_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreDeviceSelfRetirement {
-    pub version: u32,
-    pub store_root_hash: ObjectHash,
-    pub candidate_family: CandidateFamilyId,
-    pub target: StoreDeviceRegistrationRef,
-    pub retiring_cut: StoreHistoryCut,
-    pub signature: String,
-}
-
-#[derive(Serialize)]
-struct StoreDeviceSelfRetirementSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    candidate_family: CandidateFamilyId,
-    target: &'a StoreDeviceRegistrationRef,
-    retiring_cut: &'a StoreHistoryCut,
-}
-
-impl StoreDeviceSelfRetirement {
-    pub fn signed(
-        store_root_hash: ObjectHash,
-        candidate_family: CandidateFamilyId,
-        target: StoreDeviceRegistrationRef,
-        retiring_cut: StoreHistoryCut,
-        device_signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        validate_store_history_cut(&retiring_cut)?;
-        let mut retirement = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            candidate_family,
-            target,
-            retiring_cut,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &retirement.canonical_signed_bytes());
-        retirement.signature = signature;
-        Ok(retirement)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            SELF_RETIREMENT_DOMAIN,
-            &StoreDeviceSelfRetirementSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                candidate_family: self.candidate_family,
-                target: &self.target,
-                retiring_cut: &self.retiring_cut,
-            },
-        )
-    }
-
-    pub fn retirement_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreDeviceSelfRetirement serialization cannot fail")
-    }
-
-    pub fn parse_at(
-        bytes: &[u8],
-        expected: &StoreDeviceSelfRetirementRef,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<Self, StoreProtocolError> {
-        let retirement: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        require_version(retirement.version)?;
-        validate_store_history_cut(&retirement.retiring_cut)?;
-        if retirement.store_root_hash != registration.store_root.store_root_hash
-            || retirement.candidate_family != expected.candidate_family
-            || retirement.target != expected.target
-            || retirement.retiring_cut != expected.retiring_cut
-            || retirement.retirement_hash() != expected.retirement_hash
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        let prefix = device_self_retirement_semantic_prefix(
-            expected.candidate_family,
-            &expected.target.device_id,
-            expected.retirement_hash,
-        );
-        if expected.object.slot().logical_key() != format!("{prefix}.json") {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected: prefix,
-                actual: expected.object.slot().logical_key().to_string(),
-            });
-        }
-        expected.target.verify_registration(registration)?;
-        if !keys::verify_signature_hex(
-            &registration.device_signing_pubkey,
-            &retirement.signature,
-            &retirement.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(retirement)
-    }
-}
-
-impl StoreDeviceSelfRetirementRef {
-    pub fn from_retirement(retirement: &StoreDeviceSelfRetirement, object: ExactObjectRef) -> Self {
-        Self {
-            candidate_family: retirement.candidate_family,
-            target: retirement.target.clone(),
-            retiring_cut: retirement.retiring_cut.clone(),
-            retirement_hash: retirement.retirement_hash(),
-            object,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreDeviceTerminalRef {
-    Excluded(StoreDeviceExclusionRef),
-    SelfRetirement(StoreDeviceSelfRetirementRef),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreDeviceProposalState {
@@ -1329,7 +1197,7 @@ pub enum StoreDeviceProposalState {
     },
     Superseded {
         proposal: StoreDeviceExclusionProposalRef,
-        terminals: Vec<StoreDeviceTerminalRef>,
+        terminals: Vec<StoreDeviceExclusionRef>,
     },
 }
 
@@ -1505,36 +1373,12 @@ impl ResolvedStoreDeviceState {
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        let terminals = vec![StoreDeviceTerminalRef::Excluded(exclusion)];
+        let terminals = vec![exclusion];
         supersede_pending_proposals(&mut record.proposals, &terminals);
         record.status = StoreDeviceStatus::Inactive {
             terminals,
             accepted_cut,
         };
-        Self::from_parts(devices, self.recovery.clone())
-    }
-
-    pub fn self_retire(
-        &self,
-        retirement: StoreDeviceSelfRetirementRef,
-    ) -> Result<Self, StoreProtocolError> {
-        let mut devices = self.devices.clone();
-        let record = devices
-            .get_mut(&retirement.target.device_id)
-            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-        if record.registration != retirement.target
-            || !matches!(record.status, StoreDeviceStatus::Active)
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        record.status = StoreDeviceStatus::Inactive {
-            terminals: vec![StoreDeviceTerminalRef::SelfRetirement(retirement.clone())],
-            accepted_cut: retirement.retiring_cut,
-        };
-        let StoreDeviceStatus::Inactive { terminals, .. } = &record.status else {
-            unreachable!("self-retirement writes an inactive device state")
-        };
-        supersede_pending_proposals(&mut record.proposals, terminals);
         Self::from_parts(devices, self.recovery.clone())
     }
 
@@ -1611,7 +1455,7 @@ impl ResolvedStoreDeviceState {
 
 fn supersede_pending_proposals(
     proposals: &mut BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalState>,
-    terminals: &[StoreDeviceTerminalRef],
+    terminals: &[StoreDeviceExclusionRef],
 ) {
     for state in proposals.values_mut() {
         if let StoreDeviceProposalState::Pending { proposal } = state {
@@ -1749,9 +1593,9 @@ pub(super) fn merge_device_status(
 }
 
 fn merge_terminal_refs(
-    left: Vec<StoreDeviceTerminalRef>,
-    right: Vec<StoreDeviceTerminalRef>,
-) -> Result<Vec<StoreDeviceTerminalRef>, StoreProtocolError> {
+    left: Vec<StoreDeviceExclusionRef>,
+    right: Vec<StoreDeviceExclusionRef>,
+) -> Result<Vec<StoreDeviceExclusionRef>, StoreProtocolError> {
     let terminals = left
         .into_iter()
         .chain(right)
@@ -1861,7 +1705,7 @@ fn validate_store_device_records(
     Ok(())
 }
 
-fn validate_terminal_refs(terminals: &[StoreDeviceTerminalRef]) -> Result<(), StoreProtocolError> {
+fn validate_terminal_refs(terminals: &[StoreDeviceExclusionRef]) -> Result<(), StoreProtocolError> {
     if terminals.is_empty() || terminals.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StoreProtocolError::DeviceStateMismatch);
     }

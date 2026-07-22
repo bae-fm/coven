@@ -151,17 +151,6 @@ pub fn device_join_attempt_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> S
     format!("{STORE_DEVICE_JOIN_ATTEMPT_PREFIX}{attempt_id}")
 }
 
-pub fn device_self_retirement_semantic_prefix(
-    family: CandidateFamilyId,
-    device_id: &StoreDeviceId,
-    retirement_hash: ObjectHash,
-) -> String {
-    format!(
-        "{STORE_CANDIDATE_PREFIX}{}/device-self-retirements/{device_id}/{retirement_hash}",
-        family.as_hash()
-    )
-}
-
 pub fn circle_access_leaf_semantic_prefix(
     circle_id: CircleId,
     family: CandidateFamilyId,

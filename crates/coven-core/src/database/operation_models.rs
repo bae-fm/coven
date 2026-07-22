@@ -19,10 +19,6 @@ pub(crate) enum LocalDeviceRegistrationState {
     Activated {
         authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
     },
-    Retired {
-        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
-        retirement: crate::sync::store_commit::StoreDeviceSelfRetirementRef,
-    },
 }
 
 pub(super) type PreparedLocalDeviceRegistrationRow =
@@ -41,10 +37,6 @@ pub(super) type LocalDeviceRegistrationJournalRow = (
 impl DurableDeviceRegistration {
     pub(crate) fn is_activated(&self) -> bool {
         matches!(self.state, LocalDeviceRegistrationState::Activated { .. })
-    }
-
-    pub(crate) fn is_retired(&self) -> bool {
-        matches!(self.state, LocalDeviceRegistrationState::Retired { .. })
     }
 }
 

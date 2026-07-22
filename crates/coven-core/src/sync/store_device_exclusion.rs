@@ -4409,7 +4409,7 @@ mod tests {
         ))
         .await
         .expect("create exclusion test Store");
-        super::super::store_registration::ensure_active_registration(db, storage)
+        super::super::store::ensure_active_registration(db, storage)
             .await
             .expect("activate exclusion test registration");
     }

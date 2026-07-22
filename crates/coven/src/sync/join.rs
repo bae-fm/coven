@@ -46,7 +46,7 @@ pub enum BootstrapError {
     #[error("Store pull: {0}")]
     StorePull(#[from] crate::sync::store_pull::StorePullError),
     #[error("Store device registration: {0}")]
-    StoreRegistration(#[from] crate::sync::store_registration::StoreRegistrationError),
+    StoreRegistration(#[from] crate::sync::store::StoreRegistrationError),
     #[error("Store device join: {0}")]
     DeviceJoin(#[from] crate::DeviceJoinError),
     #[error("storage: {0}")]
@@ -1211,7 +1211,7 @@ pub(crate) async fn open_db_and_pull(
         let membership = membership.chain.as_ref().ok_or_else(|| {
             BootstrapError::Membership("Owner recovery requires resolved membership".to_string())
         })?;
-        Box::pin(crate::sync::store_registration::recover_owner_device_merge(
+        Box::pin(crate::sync::store::recover_owner_device(
             &db,
             storage,
             identity_signer,

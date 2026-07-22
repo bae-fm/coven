@@ -22,12 +22,21 @@ pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(crate) mod pull;
+mod registration;
 pub(crate) mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
 pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub use registration::ensure_active_registration as ensure_active_registration_for_test;
+pub(crate) use registration::{
+    bootstrap_pending_device, ensure_active_registration, install_existing_founder_device,
+    prepare_registration_for_origin,
+};
+pub use registration::{recover_owner_device, StoreRegistrationError};
 pub use snapshot::load_store_snapshot_ref;
 
 enum StoreLoadError {

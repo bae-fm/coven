@@ -919,7 +919,7 @@ mod tests {
         )
         .await
         .expect("create snapshot test Store");
-        crate::sync::store_registration::ensure_active_registration(db, storage)
+        crate::sync::store::ensure_active_registration(db, storage)
             .await
             .expect("activate snapshot test registration");
         let root_ref = db

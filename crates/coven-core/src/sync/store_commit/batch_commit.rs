@@ -3,7 +3,7 @@ use super::operation_refs::{
     validate_commit_acknowledgement, validate_device_exclusion_refs,
     validate_device_join_attempt_decision_refs, validate_device_join_cleanup_receipt_refs,
     validate_device_join_outcome_refs, validate_device_registration_refs,
-    validate_device_retirement_refs, validate_provider_access_refs,
+    validate_provider_access_refs,
 };
 use super::validation::{
     require_version, validate_commit_order, validate_commit_predecessor_states,
@@ -72,7 +72,6 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(operations) => Some(operations),
             StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -106,24 +105,12 @@ impl StoreBatchCommit {
             .and_then(|operations| operations.acknowledgement.as_ref())
     }
 
-    pub fn self_retirement(&self) -> Option<&StoreDeviceSelfRetirementRef> {
-        match &self.body {
-            StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
-            StoreCommitBody::Operations(_)
-            | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::OwnerPromotionRequest { .. }
-            | StoreCommitBody::AbandonCandidates { .. } => None,
-        }
-    }
-
     pub fn abandoned_candidates(&self) -> &[CandidateCleanupManifest] {
         match &self.body {
             StoreCommitBody::AbandonCandidates { manifests } => manifests,
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
         }
     }
@@ -135,7 +122,6 @@ impl StoreBatchCommit {
             StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization.as_ref()),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -146,7 +132,6 @@ impl StoreBatchCommit {
             StoreCommitBody::ReclaimReceipt { receipt } => Some(receipt.as_ref()),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -192,7 +177,6 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(operations) => operations.device_registrations.as_slice(),
             StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
@@ -215,24 +199,12 @@ impl StoreBatchCommit {
             .map_or(&[], |operations| operations.stream_activations.as_slice())
     }
 
-    pub fn device_retirements(&self) -> &[StoreDeviceSelfRetirementRef] {
-        match &self.body {
-            StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
-            StoreCommitBody::Operations(_)
-            | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
-            StoreCommitBody::AbandonCandidates { .. } => &[],
-        }
-    }
-
     pub fn owner_promotion_request(&self) -> Option<&OwnerPromotionRequest> {
         match &self.body {
             StoreCommitBody::OwnerPromotionRequest { request } => Some(request),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -512,50 +484,6 @@ impl StoreBatchCommit {
             StoreCommitBody::OwnerPromotionRequest {
                 request: Box::new(request),
             },
-            signer,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn signed_with_self_retirement(
-        store_root_hash: ObjectHash,
-        write_id: WriteId,
-        coord: StoreCommitCoord,
-        author_registration: StoreDeviceRegistrationRef,
-        author: &StoreDeviceRegistration,
-        order: StoreCommitOrder,
-        membership_state: StoreMembershipStateRef,
-        device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
-        retirement: StoreDeviceSelfRetirementRef,
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        validate_commit_envelope(
-            store_root_hash,
-            &coord,
-            &author_registration,
-            author,
-            &order,
-            &membership_state,
-            &device_state,
-            membership_authority.as_ref(),
-            signer,
-        )?;
-        validate_device_retirement_refs(
-            std::slice::from_ref(&retirement),
-            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order),
-            &author_registration,
-            &order,
-        )?;
-        Self::finish_signed_body(
-            store_root_hash,
-            write_id,
-            author_registration,
-            order,
-            membership_state,
-            device_state,
-            membership_authority,
-            StoreCommitBody::SelfRetirement { retirement },
             signer,
         )
     }
@@ -1038,7 +966,7 @@ impl StoreBatchCommit {
     ) -> Result<Self, StoreProtocolError> {
         let family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-        validate_commit_body(store_root_hash, &body, family, &author_registration, &order)?;
+        validate_commit_body(store_root_hash, &body, &author_registration)?;
         let candidate_objects = candidate_manifest(family, &body)?;
         let mut commit = Self {
             version: STORE_PROTOCOL_VERSION,
@@ -1164,13 +1092,7 @@ impl StoreBatchCommit {
                 });
             }
         }
-        validate_commit_body(
-            self.store_root_hash,
-            &self.body,
-            family,
-            &self.author_registration,
-            &self.order,
-        )?;
+        validate_commit_body(self.store_root_hash, &self.body, &self.author_registration)?;
         if matches!(self.body, StoreCommitBody::Operations(_)) {
             validate_operation_membership_authority(
                 self.membership_authority.as_ref().ok_or_else(|| {
@@ -1283,9 +1205,7 @@ fn validate_commit_envelope(
 fn validate_commit_body(
     store_root_hash: ObjectHash,
     body: &StoreCommitBody,
-    family: CandidateFamilyId,
     author: &StoreDeviceRegistrationRef,
-    order: &StoreCommitOrder,
 ) -> Result<(), StoreProtocolError> {
     match body {
         StoreCommitBody::Operations(operations) => {
@@ -1315,14 +1235,6 @@ fn validate_commit_body(
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
         StoreCommitBody::ReclaimReceipt { .. } => {}
-        StoreCommitBody::SelfRetirement { retirement } => {
-            validate_device_retirement_refs(
-                std::slice::from_ref(retirement),
-                family,
-                author,
-                order,
-            )?;
-        }
         StoreCommitBody::OwnerPromotionRequest { request } => {
             if request.store_root_hash != store_root_hash
                 || request.promoter_registration != *author
@@ -1508,11 +1420,6 @@ pub(super) fn candidate_manifest(
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
         StoreCommitBody::ReclaimReceipt { .. } => {}
-        StoreCommitBody::SelfRetirement { retirement } => {
-            objects.push(CandidateExclusiveObjectRef::SelfRetirement(
-                retirement.clone(),
-            ));
-        }
         StoreCommitBody::OwnerPromotionRequest { .. }
         | StoreCommitBody::AbandonCandidates { .. } => {}
     }
@@ -1546,9 +1453,6 @@ pub(super) fn candidate_manifest(
             CandidateExclusiveObjectRef::CirclePackage(reference) => {
                 insert_candidate_exact_ref(&mut exact_refs, &reference.package.object)?;
             }
-            CandidateExclusiveObjectRef::SelfRetirement(reference) => {
-                insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
-            }
         }
     }
     Ok(CandidateObjectManifest { family, objects })
@@ -1570,14 +1474,14 @@ fn validate_candidate_object_path(
     family: CandidateFamilyId,
     candidate: &CandidateExclusiveObjectRef,
 ) -> Result<(), StoreProtocolError> {
-    let (expected, object) = match candidate {
+    match candidate {
         CandidateExclusiveObjectRef::StorePackage(reference) => {
             if reference.candidate_family != family {
                 return Err(StoreProtocolError::Malformed(
                     "Store package candidate family differs from its manifest".to_string(),
                 ));
             }
-            return Ok(());
+            Ok(())
         }
         CandidateExclusiveObjectRef::CirclePackage(reference) => {
             if reference.package.candidate_family != family {
@@ -1585,31 +1489,13 @@ fn validate_candidate_object_path(
                     "Circle package candidate family differs from its manifest".to_string(),
                 ));
             }
-            return Ok(());
+            Ok(())
         }
         CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
             validate_circle_access_ref(*circle_id, family, access)?;
-            return Ok(());
+            Ok(())
         }
-        CandidateExclusiveObjectRef::SelfRetirement(reference) => (
-            format!(
-                "{}.json",
-                device_self_retirement_semantic_prefix(
-                    family,
-                    &reference.target.device_id,
-                    reference.retirement_hash,
-                )
-            ),
-            &reference.object,
-        ),
-    };
-    if object.slot().logical_key() != expected {
-        return Err(StoreProtocolError::RelocatedCandidateObject {
-            expected,
-            actual: object.slot().logical_key().to_string(),
-        });
     }
-    Ok(())
 }
 
 fn validate_circle_access_ref(

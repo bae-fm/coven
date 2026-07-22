@@ -3996,13 +3996,11 @@ mod tests {
     use crate::storage::cloud::ObjectSlot;
     use crate::sync::storage::{ProviderDeviceBinding, ProviderPrincipalId};
     use crate::sync::store_commit::{
-        device_self_retirement_semantic_prefix, membership_entry_semantic_prefix,
-        membership_head_semantic_prefix, membership_resolution_semantic_prefix,
-        registration_semantic_prefix, CandidateFamilyId, CommitFrontier, DeviceStreamAnchor,
-        GrantStreamAnchor, ResolvedStoreDeviceState, StoreCommitOrder, StoreCreationId,
-        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceSelfRetirement,
-        StoreDeviceSelfRetirementRef, StoreDeviceStateRef, StoreHistoryCut, StoreRootRef,
-        StreamActivation,
+        membership_entry_semantic_prefix, membership_head_semantic_prefix,
+        membership_resolution_semantic_prefix, registration_semantic_prefix, CommitFrontier,
+        DeviceStreamAnchor, GrantStreamAnchor, ResolvedStoreDeviceState, StoreCreationId,
+        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+        StoreRootRef, StreamActivation,
     };
 
     fn key() -> UserKeypair {
@@ -4736,51 +4734,6 @@ mod tests {
                 sources: 13,
                 maximum: 12,
             })
-        ));
-    }
-
-    #[test]
-    fn self_retirement_signature_cannot_retire_another_identity_registration() {
-        let root = test_root("follower-registration-negatives");
-        let follower = key();
-        let outsider = key();
-        let (follower_registration, _) = registration(&root, "negative-follower", &follower);
-        let (outsider_registration, outsider_ref) =
-            registration(&root, "negative-outsider", &outsider);
-        let order = StoreCommitOrder {
-            seq: 1,
-            predecessor: None,
-            dependencies: BTreeMap::new(),
-        };
-        let write_id = crate::WriteId::from_generated("foreign-retirement".to_string());
-        let family =
-            CandidateFamilyId::derive(root.store_root_hash, &outsider_ref, &write_id, &order);
-        let retirement = StoreDeviceSelfRetirement::signed(
-            root.store_root_hash,
-            family,
-            outsider_ref,
-            StoreHistoryCut(BTreeMap::new()),
-            &follower_registration.device_signer(&follower).unwrap(),
-        )
-        .unwrap();
-        let bytes = retirement.to_bytes();
-        let reference = StoreDeviceSelfRetirementRef::from_retirement(
-            &retirement,
-            exact(
-                format!(
-                    "{}.json",
-                    device_self_retirement_semantic_prefix(
-                        family,
-                        &outsider_registration.device_id,
-                        retirement.retirement_hash(),
-                    )
-                ),
-                &bytes,
-            ),
-        );
-        assert!(matches!(
-            StoreDeviceSelfRetirement::parse_at(&bytes, &reference, &outsider_registration),
-            Err(crate::sync::store_commit::StoreProtocolError::InvalidSignature)
         ));
     }
 

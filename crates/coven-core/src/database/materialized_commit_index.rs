@@ -621,11 +621,6 @@ impl Database {
                             .to_string(),
                     ));
                 }
-                LocalDeviceRegistrationState::Retired { .. } => {
-                    return Err(DbError::Message(
-                        "retired local registration cannot be activated again".to_string(),
-                    ));
-                }
             }
         }
         Ok(())

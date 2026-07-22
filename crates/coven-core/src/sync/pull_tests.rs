@@ -657,7 +657,7 @@ async fn make_test_root_remote(
     root_id: &str,
 ) {
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store_registration::ensure_active_registration(db, &storage.storage)
+    crate::sync::store::ensure_active_registration(db, &storage.storage)
         .await
         .expect("activate exact fixture writer");
     let hlc = crate::sync::hlc::Hlc::new("blob-fixture".to_string());

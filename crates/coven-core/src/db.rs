@@ -414,14 +414,6 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            local_store_device_retirement,
-            "
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    payload BLOB NOT NULL,
-    published INTEGER NOT NULL CHECK (published IN (0, 1))
-"
-        );
-        $visit!(
             local_store_founder_graph,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

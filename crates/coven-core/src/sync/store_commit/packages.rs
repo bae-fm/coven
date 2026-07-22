@@ -622,7 +622,6 @@ pub enum CandidateExclusiveObjectRef {
         circle_id: CircleId,
         access: CircleAccessObjectRef,
     },
-    SelfRetirement(StoreDeviceSelfRetirementRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -708,9 +707,6 @@ pub enum StoreCommitBody {
     },
     ReclaimReceipt {
         receipt: Box<crate::sync::store_reclaim::ReclaimReceiptRef>,
-    },
-    SelfRetirement {
-        retirement: StoreDeviceSelfRetirementRef,
     },
     OwnerPromotionRequest {
         request: Box<OwnerPromotionRequest>,

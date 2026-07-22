@@ -76,15 +76,13 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     )
     .await;
 
-    let error = coven_core::sync::store_registration::ensure_active_registration(
-        &opened_db,
-        &store.storage,
-    )
-    .await
-    .expect_err("an existing Store root cannot authorize another Founder registration");
+    let error =
+        coven_core::sync::store::ensure_active_registration_for_test(&opened_db, &store.storage)
+            .await
+            .expect_err("an existing Store root cannot authorize another Founder registration");
     assert!(matches!(
         error,
-        coven_core::sync::store_registration::StoreRegistrationError::ActivationRequired
+        coven_core::sync::store::StoreRegistrationError::ActivationRequired
     ));
     assert_eq!(store.home.exact_create_count(), creates_before);
     assert_eq!(

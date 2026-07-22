@@ -152,18 +152,14 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
 }
 
 pub(super) fn select_author_exclusion_activation_locator(
-    terminals: &[crate::sync::store_commit::StoreDeviceTerminalRef],
+    terminals: &[crate::sync::store_commit::StoreDeviceExclusionRef],
     expected_stream: &crate::sync::causal_grants::AuthorStreamId,
     sequence: u64,
     mut load: impl FnMut(
         &crate::sync::store_commit::StoreDeviceExclusionRef,
     ) -> Result<AuthorExclusionActivationLocator, DbError>,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-    for terminal in terminals {
-        let crate::sync::store_commit::StoreDeviceTerminalRef::Excluded(exclusion) = terminal
-        else {
-            continue;
-        };
+    for exclusion in terminals {
         let locator = load(exclusion)?;
         let excluded_by_this_terminal = match locator.accepted_cut().get(expected_stream) {
             Some(reference) => sequence > reference.coord.sequence(),

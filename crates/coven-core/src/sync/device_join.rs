@@ -2112,7 +2112,7 @@ pub fn prepare_device_registration_request<'a>(
                 }
             }
         };
-        let (registration, _) = crate::sync::store_registration::prepare_registration_for_origin(
+        let (registration, _) = crate::sync::store::prepare_registration_for_origin(
             storage,
             identity_signer,
             approval.request.offer.store_root.clone(),
@@ -2468,7 +2468,7 @@ pub fn bootstrap_pending_device<'a>(
             &verified_attempt.value.membership,
         ))
         .await?;
-        let proof = Box::pin(crate::sync::store_registration::bootstrap_pending_device(
+        let proof = Box::pin(crate::sync::store::bootstrap_pending_device(
             db,
             storage,
             identity_signer,
@@ -5715,7 +5715,7 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Object(#[from] crate::sync::store_objects::StoreObjectError),
     #[error(transparent)]
-    Registration(#[from] crate::sync::store_registration::StoreRegistrationError),
+    Registration(#[from] crate::sync::store::StoreRegistrationError),
     #[error(transparent)]
     Pull(#[from] crate::sync::store_pull::StorePullError),
     #[error(transparent)]

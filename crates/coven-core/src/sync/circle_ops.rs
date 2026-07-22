@@ -1109,7 +1109,7 @@ pub enum CircleOperationError {
     #[error("Store publication: {0}")]
     StoreOutbound(#[from] super::store::StoreError),
     #[error("Store device registration: {0}")]
-    StoreRegistration(#[from] super::store_registration::StoreRegistrationError),
+    StoreRegistration(#[from] super::store::StoreRegistrationError),
     #[error("circles require opaque cloud storage")]
     BrowsableStorage,
     #[error("circle operation journal: {0}")]
@@ -1136,7 +1136,7 @@ pub(crate) async fn create_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleId, CircleOperationError> {
-    super::store_registration::ensure_active_registration(db, storage).await?;
+    super::store::ensure_active_registration(db, storage).await?;
     let journal = Box::pin(prepare_circle_operation(
         db,
         storage,
@@ -1162,7 +1162,7 @@ pub(crate) async fn rename_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    super::store_registration::ensure_active_registration(db, storage).await?;
+    super::store::ensure_active_registration(db, storage).await?;
     let identity_pubkey = keys::public_key_hex(signer);
     let (current, activation_commit_ref) = db
         .circle_authoring_context(circle_id, &identity_pubkey)

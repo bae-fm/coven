@@ -1088,7 +1088,6 @@ fn operations_commit_uses_the_closed_body_and_signed_manifest_shape() {
     assert!(value.get("package").is_none());
     assert!(value.get("store_package").is_none());
     assert!(value.get("device_registrations").is_none());
-    assert!(value.get("device_retirements").is_none());
     assert!(value.get("circle_controls").is_none());
     assert!(value.get("circle_packages").is_none());
     let operations = value

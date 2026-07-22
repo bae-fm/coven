@@ -485,35 +485,6 @@ pub(crate) async fn load_commit_registrations_with_root(
         .await?;
         registrations.push((registration, authority));
     }
-    for retirement in commit.device_retirements() {
-        if retirement.target != commit.author_registration {
-            return Err(RegistrationLoadError::Invalid(
-                "self-retirement targets a different exact registration".to_string(),
-            ));
-        }
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreDeviceSelfRetirement,
-        );
-        let bytes = storage
-            .read_protocol_object(
-                &context,
-                &retirement.object,
-                &super::store_commit::device_self_retirement_semantic_prefix(
-                    commit.candidate_family(),
-                    &retirement.target.device_id,
-                    retirement.retirement_hash,
-                ),
-            )
-            .await
-            .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
-        super::store_commit::StoreDeviceSelfRetirement::parse_at(
-            &bytes,
-            retirement,
-            activating_author,
-        )
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    }
     Ok(registrations)
 }
 

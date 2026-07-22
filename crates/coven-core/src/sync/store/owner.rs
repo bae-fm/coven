@@ -361,14 +361,6 @@ impl AuthorizedStore<'_> {
         Ok(self)
     }
 
-    pub(crate) async fn ensure_active_registration(&self) -> Result<(), SyncCycleFailure> {
-        crate::sync::store_registration::ensure_active_registration(self.db(), self.storage())
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("publish Store device registration", error)
-            })
-    }
-
     pub(crate) async fn gc_tombstones(
         &self,
         cloud_home: &dyn CloudHome,

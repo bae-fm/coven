@@ -303,11 +303,6 @@ impl Database {
                 .activate_registration(activation.registration.clone(), None)
                 .map_err(|error| DbError::Message(error.to_string()))?;
         }
-        for retirement in commit.device_retirements() {
-            device_state = device_state
-                .self_retire(retirement.clone())
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
         let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
             let crate::sync::store_commit::StreamActivation::GrantAuthorized {
                 author_registration,

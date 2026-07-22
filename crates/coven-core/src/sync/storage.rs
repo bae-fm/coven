@@ -19,7 +19,6 @@ pub(crate) enum ProtectedObjectDomain {
     StoreHead,
     StoreAck,
     StoreDeviceRegistration,
-    StoreDeviceSelfRetirement,
     DeviceJoinAttempt,
     DeviceJoinOutcome,
     DeviceJoinAbandonment,
@@ -211,14 +210,6 @@ impl ProtectedObjectDomain {
             Self::StoreDeviceRegistration => ProtocolObjectMetadata {
                 aad_label: b"store-device-registration",
                 path: ProtocolPathRule::StoreDeviceRegistration,
-                extension: ".json",
-            },
-            Self::StoreDeviceSelfRetirement => ProtocolObjectMetadata {
-                aad_label: b"store-device-self-retirement",
-                path: ProtocolPathRule::StoreCandidate {
-                    kind: "device-self-retirements",
-                    component_count: 6,
-                },
                 extension: ".json",
             },
             Self::DeviceJoinAttempt => ProtocolObjectMetadata {
@@ -493,8 +484,6 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
     pub const StoreDeviceRegistration: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
-    pub const StoreDeviceSelfRetirement: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceSelfRetirement);
     pub const DeviceJoinAttempt: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAttempt);
     pub const DeviceJoinOutcome: SignedStoreProtocolObjectDomain =
@@ -1378,11 +1367,6 @@ mod tests {
                 cross_domain: "store-v1/device-join-attempts/attempt",
             },
             DomainPathCase {
-                domain: ProtectedObjectDomain::StoreDeviceSelfRetirement,
-                valid: &["store-v1/candidates/family/device-self-retirements/device/hash"],
-                cross_domain: "store-v1/candidates/family/packages/device/1/hash",
-            },
-            DomainPathCase {
                 domain: ProtectedObjectDomain::DeviceJoinAttempt,
                 valid: &["store-v1/device-join-attempts/attempt"],
                 cross_domain: "store-v1/device-join-outcomes/attempt",
@@ -1575,12 +1559,6 @@ mod tests {
             (
                 ProtectedObjectDomain::StoreCommit,
                 "store-v1/candidates/family/commits/device/1/hash",
-                1,
-                3,
-            ),
-            (
-                ProtectedObjectDomain::StoreDeviceSelfRetirement,
-                "store-v1/candidates/family/device-self-retirements/device/hash",
                 1,
                 3,
             ),

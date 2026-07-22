@@ -34,7 +34,7 @@ async fn initialize(db: &Database, storage: &CloudSyncStorage, signer: &UserKeyp
     crate::sync::store_protocol_root::create_store(db, storage, "ack-exact-store", signer)
         .await
         .expect("create acknowledgement test Store");
-    crate::sync::store_registration::ensure_active_registration(db, storage)
+    crate::sync::store::ensure_active_registration(db, storage)
         .await
         .expect("activate acknowledgement test registration");
 }

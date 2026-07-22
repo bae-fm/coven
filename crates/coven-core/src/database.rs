@@ -179,7 +179,7 @@ pub(crate) use write_models::{
     TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
 };
 pub(crate) use write_publication_records::{
-    CandidateCleanupObject, LocalRetirementMaterialization, MergeCandidateAbandonmentPreparation,
+    CandidateCleanupObject, MergeCandidateAbandonmentPreparation,
     OwnedVerifiedMergeMaterialization, PreparedWriteMaterialization, RetainedPackageApplication,
     StoreWritePreparation, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };

@@ -957,21 +957,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             )
             .expect("load activated recovery registration after config failure")
     };
-    let failed_device_id: crate::sync::store_commit::StoreDeviceId = failed_registration
-        .0
-        .parse()
-        .expect("parse recovered Store device id");
     let candidate_prefix = "store-v1/candidates/";
-    let retirement_path_fragment = format!("/device-self-retirements/{failed_device_id}/");
-    assert!(
-        cloud
-            .list(candidate_prefix)
-            .await
-            .expect("list recovery retirement objects after config failure")
-            .iter()
-            .all(|object| !object.contains(&retirement_path_fragment)),
-        "config failure must not retire the recovery identity reused by retry",
-    );
     let candidates_after_failure = cloud
         .list(candidate_prefix)
         .await
@@ -1073,7 +1059,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     let retried_registration = {
         let connection =
             rusqlite::Connection::open(store_dir.db_path()).expect("open retried restore database");
-        let registration = connection
+        connection
             .query_row(
                 "SELECT r.device_id, r.registration_bytes, a.activation_authority \
                  FROM local_store_device_registration r \
@@ -1088,16 +1074,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
                     ))
                 },
             )
-            .expect("load retried recovery registration");
-        let retirement_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM local_store_device_retirement",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count local retirement rows after retry");
-        assert_eq!(retirement_count, 0);
-        registration
+            .expect("load retried recovery registration")
     };
     assert_eq!(retried_registration, failed_registration);
     assert_eq!(
@@ -1106,16 +1083,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             .await
             .expect("list candidate objects after retry"),
         candidates_after_failure,
-        "retry must reuse the recovery commit without publishing a retirement commit",
-    );
-    assert!(
-        cloud
-            .list(candidate_prefix)
-            .await
-            .expect("list recovery retirement objects after retry")
-            .iter()
-            .all(|object| !object.contains(&retirement_path_fragment)),
-        "retry must not publish a recovery retirement object",
+        "retry must reuse the recovery commit",
     );
 }
 

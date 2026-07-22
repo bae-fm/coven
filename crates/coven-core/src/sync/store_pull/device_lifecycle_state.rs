@@ -174,9 +174,6 @@ pub(crate) fn apply_verified_device_lifecycle(
             )?;
         }
     }
-    for retirement in commit.device_retirements() {
-        state = state.self_retire(retirement.clone())?;
-    }
     if let Some((grant_id, activation)) = owner_recovery {
         state = state.activate_owner_recovery(grant_id, activation)?;
     }

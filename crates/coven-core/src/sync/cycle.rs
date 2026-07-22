@@ -142,7 +142,7 @@ mod sync_cycle_failure_tests {
 
     #[test]
     fn registration_transport_source_is_offline() {
-        let error = super::super::store_registration::StoreRegistrationError::Object(
+        let error = super::super::store::StoreRegistrationError::Object(
             super::super::store_objects::StoreObjectError::Storage(
                 super::super::storage::StorageError::Storage("provider unavailable".to_string()),
             ),
@@ -162,7 +162,7 @@ mod sync_cycle_failure_tests {
 
     #[test]
     fn registration_configuration_source_is_failed() {
-        let error = super::super::store_registration::StoreRegistrationError::Object(
+        let error = super::super::store::StoreRegistrationError::Object(
             super::super::store_objects::StoreObjectError::Storage(
                 super::super::storage::StorageError::Configuration("missing bucket".to_string()),
             ),
@@ -1139,14 +1139,9 @@ pub async fn init_sync_over_storage(
         && store_protocol_root.descriptor.founder_pubkey
             == crate::keys::public_key_hex(&user_keypair)
     {
-        super::store_registration::install_existing_founder_device(
-            db,
-            &storage,
-            &store_root_ref,
-            &user_keypair,
-        )
-        .await
-        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+        super::store::install_existing_founder_device(db, &storage, &store_root_ref, &user_keypair)
+            .await
+            .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
         device_id = db
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await

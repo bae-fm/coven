@@ -299,11 +299,6 @@ impl Database {
                     }
                     return Ok(());
                 }
-                LocalDeviceRegistrationState::Retired { .. } => {
-                    return Err(DbError::Message(
-                        "founder graph cannot complete through a retired local registration".into(),
-                    ));
-                }
             }
             install_store_root_authority_on(&tx, &root, &graph.root.bytes)?;
             let activation = serde_json::to_string(
@@ -459,11 +454,6 @@ impl Database {
                 LocalDeviceRegistrationState::Activated { .. } => {
                     return Err(DbError::Message(
                         "activated founder graph cannot be rolled back".to_string(),
-                    ));
-                }
-                LocalDeviceRegistrationState::Retired { .. } => {
-                    return Err(DbError::Message(
-                        "retired founder graph cannot be rolled back".to_string(),
                     ));
                 }
             }

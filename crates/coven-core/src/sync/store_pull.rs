@@ -86,7 +86,7 @@ pub enum HeldStorePositionReason {
         target_cut: StoreHistoryCut,
     },
     InactiveDevice {
-        terminals: Vec<super::store_commit::StoreDeviceTerminalRef>,
+        terminals: Vec<super::store_commit::StoreDeviceExclusionRef>,
         accepted_cut: StoreHistoryCut,
     },
     InvalidChangeset(String),

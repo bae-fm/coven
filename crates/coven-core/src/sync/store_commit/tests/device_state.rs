@@ -1,133 +1,6 @@
 use super::*;
 use crate::sync::store_commit::device_state::merge_device_status;
 
-#[test]
-fn self_retirement_is_exact_commit_state_and_dominates_active_merge_state() {
-    let fixture = fixture();
-    let write_id = WriteId::from_generated("retire-founder".to_string());
-    let order = fixture.commit.order.clone();
-    let candidate_family = CandidateFamilyId::derive(
-        fixture.root_ref.store_root_hash,
-        &fixture.registration_ref,
-        &write_id,
-        &order,
-    );
-    let retiring_cut = order.predecessor_cut().expect("derive retiring cut");
-    let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let retirement = StoreDeviceSelfRetirement::signed(
-        fixture.root_ref.store_root_hash,
-        candidate_family,
-        fixture.registration_ref.clone(),
-        retiring_cut,
-        &device_signer,
-    )
-    .unwrap();
-    let retirement_bytes = retirement.to_bytes();
-    let retirement_ref = StoreDeviceSelfRetirementRef::from_retirement(
-        &retirement,
-        exact(
-            format!(
-                "{}.json",
-                device_self_retirement_semantic_prefix(
-                    candidate_family,
-                    &fixture.registration_ref.device_id,
-                    retirement.retirement_hash(),
-                )
-            ),
-            &retirement_bytes,
-        ),
-    );
-    assert_eq!(
-        StoreDeviceSelfRetirement::parse_at(
-            &retirement_bytes,
-            &retirement_ref,
-            &fixture.registration,
-        )
-        .unwrap(),
-        retirement
-    );
-    let commit = StoreBatchCommit::signed_with_self_retirement(
-        fixture.root_ref.store_root_hash,
-        write_id,
-        fixture.commit_ref.coord.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        order,
-        fixture.commit.membership_state.clone(),
-        fixture.commit.device_state.clone(),
-        None,
-        retirement_ref.clone(),
-        &device_signer,
-    )
-    .unwrap();
-    assert_eq!(
-        commit.device_retirements(),
-        std::slice::from_ref(&retirement_ref)
-    );
-    let commit_bytes = commit.to_bytes();
-    let commit_ref = StoreBatchCommitRef::from_commit(
-        &commit,
-        fixture.commit_ref.coord.clone(),
-        exact(
-            format!(
-                "{}.json",
-                commit_semantic_prefix(
-                    commit.candidate_family(),
-                    &fixture.commit_ref.coord.stream_id.to_string(),
-                    commit.seq(),
-                    commit.commit_hash(),
-                )
-            ),
-            &commit_bytes,
-        ),
-    )
-    .unwrap();
-    let mut remotes = crate::sync::remote_object::CandidateObjectGraph::from_commit(&commit)
-        .unwrap()
-        .close(
-            &commit,
-            &commit_ref,
-            vec![crate::sync::remote_object::CandidateObjectMaterial {
-                object: retirement_ref.object.clone(),
-                canonical_semantic_bytes: retirement_bytes.clone(),
-                stored_bytes: retirement_bytes.clone(),
-            }],
-        )
-        .unwrap();
-    assert_eq!(remotes.len(), 1);
-    remotes[0].mark_uploaded_verified().unwrap();
-    let activated = remotes.pop().unwrap().into_activated(&commit_ref).unwrap();
-    assert!(matches!(
-        activated,
-        crate::sync::remote_object::RemoteObjectRecord::RetainedAuthority(record)
-            if matches!(
-                &record.identity.domain,
-                crate::sync::remote_object::RetainedAuthorityObjectDomain::SelfRetirement { reference }
-                    if reference == &retirement_ref
-            )
-    ));
-
-    let active = ResolvedStoreDeviceState::founder(
-        &fixture.root_ref,
-        fixture.registration_ref,
-        &fixture.root.descriptor.founder_pubkey,
-        fixture.root.descriptor.founder_grant.clone(),
-        &fixture.root.descriptor.founder_recovery,
-    )
-    .unwrap();
-    let retired = active.clone().self_retire(retirement_ref).unwrap();
-    let merged = ResolvedStoreDeviceState::merge([active, retired]).unwrap();
-    assert!(matches!(
-        merged
-            .devices
-            .values()
-            .next()
-            .expect("founder device")
-            .status,
-        StoreDeviceStatus::Inactive { .. }
-    ));
-}
-
 fn merge_cut_reference(
     stream_byte: u8,
     sequence: u64,
@@ -150,21 +23,29 @@ fn merge_cut_reference(
     )
 }
 
-fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceTerminalRef {
-    StoreDeviceTerminalRef::SelfRetirement(StoreDeviceSelfRetirementRef {
-        candidate_family: fixture.commit.candidate_family(),
-        target: fixture.registration_ref.clone(),
-        retiring_cut: StoreHistoryCut(BTreeMap::new()),
-        retirement_hash: ObjectHash::digest(&[identity_byte]),
+fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceExclusionRef {
+    let proposal_id =
+        StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(&[identity_byte]));
+    StoreDeviceExclusionRef {
+        proposal: StoreDeviceExclusionProposalRef {
+            proposal_id,
+            target: fixture.registration_ref.clone(),
+            proposal_hash: ObjectHash::digest(&[identity_byte, 1]),
+            object: exact(
+                format!("test/terminal-proposal/{identity_byte}.json"),
+                &[identity_byte, 1],
+            ),
+        },
+        outcome_hash: ObjectHash::digest(&[identity_byte, 2]),
         object: exact(
             format!("test/terminal/{identity_byte}.json"),
-            &[identity_byte],
+            &[identity_byte, 2],
         ),
-    })
+    }
 }
 
 fn inactive_status(
-    terminals: Vec<StoreDeviceTerminalRef>,
+    terminals: Vec<StoreDeviceExclusionRef>,
     cut: impl IntoIterator<Item = (AuthorStreamId, StoreBatchCommitRef)>,
 ) -> StoreDeviceStatus {
     StoreDeviceStatus::Inactive {
@@ -416,7 +297,7 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
             .expect("excluded record")
             .status,
         StoreDeviceStatus::Inactive { terminals, accepted_cut: cut }
-            if terminals == &vec![StoreDeviceTerminalRef::Excluded(exclusion_ref)]
+            if terminals == &vec![exclusion_ref]
                 && cut == &accepted_cut
     ));
 }

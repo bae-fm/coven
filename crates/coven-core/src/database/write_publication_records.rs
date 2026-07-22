@@ -479,12 +479,6 @@ impl<'a> VerifiedMergeMaterialization<'a> {
     }
 }
 
-pub(crate) struct LocalRetirementMaterialization {
-    pub(crate) head: StoreDeviceHead,
-    pub(crate) head_object: ExactObjectRef,
-    pub(crate) history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum MergeAbandonmentOutcome {

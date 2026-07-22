@@ -2171,9 +2171,6 @@ pub(crate) enum CandidateExclusiveObjectDomain {
         circle_id: CircleId,
         reference: super::store_commit::CircleAccessEnvelopeObjectRef,
     },
-    SelfRetirement {
-        reference: super::store_commit::StoreDeviceSelfRetirementRef,
-    },
 }
 
 impl CandidateExclusiveObjectDomain {
@@ -2187,7 +2184,6 @@ impl CandidateExclusiveObjectDomain {
             Self::CircleAccessLeaf { family, .. } | Self::CircleAccessEnvelope { family, .. } => {
                 *family
             }
-            Self::SelfRetirement { reference } => reference.candidate_family,
         }
     }
 
@@ -2200,7 +2196,6 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => &reference.package.object,
             Self::CircleAccessLeaf { reference, .. } => &reference.object,
             Self::CircleAccessEnvelope { reference, .. } => &reference.object,
-            Self::SelfRetirement { reference } => &reference.object,
         }
     }
 
@@ -2216,8 +2211,7 @@ impl CandidateExclusiveObjectDomain {
             | Self::MergeMembershipHead { .. }
             | Self::MergeMembershipWrappedStoreKey { .. }
             | Self::CircleAccessLeaf { .. }
-            | Self::CircleAccessEnvelope { .. }
-            | Self::SelfRetirement { .. } => None,
+            | Self::CircleAccessEnvelope { .. } => None,
         }
     }
 
@@ -2256,11 +2250,6 @@ impl CandidateExclusiveObjectDomain {
                 circle_id: *circle_id,
                 reference: reference.clone(),
             }),
-            Self::SelfRetirement { reference } => {
-                Some(RetainedAuthorityObjectDomain::SelfRetirement {
-                    reference: reference.clone(),
-                })
-            }
             Self::StorePackage { .. } | Self::CirclePackage { .. } => None,
         }
     }
@@ -2324,11 +2313,6 @@ impl CandidateObjectGraph {
                         family: manifest.family,
                         circle_id: *circle_id,
                         reference: access.envelope.clone(),
-                    });
-                }
-                super::store_commit::CandidateExclusiveObjectRef::SelfRetirement(reference) => {
-                    objects.push(CandidateExclusiveObjectDomain::SelfRetirement {
-                        reference: reference.clone(),
                     });
                 }
             }
@@ -2531,9 +2515,6 @@ fn validate_candidate_exclusive_identity(
             canonical_semantic_bytes,
             &identity.object,
         ),
-        CandidateExclusiveObjectDomain::SelfRetirement { reference } => {
-            validate_self_retirement_identity(reference, canonical_semantic_bytes, &identity.object)
-        }
     }
 }
 
@@ -2627,26 +2608,6 @@ fn validate_circle_access_envelope_identity(
         || envelope.control_hash != reference.control_hash
         || envelope.leaf_id != reference.leaf_id
         || envelope.leaf_hash != reference.leaf_hash
-        || reference.object != *object
-    {
-        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-    }
-    Ok(())
-}
-
-fn validate_self_retirement_identity(
-    reference: &super::store_commit::StoreDeviceSelfRetirementRef,
-    canonical_semantic_bytes: &[u8],
-    object: &ExactObjectRef,
-) -> Result<(), RemoteObjectRecordError> {
-    let retirement: super::store_commit::StoreDeviceSelfRetirement =
-        serde_json::from_slice(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-    if retirement.to_bytes() != canonical_semantic_bytes
-        || retirement.candidate_family != reference.candidate_family
-        || retirement.target != reference.target
-        || retirement.retiring_cut != reference.retiring_cut
-        || retirement.retirement_hash() != reference.retirement_hash
         || reference.object != *object
     {
         return Err(RemoteObjectRecordError::StoredReferenceMismatch);
@@ -2837,9 +2798,6 @@ pub(crate) enum RetainedAuthorityObjectDomain {
         circle_id: CircleId,
         reference: super::store_commit::CircleAccessEnvelopeObjectRef,
     },
-    SelfRetirement {
-        reference: super::store_commit::StoreDeviceSelfRetirementRef,
-    },
 }
 
 fn validate_retained_authority_identity(
@@ -3007,13 +2965,6 @@ fn validate_retained_authority_identity(
             canonical_semantic_bytes,
             &identity.object,
         )?,
-        RetainedAuthorityObjectDomain::SelfRetirement { reference } => {
-            validate_self_retirement_identity(
-                reference,
-                canonical_semantic_bytes,
-                &identity.object,
-            )?;
-        }
     }
     Ok(())
 }

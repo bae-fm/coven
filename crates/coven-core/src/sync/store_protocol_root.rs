@@ -604,7 +604,7 @@ async fn prepare_founder_graph(
         creation_id: authority.creation_id,
     };
     let (registration_value, registration_prepared) =
-        super::store_registration::prepare_registration_for_origin(
+        super::store::prepare_registration_for_origin(
             storage,
             signer,
             root_ref.clone(),
@@ -873,11 +873,6 @@ pub async fn create_store(
         crate::database::LocalDeviceRegistrationState::Prepared
         | crate::database::LocalDeviceRegistrationState::Created => true,
         crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
-        crate::database::LocalDeviceRegistrationState::Retired { .. } => {
-            return Err(StoreProtocolRootError::Database(
-                "retired founder graph cannot create a Store".to_string(),
-            ))
-        }
     };
     if rollback_allowed {
         Box::pin(rollback_founder_publication(db, storage, &graph))

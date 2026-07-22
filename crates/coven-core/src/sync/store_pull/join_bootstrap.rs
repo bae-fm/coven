@@ -13,7 +13,6 @@ pub(crate) async fn load_device_join_activation_commit(
         || commit.device_registrations().len() != 1
         || !commit.provider_access_grants().is_empty()
         || !commit.provider_access_withdrawals().is_empty()
-        || !commit.device_retirements().is_empty()
         || !commit.circle_controls().is_empty()
         || !commit.circle_packages().is_empty()
         || commit.store_package().is_some()
