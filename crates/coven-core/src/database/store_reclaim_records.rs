@@ -2,11 +2,11 @@ use crate::database::remote_object_records::record_reclaimed_store_package_on;
 
 use super::*;
 
-pub(super) fn store_reclaim_journal_error(error: StoreReclaimJournalError) -> DbError {
+pub(crate) fn store_reclaim_journal_error(error: StoreReclaimJournalError) -> DbError {
     DbError::Message(error.to_string())
 }
 
-pub(super) fn parse_store_reclaim_operation(
+pub(crate) fn parse_store_reclaim_operation(
     operation_id: ObjectHash,
     raw: &str,
 ) -> Result<DurableStoreReclaimOperation, DbError> {
@@ -25,7 +25,7 @@ pub(super) fn parse_store_reclaim_operation(
     Ok(operation)
 }
 
-pub(super) fn load_store_reclaim_operation_on(
+pub(crate) fn load_store_reclaim_operation_on(
     conn: &Connection,
     operation_id: ObjectHash,
 ) -> Result<Option<DurableStoreReclaimOperation>, DbError> {
@@ -40,7 +40,7 @@ pub(super) fn load_store_reclaim_operation_on(
     .transpose()
 }
 
-pub(super) fn insert_store_reclaim_operation_on(
+pub(crate) fn insert_store_reclaim_operation_on(
     conn: &Connection,
     operation: &DurableStoreReclaimOperation,
 ) -> Result<(), DbError> {
@@ -55,7 +55,7 @@ pub(super) fn insert_store_reclaim_operation_on(
     .map_err(DbError::from)
 }
 
-pub(super) fn update_store_reclaim_operation_on(
+pub(crate) fn update_store_reclaim_operation_on(
     conn: &Connection,
     expected: &DurableStoreReclaimOperation,
     next: &DurableStoreReclaimOperation,
@@ -163,7 +163,7 @@ pub(super) fn record_store_reclaim_activation_on(
                 ..
             } if matches!(
                 &**object,
-                crate::sync::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+                crate::sync::store::DurableStoreReclaimObject::Receipt {
                     receipt_ref,
                     ..
                 } if receipt_ref == receipt
@@ -178,7 +178,7 @@ pub(super) fn record_store_reclaim_activation_on(
                 ..
             } if matches!(
                 &**object,
-                crate::sync::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
+                crate::sync::store::DurableStoreReclaimObject::Receipt {
                     receipt_ref,
                     ..
                 } if receipt_ref == receipt

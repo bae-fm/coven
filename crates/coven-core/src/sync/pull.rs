@@ -35,11 +35,7 @@ pub struct CycleMembership {
     /// the LIST view (an entry is visible as soon as it is listed), distinct from
     /// the committed chain (an entry is committed only once a head certifies it).
     pub listed_entries: Vec<super::membership::MembershipCoord>,
-    pub discovery_proof: MembershipDiscoveryProof,
 }
-
-#[derive(Debug, Clone, Copy)]
-pub struct MembershipDiscoveryProof;
 
 /// Load and anchor the cycle's membership chain once. Every successful listing
 /// is validated; a loader error aborts regardless of owner pin because an
@@ -79,7 +75,6 @@ pub async fn load_cycle_membership(
         chain: Some(chain),
         pinned_owner: Some(owner),
         listed_entries,
-        discovery_proof: MembershipDiscoveryProof,
     })
 }
 

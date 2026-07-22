@@ -75,11 +75,11 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .store_package()
         .expect("target commit has a package")
         .clone();
-    let authorization = crate::sync::store_reclaim::ReclaimAuthorizationRef {
+    let authorization = crate::sync::store::ReclaimAuthorizationRef {
         authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
-        evidence: crate::sync::store_reclaim::ReclaimEvidenceRef {
+        evidence: crate::sync::store::ReclaimEvidenceRef {
             evidence_hash: ObjectHash::digest(b"closed reclaim evidence"),
-            target: Box::new(crate::sync::store_reclaim::StorePackageReclaimTarget {
+            target: Box::new(crate::sync::store::StorePackageReclaimTarget {
                 package: target,
                 activation: target_activation,
             }),
@@ -150,7 +150,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("verify irreversible absence closure");
 
-    let receipt = crate::sync::store_reclaim::ReclaimReceiptRef {
+    let receipt = crate::sync::store::ReclaimReceiptRef {
         receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
         authorization: authorization.clone(),
         object: reclaim_test_object("store-v1/reclaim/receipts/closed.json"),

@@ -285,7 +285,7 @@ pub(super) fn load_reclaimed_store_package_on(
     Ok(Some(reclaimed))
 }
 
-pub(super) fn record_reclaimed_store_package_on(
+pub(crate) fn record_reclaimed_store_package_on(
     conn: &Connection,
     reclaimed: &ReclaimedStorePackage,
 ) -> Result<(), DbError> {

@@ -1,5 +1,6 @@
 mod acknowledgements;
 mod device_exclusion;
+mod reclaim;
 
 use crate::database::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
@@ -24,4 +25,15 @@ impl<'a> StoreDatabase<'a> {
     pub(super) fn new(database: &'a Database) -> Self {
         Self { database }
     }
+}
+
+#[cfg(test)]
+pub(in crate::sync) async fn store_package_is_retained_for_replay_for_test(
+    database: &Database,
+    package: crate::sync::store_commit::StorePackageRef,
+    activation: crate::sync::store_commit::StoreBatchCommitRef,
+) -> Result<bool, DbError> {
+    StoreDatabase::new(database)
+        .store_package_is_retained_for_replay(package, activation)
+        .await
 }

@@ -115,9 +115,7 @@ impl StoreBatchCommit {
         }
     }
 
-    pub fn reclaim_authorization(
-        &self,
-    ) -> Option<&crate::sync::store_reclaim::ReclaimAuthorizationRef> {
+    pub fn reclaim_authorization(&self) -> Option<&crate::sync::store::ReclaimAuthorizationRef> {
         match &self.body {
             StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization.as_ref()),
             StoreCommitBody::Operations(_)
@@ -127,7 +125,7 @@ impl StoreBatchCommit {
         }
     }
 
-    pub fn reclaim_receipt(&self) -> Option<&crate::sync::store_reclaim::ReclaimReceiptRef> {
+    pub fn reclaim_receipt(&self) -> Option<&crate::sync::store::ReclaimReceiptRef> {
         match &self.body {
             StoreCommitBody::ReclaimReceipt { receipt } => Some(receipt.as_ref()),
             StoreCommitBody::Operations(_)
@@ -234,7 +232,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        authorization: crate::sync::store_reclaim::ReclaimAuthorizationRef,
+        authorization: crate::sync::store::ReclaimAuthorizationRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_commit_envelope(
@@ -273,7 +271,7 @@ impl StoreBatchCommit {
         order: StoreCommitOrder,
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
-        receipt: crate::sync::store_reclaim::ReclaimReceiptRef,
+        receipt: crate::sync::store::ReclaimReceiptRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_commit_envelope(

@@ -2,20 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::remote_object::{
-    CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
-};
-use super::storage::{
-    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
-use super::store::operations::PreparedStoreOperationCommit;
-use super::store::StoreError;
-use super::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
-use super::store_reclaim::{
+use super::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef,
 };
+use crate::sync::remote_object::{
+    CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
+};
+use crate::sync::storage::{
+    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
+};
+use crate::sync::store::operations::PreparedStoreOperationCommit;
+use crate::sync::store::StoreError;
+use crate::sync::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -323,7 +323,7 @@ impl ReclaimedStorePackage {
     }
 
     pub(crate) fn object_id(&self) -> ObjectHash {
-        super::remote_object::remote_object_id(&self.authorization().target().object)
+        crate::sync::remote_object::remote_object_id(&self.authorization().target().object)
     }
 
     pub(crate) fn validate(&self) -> Result<(), StoreReclaimJournalError> {
@@ -388,7 +388,7 @@ pub(crate) enum DurableStoreReclaimOperation {
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: ReclaimCommitActivation,
-        target: super::store_commit::StorePackageRef,
+        target: crate::sync::store_commit::StorePackageRef,
     },
     ReceiptCandidate {
         authorization: ReclaimAuthorizationRef,
@@ -580,7 +580,7 @@ fn validate_replacement(
         .reference
         .verify_commit(&losing.candidate.commit)
         .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
-    super::remote_object::CandidateNonactivation::validate_durable_shape(
+    crate::sync::remote_object::CandidateNonactivation::validate_durable_shape(
         &losing.candidate.reference,
         &losing.candidate.commit,
         losing.proof.clone(),
@@ -605,5 +605,5 @@ pub(crate) enum StoreReclaimJournalError {
     #[error(transparent)]
     Outbound(#[from] StoreError),
     #[error(transparent)]
-    Storage(#[from] super::storage::StorageError),
+    Storage(#[from] crate::sync::storage::StorageError),
 }

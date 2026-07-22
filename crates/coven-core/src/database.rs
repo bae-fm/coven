@@ -23,9 +23,14 @@ pub(crate) use crate::database::remote_object_records::load_protocol_inert_objec
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::mark_remote_object_uploaded_on;
 pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
+pub(crate) use crate::database::remote_object_records::record_reclaimed_store_package_on;
 pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
 pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
+pub(crate) use crate::database::store_reclaim_records::{
+    insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
+    parse_store_reclaim_operation, store_reclaim_journal_error, update_store_reclaim_operation_on,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -65,6 +70,10 @@ use crate::sync::retained_replay::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::store::{
+    DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
+    StoreReclaimJournalError,
+};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
     CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
@@ -74,10 +83,6 @@ use crate::sync::store_commit::{
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSnapshotRef,
     StreamActivationId, VerifiedStoreDeviceOperations,
-};
-use crate::sync::store_reclaim_journal::{
-    DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
-    StoreReclaimJournalError,
 };
 use crate::write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteResolution,
@@ -124,7 +129,6 @@ mod store_coordinates;
 mod store_creation_attempts;
 mod store_device_state;
 mod store_reclaim_records;
-mod store_reclamation;
 mod store_write_preparation;
 mod store_write_publication;
 mod stream_activation_records;

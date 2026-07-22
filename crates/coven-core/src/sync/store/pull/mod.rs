@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+use super::reclaim as store_reclaim;
 use super::*;
 use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
@@ -56,7 +57,7 @@ use crate::sync::store_objects::{
 };
 use crate::sync::{
     causal_grants, circle, circle_activation, circle_ops, gate, hlc, membership, membership_ops,
-    provider, remote_object, retained_replay, session, store_commit, store_objects, store_reclaim,
+    provider, remote_object, retained_replay, session, store_commit, store_objects,
 };
 
 mod ancestry;

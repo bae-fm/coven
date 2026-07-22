@@ -875,10 +875,10 @@ async fn reclaim_cycle_packages(
         ),
         Ok(_) => {}
         Err(
-            error @ (super::store_reclaim::StoreReclaimError::NoSnapshot
-            | super::store_reclaim::StoreReclaimError::MissingRegisteredDevice { .. }
-            | super::store_reclaim::StoreReclaimError::MissingAcknowledgement { .. }
-            | super::store_reclaim::StoreReclaimError::StaleAcknowledgement { .. }),
+            error @ (super::store::StoreReclaimError::NoSnapshot
+            | super::store::StoreReclaimError::MissingRegisteredDevice { .. }
+            | super::store::StoreReclaimError::MissingAcknowledgement { .. }
+            | super::store::StoreReclaimError::StaleAcknowledgement { .. }),
         ) => info!(%error, "Store package reclamation is awaiting coverage"),
         Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
     }

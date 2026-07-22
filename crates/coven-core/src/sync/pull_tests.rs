@@ -2398,12 +2398,17 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         })
         .await
         .expect("invent replay ownership index row");
-    assert!(target
-        .store_package_is_retained_for_replay(first_package, first)
+    assert!(
+        crate::sync::store::store_package_is_retained_for_replay_for_test(
+            &target,
+            first_package,
+            first,
+        )
         .await
         .expect_err("invented replay pin must block reclamation validation")
         .to_string()
-        .contains("ownership differs from its exact object closure"));
+        .contains("ownership differs from its exact object closure")
+    );
     assert!(target
         .materialized_frontier()
         .await

@@ -900,7 +900,7 @@ impl Database {
         })
     }
 
-    pub(super) fn load_retained_merge_materialization_on(
+    pub(crate) fn load_retained_merge_materialization_on(
         conn: &Connection,
         stream_id: &str,
         sequence: u64,

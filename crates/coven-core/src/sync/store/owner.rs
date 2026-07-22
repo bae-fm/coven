@@ -27,7 +27,6 @@ struct StoreAccess<'a> {
 pub(crate) struct AuthorizedStore<'a> {
     access: StoreAccess<'a>,
     membership: crate::sync::membership::MembershipChain,
-    discovery_proof: MembershipDiscoveryProof,
 }
 
 impl Store {
@@ -409,28 +408,6 @@ impl AuthorizedStore<'_> {
         )
         .map_err(|error| error.to_string())
     }
-
-    pub(crate) async fn reclaim_packages(
-        &self,
-        device_id: &str,
-        identity: &UserKeypair,
-    ) -> Result<
-        crate::sync::store_reclaim::StoreReclaimResult,
-        crate::sync::store_reclaim::StoreReclaimError,
-    > {
-        crate::sync::store_reclaim::reclaim_store_packages(
-            self.db(),
-            self.storage(),
-            device_id,
-            identity,
-            self.store_root().store_root_hash,
-            crate::sync::store_reclaim::ReclaimMembership {
-                membership: &self.membership,
-                discovery_proof: self.discovery_proof,
-            },
-        )
-        .await
-    }
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
@@ -438,7 +415,6 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
         chain,
         pinned_owner,
         listed_entries: _,
-        discovery_proof,
     } = crate::sync::pull::load_cycle_membership(access.storage, access.db)
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
@@ -455,11 +431,7 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
             );
         }
     };
-    Ok(AuthorizedStore {
-        access,
-        membership,
-        discovery_proof,
-    })
+    Ok(AuthorizedStore { access, membership })
 }
 
 #[cfg(any(test, feature = "test-utils"))]

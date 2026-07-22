@@ -7,7 +7,6 @@ use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{BlobPathScheme, CloudCipherAccess, CloudSyncStorage};
 use super::cycle::SyncCycleFailure;
-use super::pull::MembershipDiscoveryProof;
 use super::storage::SyncStorage;
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 
@@ -24,11 +23,14 @@ pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(crate) mod pull;
+mod reclaim;
 mod registration;
 pub(crate) mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
+#[cfg(test)]
+pub(in crate::sync) use database::store_package_is_retained_for_replay_for_test;
 pub(crate) use device_exclusion::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
@@ -41,6 +43,16 @@ pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
 pub use pull::{
     StorePullError, StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
+};
+pub(crate) use reclaim::journal::{
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
+    ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
+};
+pub use reclaim::{
+    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
+    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
+    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef,
+    StorePackageReclaimClaim, StorePackageReclaimTarget, StoreReclaimError, StoreReclaimResult,
 };
 #[cfg(feature = "test-utils")]
 #[doc(hidden)]

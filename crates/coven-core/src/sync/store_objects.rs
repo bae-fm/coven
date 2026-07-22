@@ -50,13 +50,13 @@ pub struct VerifiedDeviceExclusionOutcome {
 
 #[derive(Debug)]
 pub struct VerifiedReclaimAuthorization {
-    pub authorization: VerifiedObject<super::store_reclaim::ReclaimAuthorization>,
-    pub evidence: VerifiedObject<super::store_reclaim::ReclaimEvidence>,
+    pub authorization: VerifiedObject<super::store::ReclaimAuthorization>,
+    pub evidence: VerifiedObject<super::store::ReclaimEvidence>,
 }
 
 #[derive(Debug)]
 pub struct VerifiedReclaimReceipt {
-    pub receipt: VerifiedObject<super::store_reclaim::ReclaimReceipt>,
+    pub receipt: VerifiedObject<super::store::ReclaimReceipt>,
     pub authorization: VerifiedReclaimAuthorization,
     pub executor: StoreDeviceRegistration,
 }
@@ -639,14 +639,14 @@ pub async fn load_store_ack_ref(
 pub async fn load_reclaim_authorization_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
-    reference: &super::store_reclaim::ReclaimAuthorizationRef,
+    reference: &super::store::ReclaimAuthorizationRef,
 ) -> Result<VerifiedReclaimAuthorization, StoreObjectError> {
     let evidence_context = ProtocolObjectContext::store_encrypted(
         store_root.store_root_hash,
         ProtocolObjectDomain::StoreReclaimEvidence,
     );
     let evidence_prefix =
-        super::store_reclaim::reclaim_evidence_semantic_prefix(reference.evidence.evidence_hash);
+        super::store::reclaim_evidence_semantic_prefix(reference.evidence.evidence_hash);
     let expected_evidence = reference.evidence.clone();
     let expected_store_root_hash = store_root.store_root_hash;
     let evidence = load_exact_object(
@@ -656,7 +656,7 @@ pub async fn load_reclaim_authorization_ref(
         &evidence_prefix,
         reference.evidence.evidence_hash,
         move |bytes| {
-            let evidence: super::store_reclaim::ReclaimEvidence = serde_json::from_slice(bytes)
+            let evidence: super::store::ReclaimEvidence = serde_json::from_slice(bytes)
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
             expected_evidence.verify(&evidence)?;
             if evidence.store_root_hash != expected_store_root_hash {
@@ -674,7 +674,7 @@ pub async fn load_reclaim_authorization_ref(
         ProtocolObjectDomain::StoreReclaimAuthorization,
     );
     let authorization_prefix =
-        super::store_reclaim::reclaim_authorization_semantic_prefix(reference.authorization_hash);
+        super::store::reclaim_authorization_semantic_prefix(reference.authorization_hash);
     let owner_pubkey = evidence.value.author_pubkey.clone();
     let expected_authorization = reference.clone();
     let expected_store_root_hash = store_root.store_root_hash;
@@ -685,7 +685,7 @@ pub async fn load_reclaim_authorization_ref(
         &authorization_prefix,
         reference.authorization_hash,
         move |bytes| {
-            let authorization: super::store_reclaim::ReclaimAuthorization =
+            let authorization: super::store::ReclaimAuthorization =
                 serde_json::from_slice(bytes)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
             expected_authorization.verify(&authorization, &owner_pubkey)?;
@@ -717,7 +717,7 @@ pub async fn load_reclaim_authorization_ref(
 pub async fn load_reclaim_receipt_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
-    reference: &super::store_reclaim::ReclaimReceiptRef,
+    reference: &super::store::ReclaimReceiptRef,
 ) -> Result<VerifiedReclaimReceipt, StoreObjectError> {
     let authorization = Box::pin(load_reclaim_authorization_ref(
         storage,
@@ -729,11 +729,11 @@ pub async fn load_reclaim_receipt_ref(
         store_root.store_root_hash,
         ProtocolObjectDomain::StoreReclaimReceipt,
     );
-    let prefix = super::store_reclaim::reclaim_receipt_semantic_prefix(reference.receipt_hash);
+    let prefix = super::store::reclaim_receipt_semantic_prefix(reference.receipt_hash);
     let bytes = storage
         .read_protocol_object(&context, &reference.object, &prefix)
         .await?;
-    let unverified: super::store_reclaim::ReclaimReceipt =
+    let unverified: super::store::ReclaimReceipt =
         serde_json::from_slice(&bytes).map_err(|error| StoreObjectError::InvalidObject {
             semantic_prefix: prefix.clone(),
             key: reference.object.slot().logical_key().to_string(),
