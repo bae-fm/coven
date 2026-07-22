@@ -2,15 +2,15 @@ use super::*;
 use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::sync::store::package_preparation::{close_prepared_packages, prepare_partition_package};
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
     StoreCommitOrder, StoreDeviceHead, StorePackageInput, SuccessorLink,
 };
 use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::{
-    close_prepared_packages, prepare_partition_package, StoreOutboundError,
-};
+
+use super::StoreError;
 
 use super::operations::{
     blocked_status, load_local_store_authority, next_store_sequence, successor_store_sequence,
@@ -25,7 +25,7 @@ pub(crate) async fn prepare_store_write(
     keypair: &UserKeypair,
     store_dir: &StoreDir,
     membership: &MembershipChain,
-) -> Result<bool, StoreOutboundError> {
+) -> Result<bool, StoreError> {
     let Some(PreparedStoreWrite {
         write_id,
         changeset,
@@ -38,18 +38,18 @@ pub(crate) async fn prepare_store_write(
         return Ok(false);
     };
     if !changeset.is_empty() && inverse_changeset.is_empty() {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "shared Store write has no inverse changeset".to_string(),
         ));
     }
     let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(base.dependencies)
         .map(|frontier| frontier.commits().clone())
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let preparation = async {
         let (root, registration_ref, registration, device_signer) =
             load_local_store_authority(db, device_id, keypair).await?;
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let store_root_hash = root.store_root_hash;
         let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
@@ -77,7 +77,7 @@ pub(crate) async fn prepare_store_write(
             &registration_ref,
         )
         .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let payload = crate::sync::service::prepare_store_payload(
             &blob_facts,
             keypair,
@@ -85,7 +85,7 @@ pub(crate) async fn prepare_store_write(
             &authorization.membership,
         )
         .await
-        .map_err(StoreOutboundError::Preparation)?;
+        .map_err(StoreError::Preparation)?;
         let membership_state = authorization.membership_state;
         let device_state = authorization.device_state_ref;
         let candidate_family =
@@ -209,7 +209,7 @@ pub(crate) async fn prepare_store_write(
             },
             &device_signer,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let commit_prefix = commit_semantic_prefix(
             commit.candidate_family(),
             &stream_id.to_string(),
@@ -230,7 +230,7 @@ pub(crate) async fn prepare_store_write(
             .map_err(StoreObjectError::from)?;
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let successor = super::pull::prepare_merge_history_successor(
             db,
             &root,
@@ -243,10 +243,10 @@ pub(crate) async fn prepare_store_write(
             super::pull::MergeHistorySuccessorEvidence::none(),
         )
         .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let activation = registration
             .store_announcement_activation(&registration_ref)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
             .activation_id();
         let head = StoreDeviceHead::signed(
             store_root_hash,
@@ -260,7 +260,7 @@ pub(crate) async fn prepare_store_write(
             },
             &device_signer,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head_prepared = storage
             .prepare_protocol_object(
                 &head_context,
@@ -275,8 +275,8 @@ pub(crate) async fn prepare_store_write(
             payload.local_cleanup,
             &audience_objects.blobs,
         )
-        .map_err(StoreOutboundError::Preparation)?;
-        Ok::<_, StoreOutboundError>(StoreWritePreparation {
+        .map_err(StoreError::Preparation)?;
+        Ok::<_, StoreError>(StoreWritePreparation {
             write_id: write_id.clone(),
             remote_objects,
             audiences: audience_objects,
@@ -308,8 +308,8 @@ pub(crate) async fn prepare_store_write(
 async fn record_preparation_failure(
     db: &Database,
     write_id: &crate::WriteId,
-    error: &StoreOutboundError,
-) -> Result<(), StoreOutboundError> {
+    error: &StoreError,
+) -> Result<(), StoreError> {
     let Some(block) = blocked_status(error) else {
         return Ok(());
     };
@@ -317,7 +317,7 @@ async fn record_preparation_failure(
         .await
         .map(|_| ())
         .map_err(|status_error| {
-            StoreOutboundError::Database(format!(
+            StoreError::Database(format!(
                 "record blocked status for write {write_id} after {error}: {status_error}"
             ))
         })

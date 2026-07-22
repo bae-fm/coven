@@ -4,7 +4,7 @@ pub(crate) async fn publish_prepared_store_operation(
     db: &Database,
     storage: &dyn SyncStorage,
     prepared: Box<PreparedStoreOperationCommit>,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+) -> Result<StoreOperationPublicationOutcome, StoreError> {
     Box::pin(publish_prepared_store_operation_with_membership_completion(
         db, storage, prepared, None, None,
     ))
@@ -17,13 +17,8 @@ pub(crate) fn publish_prepared_store_membership_operation<'a>(
     prepared: Box<PreparedStoreOperationCommit>,
     membership_objects: crate::database::VerifiedMergeMembershipObjects,
     completion: StoreMembershipJournalCompletion,
-) -> Pin<
-    Box<
-        dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreOutboundError>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
+{
     Box::pin(publish_prepared_store_operation_with_membership_completion(
         db,
         storage,
@@ -39,7 +34,7 @@ async fn publish_prepared_store_operation_with_membership_completion(
     prepared: Box<PreparedStoreOperationCommit>,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+) -> Result<StoreOperationPublicationOutcome, StoreError> {
     publish_prepared(
         db,
         storage,
@@ -89,7 +84,7 @@ impl StoreMembershipJournalCompletion {
     pub(crate) fn remote_object(
         &self,
         object: &ExactObjectRef,
-    ) -> Result<super::remote_object::RemoteObjectRecord, StoreOutboundError> {
+    ) -> Result<super::remote_object::RemoteObjectRecord, StoreError> {
         let remote_objects = match self {
             Self::Mutation { remote_objects, .. }
             | Self::RotationMutation { remote_objects, .. }
@@ -100,7 +95,7 @@ impl StoreMembershipJournalCompletion {
             .find(|remote| remote.object() == object)
             .cloned()
             .ok_or_else(|| {
-                StoreOutboundError::InvalidOutbound(
+                StoreError::InvalidOutbound(
                     "membership completion omits an exact activated object".to_string(),
                 )
             })
@@ -185,7 +180,7 @@ impl StoreMembershipJournalCompletion {
 
 pub(crate) fn retained_store_operation_objects(
     commit: &StoreBatchCommit,
-) -> Result<Vec<ExactObjectRef>, StoreOutboundError> {
+) -> Result<Vec<ExactObjectRef>, StoreError> {
     let objects = commit
         .acknowledgement()
         .map(|reference| reference.object.clone())
@@ -222,7 +217,7 @@ pub(crate) fn retained_store_operation_objects(
         .len()
         != objects.len()
     {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "Store operation publication repeats a retained authority object".to_string(),
         ));
     }
@@ -234,22 +229,22 @@ pub(crate) async fn activate_store_operation_commit(
     storage: &dyn SyncStorage,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
-) -> Result<StoreBatchCommitRef, StoreOutboundError> {
+) -> Result<StoreBatchCommitRef, StoreError> {
     let prepared = prepare_candidate(db, storage, plan, batch).await?;
     match publish_prepared_store_operation(db, storage, Box::new(prepared)).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {
-            Err(StoreOutboundError::InvalidOutbound(format!(
+            Err(StoreError::InvalidOutbound(format!(
                 "Store operation candidate {} did not activate",
                 reference.commit_hash
             )))
         }
-        StoreOperationPublicationOutcome::Reprepared => Err(StoreOutboundError::InvalidOutbound(
+        StoreOperationPublicationOutcome::Reprepared => Err(StoreError::InvalidOutbound(
             "Store operation was reprepared during immediate activation".to_string(),
         )),
         StoreOperationPublicationOutcome::RepreparedCandidate(_)
         | StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
-            Err(StoreOutboundError::InvalidOutbound(
+            Err(StoreError::InvalidOutbound(
                 "unpersisted Store operation encountered an activation conflict".to_string(),
             ))
         }

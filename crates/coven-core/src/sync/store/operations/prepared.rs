@@ -35,13 +35,13 @@ impl std::ops::DerefMut for PreparedStoreOperationCommit {
 impl PreparedStoreOperationCommit {
     fn candidate_remote_objects(
         &self,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         let mut objects = vec![super::remote_object::RemoteObjectRecord::candidate_commit(
             self.reference.clone(),
             self.commit.to_bytes(),
             self.prepared.stored_bytes().to_vec(),
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?];
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?];
         objects.push(
             super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
                 super::store_commit::StoreDeviceHeadRef {
@@ -52,7 +52,7 @@ impl PreparedStoreOperationCommit {
                 self.prepared_head.stored_bytes().to_vec(),
                 self.reference.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         );
         Ok(objects)
     }
@@ -62,13 +62,13 @@ impl PreparedStoreOperationCommit {
         transition: &super::invite::PreparedMembershipTransition,
         publication: &super::invite::PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
-            .map_err(StoreOutboundError::InvalidOutbound)?;
+            .map_err(StoreError::InvalidOutbound)?;
         super::invite::validate_prepared_transition(transition)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
                 transition: transition.transition.clone(),
@@ -82,7 +82,7 @@ impl PreparedStoreOperationCommit {
                     if commit == &self.reference
             )
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership authority graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -90,7 +90,7 @@ impl PreparedStoreOperationCommit {
         let expected_wraps = match &transition.entry.change {
             super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
             _ => {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "Merge membership removal graph contains another change".to_string(),
                 ))
             }
@@ -101,7 +101,7 @@ impl PreparedStoreOperationCommit {
                 .zip(wraps)
                 .any(|(reference, prepared)| reference != &prepared.reference)
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership removal wraps differ from its exact entry".to_string(),
             ));
         }
@@ -115,13 +115,13 @@ impl PreparedStoreOperationCommit {
         resolution: &super::membership::StoreMembershipConflictResolution,
         reference: &super::membership::StoreMembershipConflictResolutionRef,
         prepared: &PreparedExactObject,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
-            .map_err(StoreOutboundError::InvalidOutbound)?;
+            .map_err(StoreError::InvalidOutbound)?;
         super::invite::validate_prepared_transition(transition)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
                 transition: transition.transition.clone(),
@@ -146,12 +146,12 @@ impl PreparedStoreOperationCommit {
             || reference.resolver_pubkey != resolution.resolver_pubkey
             || prepared.stored_bytes()
                 != serde_json::to_vec(resolution).map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "serialize Store membership resolution: {error}"
                     ))
                 })?
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership resolution graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -160,14 +160,14 @@ impl PreparedStoreOperationCommit {
             super::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 reference.clone(),
                 serde_json::to_vec(resolution).map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "serialize Store membership resolution: {error}"
                     ))
                 })?,
                 prepared.stored_bytes().to_vec(),
                 self.reference.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         self.close_merge_membership_remote_objects(transition, publication, &[], vec![authority])
     }
 
@@ -176,13 +176,13 @@ impl PreparedStoreOperationCommit {
         transition: &super::invite::PreparedMembershipTransition,
         publication: &super::invite::PreparedMembershipPublication,
         wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
-            .map_err(StoreOutboundError::InvalidOutbound)?;
+            .map_err(StoreError::InvalidOutbound)?;
         super::invite::validate_prepared_transition(transition)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
                 transition: transition.transition.clone(),
@@ -201,7 +201,7 @@ impl PreparedStoreOperationCommit {
                     if expected == &wrapped_key.reference
             )
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge Owner-promotion graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -220,11 +220,11 @@ impl PreparedStoreOperationCommit {
         publication: &super::invite::PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
         authorities: Vec<super::remote_object::RemoteObjectRecord>,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         let family = self.commit.candidate_family();
         let mut objects = self.candidate_remote_objects()?;
         let entry_bytes = serde_json::to_vec(&transition.entry).map_err(|error| {
-            StoreOutboundError::InvalidOutbound(format!(
+            StoreError::InvalidOutbound(format!(
                 "serialize Merge membership candidate entry: {error}"
             ))
         })?;
@@ -236,26 +236,26 @@ impl PreparedStoreOperationCommit {
                 transition.entry_object.stored_bytes().to_vec(),
                 self.reference.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         );
         objects.push(
             super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
                 family,
                 publication.head_ref.clone(),
                 serde_json::to_vec(&publication.head).map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "serialize Merge membership candidate head: {error}"
                     ))
                 })?,
                 publication.head_object.stored_bytes().to_vec(),
                 self.reference.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         );
         for prepared in wraps {
             let value = prepared.validate().map_err(StoreObjectError::from)?;
             let canonical = serde_json::to_vec(&value).map_err(|error| {
-                StoreOutboundError::InvalidOutbound(format!(
+                StoreError::InvalidOutbound(format!(
                     "serialize Merge membership candidate wrap: {error}"
                 ))
             })?;
@@ -267,7 +267,7 @@ impl PreparedStoreOperationCommit {
                     prepared.object.stored_bytes().to_vec(),
                     self.reference.clone(),
                 )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             );
         }
         objects.extend(authorities);
@@ -276,7 +276,7 @@ impl PreparedStoreOperationCommit {
             .iter()
             .any(|object| !unique.insert(object.object_id()))
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership authority graph repeats an exact object".to_string(),
             ));
         }
@@ -341,9 +341,9 @@ impl PreparedStoreOperationCommit {
     pub(crate) fn acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::StoreAck>,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         let reference = self.commit.acknowledgement().ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
+            StoreError::InvalidOutbound(
                 "prepared acknowledgement operation has no exact acknowledgement ref".to_string(),
             )
         })?;
@@ -351,7 +351,7 @@ impl PreparedStoreOperationCommit {
             || reference.ack_hash != acknowledgement.value.ack_hash()
             || acknowledgement.value.to_bytes() != acknowledgement.bytes
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "prepared acknowledgement operation differs from its exact acknowledgement object"
                     .to_string(),
             ));
@@ -363,16 +363,16 @@ impl PreparedStoreOperationCommit {
                 acknowledgement.prepared.stored_bytes().to_vec(),
                 self.reference.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         self.retained_authority_remote_objects(vec![authority])
     }
 
     pub(crate) fn retained_authority_remote_objects(
         &self,
         authorities: Vec<super::remote_object::RemoteObjectRecord>,
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         if authorities.is_empty() {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Store operation has no retained authority objects".to_string(),
             ));
         }
@@ -380,18 +380,18 @@ impl PreparedStoreOperationCommit {
         for authority in &authorities {
             authority
                 .validate()
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             if !matches!(authority, super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
                 if matches!(&record.state, super::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
                     if ownership.pending == std::collections::BTreeSet::from([self.reference.clone()])))
             {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "Store operation retained authority has different candidate ownership"
                         .to_string(),
                 ));
             }
             if !authority_ids.insert(authority.object_id()) {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "Store operation repeats a retained authority object".to_string(),
                 ));
             }
@@ -405,7 +405,7 @@ impl PreparedStoreOperationCommit {
         &mut self,
         winner: StoreDeviceHead,
         prepared: PreparedExactObject,
-    ) -> Result<(), StoreOutboundError> {
+    ) -> Result<(), StoreError> {
         let current = &mut self.head;
         let current_prepared = &mut self.prepared_head;
         let history_summary = &self.history_summary;
@@ -417,7 +417,7 @@ impl PreparedStoreOperationCommit {
             || winner.successor.predecessor != current.successor.predecessor
             || winner.history_summary != history_summary.digest()
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "alternate Merge head differs from the prepared activation point".to_string(),
             ));
         }
@@ -432,35 +432,35 @@ impl PreparedStoreOperationCommit {
         publication: &super::invite::PreparedMembershipPublication,
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
         identity_signer: &UserKeypair,
-    ) -> Result<(), StoreOutboundError> {
+    ) -> Result<(), StoreError> {
         super::invite::validate_prepared_publication(publication)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();
         let head = &mut self.head;
         let prepared = &mut self.prepared_head;
         let history_summary = &mut self.history_summary;
         let Some(StoreControl { transition }) = commit.control() else {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership proof accompanies another Store control".to_string(),
             ));
         };
         if !transition.matches_head(&publication.head, &publication.head_ref)
             || publication.entry_ref != transition.body.entry
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Merge membership proof differs from its signed Store transition".to_string(),
             ));
         }
         let resolution = match &publication.entry.change {
             super::membership::MembershipChange::ResolutionActivation { resolution } => {
                 let value = resolution_value.ok_or_else(|| {
-                    StoreOutboundError::InvalidOutbound(
+                    StoreError::InvalidOutbound(
                         "Merge resolution activation lacks its exact resolution proof".to_string(),
                     )
                 })?;
                 if value.resolution_ref(resolution.object.clone()) != *resolution {
-                    return Err(StoreOutboundError::InvalidOutbound(
+                    return Err(StoreError::InvalidOutbound(
                         "Merge resolution proof differs from its exact reference".to_string(),
                     ));
                 }
@@ -468,7 +468,7 @@ impl PreparedStoreOperationCommit {
             }
             _ if resolution_value.is_none() => (None, None),
             _ => {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "non-resolution membership proof carries a resolution".to_string(),
                 ))
             }
@@ -493,23 +493,23 @@ impl PreparedStoreOperationCommit {
                 publication.entry_ref.coord.clone(),
                 &publication.head.body.resolutions,
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         history_summary
             .validate_shape()
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let author = history_summary
             .registrations
             .get(&head.author_registration.device_id)
             .filter(|registration| registration.reference == head.author_registration)
             .ok_or_else(|| {
-                StoreOutboundError::InvalidOutbound(
+                StoreError::InvalidOutbound(
                     "Merge membership proof lacks its exact author registration".to_string(),
                 )
             })?;
         let device_signer = author
             .value
             .device_signer(identity_signer)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let replacement = StoreDeviceHead::signed(
             head.store_root_hash,
             head.author_registration.clone(),
@@ -518,7 +518,7 @@ impl PreparedStoreOperationCommit {
             head.successor.clone(),
             &device_signer,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let context = ProtocolObjectContext::signed_plaintext(
             head.store_root_hash,
             ProtocolObjectDomain::StoreHead,
@@ -537,7 +537,7 @@ impl PreparedStoreOperationCommit {
             .map_err(StoreObjectError::from)?;
         *head = replacement;
         self.validate_closed_shape()
-            .map_err(StoreOutboundError::InvalidOutbound)?;
+            .map_err(StoreError::InvalidOutbound)?;
         Ok(())
     }
 }

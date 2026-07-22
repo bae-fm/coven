@@ -15,14 +15,17 @@ use super::store_pull::StorePullResult;
 pub(crate) mod abandonment;
 mod acknowledgements;
 mod database;
+mod error;
 pub(crate) mod operations;
 mod owner;
+pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(crate) mod pull;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
+pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
 
 enum StoreLoadError {
@@ -32,7 +35,7 @@ enum StoreLoadError {
     Invalid(String),
 }
 
-impl From<StoreLoadError> for super::store_outbound::StoreOutboundError {
+impl From<StoreLoadError> for StoreError {
     fn from(error: StoreLoadError) -> Self {
         match error {
             StoreLoadError::Database(error) => error.into(),
@@ -52,7 +55,7 @@ pub async fn abandon_merge_candidate(
     device_id: &str,
     identity: &UserKeypair,
     write_id: crate::WriteId,
-) -> Result<MergeCandidateAbandonment, super::store_outbound::StoreOutboundError> {
+) -> Result<MergeCandidateAbandonment, StoreError> {
     load_store(db, storage)
         .await?
         .abandon_candidate(device_id, identity, write_id)

@@ -5,7 +5,7 @@ pub(super) async fn finish_nonactivating_acknowledgement(
     db: &Database,
     storage: &dyn SyncStorage,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
-) -> Result<(), crate::sync::store_outbound::StoreOutboundError> {
+) -> Result<(), crate::sync::store::StoreError> {
     let database = StoreDatabase::new(db);
     if let Some(target) = database
         .acknowledgement_cleanup_target(acknowledgement.clone())

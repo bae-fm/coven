@@ -37,7 +37,7 @@ pub enum StoreRegistrationError {
     #[error("retired Store device {device_id:?} cannot become active again")]
     RetiredDevice { device_id: String },
     #[error("Store device registration activation: {0}")]
-    Outbound(#[from] super::store_outbound::StoreOutboundError),
+    Outbound(#[from] super::store::StoreError),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

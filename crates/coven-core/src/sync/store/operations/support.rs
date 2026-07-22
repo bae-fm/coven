@@ -1,72 +1,64 @@
 use super::*;
 
-pub(crate) fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
+pub(crate) fn blocked_status(error: &StoreError) -> Option<crate::WriteBlock> {
     match error {
-        StoreOutboundError::Database(_)
-        | StoreOutboundError::BlobStorage { .. }
-        | StoreOutboundError::CandidateCleanup(_) => None,
-        StoreOutboundError::MergeAnnouncementOccupied { .. } => {
+        StoreError::Database(_)
+        | StoreError::BlobStorage { .. }
+        | StoreError::CandidateCleanup(_) => None,
+        StoreError::MergeAnnouncementOccupied { .. } => {
             Some(crate::WriteBlock::InvalidProtocolState {
                 reason: error.to_string(),
             })
         }
-        StoreOutboundError::SequenceExhausted { .. } => {
-            Some(crate::WriteBlock::InvalidProtocolState {
-                reason: error.to_string(),
-            })
-        }
-        StoreOutboundError::AuthorExcluded { .. } => {
-            Some(crate::WriteBlock::InvalidProtocolState {
-                reason: error.to_string(),
-            })
-        }
-        StoreOutboundError::Object(StoreObjectError::Storage(_)) => None,
-        StoreOutboundError::MissingBlob { namespace, id } => Some(crate::WriteBlock::MissingBlob {
+        StoreError::SequenceExhausted { .. } => Some(crate::WriteBlock::InvalidProtocolState {
+            reason: error.to_string(),
+        }),
+        StoreError::AuthorExcluded { .. } => Some(crate::WriteBlock::InvalidProtocolState {
+            reason: error.to_string(),
+        }),
+        StoreError::Object(StoreObjectError::Storage(_)) => None,
+        StoreError::MissingBlob { namespace, id } => Some(crate::WriteBlock::MissingBlob {
             namespace: namespace.clone(),
             id: id.clone(),
         }),
-        StoreOutboundError::LocalUserBlob { namespace, id } => {
-            Some(crate::WriteBlock::LocalUserBlob {
-                namespace: namespace.clone(),
-                id: id.clone(),
-            })
-        }
-        StoreOutboundError::MissingState { key } => Some(crate::WriteBlock::InvalidProtocolState {
+        StoreError::LocalUserBlob { namespace, id } => Some(crate::WriteBlock::LocalUserBlob {
+            namespace: namespace.clone(),
+            id: id.clone(),
+        }),
+        StoreError::MissingState { key } => Some(crate::WriteBlock::InvalidProtocolState {
             reason: format!("Store protocol state {key:?} is absent"),
         }),
-        StoreOutboundError::InvalidState { key, reason } => {
-            Some(crate::WriteBlock::InvalidProtocolState {
-                reason: format!("Store protocol state {key:?} is invalid: {reason}"),
-            })
-        }
-        StoreOutboundError::InvalidOutbound(_) | StoreOutboundError::Object(_) => {
+        StoreError::InvalidState { key, reason } => Some(crate::WriteBlock::InvalidProtocolState {
+            reason: format!("Store protocol state {key:?} is invalid: {reason}"),
+        }),
+        StoreError::InvalidOutbound(_) | StoreError::Object(_) => {
             Some(crate::WriteBlock::InvalidPackage {
                 reason: error.to_string(),
             })
         }
-        StoreOutboundError::Preparation(super::service::SyncCycleError::LocalUserBlob {
+        StoreError::Preparation(super::service::SyncCycleError::LocalUserBlob {
             namespace,
             id,
         }) => Some(crate::WriteBlock::LocalUserBlob {
             namespace: namespace.clone(),
             id: id.clone(),
         }),
-        StoreOutboundError::Preparation(super::service::SyncCycleError::MissingPreparedBlob {
+        StoreError::Preparation(super::service::SyncCycleError::MissingPreparedBlob {
             namespace,
             id,
         }) => Some(crate::WriteBlock::MissingBlob {
             namespace: namespace.clone(),
             id: id.clone(),
         }),
-        StoreOutboundError::Preparation(super::service::SyncCycleError::Gate(_))
-        | StoreOutboundError::Preparation(super::service::SyncCycleError::AssetScan(_))
-        | StoreOutboundError::Preparation(super::service::SyncCycleError::Database(_)) => {
+        StoreError::Preparation(super::service::SyncCycleError::Gate(_))
+        | StoreError::Preparation(super::service::SyncCycleError::AssetScan(_))
+        | StoreError::Preparation(super::service::SyncCycleError::Database(_)) => {
             Some(crate::WriteBlock::InvalidPackage {
                 reason: error.to_string(),
             })
         }
-        StoreOutboundError::Preparation(super::service::SyncCycleError::AssetUpload(_))
-        | StoreOutboundError::Preparation(super::service::SyncCycleError::Storage { .. }) => None,
+        StoreError::Preparation(super::service::SyncCycleError::AssetUpload(_))
+        | StoreError::Preparation(super::service::SyncCycleError::Storage { .. }) => None,
     }
 }
 
@@ -75,7 +67,7 @@ pub(crate) async fn publish_prepared_remote_objects(
     storage: &dyn SyncStorage,
     write_id: &crate::WriteId,
     store_root_hash: ObjectHash,
-) -> Result<(), StoreOutboundError> {
+) -> Result<(), StoreError> {
     for prepared in db.prepared_remote_objects(write_id).await? {
         let remote = prepared.record;
         let prepared_state = match &remote {
@@ -98,7 +90,7 @@ pub(crate) async fn publish_prepared_remote_objects(
                 let package = super::audience_package::AudiencePackage::parse(
                     remote.bytes().canonical_semantic_bytes(),
                 )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                 let stream_id = package.commit_coord().stream_id.to_string();
                 let sequence = package.commit_coord().sequence;
                 let (context, prefix) = match package.audience() {
@@ -149,7 +141,7 @@ pub(crate) async fn publish_prepared_remote_objects(
                     .await
                     .map_err(StoreObjectError::from)?;
                 if opened != remote.bytes().canonical_semantic_bytes() {
-                    return Err(StoreOutboundError::InvalidOutbound(format!(
+                    return Err(StoreError::InvalidOutbound(format!(
                         "remote package {} exact readback differs from its canonical bytes",
                         remote.object_id()
                     )));
@@ -159,18 +151,18 @@ pub(crate) async fn publish_prepared_remote_objects(
                 let locator = crate::blob::locator::BlobLocator::parse(
                     remote.bytes().canonical_semantic_bytes(),
                 )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                 let uploader = locator.uploader().clone();
                 let registration = db
                     .activated_store_device_registration(uploader.clone())
                     .await?;
                 let authority = BlobWriteAuthority::new(&uploader, &registration)
-                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                 let blob = crate::blob::locator::StoredBlobRef::new(locator, object.clone())
-                    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                 if prepared_state {
                     let path = prepared.spool_path.as_deref().ok_or_else(|| {
-                        StoreOutboundError::InvalidOutbound(format!(
+                        StoreError::InvalidOutbound(format!(
                             "prepared blob {} awaiting upload has no local spool",
                             remote.object_id()
                         ))
@@ -183,14 +175,14 @@ pub(crate) async fn publish_prepared_remote_objects(
                             &crate::storage::cloud::no_progress(),
                         )
                         .await
-                        .map_err(|source| StoreOutboundError::BlobStorage {
+                        .map_err(|source| StoreError::BlobStorage {
                             namespace: blob.locator().namespace().to_string(),
                             id: blob.locator().blob_id().to_string(),
                             source,
                         })?;
                 }
                 storage.verify_blob_object(&blob).await.map_err(|source| {
-                    StoreOutboundError::BlobStorage {
+                    StoreError::BlobStorage {
                         namespace: blob.locator().namespace().to_string(),
                         id: blob.locator().blob_id().to_string(),
                         source,
@@ -198,7 +190,7 @@ pub(crate) async fn publish_prepared_remote_objects(
                 })?;
             }
             super::remote_object::RemoteStoredRepresentation::ExternalExact { .. } => {
-                return Err(StoreOutboundError::InvalidOutbound(format!(
+                return Err(StoreError::InvalidOutbound(format!(
                     "prepared outbound object {} has no locally stored representation",
                     remote.object_id()
                 )));
@@ -211,10 +203,10 @@ pub(crate) async fn publish_prepared_remote_objects(
     Ok(())
 }
 
-pub(crate) async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreOutboundError> {
+pub(crate) async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreError> {
     db.local_store_root_ref()
         .await?
-        .ok_or(StoreOutboundError::MissingState {
+        .ok_or(StoreError::MissingState {
             key: STORE_ROOT_AUTHORITY,
         })
 }

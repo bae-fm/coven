@@ -15,14 +15,14 @@ pub(crate) async fn prepare_partition_package(
     blob_facts: &StoreWriteBlobFacts,
     authority: &BlobWriteAuthority<'_>,
     store_dir: &StoreDir,
-) -> Result<PreparedPartitionPackage, StoreOutboundError> {
+) -> Result<PreparedPartitionPackage, StoreError> {
     let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
     let (remote_audience, protection) = match partition.audience {
         super::circle::Audience::Store => (
             crate::blob::locator::RemoteAudience::Store,
             storage
                 .store_blob_protection()
-                .map_err(|source| StoreOutboundError::BlobStorage {
+                .map_err(|source| StoreError::BlobStorage {
                     namespace: "store".to_string(),
                     id: "protection".to_string(),
                     source,
@@ -30,7 +30,7 @@ pub(crate) async fn prepare_partition_package(
         ),
         super::circle::Audience::Circle(circle_id) => {
             let control = partition.control.as_ref().ok_or_else(|| {
-                StoreOutboundError::InvalidOutbound(format!(
+                StoreError::InvalidOutbound(format!(
                     "Circle partition {circle_id} has no exact control"
                 ))
             })?;
@@ -43,7 +43,7 @@ pub(crate) async fn prepare_partition_package(
             )
         }
         super::circle::Audience::Local => {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Local partition reached Store publication".to_string(),
             ));
         }
@@ -67,7 +67,7 @@ pub(crate) async fn prepare_partition_package(
     let (package, context, semantic_prefix, key_fingerprint) = match partition.audience {
         super::circle::Audience::Store => {
             if partition.control.is_some() {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "Store partition carries Circle control".to_string(),
                 ));
             }
@@ -80,7 +80,7 @@ pub(crate) async fn prepare_partition_package(
                 partition.changeset.clone(),
                 blob_bindings,
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let bytes = package.to_bytes();
             let prefix = package_semantic_prefix(
                 candidate_family,
@@ -100,7 +100,7 @@ pub(crate) async fn prepare_partition_package(
         }
         super::circle::Audience::Circle(circle_id) => {
             let control = partition.control.as_ref().ok_or_else(|| {
-                StoreOutboundError::InvalidOutbound(format!(
+                StoreError::InvalidOutbound(format!(
                     "Circle partition {circle_id} has no exact control"
                 ))
             })?;
@@ -119,7 +119,7 @@ pub(crate) async fn prepare_partition_package(
                 partition.changeset.clone(),
                 blob_bindings,
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let bytes = package.to_bytes();
             let prefix = circle_package_semantic_prefix(
                 circle_id,
@@ -140,7 +140,7 @@ pub(crate) async fn prepare_partition_package(
             )
         }
         super::circle::Audience::Local => {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Local partition reached Store publication".to_string(),
             ));
         }
@@ -166,10 +166,10 @@ pub(crate) async fn prepare_partition_package(
 fn partition_blob_facts<'a>(
     changeset: &[u8],
     facts: &'a StoreWriteBlobFacts,
-) -> Result<Vec<&'a StoreWriteBlobFact>, StoreOutboundError> {
+) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
     let rows = crate::changeset::walk(changeset)
         .map_err(|error| {
-            StoreOutboundError::InvalidOutbound(format!("read audience package blob rows: {error}"))
+            StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
         })?
         .into_iter()
         .filter(|change| {
@@ -183,7 +183,7 @@ fn partition_blob_facts<'a>(
                 .pk()
                 .map(|row_id| (change.table.clone(), row_id.to_string()))
                 .ok_or_else(|| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "audience package row in {:?} has no primary key",
                         change.table
                     ))
@@ -210,7 +210,7 @@ pub(crate) async fn prepare_partition_blob(
         super::audience_package::RowBlobLocatorBinding,
         PreparedPartitionBlob,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     let locator = prepare_partition_blob_locator(fact, audience.clone(), &protection, authority)?;
     let spool_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
@@ -223,7 +223,7 @@ pub(crate) async fn prepare_partition_blob(
                 fact.column.clone(),
                 previous.stored.clone(),
             )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             return Ok((
                 binding,
                 PreparedPartitionBlob {
@@ -239,14 +239,14 @@ pub(crate) async fn prepare_partition_blob(
         crate::blob::Provenance::HostProvided => Some(
             store_dir
                 .local_blob_path(&fact.blob.namespace, &fact.blob.id)
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         ),
         crate::blob::Provenance::UserProvided => None,
     };
     let mut temporary_plaintext = false;
     let source_path = if let Some(path) = &fact.external_path {
         if fact.blob.provenance != crate::blob::Provenance::UserProvided {
-            return Err(StoreOutboundError::InvalidOutbound(format!(
+            return Err(StoreError::InvalidOutbound(format!(
                 "host-provided blob {}/{} carries an external path",
                 fact.blob.namespace, fact.blob.id
             )));
@@ -256,7 +256,7 @@ pub(crate) async fn prepare_partition_blob(
         match tokio::fs::metadata(&path).await {
             Ok(metadata) if metadata.is_file() => path,
             Ok(_) => {
-                return Err(StoreOutboundError::InvalidOutbound(format!(
+                return Err(StoreError::InvalidOutbound(format!(
                     "host blob source is not a file: {}",
                     path.display()
                 )));
@@ -267,7 +267,7 @@ pub(crate) async fn prepare_partition_blob(
                     .await?
             }
             Err(error) => {
-                return Err(StoreOutboundError::InvalidOutbound(format!(
+                return Err(StoreError::InvalidOutbound(format!(
                     "inspect host blob source {}: {error}",
                     path.display()
                 )));
@@ -280,7 +280,7 @@ pub(crate) async fn prepare_partition_blob(
     if let Err(error) = storage
         .seal_blob_to_spool(&locator, authority, protection, &source_path, &spool_path)
         .await
-        .map_err(|source| StoreOutboundError::BlobStorage {
+        .map_err(|source| StoreError::BlobStorage {
             namespace: fact.blob.namespace.clone(),
             id: fact.blob.id.clone(),
             source,
@@ -299,19 +299,19 @@ pub(crate) async fn prepare_partition_blob(
             tokio::fs::remove_file(&source_path)
                 .await
                 .map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "remove prepared plaintext {}: {error}",
                         source_path.display()
                     ))
                 })?;
             crate::local_blob::sync_parent_dir(&source_path)
                 .await
-                .map_err(StoreOutboundError::InvalidOutbound)?;
+                .map_err(StoreError::InvalidOutbound)?;
         }
         let slot = storage
             .allocate_blob_slot(&locator, authority)
             .await
-            .map_err(|source| StoreOutboundError::BlobStorage {
+            .map_err(|source| StoreError::BlobStorage {
                 namespace: fact.blob.namespace.clone(),
                 id: fact.blob.id.clone(),
                 source,
@@ -319,7 +319,7 @@ pub(crate) async fn prepare_partition_blob(
         let stored = storage
             .prepare_blob_object(&locator, authority, slot, &spool_path)
             .await
-            .map_err(|source| StoreOutboundError::BlobStorage {
+            .map_err(|source| StoreError::BlobStorage {
                 namespace: fact.blob.namespace.clone(),
                 id: fact.blob.id.clone(),
                 source,
@@ -331,8 +331,8 @@ pub(crate) async fn prepare_partition_blob(
             fact.column.clone(),
             stored.clone(),
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        Ok::<_, StoreOutboundError>((binding, stored))
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        Ok::<_, StoreError>((binding, stored))
     }
     .await;
     let (binding, stored) = match prepared {
@@ -362,8 +362,8 @@ async fn cleanup_failed_partition_blob(
     spool_path: &std::path::Path,
     temporary_plaintext: Option<&std::path::Path>,
     spool_expected: bool,
-    error: StoreOutboundError,
-) -> StoreOutboundError {
+    error: StoreError,
+) -> StoreError {
     let mut failures = Vec::new();
     if let Some(path) = temporary_plaintext {
         match crate::local_blob::remove_file(path).await {
@@ -398,7 +398,7 @@ async fn cleanup_failed_partition_blob(
     if failures.is_empty() {
         error
     } else {
-        StoreOutboundError::InvalidOutbound(format!(
+        StoreError::InvalidOutbound(format!(
             "blob preparation failed: {error}; cleanup failed: {}",
             failures.join("; ")
         ))
@@ -410,7 +410,7 @@ pub(crate) fn prepare_partition_blob_locator(
     audience: crate::blob::locator::RemoteAudience,
     protection: &super::storage::BlobSpoolProtection,
     authority: &BlobWriteAuthority<'_>,
-) -> Result<crate::blob::locator::BlobLocator, StoreOutboundError> {
+) -> Result<crate::blob::locator::BlobLocator, StoreError> {
     match protection {
         super::storage::BlobSpoolProtection::Opaque(encryption) => {
             crate::blob::locator::BlobLocator::opaque(
@@ -426,7 +426,7 @@ pub(crate) fn prepare_partition_blob_locator(
         }
         super::storage::BlobSpoolProtection::Browsable => {
             if audience != crate::blob::locator::RemoteAudience::Store {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "Circle blob cannot use Browsable storage".to_string(),
                 ));
             }
@@ -435,7 +435,7 @@ pub(crate) fn prepare_partition_blob_locator(
                 fact.blob.id.clone(),
                 authority.reference.clone(),
                 fact.blob.cloud_path.clone().ok_or_else(|| {
-                    StoreOutboundError::InvalidOutbound(format!(
+                    StoreError::InvalidOutbound(format!(
                         "Browsable blob {}/{} has no readable path",
                         fact.blob.namespace, fact.blob.id
                     ))
@@ -445,7 +445,7 @@ pub(crate) fn prepare_partition_blob_locator(
             )
         }
     }
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
 }
 
 async fn materialize_previous_blob(
@@ -454,11 +454,11 @@ async fn materialize_previous_blob(
     fact: &StoreWriteBlobFact,
     store_dir: &StoreDir,
     destination_locator: ObjectHash,
-) -> Result<std::path::PathBuf, StoreOutboundError> {
+) -> Result<std::path::PathBuf, StoreError> {
     let previous = fact
         .previous
         .as_ref()
-        .ok_or_else(|| StoreOutboundError::MissingBlob {
+        .ok_or_else(|| StoreError::MissingBlob {
             namespace: fact.blob.namespace.clone(),
             id: fact.blob.id.clone(),
         })?;
@@ -470,7 +470,7 @@ async fn materialize_previous_blob(
         &previous.stored,
     )
     .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let destination = store_dir
         .storage_dir()
         .join("outbound-blobs")
@@ -478,15 +478,12 @@ async fn materialize_previous_blob(
     let staged = storage
         .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
         .await
-        .map_err(|source| StoreOutboundError::BlobStorage {
+        .map_err(|source| StoreError::BlobStorage {
             namespace: fact.blob.namespace.clone(),
             id: fact.blob.id.clone(),
             source,
         })?;
-    staged
-        .commit()
-        .await
-        .map_err(StoreOutboundError::InvalidOutbound)?;
+    staged.commit().await.map_err(StoreError::InvalidOutbound)?;
     Ok(destination)
 }
 
@@ -499,7 +496,7 @@ pub(crate) fn close_prepared_packages(
         Vec<super::remote_object::RemoteObjectRecord>,
         PreparedAudienceObjects,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     let mut materials = Vec::with_capacity(packages.len());
     let mut indexed_packages = Vec::with_capacity(packages.len());
@@ -514,7 +511,7 @@ pub(crate) fn close_prepared_packages(
                 package.prepared.stored_bytes().to_vec(),
                 object.clone(),
             )
-            .map_err(StoreOutboundError::from)?,
+            .map_err(StoreError::from)?,
         );
         materials.push(super::remote_object::CandidateObjectMaterial {
             object,
@@ -525,7 +522,7 @@ pub(crate) fn close_prepared_packages(
     }
     let mut remote_objects = super::remote_object::CandidateObjectGraph::from_commit(commit)
         .and_then(|graph| graph.close(commit, owner, materials))
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let (blob_remotes, indexed_blobs) = close_prepared_blobs(prepared_blobs, owner)?;
     remote_objects.extend(blob_remotes);
     Ok((
@@ -545,7 +542,7 @@ pub(super) fn close_prepared_blobs(
         Vec<super::remote_object::RemoteObjectRecord>,
         Vec<PreparedAudienceBlob>,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     let mut exact_blobs = std::collections::BTreeMap::new();
     for blob in blobs {
@@ -572,7 +569,7 @@ pub(super) fn close_prepared_blobs(
                     blob.stored.locator().to_bytes(),
                     blob.stored.object().clone(),
                 )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
                 state: if blob.uploaded_verified {
                     super::remote_object::OwnedObjectState::UploadedVerified {
                         ownership: super::remote_object::SharedObjectOwnership {
@@ -606,16 +603,16 @@ pub(super) fn close_prepared_blobs(
 fn merge_identical_prepared_blob(
     existing: &mut PreparedPartitionBlob,
     duplicate: PreparedPartitionBlob,
-) -> Result<(), StoreOutboundError> {
+) -> Result<(), StoreError> {
     if existing.audience != duplicate.audience || existing.stored != duplicate.stored {
-        return Err(StoreOutboundError::InvalidOutbound(format!(
+        return Err(StoreError::InvalidOutbound(format!(
             "prepared blob object {} has conflicting exact references",
             super::remote_object::remote_object_id(existing.stored.object())
         )));
     }
     existing.spool_path = match (&existing.spool_path, duplicate.spool_path) {
         (Some(left), Some(right)) if left != &right => {
-            return Err(StoreOutboundError::InvalidOutbound(format!(
+            return Err(StoreError::InvalidOutbound(format!(
                 "prepared blob object {} has conflicting spool paths",
                 super::remote_object::remote_object_id(existing.stored.object())
             )));
@@ -625,7 +622,7 @@ fn merge_identical_prepared_blob(
     };
     existing.uploaded_verified |= duplicate.uploaded_verified;
     if !existing.uploaded_verified && existing.spool_path.is_none() {
-        return Err(StoreOutboundError::InvalidOutbound(format!(
+        return Err(StoreError::InvalidOutbound(format!(
             "prepared blob object {} awaiting upload has no local spool",
             super::remote_object::remote_object_id(existing.stored.object())
         )));

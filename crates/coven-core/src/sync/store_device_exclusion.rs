@@ -16,6 +16,7 @@ use super::storage::{
 use super::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
+use super::store::StoreError;
 use super::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusion, StoreDeviceExclusionCancellation,
@@ -23,7 +24,6 @@ use super::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId, StoreDeviceExclusionProposalRef,
     StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
 };
-use super::store_outbound::StoreOutboundError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -557,7 +557,7 @@ pub enum StoreDeviceExclusionError {
     #[error("Store-device exclusion protocol: {0}")]
     Protocol(#[from] StoreProtocolError),
     #[error("Store-device exclusion publication: {0}")]
-    Outbound(#[from] StoreOutboundError),
+    Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
     Storage(#[from] super::storage::StorageError),
     #[error("Store-device exclusion journal: {0}")]
@@ -1445,7 +1445,7 @@ pub(crate) enum StoreDeviceExclusionJournalError {
     #[error("Store-device exclusion remote ownership: {0}")]
     RemoteObject(#[from] RemoteObjectRecordError),
     #[error("Store-device exclusion activation: {0}")]
-    Outbound(#[from] StoreOutboundError),
+    Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
     Storage(#[from] super::storage::StorageError),
 }
@@ -3063,7 +3063,7 @@ mod tests {
             .expect("load excluded peer position");
         assert!(matches!(
             publish_error,
-            super::super::store_outbound::StoreOutboundError::AuthorExcluded { .. }
+            super::super::store::StoreError::AuthorExcluded { .. }
         ));
         match peer_db
             .write_status(&write_id)

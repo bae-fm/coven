@@ -502,7 +502,7 @@ pub enum StoreReclaimError {
     #[error(transparent)]
     Database(#[from] crate::database::DbError),
     #[error(transparent)]
-    Outbound(#[from] super::store_outbound::StoreOutboundError),
+    Outbound(#[from] super::store::StoreError),
     #[error("Store reclaim journal: {0}")]
     Journal(String),
     #[error(transparent)]

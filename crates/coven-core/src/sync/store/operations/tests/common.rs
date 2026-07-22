@@ -4,7 +4,7 @@ use super::*;
 fn store_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
     assert!(matches!(
         successor_store_sequence(u64::MAX),
-        Err(StoreOutboundError::SequenceExhausted { current: u64::MAX })
+        Err(StoreError::SequenceExhausted { current: u64::MAX })
     ));
 }
 

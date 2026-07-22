@@ -1,3 +1,4 @@
+use super::StoreError;
 use super::*;
 use crate::database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
 use crate::sync::storage::{
@@ -9,7 +10,6 @@ use crate::sync::store_commit::{
     StoreDeviceRegistration,
 };
 use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::StoreOutboundError;
 
 use super::operations::load_local_store_authority;
 
@@ -26,7 +26,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
     device_id: &str,
     identity_signer: &UserKeypair,
     write_id: crate::WriteId,
-) -> Result<bool, StoreOutboundError> {
+) -> Result<bool, StoreError> {
     let Some(candidate) = db.blocked_merge_candidate(write_id.clone()).await? else {
         return Ok(false);
     };
@@ -34,7 +34,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, identity_signer).await?;
     if candidate.commit.value.author_registration != registration_ref {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "blocked Merge candidate belongs to another local registration".to_string(),
         ));
     }
@@ -57,7 +57,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
         }],
         &device_signer,
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let stream_id = coord.stream_id;
     let sequence = coord.sequence;
     let commit_context = ProtocolObjectContext::signed_plaintext(
@@ -84,7 +84,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
         .map_err(StoreObjectError::from)?;
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let history_summary = super::pull::prepare_merge_abandonment_history_summary(
         &candidate_summary,
         &candidate.head.value.commit,
@@ -92,7 +92,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
         &commit_ref,
         &commit,
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head = StoreDeviceHead::signed(
         root.store_root_hash,
         registration_ref,
@@ -101,7 +101,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
         candidate.head.value.successor,
         &device_signer,
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head_context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreHead,
@@ -137,7 +137,7 @@ pub(crate) async fn abandon_merge_candidate(
     device_id: &str,
     identity_signer: &UserKeypair,
     write_id: crate::WriteId,
-) -> Result<MergeCandidateAbandonment, StoreOutboundError> {
+) -> Result<MergeCandidateAbandonment, StoreError> {
     match db.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
@@ -179,7 +179,7 @@ pub(crate) async fn abandon_merge_candidate(
                 .prepared_merge_abandonment_candidates(write_id.clone())
                 .await?
                 .ok_or_else(|| {
-                    StoreOutboundError::InvalidOutbound(
+                    StoreError::InvalidOutbound(
                         "prepared Merge abandonment has no exact candidates".to_string(),
                     )
                 })?;
@@ -210,7 +210,7 @@ pub(crate) async fn abandon_merge_candidate(
                 }
                 (None, None) => {}
                 _ => {
-                    return Err(StoreOutboundError::InvalidOutbound(
+                    return Err(StoreError::InvalidOutbound(
                         "prepared Merge abandonment candidates disagree on author exclusion"
                             .to_string(),
                     ));
@@ -236,7 +236,7 @@ pub(crate) async fn abandon_merge_candidate(
     }
     crate::sync::store::publication::drain_store_writes(db, storage).await?;
     if !db.merge_candidate_cleanup_pending(&write_id).await? {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
         ));
     }
@@ -248,7 +248,7 @@ async fn finish_merge_abandonment(
     db: &Database,
     storage: &dyn SyncStorage,
     write_id: crate::WriteId,
-) -> Result<MergeCandidateAbandonment, StoreOutboundError> {
+) -> Result<MergeCandidateAbandonment, StoreError> {
     match db.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None
         | crate::database::MergeAbandonmentState::Accepted => {
@@ -263,11 +263,9 @@ async fn finish_merge_abandonment(
             crate::sync::store::publication::drain_store_writes(db, storage).await?;
             Ok(MergeCandidateAbandonment::CandidateActivated)
         }
-        crate::database::MergeAbandonmentState::Prepared => {
-            Err(StoreOutboundError::InvalidOutbound(
-                "Merge abandonment has no accepted head outcome".to_string(),
-            ))
-        }
+        crate::database::MergeAbandonmentState::Prepared => Err(StoreError::InvalidOutbound(
+            "Merge abandonment has no accepted head outcome".to_string(),
+        )),
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
@@ -283,8 +281,7 @@ async fn excluded_candidate_nonactivation(
     db: &Database,
     storage: &dyn SyncStorage,
     candidate: &crate::database::BlockedMergeCandidate,
-) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError>
-{
+) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
     let candidate_ref = candidate.head.value.commit.clone();
     let Some(locator) = db
         .author_exclusion_activation_for_candidate(
@@ -296,7 +293,7 @@ async fn excluded_candidate_nonactivation(
         return Ok(None);
     };
     let root = db.local_store_root_ref().await?.ok_or_else(|| {
-        StoreOutboundError::InvalidOutbound("blocked Merge candidate has no Store root".to_string())
+        StoreError::InvalidOutbound("blocked Merge candidate has no Store root".to_string())
     })?;
     let candidate_target = StoreBatchCommitDeletionTarget {
         coord: candidate_ref.coord.clone(),
@@ -334,7 +331,7 @@ async fn excluded_candidate_nonactivation(
                 .await?;
             observation
                 .verified_nonactivation(candidate_target, &registration)
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
         }
     };
     Ok(Some(nonactivation))
@@ -455,7 +452,7 @@ pub(crate) async fn observe_excluded_candidate_head(
     candidate: &StoreDeviceHead,
     candidate_commit: &StoreBatchCommit,
     candidate_object: &ExactObjectRef,
-) -> Result<ExcludedCandidateHeadObservation, StoreOutboundError> {
+) -> Result<ExcludedCandidateHeadObservation, StoreError> {
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let prefix = head_slot_prefix(
@@ -489,7 +486,7 @@ pub(crate) fn verify_merge_candidate_nonactivations(
     observation: &VerifiedMergeWinner,
     targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
     author: &StoreDeviceRegistration,
-) -> Result<Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
+) -> Result<Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
     let mut nonactivations = Vec::new();
     for target in targets {
         if target.coord == observation.winner().commit.coord
@@ -501,7 +498,7 @@ pub(crate) fn verify_merge_candidate_nonactivations(
         nonactivations.push(
             observation
                 .verified_nonactivation(target, author)
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         );
     }
     Ok(nonactivations)
@@ -515,7 +512,7 @@ pub(crate) async fn read_occupied_merge_head(
     expected_commit: &StoreBatchCommit,
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
-) -> Result<VerifiedMergeWinner, StoreOutboundError> {
+) -> Result<VerifiedMergeWinner, StoreError> {
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let (winner_bytes, winner_prepared) = storage
@@ -523,14 +520,14 @@ pub(crate) async fn read_occupied_merge_head(
         .await
         .map_err(StoreObjectError::from)?;
     let unverified: StoreDeviceHead = serde_json::from_slice(&winner_bytes).map_err(|error| {
-        StoreOutboundError::InvalidOutbound(format!("parse competing Merge head: {error}"))
+        StoreError::InvalidOutbound(format!("parse competing Merge head: {error}"))
     })?;
     if unverified.author_registration != expected.author_registration
         || unverified.commit.coord != expected.commit.coord
         || unverified.successor.activation != expected.successor.activation
         || unverified.successor.predecessor != expected.successor.predecessor
     {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "competing Merge head does not occupy the prepared successor point".to_string(),
         ));
     }
@@ -540,21 +537,21 @@ pub(crate) async fn read_occupied_merge_head(
     expected
         .commit
         .verify_commit(expected_commit)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     StoreBatchCommit::parse_at(
         &expected_commit.to_bytes(),
         store_root_hash,
         &expected.commit.coord,
         &registration,
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     StoreDeviceHead::parse_at(
         &expected.to_bytes(),
         store_root_hash,
         &registration,
         &expected.commit,
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let winner_commit = crate::sync::store_objects::load_commit_ref(
         storage,
         store_root_hash,
@@ -569,9 +566,7 @@ pub(crate) async fn read_occupied_merge_head(
         &registration,
         &unverified.commit,
     )
-    .map_err(|error| {
-        StoreOutboundError::InvalidOutbound(format!("verify occupied Merge head: {error}"))
-    })?;
+    .map_err(|error| StoreError::InvalidOutbound(format!("verify occupied Merge head: {error}")))?;
     Ok(VerifiedMergeWinner {
         store_root_hash,
         expected_slot: slot.clone(),

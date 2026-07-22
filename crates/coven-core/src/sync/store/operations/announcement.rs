@@ -11,7 +11,7 @@ pub(crate) async fn exact_next_announcement_slot(
         crate::storage::cloud::ObjectSlot,
         Option<StoreDeviceHeadRef>,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     exact_next_announcement_slot_impl(
         storage,
@@ -36,13 +36,13 @@ pub(crate) async fn exact_next_announcement_slot_for_verified_commit(
         crate::storage::cloud::ObjectSlot,
         Option<StoreDeviceHeadRef>,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     reference
         .verify_commit(commit)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     if commit.author_registration != *registration_ref {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "verified Store commit author differs from its announcement registration".to_string(),
         ));
     }
@@ -69,12 +69,12 @@ async fn exact_next_announcement_slot_impl(
         crate::storage::cloud::ObjectSlot,
         Option<StoreDeviceHeadRef>,
     ),
-    StoreOutboundError,
+    StoreError,
 > {
     let super::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
         &registration.store_commits
     else {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "Merge registration has no Store announcement anchor".to_string(),
         ));
     };
@@ -87,13 +87,13 @@ async fn exact_next_announcement_slot_impl(
         super::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
     if target.coord.stream_id != expected_stream {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "local predecessor belongs to another Store announcement stream".to_string(),
         ));
     }
     let activation = registration
         .store_announcement_activation(registration_ref)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
         .activation_id();
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
@@ -139,7 +139,7 @@ async fn exact_next_announcement_slot_impl(
         .await?;
         let is_target = sequence == target.coord.sequence();
         if is_target && head.commit != *target {
-            return Err(StoreOutboundError::MergeAnnouncementOccupied {
+            return Err(StoreError::MergeAnnouncementOccupied {
                 expected: Box::new(target.clone()),
                 actual: Box::new(head.commit),
             });
@@ -163,7 +163,7 @@ async fn exact_next_announcement_slot_impl(
         slot = head.successor.next_slot;
         predecessor = Some(reference);
     }
-    Err(StoreOutboundError::InvalidOutbound(
+    Err(StoreError::InvalidOutbound(
         "local Store predecessor traversal ended early".to_string(),
     ))
 }
@@ -172,13 +172,13 @@ pub(crate) async fn reject_excluded_merge_candidate(
     db: &Database,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
-) -> Result<(), StoreOutboundError> {
+) -> Result<(), StoreError> {
     if db
         .author_exclusion_activation_for_candidate(candidate.clone(), author.clone())
         .await?
         .is_some()
     {
-        return Err(StoreOutboundError::AuthorExcluded {
+        return Err(StoreError::AuthorExcluded {
             device_id: author.device_id,
         });
     }

@@ -44,8 +44,8 @@ impl From<crate::database::DbError> for OwnerPromotionError {
     }
 }
 
-impl From<super::store_outbound::StoreOutboundError> for OwnerPromotionError {
-    fn from(error: super::store_outbound::StoreOutboundError) -> Self {
+impl From<super::store::StoreError> for OwnerPromotionError {
+    fn from(error: super::store::StoreError) -> Self {
         Self::Protocol(error.to_string())
     }
 }

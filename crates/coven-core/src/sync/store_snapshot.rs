@@ -265,7 +265,7 @@ async fn prepare_snapshot_blobs(
             )));
         }
         if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided {
-            let locator = super::store_outbound::prepare_partition_blob_locator(
+            let locator = super::store::package_preparation::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
                 &protection,
@@ -307,7 +307,7 @@ async fn prepare_snapshot_blobs(
             prepared[index].bindings.push(binding);
             continue;
         }
-        let (binding, blob) = super::store_outbound::prepare_partition_blob(
+        let (binding, blob) = super::store::package_preparation::prepare_partition_blob(
             db,
             storage,
             &captured.fact,

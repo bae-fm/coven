@@ -17,7 +17,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
     storage: &dyn SyncStorage,
     plan: &StoreOperationPlanCommon,
     batch: StoreOperationBatch,
-) -> Result<PreparedStoreOperationCommon, StoreOutboundError> {
+) -> Result<PreparedStoreOperationCommon, StoreError> {
     let store_root_hash = plan.root.store_root_hash;
     let registration_activation = match &batch {
         StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
@@ -239,7 +239,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
             &plan.device_signer,
         ),
     }
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
     let stream_id = plan.coord.stream_id.to_string();
@@ -258,7 +258,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
         .map_err(StoreObjectError::from)?;
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, plan.coord.clone(), prepared.reference().clone())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     Ok(PreparedStoreOperationCommon {
         commit,
         prepared,

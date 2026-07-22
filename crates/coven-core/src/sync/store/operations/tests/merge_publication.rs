@@ -760,7 +760,7 @@ async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
 
     assert!(matches!(
         result,
-        Err(StoreOutboundError::Object(StoreObjectError::Storage(_)))
+        Err(StoreError::Object(StoreObjectError::Storage(_)))
     ));
     assert_eq!(
         fixture.db.write_status(&fixture.write_id).await.unwrap(),
@@ -835,7 +835,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         .await
         .expect("install completion fault");
     let first = drain_store_writes(&fixture.db, &fixture.storage).await;
-    assert!(matches!(first, Err(StoreOutboundError::Database(_))));
+    assert!(matches!(first, Err(StoreError::Database(_))));
     assert_eq!(
         fixture.db.write_status(&fixture.write_id).await.unwrap(),
         crate::WriteStatus::Publishing,
@@ -977,10 +977,10 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let reopened = open();
         let result = drain_store_writes(&reopened, &storage).await;
         match (invalid_root, result) {
-            (None, Err(StoreOutboundError::Database(reason))) => {
+            (None, Err(StoreError::Database(reason))) => {
                 assert!(reason.contains("exact Store root authority is absent"));
             }
-            (Some(_), Err(StoreOutboundError::Database(reason))) => {
+            (Some(_), Err(StoreError::Database(reason))) => {
                 assert!(reason.contains("Store root authority hash differs"));
             }
             (_, result) => panic!("unexpected Store root failure: {result:?}"),
@@ -1048,7 +1048,7 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
             &membership,
         )
         .await,
-        Err(StoreOutboundError::MissingState { .. })
+        Err(StoreError::MissingState { .. })
     ));
     assert_eq!(
         db.blocked_writes().await.expect("inspect blocked writes")[0].write_id,
@@ -1085,7 +1085,7 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
             &membership,
         )
         .await,
-        Err(StoreOutboundError::MissingState { .. })
+        Err(StoreError::MissingState { .. })
     ));
     assert!(matches!(
         db.write_status(&first).await.unwrap(),

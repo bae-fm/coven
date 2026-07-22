@@ -131,10 +131,7 @@ impl Store {
         device_id: &str,
         identity: &UserKeypair,
         write_id: crate::WriteId,
-    ) -> Result<
-        abandonment::MergeCandidateAbandonment,
-        crate::sync::store_outbound::StoreOutboundError,
-    > {
+    ) -> Result<abandonment::MergeCandidateAbandonment, crate::sync::store::StoreError> {
         abandonment::abandon_merge_candidate(
             self.db(),
             &**self.storage(),
@@ -395,9 +392,7 @@ impl AuthorizedStore<'_> {
         .await
     }
 
-    pub(crate) async fn drain_store_writes(
-        &self,
-    ) -> Result<u64, crate::sync::store_outbound::StoreOutboundError> {
+    pub(crate) async fn drain_store_writes(&self) -> Result<u64, crate::sync::store::StoreError> {
         publication::drain_store_writes(self.db(), self.storage()).await
     }
 

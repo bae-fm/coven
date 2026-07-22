@@ -1,11 +1,11 @@
 use super::abandonment::{read_occupied_merge_head, verify_merge_candidate_nonactivations};
+use super::StoreError;
 use super::*;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
 use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::StoreOutboundError;
 
 use super::operations::{
     blocked_status, publish_prepared_remote_objects, reject_excluded_merge_candidate,
@@ -15,7 +15,7 @@ use super::operations::{
 pub(crate) async fn drain_store_writes(
     db: &Database,
     storage: &dyn SyncStorage,
-) -> Result<u64, StoreOutboundError> {
+) -> Result<u64, StoreError> {
     let mut published = 0_u64;
     while let Some(batch) = db.oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();
@@ -57,7 +57,7 @@ pub(crate) async fn drain_store_writes(
                 .await
                 .map_err(StoreObjectError::from)?;
             if opened_commit != batch.commit.bytes {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "prepared commit exact readback differs from its signed bytes".to_string(),
                 ));
             }
@@ -123,9 +123,9 @@ pub(crate) async fn drain_store_writes(
                         crate::database::CompletePreparedStoreWriteOutcome::Published => {}
                         crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
                             device_id,
-                        } => return Err(StoreOutboundError::AuthorExcluded { device_id }),
+                        } => return Err(StoreError::AuthorExcluded { device_id }),
                     }
-                    return Ok::<bool, StoreOutboundError>(true);
+                    return Ok::<bool, StoreError>(true);
                 }
                 let registration = db
                     .activated_store_device_registration(head.author_registration.clone())
@@ -147,7 +147,7 @@ pub(crate) async fn drain_store_writes(
                 )?;
                 db.mark_merge_candidate_conflict(write_id.clone(), nonactivations)
                     .await?;
-                return Ok::<bool, StoreOutboundError>(false);
+                return Ok::<bool, StoreError>(false);
             }
             let observation = read_occupied_merge_head(
                 db,
@@ -162,7 +162,7 @@ pub(crate) async fn drain_store_writes(
             if observation.winner() != head
                 || observation.winner_prepared().reference() != &batch.head.object
             {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "prepared head exact readback differs from its signed bytes".to_string(),
                 ));
             }
@@ -194,9 +194,9 @@ pub(crate) async fn drain_store_writes(
                 crate::database::CompletePreparedStoreWriteOutcome::Published => {}
                 crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
                     device_id,
-                } => return Err(StoreOutboundError::AuthorExcluded { device_id }),
+                } => return Err(StoreError::AuthorExcluded { device_id }),
             }
-            Ok::<bool, StoreOutboundError>(true)
+            Ok::<bool, StoreError>(true)
         }
         .await;
         match attempt {
@@ -211,7 +211,7 @@ pub(crate) async fn drain_store_writes(
         }
         published = published
             .checked_add(1)
-            .ok_or_else(|| StoreOutboundError::Database("publish count exceeded u64".into()))?;
+            .ok_or_else(|| StoreError::Database("publish count exceeded u64".into()))?;
     }
     Ok(published)
 }

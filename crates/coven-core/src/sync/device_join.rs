@@ -5719,7 +5719,7 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Pull(#[from] crate::sync::store_pull::StorePullError),
     #[error(transparent)]
-    Outbound(#[from] crate::sync::store_outbound::StoreOutboundError),
+    Outbound(#[from] crate::sync::store::StoreError),
     #[error(transparent)]
     Protocol(#[from] crate::sync::store_commit::StoreProtocolError),
     #[error(transparent)]

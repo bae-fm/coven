@@ -90,16 +90,16 @@ impl StoreOperationPlanCommon {
     pub(crate) fn validate_acknowledgement(
         &self,
         acknowledgement: &super::store_commit::StoreAck,
-    ) -> Result<(), StoreOutboundError> {
+    ) -> Result<(), StoreError> {
         let predecessor_cut = self
             .order
             .predecessor_cut()
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if acknowledgement.registration != self.registration_ref
             || acknowledgement.store_cut != predecessor_cut
             || acknowledgement.device_state != self.device_state
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Store acknowledgement differs from its operation commit predecessor".to_string(),
             ));
         }
@@ -170,9 +170,9 @@ impl MergeConflictResolutionCommitPlan {
         self,
         membership: &MembershipChain,
         resolution: &super::membership::StoreMembershipConflictResolutionRef,
-    ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
+    ) -> Result<StoreOperationCommitPlan, StoreError> {
         let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "conflict-resolution candidate membership remains conflicted".to_string(),
             ));
         };
@@ -181,7 +181,7 @@ impl MergeConflictResolutionCommitPlan {
             .binary_search(resolution)
             .is_err()
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "conflict-resolution candidate membership omits its exact resolution".to_string(),
             ));
         }
@@ -199,7 +199,7 @@ impl MergeConflictResolutionCommitPlan {
                     || record.creation_authority != authority
             })
         {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "conflict-resolution candidate is not authorized by its replacement Owner grant"
                     .to_string(),
             ));
@@ -210,7 +210,7 @@ impl MergeConflictResolutionCommitPlan {
             self.device_state.recovery().to_vec(),
             resolved.state_hash,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(StoreOperationCommitPlan {
             common: StoreOperationPlanCommon {
                 root: self.root,
@@ -242,9 +242,9 @@ impl StoreOperationCommitPlan {
         member_grant: super::membership::MembershipGrantId,
         finalization: super::store_commit::OwnerPromotionFinalization,
         identity_signer: &UserKeypair,
-    ) -> Result<super::store_commit::OwnerPromotionRequest, StoreOutboundError> {
+    ) -> Result<super::store_commit::OwnerPromotionRequest, StoreError> {
         let promoter_owner_grant = self.owner_grant.clone().ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
+            StoreError::InvalidOutbound(
                 "Owner-promotion request author has no active Owner grant".to_string(),
             )
         })?;
@@ -262,15 +262,15 @@ impl StoreOperationCommitPlan {
             finalization,
             identity_signer,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 }
 
 impl StoreOperationCommitPlan {
-    pub(crate) fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreOutboundError> {
+    pub(crate) fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreError> {
         self.order
             .predecessor_cut()
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) fn membership_state(&self) -> &super::circle_control::StoreMembershipStateRef {
@@ -308,13 +308,13 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
     device_id: &str,
     keypair: &UserKeypair,
     candidate_membership_heads: &[super::membership::MembershipHeadRef],
-) -> Result<MergeConflictResolutionCommitPlan, StoreOutboundError> {
+) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
     let previous = db.latest_local_store_position().await?;
     let dependencies =
         super::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
@@ -339,7 +339,7 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         &registration.author_pubkey,
     )
     .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     Ok(MergeConflictResolutionCommitPlan {
         root,
         registration_ref,

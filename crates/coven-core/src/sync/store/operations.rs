@@ -1,5 +1,6 @@
 use super::abandonment::read_occupied_merge_head;
 use super::database::StoreDatabase;
+use super::StoreError;
 use super::*;
 use crate::database::VerifiedMergeMaterialization;
 use crate::sync::circle_activation::VerifiedCircleActivations;
@@ -18,7 +19,6 @@ use crate::sync::store_commit::{
     StoreProtocolError, StoreRootRef, SuccessorLink,
 };
 use crate::sync::store_objects::{run_blocking_object_verification, StoreObjectError};
-use crate::sync::store_outbound::StoreOutboundError;
 use crate::sync::{
     audience_package, circle_control, device_join, invite, membership, owner_promotion, provider,
     remote_object, service, store_commit, store_objects, store_reclaim, wrapped_store_key,
@@ -47,15 +47,15 @@ pub(crate) use support::*;
 
 pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 
-pub(crate) fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
+pub(crate) fn successor_store_sequence(current: u64) -> Result<u64, StoreError> {
     current
         .checked_add(1)
-        .ok_or(StoreOutboundError::SequenceExhausted { current })
+        .ok_or(StoreError::SequenceExhausted { current })
 }
 
 pub(crate) fn next_store_sequence(
     previous: Option<&StoreBatchCommitRef>,
-) -> Result<u64, StoreOutboundError> {
+) -> Result<u64, StoreError> {
     previous.map_or(Ok(1), |reference| {
         successor_store_sequence(reference.coord.sequence())
     })
@@ -67,14 +67,14 @@ pub(crate) async fn prepare_plan(
     candidate_membership: &crate::sync::membership::MembershipChain,
     device_id: &str,
     keypair: &UserKeypair,
-) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
+) -> Result<StoreOperationCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
     let previous = db.latest_local_store_position().await?;
     let dependencies =
         crate::sync::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
             .map(|frontier| frontier.commits().clone())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
@@ -98,7 +98,7 @@ pub(crate) async fn prepare_plan(
         &registration_ref,
     )
     .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let owner_grant = authorization
         .membership
         .active_owner_grant(&registration.author_pubkey);
@@ -106,7 +106,7 @@ pub(crate) async fn prepare_plan(
         .membership
         .write_grant_authority(&registration.author_pubkey)
         .ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(format!(
+            StoreError::InvalidOutbound(format!(
                 "Merge Store operation author {} has no active write grant",
                 registration.author_pubkey
             ))
@@ -134,7 +134,7 @@ pub(crate) async fn prepare_candidate(
     storage: &dyn SyncStorage,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
-) -> Result<PreparedStoreOperationCommit, StoreOutboundError> {
+) -> Result<PreparedStoreOperationCommit, StoreError> {
     let acknowledgement_evidence = match &batch {
         StoreOperationBatch::Acknowledgement { reference, value } => {
             Some((reference.clone(), value.clone()))
@@ -180,7 +180,7 @@ pub(crate) async fn prepare_candidate(
                 value,
             )
             .await
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         ),
         None => None,
     };
@@ -202,11 +202,11 @@ pub(crate) async fn prepare_candidate(
     let device_operations = match retained_device_operations {
         Some(retained) => retained
             .verify_for(plan.root(), &common.commit)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         None => crate::sync::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
             &common.commit,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
     };
     let state_after = Box::pin(super::pull::derive_local_post_device_state(
         storage,
@@ -217,7 +217,7 @@ pub(crate) async fn prepare_candidate(
         device_operations,
     ))
     .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head_context = ProtocolObjectContext::signed_plaintext(
         common.commit.store_root_hash,
         ProtocolObjectDomain::StoreHead,
@@ -235,7 +235,7 @@ pub(crate) async fn prepare_candidate(
         merge_history_evidence,
     )
     .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let next_prefix = head_slot_prefix(&device_id, successor_store_sequence(common.commit.seq())?);
     let next_slot = storage
         .allocate_protocol_slot(&head_context, &next_prefix, ".json")
@@ -250,14 +250,14 @@ pub(crate) async fn prepare_candidate(
             activation: plan
                 .registration()
                 .store_announcement_activation(plan.registration_ref())
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
                 .activation_id(),
             predecessor: successor.predecessor_head.map(|reference| reference.object),
             next_slot,
         },
         plan.device_signer(),
     )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head_prefix = head_slot_prefix(&device_id, common.commit.seq());
     let prepared_head = storage
         .prepare_protocol_object(
@@ -281,7 +281,7 @@ pub(crate) async fn publish_prepared(
     candidate: Box<PreparedStoreOperationCommit>,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+) -> Result<StoreOperationPublicationOutcome, StoreError> {
     let root = required_store_root(db).await?;
     let retained_operation_objects = retained_store_operation_objects(&candidate.commit)?;
     let head = candidate.head.clone();
@@ -295,10 +295,10 @@ pub(crate) async fn publish_prepared(
             &candidate.commit,
         )
         .await
-        .map_err(StoreOutboundError::InvalidOutbound)?
+        .map_err(StoreError::InvalidOutbound)?
     } else {
         VerifiedCircleActivations::none(&candidate.commit, &candidate.reference)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
     };
     publish(
         db,
@@ -321,7 +321,7 @@ pub(crate) async fn publish_prepared(
 pub(crate) async fn upload_commit(
     storage: &dyn SyncStorage,
     candidate: &PreparedStoreOperationCommit,
-) -> Result<(), StoreOutboundError> {
+) -> Result<(), StoreError> {
     let stream_id = candidate.reference.coord.stream_id;
     let context = ProtocolObjectContext::signed_plaintext(
         candidate.commit.store_root_hash,
@@ -342,7 +342,7 @@ pub(crate) async fn upload_commit(
         .await
         .map_err(StoreObjectError::from)?;
     if opened != candidate.commit.to_bytes() {
-        return Err(StoreOutboundError::InvalidOutbound(
+        return Err(StoreError::InvalidOutbound(
             "Store operation commit exact readback differs from its signed bytes".to_string(),
         ));
     }
@@ -361,13 +361,8 @@ pub(crate) fn publish<'a>(
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
     circle_activations: VerifiedCircleActivations,
-) -> Pin<
-    Box<
-        dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreOutboundError>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
+{
     Box::pin(async move {
         let commit = activation.candidate.commit.clone();
         let reference = activation.candidate.reference.clone();
@@ -382,7 +377,7 @@ pub(crate) fn publish<'a>(
             &commit.author_registration,
         ))
         .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
             db,
             storage,
@@ -393,16 +388,14 @@ pub(crate) fn publish<'a>(
             authorization.device_state,
         ))
         .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let has_tracked_remote_objects =
             !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
         if has_tracked_remote_objects {
             db.mark_candidate_commit_uploaded(reference.clone())
                 .await
                 .map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
-                        "record uploaded Store candidate: {error}"
-                    ))
+                    StoreError::InvalidOutbound(format!("record uploaded Store candidate: {error}"))
                 })?;
         }
         let head_context = ProtocolObjectContext::signed_plaintext(
@@ -435,7 +428,7 @@ pub(crate) fn publish<'a>(
             .await
             .map_err(StoreObjectError::from)?;
         if opened_head != head.to_bytes() {
-            return Err(StoreOutboundError::InvalidOutbound(
+            return Err(StoreError::InvalidOutbound(
                 "Store operation head exact readback differs from its signed bytes".to_string(),
             ));
         }
@@ -447,9 +440,7 @@ pub(crate) fn publish<'a>(
             db.mark_store_head_uploaded(activation_head.clone())
                 .await
                 .map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
-                        "record uploaded Store head: {error}"
-                    ))
+                    StoreError::InvalidOutbound(format!("record uploaded Store head: {error}"))
                 })?;
             membership_completion.is_none().then(|| {
                 std::iter::once(crate::sync::remote_object::remote_object_id(
@@ -483,7 +474,7 @@ pub(crate) fn publish<'a>(
                     prepared_head.reference(),
                 ))
             {
-                return Err(StoreOutboundError::InvalidOutbound(
+                return Err(StoreError::InvalidOutbound(
                     "membership journal completion does not cover its exact Store candidate"
                         .to_string(),
                 ));
@@ -562,7 +553,7 @@ async fn resolve_head_collision(
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
     head_prefix: String,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+) -> Result<StoreOperationPublicationOutcome, StoreError> {
     let observation = read_occupied_merge_head(
         db,
         storage,
@@ -598,7 +589,7 @@ async fn resolve_head_collision(
             },
             &registration,
         )
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let Some(acknowledgement) = commit.acknowledgement().cloned() else {
         return Ok(StoreOperationPublicationOutcome::NonactivatedCandidate {
             candidate,

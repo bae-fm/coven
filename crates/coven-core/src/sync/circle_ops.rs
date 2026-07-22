@@ -1107,7 +1107,7 @@ pub enum CircleOperationError {
     #[error("circle object: {0}")]
     Object(#[from] super::store_objects::StoreObjectError),
     #[error("Store publication: {0}")]
-    StoreOutbound(#[from] super::store_outbound::StoreOutboundError),
+    StoreOutbound(#[from] super::store::StoreError),
     #[error("Store device registration: {0}")]
     StoreRegistration(#[from] super::store_registration::StoreRegistrationError),
     #[error("circles require opaque cloud storage")]

@@ -22,6 +22,7 @@ use crate::sync::storage::{
     BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     SyncStorage,
 };
+use crate::sync::store::StoreError;
 use crate::sync::store_commit::{
     head_slot_prefix, CommitFrontier, DeviceStreamAnchor, ObjectHash,
     OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
@@ -39,7 +40,7 @@ use crate::sync::store_objects::{
 use crate::sync::store_pull::*;
 use crate::sync::{
     causal_grants, gate, hlc, membership, membership_ops, remote_object, retained_replay, session,
-    store_commit, store_objects, store_outbound,
+    store_commit, store_objects,
 };
 
 mod device_join_attempt;

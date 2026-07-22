@@ -20,7 +20,7 @@ pub enum StoreAckError {
     #[error("outbound Store acknowledgement is invalid: {0}")]
     InvalidOutbound(String),
     #[error("Store acknowledgement activation: {0}")]
-    Outbound(#[from] super::store_outbound::StoreOutboundError),
+    Outbound(#[from] super::store::StoreError),
     #[error("Store acknowledgement snapshot: {0}")]
     Snapshot(#[from] super::snapshot::SnapshotError),
 }

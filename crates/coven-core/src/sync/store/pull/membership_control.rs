@@ -391,10 +391,10 @@ pub(crate) async fn verify_merge_membership_head_activation(
     match activation_observation {
         Ok((_, Some(_))) => {}
         Ok((_, None)) => return Ok(false),
-        Err(super::store_outbound::StoreOutboundError::MergeAnnouncementOccupied { .. })
-        | Err(super::store_outbound::StoreOutboundError::Object(
-            super::store_objects::StoreObjectError::Storage(StorageError::NotFound(_)),
-        )) => return Ok(false),
+        Err(StoreError::MergeAnnouncementOccupied { .. })
+        | Err(StoreError::Object(super::store_objects::StoreObjectError::Storage(
+            StorageError::NotFound(_),
+        ))) => return Ok(false),
         Err(error) => return Err(error.to_string()),
     }
     let (_, _, replayed, verified_control) =
