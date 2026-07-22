@@ -46,6 +46,7 @@ use crate::sync::{
 
 mod discovery;
 mod history;
+mod join_bootstrap;
 mod materialization;
 mod membership_control;
 mod owner_promotion;
@@ -58,6 +59,9 @@ mod terminal_cleanup;
 
 pub(crate) use discovery::*;
 pub(crate) use history::*;
+pub(in crate::sync::store_engine) use join_bootstrap::{
+    materialize_device_join_activation, prepare_device_join_bootstrap,
+};
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(in crate::sync::store_engine) use owner_promotion::{

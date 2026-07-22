@@ -2023,19 +2023,12 @@ mod tests {
             .order
             .predecessor_cut()
             .expect("read exclusion activation predecessor");
-        let authorization = super::super::store_engine::load_device_join_authorization(
-            &store.storage,
-            &store.root,
-            &activation_commit.membership_state,
-        )
-        .await
-        .expect("load exclusion bootstrap authority");
-        let plan = super::super::store_pull::prepare_device_join_bootstrap(
+        let plan = super::super::store_engine::prepare_device_join_bootstrap(
             &store.storage,
             &store.root,
             &replay_cut,
             &activation,
-            &authorization,
+            &activation_commit.membership_state,
         )
         .await
         .expect("prepare post-snapshot exclusion replay");

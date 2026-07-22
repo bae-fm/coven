@@ -41,6 +41,7 @@ use crate::sync::{
 
 mod application;
 mod history;
+mod join_bootstrap;
 mod owner_promotion;
 mod registration_authority;
 mod resolution;
@@ -48,6 +49,9 @@ mod snapshot_authority;
 
 pub(crate) use application::*;
 pub(crate) use history::*;
+pub(in crate::sync::store_engine) use join_bootstrap::{
+    materialize_device_join_activation, prepare_device_join_bootstrap,
+};
 pub(in crate::sync::store_engine) use owner_promotion::{
     find_request_activation as find_owner_promotion_request_activation,
     verify_acceptance as verify_owner_promotion_acceptance,

@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::{
     circle, circle_activation, circle_ops, device_join, membership, membership_ops, provider,
-    retained_replay, store_commit, store_objects, store_outbound, store_reclaim, store_snapshot,
+    retained_replay, store_commit, store_objects, store_reclaim, store_snapshot,
 };
 
 use super::audience_package::{AudiencePackage, PackageAudience};
@@ -26,13 +26,13 @@ use super::store_commit::{
     DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash, OwnerRecoveryCursor,
     OwnerRecoveryPosition, ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
     RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
-    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
-    StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
-    StoreSerialPredecessor, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
+    StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, StoreSerialHead, StoreSerialPredecessor,
+    VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,

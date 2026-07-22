@@ -384,11 +384,9 @@ pub(crate) struct VerifiedOwnerPromotionAcceptance(VerifiedOwnerPromotionAccepta
 
 pub(crate) enum DeviceJoinBootstrapAuthorization {
     MergeConcurrent {
-        state: super::circle_control::StoreMembershipStateRef,
         chain: super::membership::MembershipChain,
     },
     Serial {
-        state: super::circle_control::StoreMembershipStateRef,
         position: super::store_commit::SerialStorePosition,
         authorization: super::membership::SerialAuthorizationState,
     },
@@ -402,19 +400,80 @@ pub(crate) async fn load_device_join_authorization(
     match state {
         super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
             let chain = merge::pull::load_device_join_authorization(storage, root, state).await?;
-            Ok(DeviceJoinBootstrapAuthorization::MergeConcurrent {
-                state: state.clone(),
-                chain,
-            })
+            Ok(DeviceJoinBootstrapAuthorization::MergeConcurrent { chain })
         }
         super::circle_control::StoreMembershipStateRef::Serial(_) => {
             let (position, authorization) =
                 serial::pull::load_device_join_authorization(storage, root, state).await?;
             Ok(DeviceJoinBootstrapAuthorization::Serial {
-                state: state.clone(),
                 position,
                 authorization,
             })
+        }
+    }
+}
+
+pub(crate) async fn prepare_device_join_bootstrap(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    coverage: &super::store_commit::StoreHistoryCut,
+    attempt_activation: &super::store_commit::StoreBatchCommitRef,
+    membership_state: &super::circle_control::StoreMembershipStateRef,
+) -> Result<super::store_pull::DeviceJoinBootstrapPlan, super::store_pull::StorePullError> {
+    match membership_state {
+        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
+            merge::pull::prepare_device_join_bootstrap(
+                storage,
+                root,
+                coverage,
+                attempt_activation,
+                membership_state,
+            )
+            .await
+        }
+        super::circle_control::StoreMembershipStateRef::Serial(_) => {
+            serial::pull::prepare_device_join_bootstrap(
+                storage,
+                root,
+                coverage,
+                attempt_activation,
+                membership_state,
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) async fn materialize_device_join_activation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    reference: &super::store_commit::StoreBatchCommitRef,
+    expected_outcome: &super::store_commit::DeviceJoinOutcomeRef,
+    membership_state: &super::circle_control::StoreMembershipStateRef,
+) -> Result<(), super::store_pull::StorePullError> {
+    match membership_state {
+        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
+            merge::pull::materialize_device_join_activation(
+                db,
+                storage,
+                root,
+                reference,
+                expected_outcome,
+                membership_state,
+            )
+            .await
+        }
+        super::circle_control::StoreMembershipStateRef::Serial(_) => {
+            serial::pull::materialize_device_join_activation(
+                db,
+                storage,
+                root,
+                reference,
+                expected_outcome,
+                membership_state,
+            )
+            .await
         }
     }
 }
