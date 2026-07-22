@@ -6135,21 +6135,20 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             .await
             .expect("load exact founder authority")
             .0;
-        let proposal = match crate::sync::store_device_exclusion::propose_device_exclusion(
-        &excluding_db,
-        &storage.storage,
-        &excluding_owner,
-        &founder_registration,
-    )
-    .await
-    .expect("propose founder device exclusion")
-    {
-        crate::sync::store_device_exclusion::StoreDeviceExclusionResult::ProposalActivated {
-            proposal,
-            ..
-        } => proposal,
-        result => panic!("unexpected exclusion proposal result: {result:?}"),
-    };
+        let proposal = match crate::sync::store::device_exclusion::propose_device_exclusion(
+            &excluding_db,
+            &storage.storage,
+            &excluding_owner,
+            &founder_registration,
+        )
+        .await
+        .expect("propose founder device exclusion")
+        {
+            crate::sync::store::StoreDeviceExclusionResult::ProposalActivated {
+                proposal, ..
+            } => proposal,
+            result => panic!("unexpected exclusion proposal result: {result:?}"),
+        };
 
         let joining_member = UserKeypair::generate();
         let approval = prepare_same_principal_approval_fixture(
@@ -6184,7 +6183,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         )
         .await
         .expect("publish exclusion acknowledgement");
-        match crate::sync::store_device_exclusion::finalize_device_exclusion(
+        match crate::sync::store::device_exclusion::finalize_device_exclusion(
             &excluding_db,
             &storage.storage,
             &excluding_owner,
@@ -6193,9 +6192,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         .await
         .expect("activate founder exclusion")
         {
-            crate::sync::store_device_exclusion::StoreDeviceExclusionResult::OutcomeActivated {
-                ..
-            } => {}
+            crate::sync::store::StoreDeviceExclusionResult::OutcomeActivated { .. } => {}
             result => panic!("unexpected exclusion outcome result: {result:?}"),
         }
 

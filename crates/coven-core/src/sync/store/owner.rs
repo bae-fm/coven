@@ -114,13 +114,9 @@ impl Store {
         &self,
         identity: &UserKeypair,
     ) -> Result<(), SyncCycleFailure> {
-        crate::sync::store_device_exclusion::resume_device_exclusion(
-            self.db(),
-            &**self.storage(),
-            identity,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
+        self.resume_device_exclusion(identity)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
         crate::sync::circle_ops::resume_circle_operations(self.db(), &**self.storage(), identity)
             .await
             .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
@@ -264,66 +260,6 @@ impl Store {
             identity,
         )
         .await
-    }
-
-    pub(crate) async fn propose_device_exclusion(
-        &self,
-        identity: &UserKeypair,
-        target: &crate::sync::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<
-        crate::sync::store_device_exclusion::StoreDeviceExclusionResult,
-        crate::sync::store_device_exclusion::StoreDeviceExclusionError,
-    > {
-        crate::sync::store_device_exclusion::propose_device_exclusion(
-            self.db(),
-            &**self.storage(),
-            identity,
-            target,
-        )
-        .await
-    }
-
-    pub(crate) async fn cancel_device_exclusion(
-        &self,
-        identity: &UserKeypair,
-        proposal: &crate::sync::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<
-        crate::sync::store_device_exclusion::StoreDeviceExclusionResult,
-        crate::sync::store_device_exclusion::StoreDeviceExclusionError,
-    > {
-        crate::sync::store_device_exclusion::cancel_device_exclusion(
-            self.db(),
-            &**self.storage(),
-            identity,
-            proposal,
-        )
-        .await
-    }
-
-    pub(crate) async fn finalize_device_exclusion(
-        &self,
-        identity: &UserKeypair,
-        proposal: &crate::sync::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<
-        crate::sync::store_device_exclusion::StoreDeviceExclusionResult,
-        crate::sync::store_device_exclusion::StoreDeviceExclusionError,
-    > {
-        crate::sync::store_device_exclusion::finalize_device_exclusion(
-            self.db(),
-            &**self.storage(),
-            identity,
-            proposal,
-        )
-        .await
-    }
-
-    pub(crate) async fn device_exclusion_operations(
-        &self,
-    ) -> Result<
-        Vec<crate::sync::store_device_exclusion::StoreDeviceExclusionOperationInfo>,
-        crate::sync::store_device_exclusion::StoreDeviceExclusionError,
-    > {
-        crate::sync::store_device_exclusion::get_device_exclusion_operations(self.db()).await
     }
 }
 

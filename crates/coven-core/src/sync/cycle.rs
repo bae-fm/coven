@@ -1354,10 +1354,8 @@ impl SyncComponents {
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<
-        super::store_device_exclusion::StoreDeviceExclusionResult,
-        super::store_device_exclusion::StoreDeviceExclusionError,
-    > {
+    ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
+    {
         self.store
             .propose_device_exclusion(&self.user_keypair, target)
             .await
@@ -1366,10 +1364,8 @@ impl SyncComponents {
     pub async fn cancel_device_exclusion(
         &self,
         proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<
-        super::store_device_exclusion::StoreDeviceExclusionResult,
-        super::store_device_exclusion::StoreDeviceExclusionError,
-    > {
+    ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
+    {
         self.store
             .cancel_device_exclusion(&self.user_keypair, proposal)
             .await
@@ -1378,10 +1374,8 @@ impl SyncComponents {
     pub async fn finalize_device_exclusion(
         &self,
         proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<
-        super::store_device_exclusion::StoreDeviceExclusionResult,
-        super::store_device_exclusion::StoreDeviceExclusionError,
-    > {
+    ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
+    {
         self.store
             .finalize_device_exclusion(&self.user_keypair, proposal)
             .await
@@ -1390,8 +1384,8 @@ impl SyncComponents {
     pub async fn get_device_exclusion_operations(
         &self,
     ) -> Result<
-        Vec<super::store_device_exclusion::StoreDeviceExclusionOperationInfo>,
-        super::store_device_exclusion::StoreDeviceExclusionError,
+        Vec<super::store::StoreDeviceExclusionOperationInfo>,
+        super::store::StoreDeviceExclusionError,
     > {
         self.store.device_exclusion_operations().await
     }

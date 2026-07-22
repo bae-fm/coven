@@ -14,6 +14,7 @@ use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 pub(crate) mod abandonment;
 mod acknowledgements;
 mod database;
+pub(crate) mod device_exclusion;
 #[doc(hidden)]
 pub mod device_join;
 mod error;
@@ -28,6 +29,14 @@ pub(crate) mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
+pub(crate) use device_exclusion::{
+    DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
+    StoreDeviceExclusionJournalError,
+};
+pub use device_exclusion::{
+    StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo,
+    StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
+};
 pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
 pub use pull::{

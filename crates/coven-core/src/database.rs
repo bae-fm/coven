@@ -65,6 +65,10 @@ use crate::sync::retained_replay::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::store::{
+    DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
+    StoreDeviceExclusionJournalError,
+};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
     CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
@@ -74,10 +78,6 @@ use crate::sync::store_commit::{
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSnapshotRef,
     StreamActivationId, VerifiedStoreDeviceOperations,
-};
-use crate::sync::store_device_exclusion::{
-    DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
-    StoreDeviceExclusionJournalError,
 };
 use crate::sync::store_reclaim_journal::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,

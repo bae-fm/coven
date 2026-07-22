@@ -47,7 +47,6 @@ pub mod snapshot;
 pub mod status;
 pub mod storage;
 pub mod store_commit;
-pub mod store_device_exclusion;
 #[cfg(test)]
 mod store_history_checkpoint_tests;
 pub mod store_objects;

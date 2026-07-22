@@ -208,7 +208,7 @@ impl Database {
     pub(crate) async fn complete_outbound_store_device_exclusion_slot_loss(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        winner: crate::sync::store_device_exclusion::DurableStoreDeviceExclusionObject,
+        winner: crate::sync::store::device_exclusion::DurableStoreDeviceExclusionObject,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let next = DurableStoreDeviceExclusionOperation::Completed(
             StoreDeviceExclusionCompletion::OutcomeSlotOccupied {
