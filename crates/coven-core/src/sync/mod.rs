@@ -47,7 +47,6 @@ pub mod session;
 pub mod snapshot;
 pub mod status;
 pub mod storage;
-pub mod store_ack;
 pub mod store_commit;
 pub mod store_device_exclusion;
 #[cfg(test)]

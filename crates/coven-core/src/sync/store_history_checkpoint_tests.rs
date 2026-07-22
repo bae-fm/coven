@@ -458,7 +458,7 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
-    crate::sync::test_helpers::publish_merge_store_ack_fixture(
+    crate::sync::test_helpers::publish_store_ack_fixture(
         &db,
         &store.storage,
         coverage,
@@ -743,7 +743,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         meta: forged,
     };
     assert!(
-        super::store::verify_merge_snapshot_for_acknowledgement_for_test(
+        super::store::verify_store_snapshot_for_acknowledgement_for_test(
             &store.storage,
             &store.root,
             &forged,

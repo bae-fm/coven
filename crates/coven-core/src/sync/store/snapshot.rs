@@ -1001,7 +1001,7 @@ mod tests {
         )
         .await
         .expect("publish exact snapshot selector fixture");
-        crate::sync::store::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_store_acknowledgement_for_test(
             &db,
             &store.storage,
             CommitFrontier(BTreeMap::new()),
@@ -1010,7 +1010,7 @@ mod tests {
         )
         .await
         .expect("stage exact snapshot selector acknowledgement");
-        crate::sync::store::drain_merge_acknowledgements_for_test(&db, &store.storage, &signer)
+        crate::sync::store::drain_store_acknowledgements_for_test(&db, &store.storage, &signer)
             .await
             .expect("activate exact snapshot selector acknowledgement");
 

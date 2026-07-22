@@ -3070,7 +3070,7 @@ mod tests {
         let db = open_test_db();
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
-        super::super::store::stage_merge_acknowledgement_for_test(
+        super::super::store::stage_store_acknowledgement_for_test(
             &db,
             &store.storage,
             super::super::store_commit::CommitFrontier::from_refs(

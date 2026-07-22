@@ -1670,7 +1670,7 @@ mod tests {
         )
         .await
         .expect("publish author exclusion snapshot");
-        crate::sync::test_helpers::publish_merge_store_ack_fixture(
+        crate::sync::test_helpers::publish_store_ack_fixture(
             &owner_db,
             &store.storage,
             snapshot_coverage,
@@ -1889,7 +1889,7 @@ mod tests {
             (&owner_db, "2026-07-18T00:00:01Z"),
             (&peer_db, "2026-07-18T00:00:02Z"),
         ] {
-            let acknowledgement = crate::sync::store::stage_merge_acknowledgement_for_test(
+            let acknowledgement = crate::sync::store::stage_store_acknowledgement_for_test(
                 database,
                 &store.storage,
                 snapshot_coverage.clone(),
@@ -1906,7 +1906,7 @@ mod tests {
                 published_snapshot.meta.author_registration
             );
             assert_eq!(locator.snapshot, published_snapshot.reference);
-            crate::sync::store::drain_merge_acknowledgements_for_test(
+            crate::sync::store::drain_store_acknowledgements_for_test(
                 database,
                 &store.storage,
                 &signer,
@@ -2066,7 +2066,7 @@ mod tests {
                 .expect("read owner exclusion frontier"),
         )
         .expect("shape owner exclusion frontier");
-        let acknowledgement = Box::pin(super::super::store::stage_merge_acknowledgement_for_test(
+        let acknowledgement = Box::pin(super::super::store::stage_store_acknowledgement_for_test(
             owner_db,
             &store.storage,
             frontier,
@@ -2078,7 +2078,7 @@ mod tests {
         let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
         assert_eq!(proposal_freezes, freezes);
         assert_eq!(
-            Box::pin(super::super::store::drain_merge_acknowledgements_for_test(
+            Box::pin(super::super::store::drain_store_acknowledgements_for_test(
                 owner_db,
                 &store.storage,
                 signer,
@@ -4561,7 +4561,7 @@ mod tests {
                 .expect("read exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        let acknowledgement = Box::pin(super::super::store::stage_merge_acknowledgement_for_test(
+        let acknowledgement = Box::pin(super::super::store::stage_store_acknowledgement_for_test(
             &reopened,
             storage.as_ref(),
             frontier,
@@ -4574,7 +4574,7 @@ mod tests {
         assert!(proposal_freezes.is_empty());
 
         assert_eq!(
-            Box::pin(super::super::store::drain_merge_acknowledgements_for_test(
+            Box::pin(super::super::store::drain_store_acknowledgements_for_test(
                 &reopened,
                 storage.as_ref(),
                 &signer,
@@ -4625,7 +4625,7 @@ mod tests {
                 .expect("read competing acknowledgement frontier"),
         )
         .expect("shape competing acknowledgement frontier");
-        super::super::store::stage_merge_acknowledgement_for_test(
+        super::super::store::stage_store_acknowledgement_for_test(
             &reopened,
             storage.as_ref(),
             frontier,
@@ -4635,7 +4635,7 @@ mod tests {
         .await
         .expect("stage competing acknowledgement");
         assert_eq!(
-            super::super::store::drain_merge_acknowledgements_for_test(
+            super::super::store::drain_store_acknowledgements_for_test(
                 &reopened,
                 storage.as_ref(),
                 &signer,

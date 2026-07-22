@@ -5563,7 +5563,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("read behind device frontier"),
     )
     .expect("validate behind device frontier");
-    crate::sync::store::stage_merge_acknowledgement_for_test(
+    crate::sync::store::stage_store_acknowledgement_for_test(
         &behind_db,
         &storage.storage,
         behind_frontier,
@@ -5572,7 +5572,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     )
     .await
     .expect("stage behind device acknowledgement");
-    crate::sync::store::drain_merge_acknowledgements_for_test(
+    crate::sync::store::drain_store_acknowledgements_for_test(
         &behind_db,
         &storage.storage,
         &behind,
@@ -6115,7 +6115,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 .expect("load exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        crate::sync::store::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_store_acknowledgement_for_test(
             &excluding_db,
             &storage.storage,
             frontier,
@@ -6124,7 +6124,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         )
         .await
         .expect("stage exclusion acknowledgement");
-        crate::sync::store::drain_merge_acknowledgements_for_test(
+        crate::sync::store::drain_store_acknowledgements_for_test(
             &excluding_db,
             &storage.storage,
             &excluding_owner,

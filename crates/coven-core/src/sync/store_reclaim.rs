@@ -1478,7 +1478,7 @@ mod tests {
         )
         .await
         .expect("publish stable snapshot");
-        crate::sync::test_helpers::publish_merge_store_ack_fixture(
+        crate::sync::test_helpers::publish_store_ack_fixture(
             &db,
             &store.storage,
             first_coverage,
@@ -1856,7 +1856,7 @@ mod tests {
         )
         .await
         .expect("publish covering snapshot");
-        crate::sync::test_helpers::publish_merge_store_ack_fixture(
+        crate::sync::test_helpers::publish_store_ack_fixture(
             &db,
             &store.storage,
             coverage,

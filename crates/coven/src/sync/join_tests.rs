@@ -87,7 +87,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     )
     .await
     .expect("publish join snapshot");
-    publish_merge_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
+    publish_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
         .await
         .expect("publish join snapshot acknowledgement");
     let authorization = membership;

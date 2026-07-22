@@ -81,35 +81,35 @@ async fn load_store(
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn stage_merge_acknowledgement_for_test(
+pub(crate) async fn stage_store_acknowledgement_for_test(
     db: &Database,
     storage: &dyn SyncStorage,
     frontier: CommitFrontier,
     sync_time: String,
     identity: &UserKeypair,
-) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError> {
+) -> Result<super::store_commit::StoreAck, acknowledgements::StoreAckError> {
     let store = Store::authorize_borrowed(storage, db)
         .await
-        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
     store
         .stage_acknowledgement(frontier, sync_time, identity)
         .await
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn drain_merge_acknowledgements_for_test(
+pub(crate) async fn drain_store_acknowledgements_for_test(
     db: &Database,
     storage: &dyn SyncStorage,
     identity: &UserKeypair,
-) -> Result<u64, super::store_ack::StoreAckError> {
+) -> Result<u64, acknowledgements::StoreAckError> {
     let store = Store::authorize_borrowed(storage, db)
         .await
-        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
     store.drain_acknowledgements(identity).await
 }
 
 #[cfg(test)]
-pub(crate) async fn prepare_merge_acknowledgement_activation_for_test(
+pub(crate) async fn prepare_store_acknowledgement_activation_for_test(
     db: &Database,
     acknowledgement: super::store_commit::StoreAckRef,
     candidate: crate::sync::store::operations::PreparedStoreOperationCommit,
@@ -126,7 +126,7 @@ pub(crate) async fn verify_store_snapshot_stability(
 }
 
 #[cfg(test)]
-pub(crate) async fn verify_merge_snapshot_for_acknowledgement_for_test(
+pub(crate) async fn verify_store_snapshot_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,

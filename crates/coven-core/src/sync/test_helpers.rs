@@ -1289,13 +1289,13 @@ pub async fn publish_snapshot_fixture(
     .map_err(|error| error.to_string())
 }
 
-pub async fn publish_merge_store_ack_fixture(
+pub async fn publish_store_ack_fixture(
     db: &Database,
     storage: &dyn crate::sync::storage::SyncStorage,
     frontier: crate::sync::store_commit::CommitFrontier,
     signer: &UserKeypair,
 ) -> Result<(), String> {
-    Box::pin(crate::sync::store::stage_merge_acknowledgement_for_test(
+    Box::pin(crate::sync::store::stage_store_acknowledgement_for_test(
         db,
         storage,
         frontier,
@@ -1304,7 +1304,7 @@ pub async fn publish_merge_store_ack_fixture(
     ))
     .await
     .map_err(|error| error.to_string())?;
-    let published = Box::pin(crate::sync::store::drain_merge_acknowledgements_for_test(
+    let published = Box::pin(crate::sync::store::drain_store_acknowledgements_for_test(
         db, storage, signer,
     ))
     .await

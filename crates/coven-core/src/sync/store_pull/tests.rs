@@ -116,7 +116,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
-    crate::sync::test_helpers::publish_merge_store_ack_fixture(
+    crate::sync::test_helpers::publish_store_ack_fixture(
         &db,
         &store.storage,
         coverage,

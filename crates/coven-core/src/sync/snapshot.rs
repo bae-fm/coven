@@ -1032,7 +1032,7 @@ mod tests {
         )
         .await
         .expect("publish bootstrap database image");
-        crate::sync::store::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_store_acknowledgement_for_test(
             &source,
             &store.storage,
             CommitFrontier(BTreeMap::new()),
@@ -1041,7 +1041,7 @@ mod tests {
         )
         .await
         .expect("stage snapshot stability acknowledgement");
-        crate::sync::store::drain_merge_acknowledgements_for_test(&source, &store.storage, &signer)
+        crate::sync::store::drain_store_acknowledgements_for_test(&source, &store.storage, &signer)
             .await
             .expect("activate snapshot stability acknowledgement");
 
