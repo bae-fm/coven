@@ -136,16 +136,11 @@ impl AuthorizedMergeStoreEngine<'_> {
                 {
                     continue;
                 }
-                crate::sync::store_pull::verify_store_snapshot_for_acknowledgement(
-                    self.storage(),
-                    None,
-                    root,
-                    &snapshot,
-                )
-                .await
-                .map_err(|error| {
-                    crate::sync::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
-                })?;
+                pull::verify_snapshot_for_acknowledgement(self.storage(), root, &snapshot)
+                    .await
+                    .map_err(|error| {
+                        crate::sync::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
+                    })?;
                 candidates.push(snapshot);
             }
         }

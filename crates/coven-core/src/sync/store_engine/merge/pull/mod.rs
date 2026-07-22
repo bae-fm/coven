@@ -50,6 +50,7 @@ mod materialization;
 mod membership_control;
 mod replay;
 mod retained_authority;
+mod snapshot_authority;
 mod terminal_authority;
 mod terminal_cleanup;
 
@@ -59,6 +60,9 @@ pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 use replay::*;
 pub(crate) use retained_authority::*;
+pub(in crate::sync::store_engine) use snapshot_authority::{
+    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
+};
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
 pub(super) use terminal_cleanup::resume_merge_retraction_cleanups;

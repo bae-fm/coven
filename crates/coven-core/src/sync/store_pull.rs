@@ -23,9 +23,8 @@ use super::storage::{
 };
 use super::store_commit::{
     ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier, DeviceJoinAttempt,
-    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash,
-    OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor, OwnerRecoveryPosition,
-    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
+    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash, OwnerRecoveryCursor,
+    OwnerRecoveryPosition, ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
     RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
     RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
@@ -58,6 +57,7 @@ mod join_bootstrap;
 mod join_validation;
 mod pull;
 mod registration;
+mod snapshot_evidence;
 
 pub(crate) use ancestry::*;
 pub(crate) use circle_packages::*;
@@ -68,6 +68,7 @@ pub(crate) use join_bootstrap::*;
 pub(crate) use join_validation::*;
 pub(crate) use pull::*;
 pub(crate) use registration::*;
+pub(crate) use snapshot_evidence::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStorePositionReason {

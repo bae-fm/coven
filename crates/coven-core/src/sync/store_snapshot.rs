@@ -796,7 +796,7 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     let mut stable = Vec::new();
     let mut maximal_rejection = None;
     for snapshot in candidates {
-        match super::store_pull::verify_store_snapshot_stability(
+        match super::store_engine::verify_store_snapshot_stability(
             storage,
             serial_coordination,
             root,

@@ -159,9 +159,9 @@ impl AuthorizedSerialStoreEngine<'_> {
                 {
                     continue;
                 }
-                crate::sync::store_pull::verify_store_snapshot_for_acknowledgement(
+                pull::verify_snapshot_for_acknowledgement(
                     self.storage(),
-                    Some(self.coordination()),
+                    self.coordination(),
                     root,
                     &snapshot,
                 )

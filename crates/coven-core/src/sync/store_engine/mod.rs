@@ -240,6 +240,41 @@ pub(crate) async fn prepare_serial_acknowledgement_activation_for_test(
     serial::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
 }
 
+pub(crate) async fn verify_store_snapshot_stability(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    snapshot: &crate::database::PublishedStoreSnapshot,
+) -> Result<super::store_pull::VerifiedStoreSnapshotStability, super::store_pull::StorePullError> {
+    match snapshot.meta.coverage.policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            if serial_coordination.is_some() {
+                return Err(super::store_pull::StorePullError::Database(
+                    "Merge snapshot verification received Serial coordination".to_string(),
+                ));
+            }
+            merge::pull::verify_snapshot_stability(storage, root, snapshot).await
+        }
+        crate::WritePolicy::Serial => {
+            let coordination = serial_coordination.ok_or_else(|| {
+                super::store_pull::StorePullError::Serial(
+                    "Serial snapshot verification requires coordination capability".to_string(),
+                )
+            })?;
+            serial::pull::verify_snapshot_stability(storage, coordination, root, snapshot).await
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn verify_merge_snapshot_for_acknowledgement_for_test(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    snapshot: &crate::database::PublishedStoreSnapshot,
+) -> Result<(), super::store_pull::StorePullError> {
+    merge::pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
+}
+
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn pull_store_commits<'a>(

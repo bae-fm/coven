@@ -42,6 +42,7 @@ use crate::sync::{
 mod application;
 mod history;
 mod resolution;
+mod snapshot_authority;
 
 pub(crate) use application::*;
 pub(crate) use history::*;
@@ -49,6 +50,9 @@ pub(crate) use resolution::cleanup_serial_abandonment_authority;
 pub use resolution::SerialResolutionPlan;
 pub(crate) use resolution::{
     cleanup_serial_candidates, prepare_serial_resolution, SerialResolutionCommit,
+};
+pub(in crate::sync::store_engine) use snapshot_authority::{
+    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
 };
 
 struct SerialApplicationCandidate {

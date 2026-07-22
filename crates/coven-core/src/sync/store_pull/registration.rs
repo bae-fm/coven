@@ -455,7 +455,7 @@ pub(crate) async fn validate_commit_acknowledgement(
     Ok(Some((reference.clone(), ack)))
 }
 
-pub(super) async fn load_acknowledgement_proof_chain(
+pub(crate) async fn load_acknowledgement_proof_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     latest_ref: super::store_commit::StoreAckRef,
@@ -682,7 +682,7 @@ pub(crate) async fn load_merge_commit_registrations(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor_membership: &MembershipChain,
-    accepted_predecessor: Option<&VerifiedStoreHistoryState>,
+    accepted_predecessor: Option<&VerifiedStoreHistoryAuthority>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     let predecessor = RegistrationPredecessorAuthority::MergeConcurrent(predecessor_membership);

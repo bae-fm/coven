@@ -1080,7 +1080,7 @@ async fn verify_store_package_reclaim_evidence(
         successor_slot: metadata.successor.next_slot.clone(),
         meta: metadata,
     };
-    let authority = match super::store_pull::verify_store_snapshot_stability(
+    let authority = match super::store_engine::verify_store_snapshot_stability(
         storage,
         coordination,
         root,

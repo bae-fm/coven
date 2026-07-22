@@ -756,9 +756,8 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         meta: forged,
     };
     assert!(
-        super::store_pull::verify_store_snapshot_for_acknowledgement(
+        super::store_engine::verify_merge_snapshot_for_acknowledgement_for_test(
             &store.storage,
-            None,
             &store.root,
             &forged,
         )
