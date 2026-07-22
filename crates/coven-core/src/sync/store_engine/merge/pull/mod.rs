@@ -50,6 +50,8 @@ mod materialization;
 mod membership_control;
 mod replay;
 mod retained_authority;
+mod terminal_authority;
+mod terminal_cleanup;
 
 pub(crate) use discovery::*;
 pub(crate) use history::*;
@@ -57,6 +59,9 @@ pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(crate) use replay::*;
 pub(crate) use retained_authority::*;
+pub(super) use terminal_authority::*;
+pub(crate) use terminal_cleanup::cleanup_merge_candidate;
+pub(super) use terminal_cleanup::resume_merge_retraction_cleanups;
 
 #[derive(Clone)]
 enum MergeCandidateDeviceOperations {

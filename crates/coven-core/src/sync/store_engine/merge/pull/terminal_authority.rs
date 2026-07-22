@@ -126,7 +126,7 @@ async fn verify_terminal_candidate_head(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn verify_author_exclusion_activation_with_verified_operation(
+pub(crate) async fn verify_author_exclusion_nonactivation_with_verified_operation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     locator: &crate::database::AuthorExclusionActivationLocator,
@@ -140,7 +140,7 @@ pub(crate) async fn verify_author_exclusion_activation_with_verified_operation(
     candidate_commit: &StoreBatchCommit,
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
-) -> Result<VerifiedAuthorExclusionActivation, StorePullError> {
+) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
     let verified_activation_head = super::store_commit::StoreDeviceHeadRef {
         head_hash: activation_head.head_hash(),
         object: activation_head_object.clone(),
@@ -201,19 +201,25 @@ pub(crate) async fn verify_author_exclusion_activation_with_verified_operation(
         &target_registration.value,
     ))
     .await?;
-    Ok(VerifiedAuthorExclusionActivation {
-        store_root_hash: root.store_root_hash,
-        target: locator.exclusion().proposal.target.clone(),
-        target_registration: target_registration.value,
-        exclusion: locator.exclusion().clone(),
-        accepted_cut: locator.accepted_cut().clone(),
-        activation_head: verified_activation_head,
-        candidate: candidate.clone(),
-        candidate_head: verified_candidate_head,
-    })
+    let durable = super::remote_object::CandidateNonactivation::from_durable_parts(
+        candidate,
+        candidate_commit,
+        super::remote_object::CandidateNonactivationProof::AuthorExclusion {
+            exclusion: locator.exclusion().clone(),
+            accepted_cut: locator.accepted_cut().clone(),
+            activation_head: verified_activation_head,
+        },
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    super::remote_object::VerifiedCandidateNonactivation::from_verified_author_exclusion(
+        durable,
+        candidate.clone(),
+        verified_candidate_head,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))
 }
 
-pub(crate) async fn verify_author_exclusion_activation(
+pub(crate) async fn verify_author_exclusion_nonactivation(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -222,42 +228,44 @@ pub(crate) async fn verify_author_exclusion_activation(
     candidate_commit: &StoreBatchCommit,
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
-) -> Result<VerifiedAuthorExclusionActivation, StorePullError> {
+) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
     let retained =
         Box::pin(db.retained_merge_materialization(locator.activation_commit().clone())).await?;
     let (_, predecessor_state) =
         Box::pin(db.store_device_state_for_order(&retained.commit().order)).await?;
-    Box::pin(verify_author_exclusion_activation_with_verified_operation(
-        storage,
-        root,
-        locator,
-        retained.activation_head(),
-        retained.activation_head_object(),
-        retained.commit_ref(),
-        retained.commit(),
-        &predecessor_state,
-        retained.device_operations(),
-        candidate,
-        candidate_commit,
-        candidate_head,
-        candidate_head_object,
-    ))
+    Box::pin(
+        verify_author_exclusion_nonactivation_with_verified_operation(
+            storage,
+            root,
+            locator,
+            retained.activation_head(),
+            retained.activation_head_object(),
+            retained.commit_ref(),
+            retained.commit(),
+            &predecessor_state,
+            retained.device_operations(),
+            candidate,
+            candidate_commit,
+            candidate_head,
+            candidate_head_object,
+        ),
+    )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn verify_membership_grant_revocation_activation(
+pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     grant_id: &super::membership::MembershipGrantId,
-    membership: &super::circle_control::MergeStoreMembershipStateRef,
+    membership: &crate::sync::circle_control::MergeStoreMembershipStateRef,
     activation_commit: &StoreBatchCommitRef,
     activation_head: &super::store_commit::StoreDeviceHeadRef,
     candidate: &StoreBatchCommitRef,
     candidate_commit: &StoreBatchCommit,
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
-) -> Result<VerifiedMembershipGrantRevocationActivation, StorePullError> {
+) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
     let head_prefix =
         super::store_commit::semantic_prefix_from_exact_object(&activation_head.object, ".json")
             .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -423,14 +431,21 @@ pub(crate) async fn verify_membership_grant_revocation_activation(
         &candidate_author.value,
     )
     .await?;
-    Ok(VerifiedMembershipGrantRevocationActivation {
-        store_root_hash: root.store_root_hash,
-        grant_id: grant_id.clone(),
-        membership: membership.clone(),
-        activation_commit: witness_head.commit,
-        activation_head: activation_head.clone(),
-        candidate: candidate.clone(),
-        candidate_author: candidate_author.value,
-        candidate_head: verified_candidate_head,
-    })
+    let durable = super::remote_object::CandidateNonactivation::from_durable_parts(
+        candidate,
+        candidate_commit,
+        super::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+            grant_id: grant_id.clone(),
+            membership: membership.clone(),
+            activation_commit: witness_head.commit,
+            activation_head: activation_head.clone(),
+        },
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    super::remote_object::VerifiedCandidateNonactivation::from_verified_membership_grant_revocation(
+        durable,
+        candidate.clone(),
+        verified_candidate_head,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))
 }

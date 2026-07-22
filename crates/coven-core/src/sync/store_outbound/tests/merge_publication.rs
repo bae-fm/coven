@@ -280,19 +280,21 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         "unexpected retry error: {retry_error}"
     );
     fixture.home.fail_exact_delete_on_call(2);
-    assert!(super::super::super::store_pull::cleanup_merge_candidate(
-        &fixture.db,
-        &fixture.storage,
-        fixture.write_id.clone(),
-    )
-    .await
-    .is_err());
+    assert!(
+        super::super::super::store_engine::merge::pull::cleanup_merge_candidate(
+            &fixture.db,
+            &fixture.storage,
+            fixture.write_id.clone(),
+        )
+        .await
+        .is_err()
+    );
     assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
     assert!(exact_object_exists(
         &fixture.home,
         &fixture.commit_ref.object
     ));
-    super::super::super::store_pull::cleanup_merge_candidate(
+    super::super::super::store_engine::merge::pull::cleanup_merge_candidate(
         &fixture.db,
         &fixture.storage,
         fixture.write_id.clone(),

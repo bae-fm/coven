@@ -7,9 +7,8 @@ use std::pin::Pin;
 use tracing::debug;
 
 use super::{
-    causal_grants, circle, circle_activation, circle_control, circle_ops, device_join, membership,
-    membership_ops, provider, remote_object, retained_replay, store_commit, store_objects,
-    store_outbound, store_reclaim, store_snapshot,
+    circle, circle_activation, circle_ops, device_join, membership, membership_ops, provider,
+    retained_replay, store_commit, store_objects, store_outbound, store_reclaim, store_snapshot,
 };
 
 use super::audience_package::{AudiencePackage, PackageAudience};
@@ -23,8 +22,8 @@ use super::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
-    head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
-    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash,
+    ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier, DeviceJoinAttempt,
+    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash,
     OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor, OwnerRecoveryPosition,
     ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
     RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
@@ -59,8 +58,6 @@ mod join_bootstrap;
 mod join_validation;
 mod pull;
 mod registration;
-mod terminal_authority;
-mod terminal_cleanup;
 
 pub(crate) use ancestry::*;
 pub(crate) use circle_packages::*;
@@ -71,8 +68,6 @@ pub(crate) use join_bootstrap::*;
 pub(crate) use join_validation::*;
 pub(crate) use pull::*;
 pub(crate) use registration::*;
-pub(crate) use terminal_authority::*;
-pub use terminal_cleanup::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStorePositionReason {
@@ -247,98 +242,6 @@ pub(crate) struct Candidate {
     pub(crate) author: StoreDeviceRegistration,
     pub(crate) package: Option<Vec<u8>>,
     pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-}
-
-pub(crate) struct VerifiedAuthorExclusionActivation {
-    store_root_hash: ObjectHash,
-    target: StoreDeviceRegistrationRef,
-    target_registration: StoreDeviceRegistration,
-    exclusion: super::store_commit::StoreDeviceExclusionRef,
-    accepted_cut: BTreeMap<super::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
-    activation_head: super::store_commit::StoreDeviceHeadRef,
-    candidate: StoreBatchCommitRef,
-    candidate_head: super::remote_object::VerifiedCandidateHead,
-}
-
-impl VerifiedAuthorExclusionActivation {
-    pub(crate) fn store_root_hash(&self) -> ObjectHash {
-        self.store_root_hash
-    }
-
-    pub(crate) fn target(&self) -> &StoreDeviceRegistrationRef {
-        &self.target
-    }
-
-    pub(crate) fn target_registration(&self) -> &StoreDeviceRegistration {
-        &self.target_registration
-    }
-
-    pub(crate) fn exclusion(&self) -> &super::store_commit::StoreDeviceExclusionRef {
-        &self.exclusion
-    }
-
-    pub(crate) fn accepted_cut(
-        &self,
-    ) -> &BTreeMap<super::causal_grants::AuthorStreamId, StoreBatchCommitRef> {
-        &self.accepted_cut
-    }
-
-    pub(crate) fn activation_head(&self) -> &super::store_commit::StoreDeviceHeadRef {
-        &self.activation_head
-    }
-
-    pub(crate) fn candidate(&self) -> &StoreBatchCommitRef {
-        &self.candidate
-    }
-
-    pub(crate) fn candidate_head(&self) -> &super::remote_object::VerifiedCandidateHead {
-        &self.candidate_head
-    }
-}
-
-pub(crate) struct VerifiedMembershipGrantRevocationActivation {
-    store_root_hash: ObjectHash,
-    grant_id: super::membership::MembershipGrantId,
-    membership: super::circle_control::MergeStoreMembershipStateRef,
-    activation_commit: StoreBatchCommitRef,
-    activation_head: super::store_commit::StoreDeviceHeadRef,
-    candidate: StoreBatchCommitRef,
-    candidate_author: StoreDeviceRegistration,
-    candidate_head: super::remote_object::VerifiedCandidateHead,
-}
-
-impl VerifiedMembershipGrantRevocationActivation {
-    pub(crate) fn store_root_hash(&self) -> ObjectHash {
-        self.store_root_hash
-    }
-
-    pub(crate) fn grant_id(&self) -> &super::membership::MembershipGrantId {
-        &self.grant_id
-    }
-
-    pub(crate) fn membership(&self) -> &super::circle_control::MergeStoreMembershipStateRef {
-        &self.membership
-    }
-
-    pub(crate) fn activation_head(&self) -> &super::store_commit::StoreDeviceHeadRef {
-        &self.activation_head
-    }
-
-    pub(crate) fn activation_commit(&self) -> &StoreBatchCommitRef {
-        &self.activation_commit
-    }
-
-    pub(crate) fn candidate(&self) -> &StoreBatchCommitRef {
-        &self.candidate
-    }
-
-    pub(crate) fn candidate_author(&self) -> &StoreDeviceRegistration {
-        &self.candidate_author
-    }
-
-    pub(crate) fn candidate_head(&self) -> &super::remote_object::VerifiedCandidateHead {
-        &self.candidate_head
-    }
 }
 
 pub(crate) async fn find_owner_promotion_request_activation(

@@ -7745,7 +7745,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     pull_into_result(&member_db, &storage, &pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
-    crate::sync::store_pull::cleanup_merge_candidate(
+    crate::sync::store_engine::merge::pull::cleanup_merge_candidate(
         &member_db,
         &storage.storage,
         write_id.clone(),

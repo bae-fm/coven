@@ -146,8 +146,7 @@ pub(crate) async fn abandon_merge_candidate(
     match db.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                    .await?;
+                super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
                 db.finish_retracted_merge_candidate_cleanup(write_id.clone())
                     .await?;
                 return Ok(MergeCandidateAbandonment::Abandoned);
@@ -164,8 +163,7 @@ pub(crate) async fn abandon_merge_candidate(
                 {
                     db.begin_blocked_merge_candidate_nonactivation(write_id.clone(), nonactivation)
                         .await?;
-                    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                        .await?;
+                    super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
                     return Ok(MergeCandidateAbandonment::Abandoned);
                 }
             }
@@ -210,8 +208,7 @@ pub(crate) async fn abandon_merge_candidate(
                         authority,
                     )
                     .await?;
-                    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                        .await?;
+                    super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
                     db.finish_author_excluded_merge_abandonment(write_id)
                         .await?;
                     return Ok(MergeCandidateAbandonment::Abandoned);
@@ -229,15 +226,13 @@ pub(crate) async fn abandon_merge_candidate(
         | crate::database::MergeAbandonmentState::CandidateWon
         | crate::database::MergeAbandonmentState::OtherWon => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                    .await?;
+                super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
             }
             return finish_merge_abandonment(db, storage, write_id).await;
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                    .await?;
+                super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
             }
             db.finish_author_excluded_merge_abandonment(write_id)
                 .await?;
@@ -250,7 +245,7 @@ pub(crate) async fn abandon_merge_candidate(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
         ));
     }
-    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+    super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
     finish_merge_abandonment(db, storage, write_id).await
 }
 
@@ -280,8 +275,7 @@ async fn finish_merge_abandonment(
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
-                    .await?;
+                super::pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
             }
             db.finish_author_excluded_merge_abandonment(write_id)
                 .await?;
@@ -325,7 +319,7 @@ async fn excluded_candidate_nonactivation(
     .await?
     {
         ExcludedCandidateHeadObservation::AuthorExclusion => {
-            let activation = Box::pin(crate::sync::store_pull::verify_author_exclusion_activation(
+            Box::pin(super::pull::verify_author_exclusion_nonactivation(
                 db,
                 storage,
                 &root,
@@ -335,12 +329,7 @@ async fn excluded_candidate_nonactivation(
                 &candidate.head.value,
                 &candidate.head.object,
             ))
-            .await?;
-            crate::sync::remote_object::VerifiedCandidateNonactivation::author_exclusion(
-                &activation,
-                candidate_target,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            .await?
         }
         ExcludedCandidateHeadObservation::MergeWinner(observation) => {
             let registration = db

@@ -1,6 +1,6 @@
 use super::*;
 
-pub async fn cleanup_merge_candidate(
+pub(crate) async fn cleanup_merge_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     write_id: crate::WriteId,
@@ -39,7 +39,7 @@ async fn verify_terminal_cleanup_candidate(
     };
     match &verification.authority {
         crate::database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
-            let activation = Box::pin(verify_author_exclusion_activation(
+            Box::pin(verify_author_exclusion_nonactivation(
                 db,
                 storage,
                 root,
@@ -49,12 +49,7 @@ async fn verify_terminal_cleanup_candidate(
                 &verification.candidate.head.value,
                 &verification.candidate.head.object,
             ))
-            .await?;
-            super::remote_object::VerifiedCandidateNonactivation::author_exclusion(
-                &activation,
-                target,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))
+            .await
         }
         crate::database::TerminalCandidateAuthority::MembershipGrantRevocation {
             grant_id,
@@ -62,7 +57,7 @@ async fn verify_terminal_cleanup_candidate(
             activation_commit,
             activation_head,
         } => {
-            let activation = Box::pin(verify_membership_grant_revocation_activation(
+            Box::pin(verify_membership_grant_revocation_nonactivation(
                 storage,
                 root,
                 grant_id,
@@ -74,12 +69,7 @@ async fn verify_terminal_cleanup_candidate(
                 &verification.candidate.head.value,
                 &verification.candidate.head.object,
             ))
-            .await?;
-            super::remote_object::VerifiedCandidateNonactivation::membership_grant_revocation(
-                &activation,
-                target,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))
+            .await
         }
         crate::database::TerminalCandidateAuthority::DependencyRetraction(authority) => {
             let author = load_registration_ref(

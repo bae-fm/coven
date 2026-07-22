@@ -100,7 +100,7 @@ pub(super) async fn verified_terminal_merge_retractions(
             ) {
                 continue;
             }
-            let verification = Box::pin(verify_membership_grant_revocation_activation(
+            let nonactivation = Box::pin(verify_membership_grant_revocation_nonactivation(
                 storage,
                 root,
                 grant_id,
@@ -113,46 +113,28 @@ pub(super) async fn verified_terminal_merge_retractions(
                 materialization.activation_head_object(),
             ))
             .await?;
-            retractions.push(
-                super::remote_object::VerifiedCandidateNonactivation::membership_grant_revocation(
-                    &verification,
-                    super::store_commit::StoreBatchCommitDeletionTarget {
-                        coord: materialization.commit_ref().coord.clone(),
-                        object: materialization.commit_ref().object.clone(),
-                        canonical_signed_bytes: materialization.commit().to_bytes(),
-                    },
-                )
-                .map_err(|error| StorePullError::Database(error.to_string()))?,
-            );
+            retractions.push(nonactivation);
             continue;
         };
-        let activation = Box::pin(verify_author_exclusion_activation_with_verified_operation(
-            storage,
-            root,
-            &locator,
-            activation_head,
-            activation_head_object,
-            activation_commit_ref,
-            activation_commit,
-            activation_predecessor_state,
-            device_operations,
-            materialization.commit_ref(),
-            materialization.commit(),
-            materialization.activation_head(),
-            materialization.activation_head_object(),
-        ))
+        let nonactivation = Box::pin(
+            verify_author_exclusion_nonactivation_with_verified_operation(
+                storage,
+                root,
+                &locator,
+                activation_head,
+                activation_head_object,
+                activation_commit_ref,
+                activation_commit,
+                activation_predecessor_state,
+                device_operations,
+                materialization.commit_ref(),
+                materialization.commit(),
+                materialization.activation_head(),
+                materialization.activation_head_object(),
+            ),
+        )
         .await?;
-        retractions.push(
-            super::remote_object::VerifiedCandidateNonactivation::author_exclusion(
-                &activation,
-                super::store_commit::StoreBatchCommitDeletionTarget {
-                    coord: materialization.commit_ref().coord.clone(),
-                    object: materialization.commit_ref().object.clone(),
-                    canonical_signed_bytes: materialization.commit().to_bytes(),
-                },
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
-        );
+        retractions.push(nonactivation);
     }
     let mut verified_by_reference = retractions
         .into_iter()

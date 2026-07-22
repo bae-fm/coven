@@ -3273,91 +3273,53 @@ impl VerifiedCandidateNonactivation {
         Ok(value)
     }
 
-    pub(crate) fn author_exclusion(
-        observation: &super::store_pull::VerifiedAuthorExclusionActivation,
-        candidate: StoreBatchCommitDeletionTarget,
+    pub(crate) fn from_verified_author_exclusion(
+        durable: CandidateNonactivation,
+        candidate: StoreBatchCommitRef,
+        head: VerifiedCandidateHead,
     ) -> Result<Self, RemoteObjectRecordError> {
-        let commit = candidate
-            .verify_nonactivation_candidate(
-                observation.store_root_hash(),
-                observation.target_registration(),
-            )
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let candidate_reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        if commit.author_registration != *observation.target()
-            || observation.exclusion().proposal.target != commit.author_registration
-            || observation.candidate() != &candidate_reference
+        durable.validate()?;
+        if !matches!(
+            durable.proof(),
+            CandidateNonactivationProof::AuthorExclusion { .. }
+        ) || durable.reference()? != candidate
         {
             return Err(RemoteObjectRecordError::InvalidProof(
-                "author exclusion targets another candidate registration".to_string(),
+                "verified author-exclusion nonactivation parts disagree".to_string(),
             ));
         }
         let value = Self {
             evidence: Box::new(VerifiedCandidateNonactivationEvidence::AuthorExclusion {
-                durable: CandidateNonactivation {
-                    candidate,
-                    proof: CandidateNonactivationProof::AuthorExclusion {
-                        exclusion: observation.exclusion().clone(),
-                        accepted_cut: observation.accepted_cut().clone(),
-                        activation_head: observation.activation_head().clone(),
-                    },
-                },
-                head_nonactivation: VerifiedCandidateHeadNonactivation {
-                    candidate: candidate_reference,
-                    head: observation.candidate_head().clone(),
-                },
+                durable,
+                head_nonactivation: VerifiedCandidateHeadNonactivation { candidate, head },
             }),
         };
-        value.durable().validate()?;
         Ok(value)
     }
 
-    pub(crate) fn membership_grant_revocation(
-        observation: &super::store_pull::VerifiedMembershipGrantRevocationActivation,
-        candidate: StoreBatchCommitDeletionTarget,
+    pub(crate) fn from_verified_membership_grant_revocation(
+        durable: CandidateNonactivation,
+        candidate: StoreBatchCommitRef,
+        head: VerifiedCandidateHead,
     ) -> Result<Self, RemoteObjectRecordError> {
-        let commit = candidate
-            .verify_nonactivation_candidate(
-                observation.store_root_hash(),
-                observation.candidate_author(),
-            )
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let candidate_reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        if observation.candidate() != &candidate_reference {
+        durable.validate()?;
+        if !matches!(
+            durable.proof(),
+            CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+        ) || durable.reference()? != candidate
+        {
             return Err(RemoteObjectRecordError::InvalidProof(
-                "membership-grant revocation names another candidate".to_string(),
+                "verified membership-revocation nonactivation parts disagree".to_string(),
             ));
         }
         let value = Self {
             evidence: Box::new(
                 VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
-                    durable: CandidateNonactivation {
-                        candidate,
-                        proof: CandidateNonactivationProof::MergeMembershipGrantRevocation {
-                            grant_id: observation.grant_id().clone(),
-                            membership: observation.membership().clone(),
-                            activation_commit: observation.activation_commit().clone(),
-                            activation_head: observation.activation_head().clone(),
-                        },
-                    },
-                    head_nonactivation: VerifiedCandidateHeadNonactivation {
-                        candidate: candidate_reference,
-                        head: observation.candidate_head().clone(),
-                    },
+                    durable,
+                    head_nonactivation: VerifiedCandidateHeadNonactivation { candidate, head },
                 },
             ),
         };
-        value.durable().validate()?;
         Ok(value)
     }
 
