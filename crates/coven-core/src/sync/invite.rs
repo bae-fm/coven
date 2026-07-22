@@ -1200,10 +1200,13 @@ pub async fn unwrap_serial_store_keyring(
             "Serial invite commit does not activate the supplied wrapped-key ref".to_string(),
         ));
     }
-    let current =
-        super::store_pull::load_serial_cycle_authorization(storage, coordination, store_root)
-            .await
-            .map_err(|error| InviteError::Crypto(format!("current Serial authority: {error}")))?;
+    let current = super::store_engine::serial::pull::load_serial_cycle_authorization(
+        storage,
+        coordination,
+        store_root,
+    )
+    .await
+    .map_err(|error| InviteError::Crypto(format!("current Serial authority: {error}")))?;
     if !current
         .authorization
         .membership

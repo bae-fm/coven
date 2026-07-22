@@ -1179,14 +1179,15 @@ async fn replace_exact_commit_bytes(
         .expect("load replacement candidate history summary");
     let reference =
         publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
-    let history_summary = crate::sync::store_pull::prepare_merge_abandonment_history_summary(
-        &candidate_summary,
-        &graph.reference,
-        &graph.commit,
-        &reference,
-        &replacement_commit,
-    )
-    .expect("prepare replacement exact Store history summary");
+    let history_summary =
+        crate::sync::store_engine::merge::pull::prepare_merge_abandonment_history_summary(
+            &candidate_summary,
+            &graph.reference,
+            &graph.commit,
+            &reference,
+            &replacement_commit,
+        )
+        .expect("prepare replacement exact Store history summary");
     replace_exact_commit_head(
         storage,
         graph,
@@ -4208,7 +4209,7 @@ fn resolve_conflicting_serial_branch<'a>(
             pending.as_slice(),
             [pending] if matches!(pending.status, crate::WriteStatus::Conflict(_))
         ));
-        let plan = crate::sync::store_pull::prepare_serial_resolution(
+        let plan = crate::sync::store_engine::serial::pull::prepare_serial_resolution(
             db,
             &storage.storage,
             coordination,
@@ -4219,7 +4220,7 @@ fn resolve_conflicting_serial_branch<'a>(
         )
         .await
         .expect("prepare Serial Circle conflict resolution");
-        crate::sync::store_pull::cleanup_serial_candidates(
+        crate::sync::store_engine::serial::pull::cleanup_serial_candidates(
             db,
             &storage.storage,
             branch_id.clone(),

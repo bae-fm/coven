@@ -191,13 +191,9 @@ pub(crate) async fn publish_prepared(
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = required_store_root(db).await?;
-    crate::sync::store_pull::validate_serial_control_wrapped_keys(
-        storage,
-        &root,
-        candidate.commit.control(),
-    )
-    .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    super::pull::validate_serial_control_wrapped_keys(storage, &root, candidate.commit.control())
+        .await
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let retained_operation_objects =
         crate::sync::store_outbound::retained_store_operation_objects(&candidate.commit)?;
     let base_head = candidate.base_head.clone();
@@ -411,15 +407,10 @@ pub(crate) async fn resolve_conflict(
         ));
     };
     let root = required_store_root(db).await?;
-    match crate::sync::store_pull::observe_serial_successors_after(
-        storage,
-        coordination,
-        &root,
-        predecessor,
-    )
-    .await?
+    match super::pull::observe_serial_successors_after(storage, coordination, &root, predecessor)
+        .await?
     {
-        crate::sync::store_pull::SerialSuccessorObservation::Unchanged(observed) => {
+        super::pull::SerialSuccessorObservation::Unchanged(observed) => {
             if let Some(acknowledgement) = commit.acknowledgement().cloned() {
                 db.adopt_outbound_store_ack_serial_base_head(acknowledgement, observed)
                     .await?;
@@ -430,7 +421,7 @@ pub(crate) async fn resolve_conflict(
                 activation.candidate,
             ))
         }
-        crate::sync::store_pull::SerialSuccessorObservation::Advanced(suffix) => {
+        super::pull::SerialSuccessorObservation::Advanced(suffix) => {
             if suffix.commits().first() == Some(&reference) {
                 let device_operations = Box::pin(reload_uploaded_device_operations(
                     db, storage, &root, &commit, &reference,

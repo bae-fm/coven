@@ -397,7 +397,7 @@ pub(super) async fn validate_commit_join_attempts(
     Ok(())
 }
 
-pub(super) async fn registration_activation(
+pub(crate) async fn registration_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     activated: &ActivatedStoreDeviceRegistrationRef,

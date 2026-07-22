@@ -528,7 +528,7 @@ async fn load_state_registrations(
     Ok(())
 }
 
-pub(super) fn load_commit_with_author_at_root<'a>(
+pub(crate) fn load_commit_with_author_at_root<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     root_value: &'a super::store_commit::StoreProtocolRoot,

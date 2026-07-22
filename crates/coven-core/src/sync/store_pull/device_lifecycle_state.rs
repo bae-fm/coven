@@ -26,7 +26,7 @@ pub(crate) struct DeviceJoinBootstrapPlan {
     pub commits: Vec<DeviceJoinBootstrapCommit>,
 }
 
-pub(super) fn history_cut_references(cut: &StoreHistoryCut) -> Vec<StoreBatchCommitRef> {
+pub(crate) fn history_cut_references(cut: &StoreHistoryCut) -> Vec<StoreBatchCommitRef> {
     match cut {
         StoreHistoryCut::MergeConcurrent(frontier) => frontier.values().cloned().collect(),
         StoreHistoryCut::Serial(StoreSerialPredecessor::Commit(reference)) => {
@@ -36,7 +36,7 @@ pub(super) fn history_cut_references(cut: &StoreHistoryCut) -> Vec<StoreBatchCom
     }
 }
 
-pub(super) fn commit_predecessor_references(commit: &StoreBatchCommit) -> Vec<StoreBatchCommitRef> {
+pub(crate) fn commit_predecessor_references(commit: &StoreBatchCommit) -> Vec<StoreBatchCommitRef> {
     match &commit.order {
         super::store_commit::StoreCommitOrder::MergeConcurrent {
             predecessor,
@@ -58,7 +58,7 @@ pub(super) fn commit_predecessor_references(commit: &StoreBatchCommit) -> Vec<St
     }
 }
 
-pub(super) fn registration_recovery_cursor(
+pub(crate) fn registration_recovery_cursor(
     origin: &StoreDeviceRegistrationOrigin,
     activation: &super::store_commit::StoreDeviceRegistrationActivation,
 ) -> Result<Option<super::store_commit::OwnerRecoveryCursor>, StoreProtocolError> {
@@ -103,7 +103,7 @@ pub(super) fn registration_recovery_cursor(
     }
 }
 
-pub(super) fn predecessor_with_recovery_author(
+pub(crate) fn predecessor_with_recovery_author(
     mut predecessor: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,
     registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
@@ -128,7 +128,7 @@ pub(super) fn predecessor_with_recovery_author(
     Ok((predecessor, None))
 }
 
-pub(super) async fn verify_commit_owner_recovery_activation(
+pub(crate) async fn verify_commit_owner_recovery_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -254,7 +254,7 @@ pub(super) async fn verify_commit_owner_recovery_activation(
     .map_err(|error| StorePullError::Database(error.to_string()))
 }
 
-pub(super) fn apply_verified_device_lifecycle(
+pub(crate) fn apply_verified_device_lifecycle(
     mut state: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,
     registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
@@ -289,7 +289,7 @@ pub(super) fn apply_verified_device_lifecycle(
     Ok(state)
 }
 
-pub(super) fn verified_merge_predecessor_state(
+pub(crate) fn verified_merge_predecessor_state(
     genesis: &ResolvedStoreDeviceState,
     states: &BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,
     commit: &StoreBatchCommit,

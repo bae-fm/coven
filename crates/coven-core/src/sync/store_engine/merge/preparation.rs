@@ -76,7 +76,7 @@ pub(crate) async fn prepare_store_write(
             dependencies,
         };
         let candidate_membership = membership;
-        let authorization = crate::sync::store_pull::load_retained_merge_outbound_authorization(
+        let authorization = super::pull::load_retained_merge_outbound_authorization(
             db,
             storage,
             &root,
@@ -241,7 +241,7 @@ pub(crate) async fn prepare_store_write(
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let successor = crate::sync::store_pull::prepare_merge_history_successor(
+        let successor = super::pull::prepare_merge_history_successor(
             db,
             &root,
             &commit,
@@ -250,7 +250,7 @@ pub(crate) async fn prepare_store_write(
             &registration,
             None,
             authorization.device_state.clone(),
-            crate::sync::store_pull::MergeHistorySuccessorEvidence::none(),
+            super::pull::MergeHistorySuccessorEvidence::none(),
         )
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;

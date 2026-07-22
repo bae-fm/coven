@@ -54,7 +54,7 @@ pub(crate) async fn prepare_plan(
         predecessor: previous,
         dependencies,
     };
-    let authorization = crate::sync::store_pull::load_retained_merge_outbound_authorization(
+    let authorization = super::pull::load_retained_merge_outbound_authorization(
         db,
         storage,
         &root,
@@ -156,7 +156,7 @@ pub(crate) async fn prepare_candidate(
         ),
         None => None,
     };
-    let merge_history_evidence = crate::sync::store_pull::MergeHistorySuccessorEvidence {
+    let merge_history_evidence = super::pull::MergeHistorySuccessorEvidence {
         registrations: retained_registration_evidence,
         acknowledgement,
         membership_proof: None,
@@ -197,7 +197,7 @@ pub(crate) async fn prepare_candidate(
         ProtocolObjectDomain::StoreHead,
     );
     let device_id = plan.registration_ref().device_id.to_string();
-    let successor = crate::sync::store_pull::prepare_merge_history_successor(
+    let successor = super::pull::prepare_merge_history_successor(
         db,
         plan.root(),
         &common.commit,
@@ -260,7 +260,7 @@ pub(crate) async fn publish_prepared(
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = crate::sync::store_outbound::required_store_root(db).await?;
-    crate::sync::store_pull::validate_serial_control_wrapped_keys(
+    crate::sync::store_engine::serial::pull::validate_serial_control_wrapped_keys(
         storage,
         &root,
         candidate.commit.control(),
@@ -277,7 +277,7 @@ pub(crate) async fn publish_prepared(
         candidate.commit.control(),
         Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
     ) {
-        crate::sync::store_pull::verify_merge_membership_control(
+        super::pull::verify_merge_membership_control(
             storage,
             &root,
             &candidate.reference,
@@ -375,16 +375,14 @@ pub(crate) fn publish<'a>(
                 ));
             }
         };
-        let authorization = Box::pin(
-            crate::sync::store_pull::load_retained_merge_outbound_authorization(
-                db,
-                storage,
-                &root,
-                &commit.order,
-                membership_heads,
-                &commit.author_registration,
-            ),
-        )
+        let authorization = Box::pin(super::pull::load_retained_merge_outbound_authorization(
+            db,
+            storage,
+            &root,
+            &commit.order,
+            membership_heads,
+            &commit.author_registration,
+        ))
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         let device_operations = Box::pin(

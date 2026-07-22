@@ -5,7 +5,7 @@ mod acknowledgements;
 mod database;
 pub(crate) mod operations;
 pub(crate) mod publication;
-pub(super) mod pull;
+pub(crate) mod pull;
 
 use database::SerialDatabase;
 
@@ -99,6 +99,32 @@ impl SerialStoreEngine {
             branch_id,
         )
         .await
+    }
+
+    pub(super) async fn prepare_resolution(
+        &self,
+        store_dir: &StoreDir,
+        branch_base: Option<crate::sync::store_commit::StoreBatchCommitRef>,
+        identity: &UserKeypair,
+    ) -> Result<pull::SerialResolutionPlan, crate::sync::store_pull::StorePullError> {
+        pull::prepare_serial_resolution(
+            self.db(),
+            &**self.storage(),
+            self.coordination(),
+            self.store_root().store_root_hash,
+            store_dir,
+            branch_base,
+            identity,
+        )
+        .await
+    }
+
+    pub(super) async fn cleanup_resolution_candidates(
+        &self,
+        branch_id: crate::PendingBranchId,
+        plan: &pull::SerialResolutionPlan,
+    ) -> Result<(), crate::sync::store_pull::StorePullError> {
+        pull::cleanup_serial_candidates(self.db(), &**self.storage(), branch_id, plan).await
     }
 
     pub(super) async fn authorize(
@@ -335,7 +361,7 @@ impl AuthorizedSerialStoreEngine<'_> {
     }
 
     pub(super) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
-        let authoritative_head = crate::sync::store_pull::load_serial_cycle_authorization(
+        let authoritative_head = pull::load_serial_cycle_authorization(
             self.storage(),
             self.coordination(),
             self.store_root(),
@@ -437,7 +463,7 @@ impl AuthorizedSerialStoreEngine<'_> {
 async fn authorize_serial(
     access: SerialStoreAccess<'_>,
 ) -> Result<AuthorizedSerialStoreEngine<'_>, SyncCycleFailure> {
-    let authorization = crate::sync::store_pull::load_serial_cycle_authorization(
+    let authorization = pull::load_serial_cycle_authorization(
         access.storage,
         access.coordination,
         &access.store_root,

@@ -1,21 +1,21 @@
 use super::*;
 
-pub(super) struct VerifiedMergeHistoryCommit {
-    pub(super) commit: StoreBatchCommit,
-    pub(super) predecessor_membership: MembershipChain,
-    pub(super) predecessor_state: ResolvedStoreDeviceState,
-    pub(super) state_after: ResolvedStoreDeviceState,
-    pub(super) operations: VerifiedStoreDeviceOperations,
-    pub(super) acknowledgement: Option<(
+pub(crate) struct VerifiedMergeHistoryCommit {
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) predecessor_membership: MembershipChain,
+    pub(crate) predecessor_state: ResolvedStoreDeviceState,
+    pub(crate) state_after: ResolvedStoreDeviceState,
+    pub(crate) operations: VerifiedStoreDeviceOperations,
+    pub(crate) acknowledgement: Option<(
         super::store_commit::StoreAckRef,
         super::store_commit::StoreAck,
     )>,
-    pub(super) membership_control: Option<VerifiedMergeMembershipControl>,
-    pub(super) history: OpenedRetainedMergeHistorySummary,
+    pub(crate) membership_control: Option<VerifiedMergeMembershipControl>,
+    pub(crate) history: OpenedRetainedMergeHistorySummary,
 }
 
 impl VerifiedAcceptedPredecessor<'_> {
-    pub(super) fn serial_history_commit(
+    pub(crate) fn serial_history_commit(
         &self,
         target: &StoreBatchCommitRef,
     ) -> Result<Option<&AuthorizedSerialCommit>, StorePullError> {
@@ -34,7 +34,7 @@ impl VerifiedAcceptedPredecessor<'_> {
             })
     }
 
-    pub(super) fn merge_history_commit(
+    pub(crate) fn merge_history_commit(
         &self,
         target: &StoreBatchCommitRef,
     ) -> Result<Option<&VerifiedMergeHistoryCommit>, StorePullError> {
@@ -81,8 +81,8 @@ impl VerifiedMergeMembershipHeadActivation {
     }
 }
 
-pub(super) struct VerifiedMergeMembershipControl {
-    pub(super) activations: VerifiedCircleActivations,
+pub(crate) struct VerifiedMergeMembershipControl {
+    pub(crate) activations: VerifiedCircleActivations,
     head_activation: VerifiedMergeMembershipHeadActivation,
     conflict_resolution: Option<VerifiedMergeConflictResolutionActivation>,
 }
@@ -123,7 +123,7 @@ pub(crate) enum VerifiedMergePrefixHeadStatus {
 }
 
 impl VerifiedMergeMembershipPrefix {
-    pub(super) fn from_retained(
+    pub(crate) fn from_retained(
         checkpoints: &[OpenedRetainedMergeHistorySummary],
     ) -> Result<Self, StorePullError> {
         let mut prefix = Self::default();
@@ -247,7 +247,7 @@ impl VerifiedMergeMembershipPrefix {
     }
 }
 
-pub(super) fn verified_merge_membership_prefix(
+pub(crate) fn verified_merge_membership_prefix(
     commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
     tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
@@ -390,7 +390,7 @@ async fn verify_merge_owner_conflict_acceptance_with_history(
     Ok(())
 }
 
-pub(super) async fn verify_merge_resolution_activation_acceptance_with_history(
+pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -465,9 +465,9 @@ pub(super) async fn verify_merge_resolution_activation_acceptance_with_history(
     }))
 }
 
-pub(super) struct VerifiedMergeHistory {
-    pub(super) genesis: ResolvedStoreDeviceState,
-    pub(super) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+pub(crate) struct VerifiedMergeHistory {
+    pub(crate) genesis: ResolvedStoreDeviceState,
+    pub(crate) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 }
 
 pub(crate) struct MergeOutboundAuthorization {
@@ -521,7 +521,7 @@ where
     }
 }
 
-pub(super) fn insert_latest_acknowledgement(
+pub(crate) fn insert_latest_acknowledgement(
     target: &mut BTreeMap<
         super::store_commit::StoreDeviceId,
         super::store_commit::RetainedVerifiedActivatedAck,
@@ -687,7 +687,7 @@ pub(crate) async fn prepare_merge_history_successor(
     )
 }
 
-pub(super) struct MergedRetainedMergeHistory {
+pub(crate) struct MergedRetainedMergeHistory {
     causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
     registrations: BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
     acknowledgements: BTreeMap<
@@ -702,7 +702,7 @@ pub(super) struct MergedRetainedMergeHistory {
     >,
 }
 
-pub(super) fn merge_retained_merge_history(
+pub(crate) fn merge_retained_merge_history(
     root: &StoreRootRef,
     membership: &MembershipChain,
     predecessors: Vec<OpenedRetainedMergeHistorySummary>,
@@ -990,7 +990,7 @@ pub(crate) async fn prepare_merge_snapshot_history_summary(
     )
 }
 
-pub(super) fn compose_merge_snapshot_history_summary(
+pub(crate) fn compose_merge_snapshot_history_summary(
     root: &StoreRootRef,
     coverage: &CommitFrontier,
     membership: &MembershipChain,
@@ -1103,7 +1103,7 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
     Ok(summary)
 }
 
-pub(super) fn verify_merge_history_refs<'a>(
+pub(crate) fn verify_merge_history_refs<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     tips: impl IntoIterator<Item = StoreBatchCommitRef>,

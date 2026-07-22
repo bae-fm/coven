@@ -55,10 +55,9 @@ pub(crate) async fn current_serial_authorization_snapshot(
     let head = observed.head().ok_or(StoreOutboundError::MissingState {
         key: SERIAL_COORDINATION_HEAD,
     })?;
-    let authorization =
-        crate::sync::store_pull::load_serial_authorization_at_head(storage, &root_ref, head)
-            .await
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let authorization = super::pull::load_serial_authorization_at_head(storage, &root_ref, head)
+        .await
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let base = match observed.predecessor()? {
         StoreSerialPredecessor::Genesis { .. } => None,
         StoreSerialPredecessor::Commit(commit) => Some(commit),

@@ -4,14 +4,59 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::*;
-use crate::blob::local_cleanup;
-use crate::sync::conflict::TableSchema;
-use crate::sync::store_commit::{
-    CommitFrontier, StoreCommitCoord, StoreDeviceRegistrationActivationRef, StoreDeviceStatus,
-    StoreHistoryCut,
+use crate::blob::decl::BlobDecls;
+use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
+use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
+use crate::store_dir::StoreDir;
+use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
+use crate::sync::audience_package::{AudiencePackage, PackageAudience};
+use crate::sync::circle_activation::{
+    CircleMembershipAuthority, VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
-use crate::sync::store_objects::{load_store_package, load_store_protocol_root};
+use crate::sync::circle_control::StoreMembershipStateRef;
+use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
+use crate::sync::membership::{MembershipChain, MembershipStatus};
+use crate::sync::pull::{
+    advance_max_updated_at, cache_eager_blobs, local_blob_cleanup_intents, verify_package_blobs,
+};
+use crate::sync::session::SyncedTable;
+use crate::sync::storage::{
+    BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+    SyncStorage,
+};
+use crate::sync::store_commit::{
+    head_slot_prefix, CommitFrontier, DeviceStreamAnchor, ObjectHash,
+    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, VerifiedStoreDeviceOperations,
+};
+use crate::sync::store_objects::{
+    load_commit_ref, load_founder_registration_with_root, load_registration_ref,
+    load_store_ack_ref, load_store_package, load_store_protocol_root, StoreObjectError,
+};
 use crate::sync::store_pull::*;
+use crate::sync::{
+    causal_grants, gate, hlc, membership, membership_ops, remote_object, retained_replay, session,
+    store_commit, store_objects, store_outbound,
+};
+
+mod discovery;
+mod history;
+mod materialization;
+mod membership_control;
+mod replay;
+mod retained_authority;
+
+pub(crate) use discovery::*;
+pub(crate) use history::*;
+pub(crate) use materialization::*;
+pub(crate) use membership_control::*;
+pub(crate) use replay::*;
+pub(crate) use retained_authority::*;
 
 impl AuthorizedMergeStoreEngine<'_> {
     pub(in crate::sync::store_engine) async fn pull(

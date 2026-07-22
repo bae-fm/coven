@@ -814,7 +814,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             .expect("load local Store authority");
 
     store.home.clear_exact_reads();
-    super::store_pull::load_merge_conflict_resolution_authorization(
+    crate::sync::store_engine::merge::pull::load_merge_conflict_resolution_authorization(
         &db,
         &store.storage,
         &root,

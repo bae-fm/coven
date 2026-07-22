@@ -215,24 +215,12 @@ impl SyncManager {
         &self,
         branch_base: Option<crate::sync::store_commit::StoreBatchCommitRef>,
         store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<crate::sync::store_pull::SerialResolutionPlan, SyncError> {
+    ) -> Result<crate::sync::store_engine::SerialResolutionPlan, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        let storage = loop_handle.storage();
-        let coordination = storage
-            .serial_coordination()
-            .map_err(|error| SyncError::Protocol(error.to_string()))?;
-        let store_root_hash = self
-            .db
-            .local_store_root_ref()
-            .await?
-            .ok_or_else(|| SyncError::Protocol("exact Store root authority is absent".to_string()))?
-            .store_root_hash;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        crate::sync::store_pull::prepare_serial_resolution(
+        crate::sync::store_engine::prepare_serial_resolution(
             &self.db,
-            &**storage,
-            coordination,
-            store_root_hash,
+            Arc::clone(loop_handle.storage()),
             store_dir,
             branch_base,
             &identity,
@@ -244,12 +232,12 @@ impl SyncManager {
     pub(crate) async fn cleanup_serial_candidates(
         &self,
         branch_id: coven_core::PendingBranchId,
-        plan: &crate::sync::store_pull::SerialResolutionPlan,
+        plan: &crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<(), SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        crate::sync::store_pull::cleanup_serial_candidates(
+        crate::sync::store_engine::cleanup_serial_resolution_candidates(
             &self.db,
-            &**loop_handle.storage(),
+            Arc::clone(loop_handle.storage()),
             branch_id,
             plan,
         )

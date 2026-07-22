@@ -5,7 +5,7 @@ pub(crate) enum RegistrationLoadError {
     Invalid(String),
 }
 
-pub(super) enum VerifiedAcceptedPredecessor<'a> {
+pub(crate) enum VerifiedAcceptedPredecessor<'a> {
     Exact,
     SerialHistory {
         commits: &'a [AuthorizedSerialCommit],
@@ -16,10 +16,10 @@ pub(super) enum VerifiedAcceptedPredecessor<'a> {
     },
 }
 
-pub(super) struct VerifiedCommitJoinOutcome {
-    pub(super) attempt: DeviceJoinAttempt,
-    pub(super) owner: StoreDeviceRegistration,
-    pub(super) outcome: super::store_commit::DeviceJoinOutcome,
+pub(crate) struct VerifiedCommitJoinOutcome {
+    pub(crate) attempt: DeviceJoinAttempt,
+    pub(crate) owner: StoreDeviceRegistration,
+    pub(crate) outcome: super::store_commit::DeviceJoinOutcome,
 }
 
 pub(super) fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
@@ -32,7 +32,7 @@ pub(super) fn registration_attempt_error(error: StorePullError) -> RegistrationL
     }
 }
 
-pub(super) enum RegistrationPredecessorAuthority<'a> {
+pub(crate) enum RegistrationPredecessorAuthority<'a> {
     MergeConcurrent(&'a MembershipChain),
     Serial {
         authorization: &'a SerialAuthorizationState,
@@ -41,7 +41,7 @@ pub(super) enum RegistrationPredecessorAuthority<'a> {
     },
 }
 
-pub(super) enum SerialAuthorizationHistory<'a> {
+pub(crate) enum SerialAuthorizationHistory<'a> {
     ExactPredecessor,
     Prefix {
         genesis_position: &'a super::store_commit::SerialStorePosition,
@@ -63,7 +63,7 @@ impl RegistrationPredecessorAuthority<'_> {
         }
     }
 
-    pub(super) fn verifies_owner(
+    pub(crate) fn verifies_owner(
         &self,
         membership: &StoreMembershipStateRef,
         owner_pubkey: &str,
@@ -101,7 +101,7 @@ impl RegistrationPredecessorAuthority<'_> {
         }
     }
 
-    pub(super) fn verifies_owner_at_ancestor(
+    pub(crate) fn verifies_owner_at_ancestor(
         &self,
         membership: &StoreMembershipStateRef,
         owner_pubkey: &str,
@@ -153,14 +153,14 @@ impl RegistrationPredecessorAuthority<'_> {
                 .authorizes_owner_grant_id(owner_pubkey, owner_grant)
     }
 
-    pub(super) fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
+    pub(crate) fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
         match self {
             Self::MergeConcurrent(chain) => chain.is_owner_now(owner_pubkey),
             Self::Serial { authorization, .. } => authorization.membership.is_owner(owner_pubkey),
         }
     }
 
-    pub(super) fn verifies_provider_administrator(
+    pub(crate) fn verifies_provider_administrator(
         &self,
         grant_id: &super::provider::ProviderAdminGrantId,
         executor: &StoreDeviceRegistrationRef,
@@ -194,7 +194,7 @@ pub(crate) async fn load_merge_predecessor_membership(
     load_merge_predecessor_membership_impl(storage, root, state, None, None).await
 }
 
-pub(super) async fn load_merge_predecessor_membership_with_verified_activations(
+pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,
@@ -257,7 +257,7 @@ async fn load_merge_predecessor_membership_impl(
     Ok(membership)
 }
 
-pub(super) fn verify_merge_membership_state_ref(
+pub(crate) fn verify_merge_membership_state_ref(
     state: &StoreMembershipStateRef,
     membership: &MembershipChain,
     device_state: &ResolvedStoreDeviceState,
@@ -397,7 +397,7 @@ pub(crate) async fn verify_device_join_cleanup_activation(
     Ok(receipt.joiner_terminal.clone())
 }
 
-pub(super) async fn validate_commit_acknowledgement(
+pub(crate) async fn validate_commit_acknowledgement(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -651,7 +651,7 @@ async fn validate_commit_reclaim_receipt(
     Ok(())
 }
 
-pub(super) async fn load_commit_registrations(
+pub(crate) async fn load_commit_registrations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -698,7 +698,7 @@ pub(crate) async fn load_merge_commit_registrations(
     .await
 }
 
-pub(super) async fn load_commit_registrations_with_root(
+pub(crate) async fn load_commit_registrations_with_root(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &super::store_commit::StoreProtocolRoot,
@@ -857,7 +857,7 @@ pub(super) async fn load_commit_registrations_with_root(
     Ok(registrations)
 }
 
-pub(super) fn device_state_has_active_registration(
+pub(crate) fn device_state_has_active_registration(
     state: &ResolvedStoreDeviceState,
     registration: &StoreDeviceRegistrationRef,
 ) -> bool {
@@ -870,7 +870,7 @@ pub(super) fn device_state_has_active_registration(
         })
 }
 
-pub(super) async fn verify_canonical_owner_registration(
+pub(crate) async fn verify_canonical_owner_registration(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &ResolvedStoreDeviceState,

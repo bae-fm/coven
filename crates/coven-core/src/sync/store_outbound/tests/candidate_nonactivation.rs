@@ -172,8 +172,8 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         .replace_head(serial_head_key(), &current.version, &winner.to_bytes())
         .await
         .expect("activate competing Serial successor");
-    let super::super::super::store_pull::SerialSuccessorObservation::Advanced(suffix) =
-        super::super::super::store_pull::observe_serial_successors_after(
+    let crate::sync::store_engine::serial::pull::SerialSuccessorObservation::Advanced(suffix) =
+        crate::sync::store_engine::serial::pull::observe_serial_successors_after(
             &storage,
             coordination,
             &root,
@@ -284,7 +284,7 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         .await
         .expect("install invalid signed Serial head bytes");
     assert!(
-        super::super::super::store_pull::observe_serial_successors_after(
+        crate::sync::store_engine::serial::pull::observe_serial_successors_after(
             &storage,
             coordination,
             &root,
@@ -329,7 +329,7 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         .await
         .expect("install Serial head with an absent chain tip");
     assert!(
-        super::super::super::store_pull::observe_serial_successors_after(
+        crate::sync::store_engine::serial::pull::observe_serial_successors_after(
             &storage,
             coordination,
             &root,

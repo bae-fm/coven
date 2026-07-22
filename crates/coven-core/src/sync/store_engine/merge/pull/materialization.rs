@@ -441,10 +441,10 @@ pub(crate) async fn apply_candidate(
     Ok(outcome)
 }
 
-pub(super) struct PreparedMergeMaterializationPackage {
-    pub(super) package: AudiencePackage,
-    pub(super) changeset: ValidatedChangeset<Vec<u8>>,
-    pub(super) cleanup: Vec<LocalBlobCleanupIntent>,
+pub(crate) struct PreparedMergeMaterializationPackage {
+    pub(crate) package: AudiencePackage,
+    pub(crate) changeset: ValidatedChangeset<Vec<u8>>,
+    pub(crate) cleanup: Vec<LocalBlobCleanupIntent>,
 }
 
 async fn prepare_merge_candidate_package(
@@ -518,29 +518,29 @@ async fn prepare_merge_candidate_package(
     }))
 }
 
-pub(super) struct PreparedMergeMaterialization {
-    pub(super) root: StoreRootRef,
-    pub(super) commit: StoreBatchCommit,
-    pub(super) commit_ref: StoreBatchCommitRef,
-    pub(super) activation_head: StoreDeviceHead,
-    pub(super) activation_head_object: ExactObjectRef,
-    pub(super) history_summary: RetainedVerifiedMergeHistorySummary,
-    pub(super) membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-    pub(super) membership_remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
-    pub(super) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    pub(super) packages: Vec<PreparedMergeMaterializationPackage>,
-    pub(super) device_operations: VerifiedStoreDeviceOperations,
-    pub(super) circle_activations: VerifiedCircleActivations,
-    pub(super) package_application: Option<crate::database::RetainedPackageApplication>,
+pub(crate) struct PreparedMergeMaterialization {
+    pub(crate) root: StoreRootRef,
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) commit_ref: StoreBatchCommitRef,
+    pub(crate) activation_head: StoreDeviceHead,
+    pub(crate) activation_head_object: ExactObjectRef,
+    pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
+    pub(crate) membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+    pub(crate) membership_remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
+    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) packages: Vec<PreparedMergeMaterializationPackage>,
+    pub(crate) device_operations: VerifiedStoreDeviceOperations,
+    pub(crate) circle_activations: VerifiedCircleActivations,
+    pub(crate) package_application: Option<crate::database::RetainedPackageApplication>,
 }
 
-pub(super) struct AppliedMergeMaterialization {
-    pub(super) outcome: ApplyOutcome,
-    pub(super) max_updated_at: Option<super::hlc::Timestamp>,
-    pub(super) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
+pub(crate) struct AppliedMergeMaterialization {
+    pub(crate) outcome: ApplyOutcome,
+    pub(crate) max_updated_at: Option<super::hlc::Timestamp>,
+    pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
 }
 
-pub(super) fn apply_prepared_merge_materialization_on(
+pub(crate) fn apply_prepared_merge_materialization_on(
     conn: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
@@ -720,7 +720,7 @@ pub(super) fn apply_prepared_merge_materialization_on(
     })
 }
 
-pub(super) async fn verified_merge_membership_objects(
+pub(crate) async fn verified_merge_membership_objects(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -856,10 +856,10 @@ pub(super) async fn verified_merge_membership_objects(
     }))
 }
 
-pub(super) struct VerifiedMergeMembershipClosure {
+pub(crate) struct VerifiedMergeMembershipClosure {
     objects: crate::database::VerifiedMergeMembershipObjects,
     remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
-    pub(super) proof: super::store_commit::RetainedMergeMembershipProof,
+    pub(crate) proof: super::store_commit::RetainedMergeMembershipProof,
 }
 
 fn activate_pulled_merge_membership_authority(

@@ -568,7 +568,7 @@ impl CovenHandle {
     async fn prepare_pending_branch_resolution(
         &self,
         branch_id: &coven_core::PendingBranchId,
-    ) -> CovenResult<crate::sync::store_pull::SerialResolutionPlan> {
+    ) -> CovenResult<crate::sync::store_engine::SerialResolutionPlan> {
         let branch_base = self.db().conflicted_serial_branch_base(branch_id).await?;
         let manager = self
             .sync_manager()

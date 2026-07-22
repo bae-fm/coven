@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) enum DeviceStateResolver<'a> {
+pub(crate) enum DeviceStateResolver<'a> {
     Database(&'a Database),
     Loaded {
         genesis: &'a ResolvedStoreDeviceState,
@@ -296,7 +296,7 @@ async fn verify_merge_device_exclusion_proof(
     Ok(())
 }
 
-pub(super) async fn load_commit_device_operations(
+pub(crate) async fn load_commit_device_operations(
     resolver: Option<&DeviceStateResolver<'_>>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

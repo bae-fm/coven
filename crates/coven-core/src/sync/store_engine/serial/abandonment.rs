@@ -276,7 +276,7 @@ pub(crate) async fn abandon_serial_branch(
     let root = required_store_root(db).await?;
     match winner {
         SerialCandidateAbandonmentWinner::OriginalBranch { accepted } => {
-            let plan = crate::sync::store_pull::prepare_serial_resolution(
+            let plan = super::pull::prepare_serial_resolution(
                 db,
                 storage,
                 coordination,
@@ -286,8 +286,7 @@ pub(crate) async fn abandon_serial_branch(
                 identity_signer,
             )
             .await?;
-            crate::sync::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan)
-                .await?;
+            super::pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
             db.remove_losing_serial_abandonment_authority().await?;
             db.complete_prepared_serial_branch(accepted).await?;
             Ok(SerialBranchAbandonment::OriginalBranchActivated)
@@ -348,7 +347,7 @@ async fn finish_serial_branch_abandonment(
     branch_id: crate::PendingBranchId,
     branch_base: Option<StoreBatchCommitRef>,
 ) -> Result<SerialBranchAbandonment, StoreOutboundError> {
-    let plan = crate::sync::store_pull::prepare_serial_resolution(
+    let plan = super::pull::prepare_serial_resolution(
         db,
         storage,
         coordination,
@@ -358,9 +357,8 @@ async fn finish_serial_branch_abandonment(
         identity_signer,
     )
     .await?;
-    crate::sync::store_pull::cleanup_serial_candidates(db, storage, branch_id.clone(), &plan)
-        .await?;
-    crate::sync::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
+    super::pull::cleanup_serial_candidates(db, storage, branch_id.clone(), &plan).await?;
+    super::pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
     db.discard_serial_branch_after_abandonment(branch_id, plan)
         .await?;
     Ok(SerialBranchAbandonment::Discarded)

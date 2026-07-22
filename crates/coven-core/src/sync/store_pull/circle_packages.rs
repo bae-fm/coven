@@ -1,11 +1,14 @@
 use super::*;
+use crate::sync::store_engine::merge::pull::{
+    carries_circle_payload, verify_merge_membership_control,
+};
 
-pub(super) enum PullCircleActivationError {
+pub(crate) enum PullCircleActivationError {
     Database(DbError),
     Invalid(String),
 }
 
-pub(super) async fn load_pull_circle_activations(
+pub(crate) async fn load_pull_circle_activations(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -61,7 +64,7 @@ pub(super) async fn load_pull_circle_activations(
     .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
 }
 
-pub(super) async fn load_applicable_circle_packages(
+pub(crate) async fn load_applicable_circle_packages(
     db: &Database,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,
@@ -134,7 +137,7 @@ fn circle_package_access(
     }))
 }
 
-pub(super) fn circle_package_accesses(
+pub(crate) fn circle_package_accesses(
     activations: &[super::circle_ops::VerifiedCircleReference],
 ) -> Result<CirclePackageAccesses, String> {
     let mut accesses = CirclePackageAccesses::new();
@@ -153,7 +156,7 @@ pub(super) fn circle_package_accesses(
     Ok(accesses)
 }
 
-pub(super) async fn load_applicable_circle_packages_with_prior_accesses(
+pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
     db: &Database,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,

@@ -126,7 +126,7 @@ async fn verify_terminal_candidate_head(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn verify_author_exclusion_activation_with_verified_operation(
+pub(crate) async fn verify_author_exclusion_activation_with_verified_operation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     locator: &crate::database::AuthorExclusionActivationLocator,

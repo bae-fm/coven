@@ -200,7 +200,7 @@ fn membership_resolution_activations(
 
 fn membership_projection_activation_status(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store_pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
     coord: &MembershipCoord,
 ) -> Result<MembershipProjectionStatus, AnchoredChainError> {
     let node = graph.path_heads.get(coord).ok_or_else(|| {
@@ -218,10 +218,10 @@ fn membership_projection_activation_status(
         (true, crate::sync::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
             .classify_head(&node.reference, &node.head, commit)
             .map(|status| match status {
-                crate::sync::store_pull::VerifiedMergePrefixHeadStatus::Included => {
+                crate::sync::store_engine::merge::pull::VerifiedMergePrefixHeadStatus::Included => {
                     MembershipProjectionStatus::Included
                 }
-                crate::sync::store_pull::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
+                crate::sync::store_engine::merge::pull::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
                     MembershipProjectionStatus::OutsidePrefix
                 }
             })
@@ -281,7 +281,7 @@ fn membership_projection_dependencies(
 
 pub(in crate::sync::membership_ops) fn membership_projection_statuses(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store_pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
     resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
 ) -> Result<BTreeMap<MembershipCoord, MembershipProjectionStatus>, AnchoredChainError> {
     let mut statuses = BTreeMap::new();
@@ -349,7 +349,7 @@ pub(in crate::sync::membership_ops) fn membership_projection_statuses(
 
 fn project_membership_cut_to_store_prefix(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store_pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<
     (
         Vec<MembershipHeadRef>,
@@ -418,7 +418,7 @@ pub(crate) async fn project_anchored_chain_to_verified_store_prefix(
     root: &StoreRootRef,
     owner_pubkey: &str,
     candidate_heads: &[MembershipHeadRef],
-    prefix: &crate::sync::store_pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let root_value = crate::sync::store_objects::load_store_protocol_root(storage, root)
         .await
@@ -453,7 +453,9 @@ fn load_exact_membership_graph<'a>(
     root: &'a StoreRootRef,
     root_value: &'a crate::sync::store_commit::StoreProtocolRoot,
     exact_heads: &'a [MembershipHeadRef],
-    verified_activations: Option<&'a crate::sync::store_pull::VerifiedMergeMembershipPrefix>,
+    verified_activations: Option<
+        &'a crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
+    >,
 ) -> LoadedMembershipGraphFuture<'a> {
     Box::pin(async move {
         let graph =
@@ -631,9 +633,11 @@ fn load_layered_membership_chain<'a>(
     graph: LoadedExactMembershipGraph,
     exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
     provider_admin: &'a crate::sync::provider::ProviderAdminState,
-    verified_activations: Option<&'a crate::sync::store_pull::VerifiedMergeMembershipPrefix>,
+    verified_activations: Option<
+        &'a crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
+    >,
     pending_resolution: Option<
-        &'a crate::sync::store_pull::VerifiedMergeConflictResolutionActivation,
+        &'a crate::sync::store_engine::merge::pull::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> LayeredMembershipFuture<'a> {
     Box::pin(async move {
@@ -792,8 +796,12 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
     owner_pubkey: &str,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: Option<&crate::sync::store_pull::VerifiedMergeMembershipPrefix>,
-    pending_resolution: Option<&crate::sync::store_pull::VerifiedMergeConflictResolutionActivation>,
+    verified_activations: Option<
+        &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
+    >,
+    pending_resolution: Option<
+        &crate::sync::store_engine::merge::pull::VerifiedMergeConflictResolutionActivation,
+    >,
 ) -> Result<MembershipChain, AnchoredChainError> {
     validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
     if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {

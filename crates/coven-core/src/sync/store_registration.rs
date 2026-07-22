@@ -572,7 +572,7 @@ async fn prepare_self_retirement(
             let state_after = predecessor_state
                 .self_retire(retirement_ref.clone())
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let history = super::store_pull::prepare_merge_history_successor(
+            let history = super::store_engine::merge::pull::prepare_merge_history_successor(
                 db,
                 &root,
                 &commit,
@@ -581,7 +581,7 @@ async fn prepare_self_retirement(
                 &registration,
                 None,
                 state_after,
-                super::store_pull::MergeHistorySuccessorEvidence::none(),
+                super::store_engine::merge::pull::MergeHistorySuccessorEvidence::none(),
             )
             .await
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
@@ -1872,7 +1872,7 @@ pub async fn recover_owner_device_merge(
             }),
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store_pull::prepare_merge_history_successor(
+    let history = super::store_engine::merge::pull::prepare_merge_history_successor(
         db,
         &root,
         &commit,
@@ -1881,7 +1881,7 @@ pub async fn recover_owner_device_merge(
         &registration,
         Some(&registration_ref),
         state_after,
-        super::store_pull::MergeHistorySuccessorEvidence {
+        super::store_engine::merge::pull::MergeHistorySuccessorEvidence {
             registrations: vec![super::store_commit::RetainedVerifiedRegistration {
                 reference: registration_ref.clone(),
                 value: registration.clone(),
@@ -3130,7 +3130,7 @@ mod tests {
         .await
         .expect("recover Serial Owner device");
 
-        let observed = super::super::store_pull::load_serial_cycle_authorization(
+        let observed = crate::sync::store_engine::serial::pull::load_serial_cycle_authorization(
             &store.storage,
             coordination,
             &store.root,

@@ -161,7 +161,7 @@ pub(crate) async fn push_store_snapshot(
                 )
             })?;
             StoreSnapshotHistorySummary::MergeConcurrent(
-                super::store_pull::prepare_merge_snapshot_history_summary(
+                super::store_engine::merge::pull::prepare_merge_snapshot_history_summary(
                     db,
                     &root,
                     &coverage,
@@ -919,7 +919,7 @@ pub(crate) async fn select_store_snapshot(
                     "membership floor does not match Store write policy".to_string(),
                 ));
             }
-            super::store_pull::load_serial_snapshot_authorities_at_position(
+            super::store_engine::serial::pull::load_serial_snapshot_authorities_at_position(
                 storage,
                 root,
                 reference.clone(),

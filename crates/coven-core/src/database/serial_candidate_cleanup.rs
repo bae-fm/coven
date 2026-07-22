@@ -10,7 +10,7 @@ impl Database {
     pub(crate) async fn prepare_serial_candidate_cleanup(
         &self,
         branch_id: PendingBranchId,
-        plan: &crate::sync::store_pull::SerialResolutionPlan,
+        plan: &crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         let accepted_refs = plan
             .commits()
@@ -250,7 +250,7 @@ impl Database {
 
     pub(crate) async fn prepare_serial_abandonment_authority_cleanup(
         &self,
-        plan: &crate::sync::store_pull::SerialResolutionPlan,
+        plan: &crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
         let prepared = self
             .prepared_serial_candidate_abandonment()
@@ -360,7 +360,7 @@ impl Database {
     pub(crate) async fn discard_serial_branch_after_abandonment(
         &self,
         branch_id: PendingBranchId,
-        plan: crate::sync::store_pull::SerialResolutionPlan,
+        plan: crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<(), DbError> {
         let prepared = self
             .prepared_serial_candidate_abandonment()

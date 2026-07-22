@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn replay_merge_device_history(
+pub(crate) async fn replay_merge_device_history(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     tip: &StoreBatchCommitRef,
@@ -745,7 +745,7 @@ async fn verify_merge_owner_promotion_acceptance(
     .await
 }
 
-pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
+pub(crate) async fn verify_merge_owner_promotion_acceptance_with_history(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,

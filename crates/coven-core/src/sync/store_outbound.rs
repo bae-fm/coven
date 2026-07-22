@@ -24,7 +24,7 @@ use super::store_objects::{run_blocking_object_verification, StoreObjectError};
 use super::{
     audience_package, circle, circle_control, device_join, gate, invite, membership,
     owner_promotion, provider, remote_object, service, storage, store_commit, store_objects,
-    store_pull, store_reclaim, wrapped_store_key,
+    store_reclaim, wrapped_store_key,
 };
 
 pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";

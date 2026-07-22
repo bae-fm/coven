@@ -3235,7 +3235,7 @@ impl VerifiedCandidateNonactivation {
     }
 
     pub(crate) fn serial(
-        observation: &super::store_pull::VerifiedSerialAcceptedSuffix,
+        observation: &super::store_engine::serial::pull::VerifiedSerialAcceptedSuffix,
         losing: Vec<(
             StoreBatchCommitDeletionTarget,
             super::store_commit::StoreDeviceRegistration,

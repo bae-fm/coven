@@ -1637,19 +1637,20 @@ async fn prepare_circle_operation_request(
                 commit_prepared.reference().clone(),
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let history_summary = super::store_pull::prepare_merge_history_successor(
-                db,
-                &root,
-                &commit,
-                &commit_ref,
-                &exact,
-                &author,
-                None,
-                resolved_devices,
-                super::store_pull::MergeHistorySuccessorEvidence::none(),
-            )
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let history_summary =
+                super::store_engine::merge::pull::prepare_merge_history_successor(
+                    db,
+                    &root,
+                    &commit,
+                    &commit_ref,
+                    &exact,
+                    &author,
+                    None,
+                    resolved_devices,
+                    super::store_engine::merge::pull::MergeHistorySuccessorEvidence::none(),
+                )
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             prepared_objects.insert("store-commit".to_string(), commit_prepared);
             let head_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
@@ -1973,14 +1974,15 @@ async fn publish_circle_operation(
                     "Merge Circle operation lacks its prepared Store head".to_string(),
                 )
             })?;
-        let (_, state_after) = super::store_pull::retained_merge_device_state_for_order(
-            db,
-            storage,
-            &root,
-            &commit.order,
-        )
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let (_, state_after) =
+            super::store_engine::merge::pull::retained_merge_device_state_for_order(
+                db,
+                storage,
+                &root,
+                &commit.order,
+            )
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let head_ref = super::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),

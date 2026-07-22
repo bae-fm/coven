@@ -235,15 +235,16 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         predecessor: None,
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
-    let result = super::super::super::store_pull::load_retained_merge_outbound_authorization(
-        &writer_db,
-        &store.storage,
-        &root,
-        &order,
-        before_removal.head_refs(),
-        &registration_ref,
-    )
-    .await;
+    let result =
+        crate::sync::store_engine::merge::pull::load_retained_merge_outbound_authorization(
+            &writer_db,
+            &store.storage,
+            &root,
+            &order,
+            before_removal.head_refs(),
+            &registration_ref,
+        )
+        .await;
 
     assert!(
         result.is_err(),
@@ -347,7 +348,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let authorization =
-        super::super::super::store_pull::load_retained_merge_outbound_authorization(
+        crate::sync::store_engine::merge::pull::load_retained_merge_outbound_authorization(
             &owner_db,
             &store.storage,
             &root,

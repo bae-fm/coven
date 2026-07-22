@@ -818,7 +818,7 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     assert_eq!(retained_prepared, 2);
 
     let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
-    let resolution = super::super::super::store_pull::prepare_serial_resolution(
+    let resolution = crate::sync::store_engine::serial::pull::prepare_serial_resolution(
         &db,
         &storage,
         storage.serial_coordination().unwrap(),
@@ -830,7 +830,7 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     .await
     .expect("prepare accepted successor resolution");
     home.fail_exact_delete_on_call(2);
-    let interrupted = super::super::super::store_pull::cleanup_serial_candidates(
+    let interrupted = crate::sync::store_engine::serial::pull::cleanup_serial_candidates(
         &db,
         &storage,
         branch_id.clone(),
@@ -852,7 +852,7 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
         .await
         .expect("refresh accepted Serial head version");
 
-    let resolution = super::super::super::store_pull::prepare_serial_resolution(
+    let resolution = crate::sync::store_engine::serial::pull::prepare_serial_resolution(
         &db,
         &storage,
         storage.serial_coordination().unwrap(),
@@ -863,7 +863,7 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     )
     .await
     .expect("prepare retry resolution");
-    super::super::super::store_pull::cleanup_serial_candidates(
+    crate::sync::store_engine::serial::pull::cleanup_serial_candidates(
         &db,
         &storage,
         branch_id.clone(),
@@ -1064,9 +1064,13 @@ async fn serial_control_rejects_an_exact_wrap_signed_for_another_store() {
         .expect("sign control naming wrong-Store wrap");
     let control = StoreControl::SerialMembership { entry };
 
-    crate::sync::store_pull::validate_serial_control_wrapped_keys(&storage, &root, Some(&control))
-        .await
-        .expect_err("exact membership wrap must authenticate its Store binding");
+    crate::sync::store_engine::serial::pull::validate_serial_control_wrapped_keys(
+        &storage,
+        &root,
+        Some(&control),
+    )
+    .await
+    .expect_err("exact membership wrap must authenticate its Store binding");
 }
 
 #[tokio::test]

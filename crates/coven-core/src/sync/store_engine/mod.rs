@@ -10,7 +10,8 @@ use super::cycle::SyncCycleFailure;
 use super::pull::MembershipDiscoveryProof;
 use super::storage::{CoordinationStorage, SyncStorage};
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
-use super::store_pull::{SerialCycleAuthorization, StorePullResult};
+use super::store_pull::StorePullResult;
+use serial::pull::SerialCycleAuthorization;
 
 pub(crate) mod merge;
 pub(crate) mod serial;
@@ -24,6 +25,41 @@ pub use merge::abandonment::MergeCandidateAbandonment;
 pub use serial::abandonment::SerialBranchAbandonment;
 #[doc(hidden)]
 pub use serial::publication::current_serial_head_ref;
+#[doc(hidden)]
+pub use serial::pull::SerialResolutionPlan;
+
+enum StoreEngineLoadError {
+    Database(crate::database::DbError),
+    Object(super::store_objects::StoreObjectError),
+    MissingRoot,
+    Invalid(String),
+}
+
+impl From<StoreEngineLoadError> for super::store_outbound::StoreOutboundError {
+    fn from(error: StoreEngineLoadError) -> Self {
+        match error {
+            StoreEngineLoadError::Database(error) => error.into(),
+            StoreEngineLoadError::Object(error) => Self::Object(error),
+            StoreEngineLoadError::MissingRoot => Self::MissingState {
+                key: super::store_outbound::STORE_ROOT_AUTHORITY,
+            },
+            StoreEngineLoadError::Invalid(reason) => Self::InvalidOutbound(reason),
+        }
+    }
+}
+
+impl From<StoreEngineLoadError> for super::store_pull::StorePullError {
+    fn from(error: StoreEngineLoadError) -> Self {
+        match error {
+            StoreEngineLoadError::Database(error) => error.into(),
+            StoreEngineLoadError::Object(error) => Self::Object(error),
+            StoreEngineLoadError::MissingRoot => {
+                Self::Database("exact Store root authority is absent".to_string())
+            }
+            StoreEngineLoadError::Invalid(reason) => Self::Database(reason),
+        }
+    }
+}
 
 #[doc(hidden)]
 pub async fn abandon_merge_candidate(
@@ -72,20 +108,60 @@ pub async fn abandon_serial_branch(
     }
 }
 
+#[doc(hidden)]
+pub async fn prepare_serial_resolution(
+    db: &Database,
+    storage: Arc<CloudSyncStorage>,
+    store_dir: &StoreDir,
+    branch_base: Option<super::store_commit::StoreBatchCommitRef>,
+    identity: &UserKeypair,
+) -> Result<SerialResolutionPlan, super::store_pull::StorePullError> {
+    let engine = load_store_engine(db, storage).await?;
+    match engine.0 {
+        StoreEngineKind::Serial(engine) => {
+            engine
+                .prepare_resolution(store_dir, branch_base, identity)
+                .await
+        }
+        StoreEngineKind::Merge(_) => Err(super::store_pull::StorePullError::Serial(
+            "Serial resolution requires Serial policy".to_string(),
+        )),
+    }
+}
+
+#[doc(hidden)]
+pub async fn cleanup_serial_resolution_candidates(
+    db: &Database,
+    storage: Arc<CloudSyncStorage>,
+    branch_id: crate::PendingBranchId,
+    plan: &SerialResolutionPlan,
+) -> Result<(), super::store_pull::StorePullError> {
+    let engine = load_store_engine(db, storage).await?;
+    match engine.0 {
+        StoreEngineKind::Serial(engine) => {
+            engine.cleanup_resolution_candidates(branch_id, plan).await
+        }
+        StoreEngineKind::Merge(_) => Err(super::store_pull::StorePullError::Serial(
+            "Serial candidate cleanup requires Serial policy".to_string(),
+        )),
+    }
+}
+
 async fn load_store_engine(
     db: &Database,
     storage: Arc<CloudSyncStorage>,
-) -> Result<StoreEngine, super::store_outbound::StoreOutboundError> {
-    let store_root = db.local_store_root_ref().await?.ok_or(
-        super::store_outbound::StoreOutboundError::MissingState {
-            key: super::store_outbound::STORE_ROOT_AUTHORITY,
-        },
-    )?;
+) -> Result<StoreEngine, StoreEngineLoadError> {
+    let store_root = db
+        .local_store_root_ref()
+        .await
+        .map_err(StoreEngineLoadError::Database)?
+        .ok_or(StoreEngineLoadError::MissingRoot)?;
     let verified_root = super::store_objects::load_store_protocol_root(&*storage, &store_root)
-        .await?
+        .await
+        .map_err(StoreEngineLoadError::Object)?
         .value;
     StoreEngine::new(db.clone(), storage, store_root, &verified_root)
-        .map_err(super::store_outbound::StoreOutboundError::InvalidOutbound)
+        .map_err(StoreEngineLoadError::Invalid)
 }
 
 #[cfg(any(test, feature = "test-utils"))]

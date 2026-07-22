@@ -3,45 +3,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
-use rusqlite::session::{ConflictAction, ConflictType};
 use tracing::debug;
 
 use super::{
-    causal_grants, circle, circle_activation, circle_control, circle_ops, device_join, gate, hlc,
-    membership, membership_ops, provider, remote_object, retained_replay, session, storage,
-    store_commit, store_objects, store_outbound, store_reclaim, store_snapshot, wrapped_store_key,
+    causal_grants, circle, circle_activation, circle_control, circle_ops, device_join, membership,
+    membership_ops, provider, remote_object, retained_replay, store_commit, store_objects,
+    store_outbound, store_reclaim, store_snapshot,
 };
 
-use super::apply::{
-    apply_changeset_strict_on, resolve_and_apply_changeset_with_policy_on, ValidatedChangeset,
-};
 use super::audience_package::{AudiencePackage, PackageAudience};
 use super::circle_activation::{
     CircleMembershipAuthority, VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 use super::circle_control::StoreMembershipStateRef;
-use super::conflict::{IncomingTimestampPolicy, TableSchema};
 use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
-use super::pull::{
-    advance_max_updated_at, cache_eager_blobs, local_blob_cleanup_intents, verify_package_blobs,
-};
-use super::session::SyncedTable;
 use super::storage::{
     BlobSpoolProtection, CoordinationError, CoordinationStorage, ExactObjectRef,
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
-    head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CirclePackageRef,
-    CommitFrontier, DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody,
-    DeviceStreamAnchor, ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor,
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition, ResolvedStoreDeviceState,
-    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
-    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
-    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
-    StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
-    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
+    head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
+    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash,
+    OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor, OwnerRecoveryPosition,
+    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
+    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
+    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
+    StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
@@ -56,12 +45,10 @@ use super::store_objects::{
     load_store_ack_predecessor, load_store_ack_ref, load_store_package, load_store_protocol_root,
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
-use crate::blob::decl::BlobDecls;
-use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
-use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
+use crate::database::{Database, DbError};
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
-use crate::store_dir::StoreDir;
+use crate::sync::store_engine::{merge::pull::*, serial::pull::*};
 
 mod ancestry;
 mod circle_packages;
@@ -70,38 +57,20 @@ mod device_operations;
 mod history_state;
 mod join_bootstrap;
 mod join_validation;
-mod merge_discovery;
-mod merge_history;
-mod merge_materialization;
-mod merge_membership;
-mod merge_replay;
-mod merge_retained_authority;
 mod pull;
 mod registration;
-mod serial;
-mod serial_apply;
 mod terminal_authority;
 mod terminal_cleanup;
 
-pub(crate) use circle_packages::load_serial_store_package;
-use circle_packages::*;
-pub(crate) use join_validation::*;
-pub(crate) use merge_discovery::*;
-use merge_replay::*;
-
 pub(crate) use ancestry::*;
+pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
 pub(crate) use history_state::*;
 pub(crate) use join_bootstrap::*;
-pub(crate) use merge_history::*;
-pub(crate) use merge_materialization::*;
-pub(crate) use merge_membership::*;
-pub(crate) use merge_retained_authority::*;
-pub use pull::*;
+pub(crate) use join_validation::*;
+pub(crate) use pull::*;
 pub(crate) use registration::*;
-pub use serial::*;
-pub(crate) use serial_apply::*;
 pub(crate) use terminal_authority::*;
 pub use terminal_cleanup::*;
 
@@ -262,7 +231,8 @@ pub enum StorePullMembershipError {
     Message(String),
 }
 
-type StorePullFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorePullError>> + Send + 'a>>;
+pub(crate) type StorePullFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, StorePullError>> + Send + 'a>>;
 
 impl From<DbError> for StorePullError {
     fn from(error: DbError) -> Self {
@@ -293,7 +263,7 @@ pub(crate) struct LoadedMergePredecessorMemberships {
 }
 
 impl LoadedMergePredecessorMemberships {
-    fn membership_for(
+    pub(crate) fn membership_for(
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Result<&MembershipChain, StorePullError> {
@@ -563,20 +533,20 @@ pub(crate) async fn verify_merge_owner_conflict_acceptance(
 }
 
 #[derive(Clone)]
-struct LoadedCirclePackage {
-    reference: CirclePackageRef,
-    bytes: Vec<u8>,
-    blob_protection: BlobSpoolProtection,
+pub(crate) struct LoadedCirclePackage {
+    pub(crate) reference: CirclePackageRef,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) blob_protection: BlobSpoolProtection,
 }
 
 #[derive(Clone)]
-struct CirclePackageAccess {
-    encryption: EncryptionService,
-    key_fingerprint: KeyFingerprint,
-    writers: BTreeSet<String>,
+pub(crate) struct CirclePackageAccess {
+    pub(crate) encryption: EncryptionService,
+    pub(crate) key_fingerprint: KeyFingerprint,
+    pub(crate) writers: BTreeSet<String>,
 }
 
-type CirclePackageAccesses =
+pub(crate) type CirclePackageAccesses =
     BTreeMap<(super::circle::CircleId, super::circle::CircleControlCoord), CirclePackageAccess>;
 
 #[derive(Clone)]
@@ -587,7 +557,7 @@ pub(crate) enum CandidateDeviceOperations {
     },
 }
 
-fn parse_candidate_store_package(
+pub(crate) fn parse_candidate_store_package(
     candidate: &Candidate,
     bytes: &[u8],
 ) -> Result<AudiencePackage, String> {
@@ -609,7 +579,7 @@ fn parse_candidate_store_package(
     Ok(package)
 }
 
-fn parse_candidate_circle_package(
+pub(crate) fn parse_candidate_circle_package(
     candidate: &Candidate,
     loaded: &LoadedCirclePackage,
 ) -> Result<AudiencePackage, String> {
@@ -686,7 +656,7 @@ pub(crate) fn held_package(
     }
 }
 
-fn held_dependency(
+pub(crate) fn held_dependency(
     dependent: &StoreBatchCommitRef,
     required_device_id: &str,
     required: &StoreBatchCommitRef,

@@ -1016,9 +1016,11 @@ async fn verify_reclaim_authorization_activation(
                         .to_string(),
                 ));
             }
-            super::store_pull::verify_merge_commit_currently_materialized(db, storage, root, commit)
-                .await
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+            super::store_engine::merge::pull::verify_merge_commit_currently_materialized(
+                db, storage, root, commit,
+            )
+            .await
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
         }
         super::store_reclaim_journal::ReclaimCommitActivation::Serial { commit } => {
             let coordination = coordination.ok_or_else(|| {
@@ -1026,7 +1028,7 @@ async fn verify_reclaim_authorization_activation(
                     "Serial reclaim activation requires coordination".to_string(),
                 )
             })?;
-            super::store_pull::observe_serial_successors_after(
+            super::store_engine::serial::pull::observe_serial_successors_after(
                 storage,
                 coordination,
                 root,

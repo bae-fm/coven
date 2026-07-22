@@ -278,12 +278,12 @@ fn apply_serial_visibility_deletes_on<B: AsRef<[u8]>>(
     .map_err(DbError::from)
 }
 
-pub(super) struct PreparedSerialCandidate {
-    pub(super) packages: Vec<AudiencePackage>,
-    pub(super) changesets: super::gate::SerialInboundChangesets,
+pub(crate) struct PreparedSerialCandidate {
+    pub(crate) packages: Vec<AudiencePackage>,
+    pub(crate) changesets: super::gate::SerialInboundChangesets,
 }
 
-pub(super) async fn prepare_serial_candidate(
+pub(crate) async fn prepare_serial_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,

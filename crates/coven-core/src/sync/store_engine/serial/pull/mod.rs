@@ -1,14 +1,54 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use rusqlite::session::{ConflictAction, ConflictType};
+
 use super::*;
-use crate::blob::local_cleanup;
+use crate::blob::decl::BlobDecls;
+use crate::blob::local_cleanup::{self};
+use crate::changeset::RowChange;
+use crate::database::{BlobActivation, Database, DbError};
+use crate::store_dir::StoreDir;
+use crate::sync::apply::{apply_changeset_strict_on, ValidatedChangeset};
+use crate::sync::audience_package::{AudiencePackage, PackageAudience};
+use crate::sync::circle_activation::{CircleMembershipAuthority, VerifiedStreamActivationPrefix};
 use crate::sync::conflict::TableSchema;
-use crate::sync::store_commit::{StoreRootRef, StoreSerialHead, SERIAL_STREAM_ID};
-use crate::sync::store_objects::load_store_protocol_root;
+use crate::sync::membership::SerialAuthorizationState;
+use crate::sync::pull::{
+    advance_max_updated_at, cache_eager_blobs, local_blob_cleanup_intents, verify_package_blobs,
+};
+use crate::sync::session::SyncedTable;
+use crate::sync::storage::{
+    BlobSpoolProtection, CoordinationError, CoordinationStorage, SyncStorage,
+};
+use crate::sync::store_commit::{
+    serial_head_key, ObjectHash, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
+};
+use crate::sync::store_objects::{
+    load_founder_registration, load_founder_registration_with_root, load_registration_ref,
+    load_store_protocol_root,
+};
 use crate::sync::store_pull::*;
+use crate::sync::{
+    circle, circle_ops, gate, provider, remote_object, storage, store_commit, store_objects,
+    wrapped_store_key,
+};
+
+mod application;
+mod history;
+mod resolution;
+
+pub(crate) use application::*;
+pub(crate) use history::*;
+pub(crate) use resolution::cleanup_serial_abandonment_authority;
+pub use resolution::SerialResolutionPlan;
+pub(crate) use resolution::{
+    cleanup_serial_candidates, prepare_serial_resolution, SerialResolutionCommit,
+};
 
 impl AuthorizedSerialStoreEngine<'_> {
     pub(in crate::sync::store_engine) async fn pull(

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn verified_terminal_merge_retractions(
+pub(crate) async fn verified_terminal_merge_retractions(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -228,7 +228,7 @@ pub(super) async fn verified_terminal_merge_retractions(
     Ok(verified_by_reference.into_values().collect())
 }
 
-pub(super) fn replay_retained_merge_projection_on(
+pub(crate) fn replay_retained_merge_projection_on(
     live: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,

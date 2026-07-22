@@ -334,7 +334,7 @@ impl Database {
         tx: &rusqlite::Transaction<'_>,
         synced_tables: &[SyncedTable],
         branch_id: &PendingBranchId,
-        plan: crate::sync::store_pull::SerialResolutionPlan,
+        plan: crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<Vec<WriteId>, DbError> {
         let (head, _head_object, commits) = plan.into_parts();
         let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
@@ -461,7 +461,7 @@ impl Database {
                     resolution.commit.seq()
                 )));
             }
-            crate::sync::store_pull::apply_prepared_serial_commit_on(
+            crate::sync::store_engine::serial::pull::apply_prepared_serial_commit_on(
                 tx,
                 schema.clone(),
                 &gates,
@@ -633,7 +633,7 @@ impl Database {
     pub async fn discard_pending_serial_branch(
         &self,
         branch_id: PendingBranchId,
-        plan: crate::sync::store_pull::SerialResolutionPlan,
+        plan: crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<(), DbError> {
         let synced_tables = self.synced_tables().to_vec();
         let statuses = self.state.write_statuses.clone();
@@ -657,7 +657,7 @@ impl Database {
     pub async fn replace_pending_serial_branch<R, E, F>(
         &self,
         branch_id: PendingBranchId,
-        plan: crate::sync::store_pull::SerialResolutionPlan,
+        plan: crate::sync::store_engine::SerialResolutionPlan,
         replacement_write_id: WriteId,
         f: F,
     ) -> Result<WriteReceipt<R>, E>

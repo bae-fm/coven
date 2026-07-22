@@ -5,7 +5,7 @@ mod acknowledgements;
 pub(crate) mod operations;
 pub(crate) mod preparation;
 pub(crate) mod publication;
-pub(super) mod pull;
+pub(crate) mod pull;
 
 pub(super) struct MergeStoreEngine {
     context: StoreEngineContext,

@@ -1,58 +1,5 @@
 use super::*;
 
-#[doc(hidden)]
-pub struct SerialResolutionCommit {
-    pub(crate) commit: StoreBatchCommit,
-    pub(crate) commit_ref: super::store_commit::StoreBatchCommitRef,
-    pub(crate) packages: Vec<AudiencePackage>,
-    pub(crate) changesets: super::gate::SerialInboundChangesets,
-    pub(crate) registrations: Vec<(
-        StoreDeviceRegistration,
-        super::store_commit::StoreDeviceRegistrationActivation,
-    )>,
-    pub(crate) verified_circle_activations: VerifiedCircleActivations,
-    pub(crate) device_operations: VerifiedStoreDeviceOperations,
-    pub(crate) authorization_after: SerialAuthorizationState,
-}
-
-#[doc(hidden)]
-pub struct SerialResolutionPlan {
-    pub(super) head: StoreSerialHead,
-    pub(super) head_object: super::storage::VersionedObject,
-    pub(super) commits: Vec<SerialResolutionCommit>,
-    pub(super) verified_suffix: Option<VerifiedSerialAcceptedSuffix>,
-}
-
-impl SerialResolutionPlan {
-    pub(crate) fn head(&self) -> &StoreSerialHead {
-        &self.head
-    }
-
-    pub(crate) fn head_object(&self) -> &super::storage::VersionedObject {
-        &self.head_object
-    }
-
-    pub(crate) fn commits(&self) -> &[SerialResolutionCommit] {
-        &self.commits
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        StoreSerialHead,
-        super::storage::VersionedObject,
-        Vec<SerialResolutionCommit>,
-    ) {
-        (self.head, self.head_object, self.commits)
-    }
-
-    pub(crate) fn verified_suffix(&self) -> Result<VerifiedSerialAcceptedSuffix, StorePullError> {
-        self.verified_suffix.clone().ok_or_else(|| {
-            StorePullError::Serial("Serial resolution has no accepted successor suffix".to_string())
-        })
-    }
-}
-
 pub(crate) enum ApplyOutcome {
     Applied(Vec<RowChange>),
     Held(HeldStorePositionReason),
