@@ -271,7 +271,7 @@ pub(super) async fn load_applicable_circle_packages_with_prior_accesses(
     Ok(loaded)
 }
 
-pub(super) async fn load_serial_store_package(
+pub(crate) async fn load_serial_store_package(
     db: &Database,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,

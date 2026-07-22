@@ -305,7 +305,7 @@ pub(crate) async fn validate_serial_control_wrapped_keys(
     Ok(())
 }
 
-pub(super) async fn load_authorized_serial_chain(
+pub(crate) async fn load_authorized_serial_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     head: &StoreSerialHead,
@@ -459,12 +459,12 @@ pub(crate) async fn observe_serial_successors_after(
     ))
 }
 
-pub(super) struct VerifiedSerialHead {
-    pub(super) head: StoreSerialHead,
-    pub(super) object: super::storage::VersionedObject,
+pub(crate) struct VerifiedSerialHead {
+    pub(crate) head: StoreSerialHead,
+    pub(crate) object: super::storage::VersionedObject,
 }
 
-pub(super) async fn read_serial_head(
+pub(crate) async fn read_serial_head(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
@@ -576,181 +576,6 @@ pub(crate) async fn load_serial_snapshot_authorities_at_position(
                 .is_owner(&registration.author_pubkey)
         })
         .collect())
-}
-
-pub(super) async fn pull_serial_store_commits(
-    db: &Database,
-    tables: &[SyncedTable],
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    root: &StoreRootRef,
-    root_value: super::store_commit::StoreProtocolRoot,
-    store_dir: &StoreDir,
-    identity: Option<&crate::keys::UserKeypair>,
-) -> Result<StorePullResult, StorePullError> {
-    if root_value.descriptor.write_policy != crate::WritePolicy::Serial {
-        return Err(StorePullError::Serial(
-            "signed Store root is not Serial".to_string(),
-        ));
-    }
-    let local = db.materialized_frontier().await?.remove(SERIAL_STREAM_ID);
-    let head = read_serial_head(storage, coordination, root).await?.head;
-    let authorized_chain = Box::pin(load_authorized_serial_chain(storage, root, &head)).await?;
-    let tip = match &head.state {
-        StoreSerialHeadState::Genesis { .. } => None,
-        StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
-    };
-    let Some(tip) = tip else {
-        if local.is_some() {
-            return Err(StorePullError::Serial(format!(
-                "global head is genesis but the durable Serial frontier is {local:?}"
-            )));
-        }
-        return empty_serial_pull_result(db, store_dir, Some(head)).await;
-    };
-    if local
-        .as_ref()
-        .is_some_and(|local| local.coord.sequence() > tip.coord.sequence())
-    {
-        return Err(StorePullError::Serial(format!(
-            "local Serial reference is ahead of the signed head: local={local:?}, head={tip:?}"
-        )));
-    }
-
-    let first_unmaterialized = match local.as_ref() {
-        None => 0,
-        Some(local) => authorized_chain
-            .iter()
-            .position(|authorized| &authorized.commit_ref == local)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                StorePullError::Serial(format!(
-                    "exact Serial predecessor chain does not reach local reference {local:?}"
-                ))
-            })?,
-    };
-    if let Some(local) = local.as_ref() {
-        let authorization = authorized_chain
-            .get(first_unmaterialized - 1)
-            .expect("materialized Serial reference was found in the authorized chain")
-            .authorization_after
-            .clone();
-        db.install_serial_authorization_at_position(local.clone(), authorization)
-            .await?;
-    }
-
-    let mut candidates = Vec::with_capacity(authorized_chain.len() - first_unmaterialized);
-    for authorized in authorized_chain.into_iter().skip(first_unmaterialized) {
-        let package =
-            load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
-                .await?;
-        candidates.push(SerialApplicationCandidate {
-            candidate: Candidate {
-                commit_ref: authorized.commit_ref,
-                commit: authorized.commit,
-                author: authorized.author,
-                package,
-                registrations: authorized.registrations,
-                device_operations: CandidateDeviceOperations::Verified(
-                    authorized.device_operations,
-                ),
-            },
-            membership_authority: authorized.authorization_before,
-            authorization_after: authorized.authorization_after,
-        });
-    }
-
-    let schema: Arc<TableSchema> = {
-        let tables = tables.to_vec();
-        Arc::new(
-            db.call(move |conn| TableSchema::from_db(conn, &tables))
-                .await?,
-        )
-    };
-    let mut row_changes = Vec::new();
-    let mut authors = BTreeSet::new();
-    let mut applied_candidates = 0_u64;
-    for candidate in &candidates {
-        let changes = match Box::pin(apply_serial_candidate(
-            db,
-            storage,
-            store_dir,
-            schema.clone(),
-            candidate,
-            root,
-            identity,
-        ))
-        .await
-        {
-            Ok(changes) => changes,
-            Err(StorePullError::BlobDownloads(failures)) if !failures.has_transport_failure() => {
-                tracing::warn!(
-                    stream_id = %commit_stream_id(&candidate.candidate.commit_ref.coord),
-                    seq = candidate.candidate.commit_ref.coord.sequence(),
-                    %failures,
-                    "holding Serial commit on blob download failure"
-                );
-                let frontier = db.materialized_frontier().await?;
-                let local_blob_cleanup_pending = local_cleanup::drain(db, store_dir).await?;
-                return Ok(StorePullResult {
-                    changesets_applied: applied_candidates,
-                    devices_pulled: u64::try_from(authors.len()).map_err(|_| {
-                        StorePullError::Serial("author count exceeds u64".to_string())
-                    })?,
-                    held_positions: vec![held_commit(
-                        &candidate.candidate.commit_ref,
-                        HeldStorePositionReason::BlobDownloadFailed,
-                    )],
-                    visible_heads: Vec::new(),
-                    serial_head: Some(head),
-                    row_changes,
-                    asset_downloads_failed: true,
-                    local_blob_cleanup_pending,
-                    frontier,
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        authors.insert(candidate.candidate.author.device_id);
-        row_changes.extend(changes);
-        applied_candidates = applied_candidates
-            .checked_add(1)
-            .ok_or_else(|| StorePullError::Serial("apply count exceeds u64".to_string()))?;
-    }
-    let frontier = db.materialized_frontier().await?;
-    let local_blob_cleanup_pending = local_cleanup::drain(db, store_dir).await?;
-    Ok(StorePullResult {
-        changesets_applied: applied_candidates,
-        devices_pulled: u64::try_from(authors.len())
-            .map_err(|_| StorePullError::Serial("author count exceeds u64".to_string()))?,
-        held_positions: Vec::new(),
-        visible_heads: Vec::new(),
-        serial_head: Some(head),
-        row_changes,
-        asset_downloads_failed: false,
-        local_blob_cleanup_pending,
-        frontier,
-    })
-}
-
-async fn empty_serial_pull_result(
-    db: &Database,
-    store_dir: &StoreDir,
-    serial_head: Option<StoreSerialHead>,
-) -> Result<StorePullResult, StorePullError> {
-    let frontier = db.materialized_frontier().await?;
-    let local_blob_cleanup_pending = local_cleanup::drain(db, store_dir).await?;
-    Ok(StorePullResult {
-        changesets_applied: 0,
-        devices_pulled: 0,
-        held_positions: Vec::new(),
-        visible_heads: Vec::new(),
-        serial_head,
-        row_changes: Vec::new(),
-        asset_downloads_failed: false,
-        local_blob_cleanup_pending,
-        frontier,
-    })
 }
 
 #[doc(hidden)]

@@ -2,6 +2,7 @@ use super::*;
 
 mod acknowledgements;
 mod database;
+pub(super) mod pull;
 
 use database::SerialDatabase;
 
@@ -302,24 +303,6 @@ impl AuthorizedSerialStoreEngine<'_> {
             self.coordination(),
         )
         .await
-    }
-
-    pub(super) async fn pull(
-        &self,
-        store_dir: &StoreDir,
-        identity: &UserKeypair,
-    ) -> Result<StorePullResult, SyncCycleFailure> {
-        crate::sync::store_pull::pull_serial_store_commits_with_identity(
-            self.db(),
-            self.db().synced_tables(),
-            self.storage(),
-            self.coordination(),
-            self.store_root().store_root_hash,
-            store_dir,
-            Some(identity),
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))
     }
 
     pub(super) async fn snapshot_position(

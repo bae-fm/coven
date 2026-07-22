@@ -56,7 +56,7 @@ pub fn pull_store_commits<'a>(
                 .await
             }
             crate::WritePolicy::Serial => {
-                super::store_pull::pull_serial_store_commits_with_identity(
+                serial::pull::pull_store_commits(
                     db,
                     tables,
                     storage,

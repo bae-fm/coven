@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn apply_serial_candidate(
+pub(crate) async fn apply_serial_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,

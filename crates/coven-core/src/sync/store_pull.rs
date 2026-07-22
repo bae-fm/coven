@@ -83,6 +83,7 @@ mod serial_apply;
 mod terminal_authority;
 mod terminal_cleanup;
 
+pub(crate) use circle_packages::load_serial_store_package;
 use circle_packages::*;
 pub(crate) use join_validation::*;
 pub(crate) use merge_discovery::*;
@@ -304,10 +305,10 @@ impl LoadedMergePredecessorMemberships {
     }
 }
 
-struct SerialApplicationCandidate {
-    candidate: Candidate,
-    membership_authority: SerialAuthorizationState,
-    authorization_after: SerialAuthorizationState,
+pub(crate) struct SerialApplicationCandidate {
+    pub(crate) candidate: Candidate,
+    pub(crate) membership_authority: SerialAuthorizationState,
+    pub(crate) authorization_after: SerialAuthorizationState,
 }
 
 pub(crate) struct VerifiedAuthorExclusionActivation {
@@ -638,20 +639,20 @@ fn parse_candidate_circle_package(
     Ok(package)
 }
 
-struct AuthorizedSerialCommit {
-    commit_ref: StoreBatchCommitRef,
-    commit: StoreBatchCommit,
-    author: StoreDeviceRegistration,
-    registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    device_operations: VerifiedStoreDeviceOperations,
-    device_state_before: ResolvedStoreDeviceState,
-    device_state_after: ResolvedStoreDeviceState,
-    acknowledgement: Option<(
+pub(crate) struct AuthorizedSerialCommit {
+    pub(crate) commit_ref: StoreBatchCommitRef,
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) author: StoreDeviceRegistration,
+    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) device_operations: VerifiedStoreDeviceOperations,
+    pub(crate) device_state_before: ResolvedStoreDeviceState,
+    pub(crate) device_state_after: ResolvedStoreDeviceState,
+    pub(crate) acknowledgement: Option<(
         super::store_commit::StoreAckRef,
         super::store_commit::StoreAck,
     )>,
-    authorization_before: SerialAuthorizationState,
-    authorization_after: SerialAuthorizationState,
+    pub(crate) authorization_before: SerialAuthorizationState,
+    pub(crate) authorization_after: SerialAuthorizationState,
 }
 
 pub(crate) fn held_commit(

@@ -76,35 +76,3 @@ pub(crate) async fn required_pull_root(
     }
     Ok(root)
 }
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn pull_serial_store_commits_with_identity<'a>(
-    db: &'a Database,
-    tables: &'a [SyncedTable],
-    storage: &'a dyn SyncStorage,
-    coordination: &'a dyn CoordinationStorage,
-    store_root_hash: ObjectHash,
-    store_dir: &'a StoreDir,
-    identity: Option<&'a crate::keys::UserKeypair>,
-) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
-    Box::pin(async move {
-        let root = required_pull_root(db, store_root_hash).await?;
-        let verified_root = load_store_protocol_root(storage, &root).await?.value;
-        if verified_root.descriptor.write_policy != crate::WritePolicy::Serial {
-            return Err(StorePullError::Database(
-                "durable write policy differs from the signed Store root".to_string(),
-            ));
-        }
-        pull_serial_store_commits(
-            db,
-            tables,
-            storage,
-            coordination,
-            &root,
-            verified_root,
-            store_dir,
-            identity,
-        )
-        .await
-    })
-}
