@@ -10,9 +10,45 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::{
-    finish_nonactivating_store_ack, required_store_root, PreparedStoreOperationActivation,
-    StoreMembershipJournalCompletion, StoreOperationPublicationOutcome, StoreOutboundError,
+    finish_nonactivating_store_ack, required_store_root, PreparedSerialStoreOperationCommit,
+    PreparedStoreOperationActivation, SerialStoreOperationCommitPlan,
+    StoreMembershipJournalCompletion, StoreOperationBatch, StoreOperationPublicationOutcome,
+    StoreOutboundError,
 };
+
+pub(crate) async fn prepare_candidate(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    plan: SerialStoreOperationCommitPlan,
+    batch: StoreOperationBatch,
+) -> Result<PreparedSerialStoreOperationCommit, StoreOutboundError> {
+    let common = crate::sync::store_outbound::prepare_store_operation_candidate_common(
+        db,
+        storage,
+        plan.common(),
+        batch,
+    )
+    .await?;
+    let authorization_after = plan
+        .authorization()
+        .authorize_and_apply(&common.reference, &common.commit, plan.registration())
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head = StoreSerialHead::signed(
+        common.commit.store_root_hash,
+        crate::sync::store_commit::StoreSerialHeadState::Commit {
+            author_registration: plan.registration_ref().clone(),
+            commit: common.reference.clone(),
+        },
+        plan.device_signer(),
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    Ok(PreparedSerialStoreOperationCommit {
+        common,
+        base_head: plan.base_head().clone(),
+        head,
+        authorization_after,
+    })
+}
 
 pub(crate) enum StoreOperationAttempt {
     Activated(StoreBatchCommitRef),

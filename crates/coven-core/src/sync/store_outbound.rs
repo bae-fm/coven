@@ -19,7 +19,7 @@ use super::store_commit::{
     StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
     StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
-    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
 };
 use super::store_objects::{run_blocking_object_verification, StoreObjectError};
 use super::{

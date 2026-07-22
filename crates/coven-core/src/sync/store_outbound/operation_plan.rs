@@ -145,6 +145,52 @@ impl std::ops::Deref for StoreOperationCommitPlan {
     }
 }
 
+impl StoreOperationPlanCommon {
+    pub(crate) fn root(&self) -> &StoreRootRef {
+        &self.root
+    }
+
+    pub(crate) fn registration_ref(&self) -> &StoreDeviceRegistrationRef {
+        &self.registration_ref
+    }
+
+    pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
+        &self.registration
+    }
+
+    pub(crate) fn device_signer(&self) -> &UserKeypair {
+        &self.device_signer
+    }
+}
+
+impl MergeStoreOperationCommitPlan {
+    pub(crate) fn common(&self) -> &StoreOperationPlanCommon {
+        &self.common
+    }
+
+    pub(crate) fn membership(&self) -> &MembershipChain {
+        &self.membership
+    }
+
+    pub(crate) fn predecessor_state(&self) -> &super::store_commit::ResolvedStoreDeviceState {
+        &self.predecessor_state
+    }
+}
+
+impl SerialStoreOperationCommitPlan {
+    pub(crate) fn common(&self) -> &StoreOperationPlanCommon {
+        &self.common
+    }
+
+    pub(crate) fn base_head(&self) -> &VersionedObject {
+        &self.base_head
+    }
+
+    pub(crate) fn authorization(&self) -> &SerialAuthorizationState {
+        &self.authorization
+    }
+}
+
 pub(crate) struct MergeConflictResolutionCommitPlan {
     root: StoreRootRef,
     registration_ref: StoreDeviceRegistrationRef,

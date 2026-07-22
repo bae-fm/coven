@@ -1,5 +1,6 @@
 use super::*;
 use crate::sync::store_commit::StorePackageInput;
+use crate::sync::store_commit::SuccessorLink;
 
 pub(super) struct PreparedWriteFixture {
     pub(super) home: InMemoryCloudHome,

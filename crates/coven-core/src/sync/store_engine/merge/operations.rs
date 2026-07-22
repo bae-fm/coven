@@ -7,15 +7,173 @@ use crate::sync::storage::{
 };
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreBatchCommitDeletionTarget,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceHeadRef,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceHeadRef, SuccessorLink,
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::{
-    finish_nonactivating_store_ack, PreparedStoreOperationActivation, PreparedStoreOperationCommit,
-    StoreMembershipJournalCompletion, StoreOperationPublicationOutcome, StoreOutboundError,
+    finish_nonactivating_store_ack, MergeStoreOperationCommitPlan,
+    PreparedMergeStoreOperationCommit, PreparedStoreOperationActivation,
+    PreparedStoreOperationCommit, StoreMembershipJournalCompletion, StoreOperationBatch,
+    StoreOperationPublicationOutcome, StoreOutboundError,
 };
 use std::future::Future;
 use std::pin::Pin;
+
+pub(crate) async fn prepare_candidate(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    plan: MergeStoreOperationCommitPlan,
+    batch: StoreOperationBatch,
+) -> Result<PreparedMergeStoreOperationCommit, StoreOutboundError> {
+    let acknowledgement_evidence = match &batch {
+        StoreOperationBatch::Acknowledgement { reference, value } => {
+            Some((reference.clone(), value.clone()))
+        }
+        _ => None,
+    };
+    let retained_registration_evidence = match &batch {
+        StoreOperationBatch::Outcome {
+            registration: Some(registration),
+            ..
+        } => vec![crate::sync::store_commit::RetainedVerifiedRegistration {
+            reference: registration.reference.registration.clone(),
+            value: registration.registration.clone(),
+        }],
+        _ => Vec::new(),
+    };
+    let retained_device_operations = match &batch {
+        StoreOperationBatch::DeviceExclusionProposal(proposal) => Some(
+            crate::sync::store_commit::RetainedStoreDeviceOperations::from_sources(
+                vec![proposal.clone()],
+                Vec::new(),
+            ),
+        ),
+        StoreOperationBatch::DeviceExclusionOutcome(outcome) => Some(
+            crate::sync::store_commit::RetainedStoreDeviceOperations::from_sources(
+                Vec::new(),
+                vec![outcome.clone()],
+            ),
+        ),
+        _ => None,
+    };
+    let common = crate::sync::store_outbound::prepare_store_operation_candidate_common(
+        db,
+        storage,
+        plan.common(),
+        batch,
+    )
+    .await?;
+    let acknowledgement = match acknowledgement_evidence {
+        Some((reference, value)) => Some(
+            crate::sync::store_pull::retain_activated_acknowledgement(
+                storage,
+                plan.root(),
+                &common.reference,
+                &common.commit,
+                plan.registration(),
+                reference,
+                value,
+            )
+            .await
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        ),
+        None => None,
+    };
+    let merge_history_evidence = crate::sync::store_pull::MergeHistorySuccessorEvidence {
+        registrations: retained_registration_evidence,
+        acknowledgement,
+        membership_proof: None,
+    };
+    let registrations = common
+        .registration_activation
+        .as_ref()
+        .map(|activation| {
+            vec![(
+                activation.registration.clone(),
+                activation.authority.clone(),
+            )]
+        })
+        .unwrap_or_default();
+    let device_operations = match retained_device_operations {
+        Some(retained) => retained
+            .verify_for(plan.root(), &common.commit)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        None => crate::sync::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
+            &common.commit,
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+    };
+    let state_after = Box::pin(
+        crate::sync::store_pull::derive_local_merge_post_device_state(
+            storage,
+            plan.root(),
+            &common.commit,
+            plan.predecessor_state().clone(),
+            &registrations,
+            device_operations,
+        ),
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head_context = ProtocolObjectContext::signed_plaintext(
+        common.commit.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
+    let device_id = plan.registration_ref().device_id.to_string();
+    let successor = crate::sync::store_pull::prepare_merge_history_successor(
+        db,
+        plan.root(),
+        &common.commit,
+        &common.reference,
+        plan.membership(),
+        plan.registration(),
+        None,
+        state_after,
+        merge_history_evidence,
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let next_prefix = head_slot_prefix(
+        &device_id,
+        crate::sync::store_outbound::successor_store_sequence(common.commit.seq())?,
+    );
+    let next_slot = storage
+        .allocate_protocol_slot(&head_context, &next_prefix, ".json")
+        .await
+        .map_err(StoreObjectError::from)?;
+    let head = StoreDeviceHead::signed(
+        common.commit.store_root_hash,
+        plan.registration_ref().clone(),
+        common.reference.clone(),
+        successor.summary.digest(),
+        SuccessorLink {
+            activation: plan
+                .registration()
+                .store_announcement_activation(plan.registration_ref())
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+                .activation_id(),
+            predecessor: successor.predecessor_head.map(|reference| reference.object),
+            next_slot,
+        },
+        plan.device_signer(),
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head_prefix = head_slot_prefix(&device_id, common.commit.seq());
+    let prepared_head = storage
+        .prepare_protocol_object(
+            &head_context,
+            successor.head_slot,
+            &head_prefix,
+            head.to_bytes(),
+        )
+        .map_err(StoreObjectError::from)?;
+    Ok(PreparedMergeStoreOperationCommit {
+        common,
+        head,
+        prepared_head,
+        history_summary: successor.summary,
+    })
+}
 
 pub(crate) async fn upload_commit(
     storage: &dyn SyncStorage,
