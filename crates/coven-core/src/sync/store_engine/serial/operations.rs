@@ -191,9 +191,13 @@ pub(crate) async fn publish_prepared(
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = required_store_root(db).await?;
-    super::pull::validate_serial_control_wrapped_keys(storage, &root, candidate.commit.control())
-        .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    crate::sync::wrapped_store_key::validate_control_wrapped_keys(
+        storage,
+        &root,
+        candidate.commit.control(),
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let retained_operation_objects =
         crate::sync::store_outbound::retained_store_operation_objects(&candidate.commit)?;
     let base_head = candidate.base_head.clone();

@@ -203,7 +203,7 @@ pub(crate) async fn publish_serial_membership_wraps(
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
     }
-    crate::sync::store_engine::serial::pull::validate_serial_control_wrapped_keys(
+    crate::sync::wrapped_store_key::validate_control_wrapped_keys(
         storage,
         root,
         candidate.commit.control(),

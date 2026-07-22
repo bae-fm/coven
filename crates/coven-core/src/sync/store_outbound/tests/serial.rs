@@ -1066,13 +1066,9 @@ async fn serial_control_rejects_an_exact_wrap_signed_for_another_store() {
         .expect("sign control naming wrong-Store wrap");
     let control = StoreControl::SerialMembership { entry };
 
-    crate::sync::store_engine::serial::pull::validate_serial_control_wrapped_keys(
-        &storage,
-        &root,
-        Some(&control),
-    )
-    .await
-    .expect_err("exact membership wrap must authenticate its Store binding");
+    crate::sync::wrapped_store_key::validate_control_wrapped_keys(&storage, &root, Some(&control))
+        .await
+        .expect_err("exact membership wrap must authenticate its Store binding");
 }
 
 #[tokio::test]

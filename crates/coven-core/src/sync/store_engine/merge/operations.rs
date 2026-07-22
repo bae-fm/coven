@@ -260,7 +260,7 @@ pub(crate) async fn publish_prepared(
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let root = crate::sync::store_outbound::required_store_root(db).await?;
-    crate::sync::store_engine::serial::pull::validate_serial_control_wrapped_keys(
+    crate::sync::wrapped_store_key::validate_control_wrapped_keys(
         storage,
         &root,
         candidate.commit.control(),

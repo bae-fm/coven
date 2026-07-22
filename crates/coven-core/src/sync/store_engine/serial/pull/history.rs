@@ -196,7 +196,8 @@ pub(crate) async fn load_authorized_serial_prefix(
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Serial(error),
         })?;
-        validate_serial_control_wrapped_keys(storage, root, commit.control()).await?;
+        super::wrapped_store_key::validate_control_wrapped_keys(storage, root, commit.control())
+            .await?;
         validate_serial_provider_admin_control(storage, root, &root_value, commit.control())
             .await?;
         let owner_recovery = verify_commit_owner_recovery_activation(
@@ -272,37 +273,6 @@ pub(crate) async fn validate_serial_provider_admin_control(
     capability
         .verify(&root_value.descriptor.provider, provider, true)
         .map_err(|error| StorePullError::Serial(error.to_string()))
-}
-
-pub(crate) async fn validate_serial_control_wrapped_keys(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    control: Option<&super::store_commit::StoreControl>,
-) -> Result<(), StorePullError> {
-    let Some(control) = control else {
-        return Ok(());
-    };
-    let store_id = root.store_root_id.to_string();
-    for reference in control.introduced_wrapped_keys() {
-        let wrapped = super::wrapped_store_key::load_wrapped_store_key(
-            storage,
-            root.store_root_hash,
-            reference,
-        )
-        .await?;
-        wrapped
-            .verify_and_unwrap(
-                &store_id,
-                &reference.recipient_pubkey,
-                std::iter::once(reference.owner_pubkey.as_str()),
-            )
-            .map_err(|error| {
-                StorePullError::Serial(format!(
-                    "membership control wrapped Store key is not authentic: {error}"
-                ))
-            })?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn load_authorized_serial_chain(
