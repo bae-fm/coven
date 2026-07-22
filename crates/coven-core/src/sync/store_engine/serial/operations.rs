@@ -445,18 +445,16 @@ pub(crate) async fn resolve_conflict(
             let author = db
                 .activated_store_device_registration(commit.author_registration.clone())
                 .await?;
-            let nonactivation = crate::sync::remote_object::VerifiedCandidateNonactivation::serial(
-                &suffix,
-                vec![(
+            let nonactivation = suffix
+                .verify_candidate_nonactivation(vec![(
                     StoreBatchCommitDeletionTarget {
                         coord: reference.coord.clone(),
                         object: reference.object.clone(),
                         canonical_signed_bytes: commit.to_bytes(),
                     },
                     author,
-                )],
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+                )])
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let Some(acknowledgement) = commit.acknowledgement().cloned() else {
                 return Ok(StoreOperationPublicationOutcome::NonactivatedCandidate {
                     candidate: activation.candidate,

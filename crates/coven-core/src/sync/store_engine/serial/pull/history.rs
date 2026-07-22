@@ -370,16 +370,47 @@ impl VerifiedSerialAcceptedSuffix {
         }
     }
 
-    pub(crate) fn store_root_hash(&self) -> ObjectHash {
-        self.store_root_hash
-    }
-
     pub(crate) fn durable(&self) -> &super::remote_object::SerialAcceptedSuffix {
         &self.durable
     }
 
     pub(crate) fn commits(&self) -> &[StoreBatchCommitRef] {
         &self.durable.commits
+    }
+
+    pub(crate) fn verify_candidate_nonactivation(
+        &self,
+        losing: Vec<(
+            super::store_commit::StoreBatchCommitDeletionTarget,
+            StoreDeviceRegistration,
+        )>,
+    ) -> Result<
+        super::remote_object::VerifiedCandidateNonactivation,
+        super::remote_object::RemoteObjectRecordError,
+    > {
+        if losing.is_empty() {
+            return Err(super::remote_object::RemoteObjectRecordError::InvalidProof(
+                "losing Serial prefix is empty".to_string(),
+            ));
+        }
+        let mut verified = Vec::with_capacity(losing.len());
+        for (target, author) in losing {
+            target
+                .verify_nonactivation_candidate(self.store_root_hash, &author)
+                .map_err(|error| {
+                    super::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
+                })?;
+            verified.push(target);
+        }
+        let candidate = verified
+            .last()
+            .expect("checked nonempty Serial prefix")
+            .clone();
+        super::remote_object::VerifiedCandidateNonactivation::from_verified_serial_successor(
+            candidate,
+            self.durable.clone(),
+            verified,
+        )
     }
 }
 

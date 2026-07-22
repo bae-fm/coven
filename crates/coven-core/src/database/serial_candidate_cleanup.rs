@@ -184,12 +184,10 @@ impl Database {
             let mut exclusive_cleanup = Vec::new();
             let mut commit_cleanup = Vec::new();
             for (index, (write_id, commit, reference, _)) in prepared.iter().enumerate() {
-                let nonactivation = crate::sync::remote_object::VerifiedCandidateNonactivation::serial(
-                    &verified_suffix,
-                    verified_losing[..=index].to_vec(),
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?
-                .into_durable();
+                let nonactivation = verified_suffix
+                    .verify_candidate_nonactivation(verified_losing[..=index].to_vec())
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .into_durable();
                 let mut object_ids = candidate_graph_exact_objects(commit)?
                     .iter()
                     .map(|object| remote_object_id(object).to_string())
@@ -344,12 +342,10 @@ impl Database {
                 &root,
                 &prepared.authority.value.author_registration,
             )?;
-            let nonactivation = crate::sync::remote_object::VerifiedCandidateNonactivation::serial(
-                &verified_suffix,
-                vec![(authority_target, author)],
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?
-            .into_durable();
+            let nonactivation = verified_suffix
+                .verify_candidate_nonactivation(vec![(authority_target, author)])
+                .map_err(|error| DbError::Message(error.to_string()))?
+                .into_durable();
             let target = begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation)?;
             tx.commit().map_err(DbError::from)?;
             Ok(target.map(|object| CandidateCleanupObject { object }))

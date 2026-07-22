@@ -3234,37 +3234,18 @@ impl VerifiedCandidateNonactivation {
         Ok(value)
     }
 
-    pub(crate) fn serial(
-        observation: &super::store_engine::serial::pull::VerifiedSerialAcceptedSuffix,
-        losing: Vec<(
-            StoreBatchCommitDeletionTarget,
-            super::store_commit::StoreDeviceRegistration,
-        )>,
+    pub(crate) fn from_verified_serial_successor(
+        candidate: StoreBatchCommitDeletionTarget,
+        accepted_suffix: SerialAcceptedSuffix,
+        losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
     ) -> Result<Self, RemoteObjectRecordError> {
-        if losing.is_empty() {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "losing Serial prefix is empty".to_string(),
-            ));
-        }
-        let mut verified = Vec::with_capacity(losing.len());
-        for (target, author) in losing {
-            let commit = target
-                .verify_nonactivation_candidate(observation.store_root_hash(), &author)
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-            verified.push((target, commit));
-        }
-        let candidate = verified
-            .last()
-            .expect("checked nonempty Serial prefix")
-            .0
-            .clone();
         let value = Self {
             evidence: Box::new(VerifiedCandidateNonactivationEvidence::Serial {
                 durable: CandidateNonactivation {
                     candidate,
                     proof: CandidateNonactivationProof::SerialImmediateSuccessor {
-                        accepted_suffix: observation.durable().clone(),
-                        losing_prefix: verified.into_iter().map(|(target, _)| target).collect(),
+                        accepted_suffix,
+                        losing_prefix,
                     },
                 },
             }),

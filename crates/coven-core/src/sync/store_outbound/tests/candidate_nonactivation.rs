@@ -199,19 +199,16 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         object: losing.commit.object.clone(),
         canonical_signed_bytes: losing.commit.bytes.clone(),
     };
-    super::super::super::remote_object::VerifiedCandidateNonactivation::serial(
-        &suffix,
-        vec![(target.clone(), author.clone())],
-    )
-    .expect("verified competing successor discards the losing candidate");
+    suffix
+        .verify_candidate_nonactivation(vec![(target.clone(), author.clone())])
+        .expect("verified competing successor discards the losing candidate");
 
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::serial(
-            &suffix,
-            vec![(target.clone(), author.clone()), (target.clone(), author)],
-        )
-        .is_err()
-    );
+    assert!(suffix
+        .verify_candidate_nonactivation(vec![
+            (target.clone(), author.clone()),
+            (target.clone(), author),
+        ])
+        .is_err());
 
     let accepted_ref = suffix
         .commits()
@@ -242,13 +239,9 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         object: accepted_ref.object.clone(),
         canonical_signed_bytes: accepted_commit.to_bytes(),
     };
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::serial(
-            &suffix,
-            vec![(accepted_target, accepted_author.clone())],
-        )
-        .is_err()
-    );
+    assert!(suffix
+        .verify_candidate_nonactivation(vec![(accepted_target, accepted_author.clone())])
+        .is_err());
 
     let mut noncanonical = target;
     noncanonical.canonical_signed_bytes.push(b' ');
@@ -261,13 +254,9 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
         .activated_store_device_registration(losing.commit.value.author_registration.clone())
         .await
         .expect("reload losing Serial author");
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::serial(
-            &suffix,
-            vec![(noncanonical, losing_author)],
-        )
-        .is_err()
-    );
+    assert!(suffix
+        .verify_candidate_nonactivation(vec![(noncanonical, losing_author)])
+        .is_err());
 
     let current = coordination
         .read_head(serial_head_key())
