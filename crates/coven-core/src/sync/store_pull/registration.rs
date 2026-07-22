@@ -1,0 +1,884 @@
+use super::*;
+
+pub(crate) enum RegistrationLoadError {
+    Object(StoreObjectError),
+    Invalid(String),
+}
+
+pub(super) enum VerifiedAcceptedPredecessor<'a> {
+    Exact,
+    SerialHistory {
+        commits: &'a [AuthorizedSerialCommit],
+    },
+    MergeHistory {
+        commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+        frontier: Vec<StoreBatchCommitRef>,
+    },
+}
+
+pub(super) struct VerifiedCommitJoinOutcome {
+    pub(super) attempt: DeviceJoinAttempt,
+    pub(super) owner: StoreDeviceRegistration,
+    pub(super) outcome: super::store_commit::DeviceJoinOutcome,
+}
+
+pub(super) fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
+    match error {
+        StorePullError::Object(error) => RegistrationLoadError::Object(error),
+        StorePullError::Storage(error) => {
+            RegistrationLoadError::Object(StoreObjectError::Storage(error))
+        }
+        error => RegistrationLoadError::Invalid(error.to_string()),
+    }
+}
+
+pub(super) enum RegistrationPredecessorAuthority<'a> {
+    MergeConcurrent(&'a MembershipChain),
+    Serial {
+        authorization: &'a SerialAuthorizationState,
+        position: super::store_commit::SerialStorePosition,
+        history: SerialAuthorizationHistory<'a>,
+    },
+}
+
+pub(super) enum SerialAuthorizationHistory<'a> {
+    ExactPredecessor,
+    Prefix {
+        genesis_position: &'a super::store_commit::SerialStorePosition,
+        genesis_authorization: &'a SerialAuthorizationState,
+        commits: &'a [AuthorizedSerialCommit],
+    },
+}
+
+impl RegistrationPredecessorAuthority<'_> {
+    fn provider_admin_state(&self) -> Option<&super::provider::ProviderAdminState> {
+        match self {
+            Self::MergeConcurrent(chain) => {
+                let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
+                    return None;
+                };
+                Some(resolved.provider_admin.combined_state())
+            }
+            Self::Serial { authorization, .. } => Some(&authorization.provider_admin),
+        }
+    }
+
+    pub(super) fn verifies_owner(
+        &self,
+        membership: &StoreMembershipStateRef,
+        owner_pubkey: &str,
+        owner_grant: &super::membership::MembershipGrantId,
+    ) -> bool {
+        match self {
+            Self::MergeConcurrent(chain) => {
+                let MembershipStatus::Resolved(resolved) = chain.status() else {
+                    return false;
+                };
+                StoreMembershipStateRef::merge_concurrent(
+                    chain.head_refs().to_vec(),
+                    chain.resolution_refs().to_vec(),
+                    membership.recovery().to_vec(),
+                    resolved.state_hash,
+                )
+                .is_ok_and(|expected| membership == &expected)
+                    && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
+            }
+            Self::Serial {
+                authorization,
+                position,
+                ..
+            } => {
+                StoreMembershipStateRef::serial(
+                    position.clone(),
+                    membership.recovery().to_vec(),
+                    authorization,
+                )
+                .is_ok_and(|expected| membership == &expected)
+                    && authorization
+                        .membership
+                        .authorizes_owner_grant_id(owner_pubkey, owner_grant)
+            }
+        }
+    }
+
+    pub(super) fn verifies_owner_at_ancestor(
+        &self,
+        membership: &StoreMembershipStateRef,
+        owner_pubkey: &str,
+        owner_grant: &super::membership::MembershipGrantId,
+    ) -> bool {
+        if self.verifies_owner(membership, owner_pubkey, owner_grant) {
+            return true;
+        }
+        let Self::Serial {
+            history:
+                SerialAuthorizationHistory::Prefix {
+                    genesis_position,
+                    genesis_authorization,
+                    commits,
+                },
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let StoreMembershipStateRef::Serial(state) = membership else {
+            return false;
+        };
+        let historical_authorization = match &state.position {
+            super::store_commit::SerialStorePosition::Genesis { .. }
+                if &state.position == *genesis_position =>
+            {
+                *genesis_authorization
+            }
+            super::store_commit::SerialStorePosition::Commit(reference) => {
+                let Some(accepted) = commits
+                    .iter()
+                    .find(|accepted| &accepted.commit_ref == reference)
+                else {
+                    return false;
+                };
+                &accepted.authorization_after
+            }
+            _ => return false,
+        };
+        StoreMembershipStateRef::serial(
+            state.position.clone(),
+            state.recovery.clone(),
+            historical_authorization,
+        )
+        .is_ok_and(|expected| membership == &expected)
+            && historical_authorization
+                .membership
+                .authorizes_owner_grant_id(owner_pubkey, owner_grant)
+    }
+
+    pub(super) fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
+        match self {
+            Self::MergeConcurrent(chain) => chain.is_owner_now(owner_pubkey),
+            Self::Serial { authorization, .. } => authorization.membership.is_owner(owner_pubkey),
+        }
+    }
+
+    pub(super) fn verifies_provider_administrator(
+        &self,
+        grant_id: &super::provider::ProviderAdminGrantId,
+        executor: &StoreDeviceRegistrationRef,
+        expected: &super::provider::ProviderAdminGrantRecord,
+    ) -> bool {
+        let Some(state) = self.provider_admin_state() else {
+            return false;
+        };
+        state.authorizes(grant_id, executor)
+            && state
+                .records()
+                .get(grant_id)
+                .is_some_and(|record| record == expected)
+    }
+
+    fn verifies_provider_administrator_grant(
+        &self,
+        grant_id: &super::provider::ProviderAdminGrantId,
+        executor: &StoreDeviceRegistrationRef,
+    ) -> bool {
+        self.provider_admin_state()
+            .is_some_and(|state| state.authorizes(grant_id, executor))
+    }
+}
+
+pub(super) async fn load_merge_predecessor_membership(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &StoreMembershipStateRef,
+) -> Result<MembershipChain, RegistrationLoadError> {
+    load_merge_predecessor_membership_impl(storage, root, state, None, None).await
+}
+
+pub(super) async fn load_merge_predecessor_membership_with_verified_activations(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &StoreMembershipStateRef,
+    verified_activations: &VerifiedMergeMembershipPrefix,
+    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
+) -> Result<MembershipChain, RegistrationLoadError> {
+    load_merge_predecessor_membership_impl(
+        storage,
+        root,
+        state,
+        Some(verified_activations),
+        pending_resolution,
+    )
+    .await
+}
+
+async fn load_merge_predecessor_membership_impl(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &StoreMembershipStateRef,
+    verified_activations: Option<&VerifiedMergeMembershipPrefix>,
+    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
+) -> Result<MembershipChain, RegistrationLoadError> {
+    let StoreMembershipStateRef::MergeConcurrent(state) = state else {
+        return Err(RegistrationLoadError::Invalid(
+            "Merge registration lifecycle commit carries Serial membership state".to_string(),
+        ));
+    };
+    let root_value = load_store_protocol_root(storage, root)
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
+    let membership = match verified_activations {
+        Some(verified_activations) => Box::pin(
+            super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+                storage,
+                root,
+                &root_value,
+                &root_value.descriptor.founder_pubkey,
+                &state.heads,
+                &state.resolutions,
+                verified_activations,
+                pending_resolution,
+            ),
+        )
+        .await,
+        None => Box::pin(
+            super::membership_ops::load_anchored_chain_at_exact_heads_with_root(
+                storage,
+                root,
+                &root_value,
+                &root_value.descriptor.founder_pubkey,
+                &state.heads,
+                &state.resolutions,
+            ),
+        )
+        .await,
+    }
+    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    Ok(membership)
+}
+
+pub(super) fn verify_merge_membership_state_ref(
+    state: &StoreMembershipStateRef,
+    membership: &MembershipChain,
+    device_state: &ResolvedStoreDeviceState,
+) -> Result<(), StorePullError> {
+    let MembershipStatus::Resolved(resolved) = membership.status() else {
+        return Err(StorePullError::Database(
+            "Store history membership state is conflicted".to_string(),
+        ));
+    };
+    let expected = StoreMembershipStateRef::merge_concurrent(
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        device_state.recovery.clone(),
+        resolved.state_hash,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if &expected != state {
+        return Err(StorePullError::Database(
+            "Store history membership reference differs from its exact resolved state".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) enum DeviceJoinBootstrapAuthorization {
+    MergeConcurrent {
+        state: StoreMembershipStateRef,
+        chain: MembershipChain,
+    },
+    Serial {
+        state: StoreMembershipStateRef,
+        position: super::store_commit::SerialStorePosition,
+        authorization: SerialAuthorizationState,
+    },
+}
+
+pub(crate) fn load_device_join_authorization<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    state: &'a StoreMembershipStateRef,
+) -> StorePullFuture<'a, DeviceJoinBootstrapAuthorization> {
+    Box::pin(async move {
+        match state {
+            StoreMembershipStateRef::MergeConcurrent(_) => {
+                let chain = Box::pin(load_merge_predecessor_membership(storage, root, state))
+                    .await
+                    .map_err(|error| match error {
+                        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                    })?;
+                Ok(DeviceJoinBootstrapAuthorization::MergeConcurrent {
+                    state: state.clone(),
+                    chain,
+                })
+            }
+            StoreMembershipStateRef::Serial(state_ref) => {
+                let reference = match &state_ref.position {
+                    super::store_commit::SerialStorePosition::Genesis { .. } => None,
+                    super::store_commit::SerialStorePosition::Commit(reference) => {
+                        Some(reference.clone())
+                    }
+                };
+                let authorization = Box::pin(load_serial_authorization_at_position(
+                    storage, root, reference,
+                ))
+                .await?;
+                let expected = StoreMembershipStateRef::serial(
+                    state_ref.position.clone(),
+                    state_ref.recovery.clone(),
+                    &authorization,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                if &expected != state {
+                    return Err(StorePullError::Database(
+                        "Serial device join membership state differs from its exact authorization"
+                            .to_string(),
+                    ));
+                }
+                Ok(DeviceJoinBootstrapAuthorization::Serial {
+                    state: expected,
+                    position: state_ref.position.clone(),
+                    authorization,
+                })
+            }
+        }
+    })
+}
+
+pub(crate) async fn verify_device_join_cleanup_activation(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    activation: &super::device_join::DeviceJoinCleanupActivation,
+) -> Result<super::device_join::JoinerJoinTerminal, StorePullError> {
+    let root_value = load_store_protocol_root(storage, root).await?.value;
+    let (commit, author) =
+        load_commit_with_author_at_root(storage, root, &root_value, &activation.activation).await?;
+    if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
+        return Err(StorePullError::Database(
+            "device join cleanup activation does not contain its exact sole receipt".to_string(),
+        ));
+    }
+    let authorization =
+        load_device_join_authorization(storage, root, &commit.membership_state).await?;
+    let predecessor = match &authorization {
+        DeviceJoinBootstrapAuthorization::MergeConcurrent { chain, .. } => {
+            RegistrationPredecessorAuthority::MergeConcurrent(chain)
+        }
+        DeviceJoinBootstrapAuthorization::Serial {
+            position,
+            authorization,
+            ..
+        } => RegistrationPredecessorAuthority::Serial {
+            authorization,
+            position: position.clone(),
+            history: SerialAuthorizationHistory::ExactPredecessor,
+        },
+    };
+    let receipts = Box::pin(validate_commit_join_cleanup_receipts(
+        storage,
+        root,
+        &root_value,
+        &commit,
+        &author,
+        Some(&predecessor),
+        None,
+    ))
+    .await
+    .map_err(|error| match error {
+        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+    })?;
+    let [receipt] = receipts.as_slice() else {
+        return Err(StorePullError::Database(
+            "device join cleanup activation does not resolve to one verified receipt".to_string(),
+        ));
+    };
+    Ok(receipt.joiner_terminal.clone())
+}
+
+pub(super) async fn validate_commit_acknowledgement(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+) -> Result<
+    Option<(
+        super::store_commit::StoreAckRef,
+        super::store_commit::StoreAck,
+    )>,
+    RegistrationLoadError,
+> {
+    let Some(reference) = commit.acknowledgement() else {
+        return Ok(None);
+    };
+    let ack = Box::pin(load_store_ack_ref(
+        storage,
+        root,
+        reference,
+        activating_author,
+    ))
+    .await
+    .map_err(RegistrationLoadError::Object)?
+    .value;
+    let predecessor_cut = commit
+        .order
+        .predecessor_cut()
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    if ack.registration != commit.author_registration
+        || ack.store_cut != predecessor_cut
+        || ack.device_state != commit.device_state
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "Store acknowledgement differs from its activating commit predecessor".to_string(),
+        ));
+    }
+    if let Some(snapshot) = &ack.snapshot {
+        let snapshot_author = load_registration_ref(storage, root, &snapshot.author_registration)
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        let (_, metadata) = Box::pin(super::store_snapshot::load_store_snapshot_ref(
+            storage,
+            root,
+            &snapshot.author_registration,
+            &snapshot_author.value,
+            &snapshot.snapshot,
+        ))
+        .await
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+        if !ack.store_cut.frontier().covers(&metadata.coverage) {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement does not cover its exact snapshot".to_string(),
+            ));
+        }
+    }
+    Ok(Some((reference.clone(), ack)))
+}
+
+pub(super) async fn load_acknowledgement_proof_chain(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    latest_ref: super::store_commit::StoreAckRef,
+    latest: super::store_commit::StoreAck,
+    registration: &StoreDeviceRegistration,
+) -> Result<
+    BTreeMap<
+        u64,
+        (
+            super::store_commit::StoreAckRef,
+            super::store_commit::StoreAck,
+        ),
+    >,
+    RegistrationLoadError,
+> {
+    let mut chain = BTreeMap::new();
+    let mut current_ref = latest_ref;
+    let mut current = latest;
+    loop {
+        if chain
+            .insert(current_ref.sequence, (current_ref.clone(), current.clone()))
+            .is_some()
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement proof chain repeats a sequence".to_string(),
+            ));
+        }
+        let Some((predecessor_ref, predecessor)) =
+            load_store_ack_predecessor(storage, root, &current_ref, &current, registration)
+                .await
+                .map_err(RegistrationLoadError::Object)?
+        else {
+            break;
+        };
+        current_ref = predecessor_ref;
+        current = predecessor.value;
+    }
+    if chain.first_key_value().map(|(sequence, _)| *sequence) != Some(1)
+        || chain.last_key_value().map(|(sequence, _)| *sequence) != Some(chain.len() as u64)
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "Store acknowledgement proof chain is not contiguous from sequence one".to_string(),
+        ));
+    }
+    Ok(chain)
+}
+
+pub(crate) async fn retain_activated_acknowledgement(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    activating_commit: &StoreBatchCommitRef,
+    activating_commit_value: &StoreBatchCommit,
+    registration: &StoreDeviceRegistration,
+    reference: super::store_commit::StoreAckRef,
+    value: super::store_commit::StoreAck,
+) -> Result<super::store_commit::RetainedVerifiedActivatedAck, StorePullError> {
+    if activating_commit_value.acknowledgement() != Some(&reference)
+        || activating_commit_value.author_registration != reference.registration
+        || value.registration != reference.registration
+    {
+        return Err(StorePullError::Database(
+            "Store acknowledgement differs from its activating commit".to_string(),
+        ));
+    }
+    activating_commit
+        .verify_commit(activating_commit_value)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let chain = load_acknowledgement_proof_chain(storage, root, reference, value, registration)
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+    Ok(super::store_commit::RetainedVerifiedActivatedAck {
+        chain,
+        activating_commit: activating_commit.clone(),
+        activating_commit_value: activating_commit_value.clone(),
+    })
+}
+
+async fn validate_commit_reclaim_authorization(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    commit: &StoreBatchCommit,
+    reference: &super::store_reclaim::ReclaimAuthorizationRef,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+) -> Result<(), RegistrationLoadError> {
+    let predecessor = predecessor.ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim authorization activation has no exact predecessor owner authority".to_string(),
+        )
+    })?;
+    let opened = load_reclaim_authorization_ref(storage, root, reference)
+        .await
+        .map_err(RegistrationLoadError::Object)?;
+    let evidence = &opened.evidence.value;
+    let authorization = &opened.authorization.value;
+    let owner_authorized = match &authorization.authority.membership {
+        StoreMembershipStateRef::MergeConcurrent { .. } => {
+            authorization.authority.membership == commit.membership_state
+                && predecessor.verifies_owner(
+                    &authorization.authority.membership,
+                    &evidence.author_pubkey,
+                    &authorization.authority.owner_grant,
+                )
+        }
+        StoreMembershipStateRef::Serial { .. } => predecessor.verifies_owner_at_ancestor(
+            &authorization.authority.membership,
+            &evidence.author_pubkey,
+            &authorization.authority.owner_grant,
+        ),
+    };
+    if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim authorization signer is not an active Owner at its exact predecessor"
+                .to_string(),
+        ));
+    }
+    let activation = Box::pin(predecessor_commit_matching_at_root(
+        storage,
+        root,
+        root_value,
+        &commit.order,
+        Box::new(|candidate, _| candidate == &evidence.claim.target.activation),
+    ))
+    .await?
+    .ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim evidence package activation is absent from predecessor history".to_string(),
+        )
+    })?;
+    if activation.1.store_package() != Some(&authorization.target) {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim evidence target differs from its exact package activation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_commit_reclaim_receipt(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    commit: &StoreBatchCommit,
+    reference: &super::store_reclaim::ReclaimReceiptRef,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+) -> Result<(), RegistrationLoadError> {
+    let predecessor = predecessor.ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim receipt activation has no exact predecessor provider authority".to_string(),
+        )
+    })?;
+    let (receipt_executor, provider_admin_state, provider_admin_grant, authorization, executor) = {
+        let opened = Box::pin(load_reclaim_receipt_ref(storage, root, reference))
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        (
+            opened.receipt.value.executor.clone(),
+            opened.receipt.value.provider_admin_state.clone(),
+            opened.receipt.value.provider_admin_grant.clone(),
+            opened.receipt.value.authorization.clone(),
+            opened.executor,
+        )
+    };
+    if receipt_executor != commit.author_registration
+        || executor != *activating_author
+        || provider_admin_state != commit.membership_state
+        || !predecessor
+            .verifies_provider_administrator_grant(&provider_admin_grant, &receipt_executor)
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
+                .to_string(),
+        ));
+    }
+    if Box::pin(predecessor_commit_matching_at_root(
+        storage,
+        root,
+        root_value,
+        &commit.order,
+        Box::new(|_, candidate| candidate.reclaim_authorization() == Some(&authorization)),
+    ))
+    .await?
+    .is_none()
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim receipt authorization is absent from predecessor history".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn load_commit_registrations(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
+{
+    let root_value = load_store_protocol_root(storage, root)
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
+    Box::pin(load_commit_registrations_with_root(
+        storage,
+        root,
+        &root_value,
+        commit,
+        activating_author,
+        predecessor,
+        accepted_predecessor,
+    ))
+    .await
+}
+
+pub(super) async fn load_commit_registrations_with_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
+{
+    if commit.acknowledgement().is_some() {
+        Box::pin(validate_commit_acknowledgement(
+            storage,
+            root,
+            commit,
+            activating_author,
+        ))
+        .await?;
+    }
+    if let Some(reference) = commit.reclaim_authorization() {
+        Box::pin(validate_commit_reclaim_authorization(
+            storage,
+            root,
+            root_value,
+            commit,
+            reference,
+            activating_author,
+            predecessor,
+        ))
+        .await?;
+    }
+    if let Some(reference) = commit.reclaim_receipt() {
+        Box::pin(validate_commit_reclaim_receipt(
+            storage,
+            root,
+            root_value,
+            commit,
+            reference,
+            activating_author,
+            predecessor,
+        ))
+        .await?;
+    }
+    let has_join_attempt = commit
+        .device_join_attempt_decisions()
+        .iter()
+        .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)));
+    if has_join_attempt {
+        Box::pin(validate_commit_join_attempts(
+            storage,
+            root,
+            commit,
+            activating_author,
+            predecessor,
+            accepted_predecessor,
+        ))
+        .await?;
+    }
+    let verified_join_outcomes = if commit.device_join_outcomes().is_empty() {
+        BTreeMap::new()
+    } else {
+        Box::pin(validate_commit_join_outcomes(
+            storage,
+            root,
+            root_value,
+            commit,
+            activating_author,
+            predecessor,
+            accepted_predecessor,
+        ))
+        .await?
+    };
+    let has_join_abandonment = commit
+        .device_join_attempt_decisions()
+        .iter()
+        .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Abandoned(_)));
+    if has_join_abandonment {
+        Box::pin(validate_commit_join_abandonments(
+            storage,
+            root,
+            commit,
+            activating_author,
+            predecessor,
+        ))
+        .await?;
+    }
+    if !commit.device_join_cleanup_receipts().is_empty() {
+        Box::pin(validate_commit_join_cleanup_receipts(
+            storage,
+            root,
+            root_value,
+            commit,
+            activating_author,
+            predecessor,
+            accepted_predecessor,
+        ))
+        .await?;
+    }
+    let mut registrations = Vec::with_capacity(commit.device_registrations().len());
+    for activated in commit.device_registrations() {
+        let registration = Box::pin(load_registration_ref_with_root(
+            storage,
+            root,
+            root_value,
+            &activated.registration,
+        ))
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
+        let predecessor = predecessor.ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "registration activation has no exact predecessor membership authority".to_string(),
+            )
+        })?;
+        let authority = Box::pin(registration_activation(
+            storage,
+            root,
+            activated,
+            &registration,
+            activating_author,
+            commit.serial_recovery_activation(),
+            predecessor,
+            &verified_join_outcomes,
+        ))
+        .await?;
+        registrations.push((registration, authority));
+    }
+    for retirement in commit.device_retirements() {
+        if retirement.target != commit.author_registration {
+            return Err(RegistrationLoadError::Invalid(
+                "self-retirement targets a different exact registration".to_string(),
+            ));
+        }
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceSelfRetirement,
+        );
+        let bytes = storage
+            .read_protocol_object(
+                &context,
+                &retirement.object,
+                &super::store_commit::device_self_retirement_semantic_prefix(
+                    commit.candidate_family(),
+                    &retirement.target.device_id,
+                    retirement.retirement_hash,
+                ),
+            )
+            .await
+            .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
+        super::store_commit::StoreDeviceSelfRetirement::parse_at(
+            &bytes,
+            retirement,
+            activating_author,
+        )
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    }
+    Ok(registrations)
+}
+
+pub(super) fn device_state_has_active_registration(
+    state: &ResolvedStoreDeviceState,
+    registration: &StoreDeviceRegistrationRef,
+) -> bool {
+    state
+        .devices
+        .get(&registration.device_id)
+        .is_some_and(|record| {
+            record.registration == *registration
+                && matches!(record.status, StoreDeviceStatus::Active)
+        })
+}
+
+pub(super) async fn verify_canonical_owner_registration(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &ResolvedStoreDeviceState,
+    owner_pubkey: &str,
+    selected: &StoreDeviceRegistrationRef,
+) -> Result<(), StorePullError> {
+    let active = load_active_history_registrations(storage, root, state).await?;
+    let canonical = active
+        .values()
+        .filter(|(_, registration)| registration.author_pubkey == owner_pubkey)
+        .map(|(reference, _)| reference)
+        .min();
+    if canonical != Some(selected) {
+        return Err(StorePullError::Database(
+            "conflict-resolution acceptance does not use the canonical active Owner registration"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn device_state_has_pending_proposal(
+    state: &ResolvedStoreDeviceState,
+    proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
+) -> bool {
+    state
+        .devices
+        .get(&proposal.target.device_id)
+        .and_then(|record| record.proposals.get(&proposal.proposal_id))
+        .is_some_and(|state| {
+            matches!(state, StoreDeviceProposalState::Pending { proposal: pending } if pending == proposal)
+        })
+}
