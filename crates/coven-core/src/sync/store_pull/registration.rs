@@ -676,28 +676,6 @@ pub(crate) async fn load_commit_registrations(
     .await
 }
 
-pub(crate) async fn load_merge_commit_registrations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    commit: &StoreBatchCommit,
-    activating_author: &StoreDeviceRegistration,
-    predecessor_membership: &MembershipChain,
-    accepted_predecessor: Option<&VerifiedStoreHistoryAuthority>,
-) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
-{
-    let predecessor = RegistrationPredecessorAuthority::MergeConcurrent(predecessor_membership);
-    let exact_predecessor = VerifiedAcceptedPredecessor::Exact;
-    load_commit_registrations(
-        storage,
-        root,
-        commit,
-        activating_author,
-        Some(&predecessor),
-        accepted_predecessor.map(|_| &exact_predecessor),
-    )
-    .await
-}
-
 pub(crate) async fn load_commit_registrations_with_root(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

@@ -4,6 +4,7 @@ use crate::sync::store_commit::StoreHistoryCut;
 
 struct VerifiedSerialSnapshotState {
     common: VerifiedSnapshotState,
+    authorization: SerialAuthorizationState,
 }
 
 async fn accepted_prefix<'a>(
@@ -42,22 +43,16 @@ async fn accepted_prefix<'a>(
     }
 }
 
-async fn verify_authority(
+async fn verify_history_state(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
-    snapshot: &crate::database::PublishedStoreSnapshot,
-) -> Result<(StoreHistoryCut, VerifiedSerialSnapshotState), StorePullError> {
-    let (CommitFrontier::Serial(_), StoreDeviceStateRef::Serial { position, .. }) =
-        (&snapshot.meta.coverage, &snapshot.meta.state.devices)
-    else {
+    position: &StoreSerialPredecessor,
+    membership_ref: &StoreMembershipStateRef,
+) -> Result<VerifiedSerialSnapshotState, StorePullError> {
+    let StoreMembershipStateRef::Serial(_) = membership_ref else {
         return Err(StorePullError::Serial(
-            "Serial snapshot coverage or device state uses Merge policy".to_string(),
-        ));
-    };
-    let StoreMembershipStateRef::Serial(_) = &snapshot.meta.state.membership else {
-        return Err(StorePullError::Serial(
-            "Serial snapshot carries Merge membership state".to_string(),
+            "Serial history carries Merge membership state".to_string(),
         ));
     };
     let verified_head = read_serial_head(storage, coordination, root).await?;
@@ -80,13 +75,63 @@ async fn verify_authority(
         &authorization,
     )
     .map_err(|error| StorePullError::Serial(error.to_string()))?;
-    if expected_membership != snapshot.meta.state.membership {
+    if &expected_membership != membership_ref {
         return Err(StorePullError::Serial(
-            "Serial snapshot membership differs from its accepted state".to_string(),
+            "Serial history membership differs from its accepted state".to_string(),
         ));
     }
-    let expected_device_state = StoreDeviceStateRef::serial(position.clone(), &device_state)
-        .map_err(|error| StorePullError::Serial(error.to_string()))?;
+    let active_registrations =
+        load_active_history_registrations(storage, root, &device_state).await?;
+    Ok(VerifiedSerialSnapshotState {
+        common: VerifiedSnapshotState {
+            device_state,
+            active_registrations,
+        },
+        authorization,
+    })
+}
+
+pub(in crate::sync::store_engine) async fn verify_history_authority(
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    root: &StoreRootRef,
+    cut: &StoreHistoryCut,
+    membership_ref: &StoreMembershipStateRef,
+) -> Result<(), StorePullError> {
+    let StoreHistoryCut::Serial(position) = cut else {
+        return Err(StorePullError::Serial(
+            "Serial history verification received a Merge cut".to_string(),
+        ));
+    };
+    verify_history_state(storage, coordination, root, position, membership_ref)
+        .await
+        .map(|_| ())
+}
+
+async fn verify_authority(
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    root: &StoreRootRef,
+    snapshot: &crate::database::PublishedStoreSnapshot,
+) -> Result<(StoreHistoryCut, VerifiedSerialSnapshotState), StorePullError> {
+    let (CommitFrontier::Serial(_), StoreDeviceStateRef::Serial { position, .. }) =
+        (&snapshot.meta.coverage, &snapshot.meta.state.devices)
+    else {
+        return Err(StorePullError::Serial(
+            "Serial snapshot coverage or device state uses Merge policy".to_string(),
+        ));
+    };
+    let state = verify_history_state(
+        storage,
+        coordination,
+        root,
+        position,
+        &snapshot.meta.state.membership,
+    )
+    .await?;
+    let expected_device_state =
+        StoreDeviceStateRef::serial(position.clone(), &state.common.device_state)
+            .map_err(|error| StorePullError::Serial(error.to_string()))?;
     if expected_device_state != snapshot.meta.state.devices {
         return Err(StorePullError::Serial(
             "Serial snapshot device state differs from its accepted state".to_string(),
@@ -100,24 +145,20 @@ async fn verify_authority(
             "Serial snapshot carries a Merge history summary".to_string(),
         ));
     }
-    let active_registrations =
-        load_active_history_registrations(storage, root, &device_state).await?;
-    let (_, author) = active_registrations
+    let (_, author) = state
+        .common
+        .active_registrations
         .get(&snapshot.meta.author_registration.device_id)
         .filter(|(reference, _)| reference == &snapshot.meta.author_registration)
         .ok_or(StorePullError::SnapshotAuthorInactive)?;
-    if !authorization.membership.is_owner(&author.author_pubkey) {
+    if !state
+        .authorization
+        .membership
+        .is_owner(&author.author_pubkey)
+    {
         return Err(StorePullError::SnapshotAuthorNotOwner);
     }
-    Ok((
-        StoreHistoryCut::Serial(position.clone()),
-        VerifiedSerialSnapshotState {
-            common: VerifiedSnapshotState {
-                device_state,
-                active_registrations,
-            },
-        },
-    ))
+    Ok((StoreHistoryCut::Serial(position.clone()), state))
 }
 
 fn head_cut(head: StoreSerialHead) -> StoreHistoryCut {

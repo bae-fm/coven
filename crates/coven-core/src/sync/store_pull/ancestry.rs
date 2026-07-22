@@ -298,7 +298,7 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
                 .await?;
         match &attempt.value.bootstrap_cut {
             StoreHistoryCut::MergeConcurrent(_) => {
-                Box::pin(verify_store_history_state(
+                Box::pin(crate::sync::store_engine::verify_store_history_authority(
                     storage,
                     None,
                     root,

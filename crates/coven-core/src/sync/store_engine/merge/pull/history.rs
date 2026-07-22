@@ -1,5 +1,89 @@
 use super::*;
 
+pub(crate) async fn verify_merge_device_state_ref(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    reference: &StoreDeviceStateRef,
+) -> Result<ResolvedStoreDeviceState, StorePullError> {
+    let StoreDeviceStateRef::MergeConcurrent { frontier, .. } = reference else {
+        return Err(StorePullError::Database(
+            "Merge authority carries Serial device state".to_string(),
+        ));
+    };
+    let CommitFrontier::MergeConcurrent(frontier) = frontier else {
+        return Err(StorePullError::Database(
+            "Merge device state carries Serial frontier".to_string(),
+        ));
+    };
+    let history = verify_merge_history_refs(
+        storage,
+        root,
+        frontier.values().cloned().collect::<Vec<_>>(),
+    )
+    .await?;
+    let state = if frontier.is_empty() {
+        history.genesis
+    } else {
+        ResolvedStoreDeviceState::merge(
+            frontier
+                .values()
+                .map(|commit| {
+                    history
+                        .commits
+                        .get(commit)
+                        .map(|verified| verified.state_after.clone())
+                        .ok_or_else(|| {
+                            StorePullError::Database(
+                                "Merge device-state frontier is absent from its verified history"
+                                    .to_string(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+    };
+    let expected = StoreDeviceStateRef::merge_concurrent(
+        CommitFrontier::MergeConcurrent(frontier.clone()),
+        &state,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if &expected != reference {
+        return Err(StorePullError::Database(
+            "Merge device-state reference differs from its verified history".to_string(),
+        ));
+    }
+    Ok(state)
+}
+
+pub(crate) async fn verify_merge_owner_conflict_acceptance(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    acceptance: &super::store_commit::OwnerConflictResolutionAcceptance,
+    resolver_pubkey: &str,
+) -> Result<(), StorePullError> {
+    let registration = load_registration_ref(storage, root, &acceptance.owner_registration).await?;
+    acceptance
+        .verify(&registration.value)
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let state = verify_merge_device_state_ref(storage, root, &acceptance.device_state).await?;
+    if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
+        return Err(StorePullError::Database(
+            "conflict-resolution Owner registration is not active at its exact device state"
+                .to_string(),
+        ));
+    }
+    verify_canonical_owner_registration(
+        storage,
+        root,
+        &state,
+        resolver_pubkey,
+        &acceptance.owner_registration,
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) commit: StoreBatchCommit,
     pub(crate) predecessor_membership: MembershipChain,

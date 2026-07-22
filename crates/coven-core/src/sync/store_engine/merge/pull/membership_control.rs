@@ -261,7 +261,7 @@ pub(crate) async fn verify_merge_membership_control_with_history(
             "Merge Owner-promotion control differs from its exact membership entry".to_string(),
         );
     }
-    verify_merge_owner_promotion_acceptance_with_history(
+    super::owner_promotion::verify_merge_owner_promotion_acceptance_with_history(
         storage,
         root,
         acceptance,

@@ -41,18 +41,23 @@ use crate::sync::{
 
 mod application;
 mod history;
+mod owner_promotion;
 mod resolution;
 mod snapshot_authority;
 
 pub(crate) use application::*;
 pub(crate) use history::*;
+pub(in crate::sync::store_engine) use owner_promotion::{
+    find_request_activation as find_owner_promotion_request_activation,
+    verify_acceptance as verify_owner_promotion_acceptance,
+};
 pub(crate) use resolution::cleanup_serial_abandonment_authority;
 pub use resolution::SerialResolutionPlan;
 pub(crate) use resolution::{
     cleanup_serial_candidates, prepare_serial_resolution, SerialResolutionCommit,
 };
 pub(in crate::sync::store_engine) use snapshot_authority::{
-    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
+    verify_history_authority, verify_snapshot_for_acknowledgement, verify_snapshot_stability,
 };
 
 struct SerialApplicationCandidate {

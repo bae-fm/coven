@@ -266,6 +266,34 @@ pub(crate) async fn verify_store_snapshot_stability(
     }
 }
 
+pub(crate) async fn verify_store_history_authority(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    cut: &super::store_commit::StoreHistoryCut,
+    membership: &super::circle_control::StoreMembershipStateRef,
+) -> Result<(), super::store_pull::StorePullError> {
+    match cut {
+        super::store_commit::StoreHistoryCut::MergeConcurrent(_) => {
+            if serial_coordination.is_some() {
+                return Err(super::store_pull::StorePullError::Database(
+                    "Merge history verification received Serial coordination".to_string(),
+                ));
+            }
+            merge::pull::verify_history_authority(storage, root, cut, membership).await
+        }
+        super::store_commit::StoreHistoryCut::Serial(_) => {
+            let coordination = serial_coordination.ok_or_else(|| {
+                super::store_pull::StorePullError::Serial(
+                    "Serial history verification requires coordination capability".to_string(),
+                )
+            })?;
+            serial::pull::verify_history_authority(storage, coordination, root, cut, membership)
+                .await
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn verify_merge_snapshot_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,
@@ -350,6 +378,95 @@ pub(crate) struct AuthorizedStoreEngine<'a>(AuthorizedStoreEngineKind<'a>);
 enum AuthorizedStoreEngineKind<'a> {
     Merge(AuthorizedMergeStoreEngine<'a>),
     Serial(AuthorizedSerialStoreEngine<'a>),
+}
+
+pub(crate) struct VerifiedOwnerPromotionAcceptance(VerifiedOwnerPromotionAcceptanceKind);
+
+enum VerifiedOwnerPromotionAcceptanceKind {
+    MergeConcurrent,
+    Serial(serial::publication::SerialAuthorizationSnapshot),
+}
+
+impl VerifiedOwnerPromotionAcceptance {
+    pub(crate) fn serial_snapshot(
+        &self,
+    ) -> Option<&serial::publication::SerialAuthorizationSnapshot> {
+        match &self.0 {
+            VerifiedOwnerPromotionAcceptanceKind::MergeConcurrent => None,
+            VerifiedOwnerPromotionAcceptanceKind::Serial(snapshot) => Some(snapshot),
+        }
+    }
+}
+
+pub(crate) async fn find_owner_promotion_request_activation(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    request: &super::store_commit::OwnerPromotionRequest,
+) -> Result<super::store_commit::OwnerPromotionRequestActivation, super::store_pull::StorePullError>
+{
+    match request.finalization {
+        super::store_commit::OwnerPromotionFinalization::MergeConcurrent { .. } => {
+            if serial_coordination.is_some() {
+                return Err(super::store_pull::StorePullError::Database(
+                    "Merge Owner-promotion discovery received Serial coordination".to_string(),
+                ));
+            }
+            merge::pull::find_owner_promotion_request_activation(storage, root, request).await
+        }
+        super::store_commit::OwnerPromotionFinalization::Serial => {
+            let coordination = serial_coordination.ok_or_else(|| {
+                super::store_pull::StorePullError::Serial(
+                    "Serial Owner-promotion discovery requires coordination".to_string(),
+                )
+            })?;
+            serial::pull::find_owner_promotion_request_activation(
+                storage,
+                coordination,
+                root,
+                request,
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) async fn verify_owner_promotion_acceptance(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    acceptance: &super::store_commit::OwnerPromotionAcceptance,
+) -> Result<VerifiedOwnerPromotionAcceptance, super::store_pull::StorePullError> {
+    match acceptance.activation {
+        super::store_commit::OwnerPromotionRequestActivation::MergeConcurrent { .. } => {
+            if serial_coordination.is_some() {
+                return Err(super::store_pull::StorePullError::Database(
+                    "Merge Owner-promotion verification received Serial coordination".to_string(),
+                ));
+            }
+            merge::pull::verify_owner_promotion_acceptance(storage, root, acceptance)
+                .await
+                .map(|()| {
+                    VerifiedOwnerPromotionAcceptance(
+                        VerifiedOwnerPromotionAcceptanceKind::MergeConcurrent,
+                    )
+                })
+        }
+        super::store_commit::OwnerPromotionRequestActivation::Serial { .. } => {
+            let coordination = serial_coordination.ok_or_else(|| {
+                super::store_pull::StorePullError::Serial(
+                    "Serial Owner-promotion verification requires coordination".to_string(),
+                )
+            })?;
+            serial::pull::verify_owner_promotion_acceptance(storage, coordination, root, acceptance)
+                .await
+                .map(|snapshot| {
+                    VerifiedOwnerPromotionAcceptance(VerifiedOwnerPromotionAcceptanceKind::Serial(
+                        snapshot,
+                    ))
+                })
+        }
+    }
 }
 
 pub(crate) struct PostPullStoreEngine<'cycle, 'engine>(PostPullStoreEngineKind<'cycle, 'engine>);

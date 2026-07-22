@@ -673,7 +673,7 @@ fn load_layered_membership_chain<'a>(
             }
             if verified_activations.is_none() {
                 Box::pin(
-                    crate::sync::store_pull::verify_merge_owner_conflict_acceptance(
+                    crate::sync::store_engine::merge::pull::verify_merge_owner_conflict_acceptance(
                         storage,
                         root,
                         &value.replacement_acceptance,

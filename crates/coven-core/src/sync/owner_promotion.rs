@@ -1657,7 +1657,7 @@ pub async fn accept_owner_promotion(
             "live storage principal differs from the Store and candidate registration".to_string(),
         ));
     }
-    let activation = super::store_pull::find_owner_promotion_request_activation(
+    let activation = super::store_engine::find_owner_promotion_request_activation(
         storage,
         coordination,
         &root,
@@ -1735,9 +1735,14 @@ pub async fn accept_owner_promotion(
         identity,
     )
     .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    super::store_pull::verify_owner_promotion_acceptance(storage, coordination, &root, &acceptance)
-        .await
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    super::store_engine::verify_owner_promotion_acceptance(
+        storage,
+        coordination,
+        &root,
+        &acceptance,
+    )
+    .await
+    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     let journal = OwnerPromotionJournal {
         promotion_id: request.promotion_id,
         target: request.member_registration.clone(),
@@ -1850,7 +1855,7 @@ pub fn finalize_owner_promotion<'a>(
             .local_store_root_ref()
             .await?
             .ok_or_else(|| OwnerPromotionError::Protocol("Store root is absent".to_string()))?;
-        let verified_acceptance = Box::pin(super::store_pull::verify_owner_promotion_acceptance(
+        let verified_acceptance = Box::pin(super::store_engine::verify_owner_promotion_acceptance(
             storage,
             coordination,
             &root,
@@ -1961,7 +1966,7 @@ fn prepare_owner_promotion_finalization<'a>(
     root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
-    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_engine::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionPreparation, OwnerPromotionError>>
@@ -2107,7 +2112,7 @@ fn prepare_serial_owner_promotion_finalization<'a>(
     root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
-    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_engine::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionPreparation, OwnerPromotionError>>
@@ -2123,9 +2128,7 @@ fn prepare_serial_owner_promotion_finalization<'a>(
                 "Serial promotion finalization requires coordination".to_string(),
             ));
         }
-        let super::store_pull::VerifiedOwnerPromotionAcceptance::Serial(snapshot) =
-            verified_acceptance
-        else {
+        let Some(snapshot) = verified_acceptance.serial_snapshot() else {
             return Err(OwnerPromotionError::Protocol(
                 "Serial promotion carries Merge acceptance authority".to_string(),
             ));
@@ -2695,7 +2698,7 @@ fn resume_owner_promotion_finalization<'a>(
     encryption: &'a EncryptionService,
     root: StoreRootRef,
     acceptance: OwnerPromotionAcceptance,
-    verified_acceptance: &'a super::store_pull::VerifiedOwnerPromotionAcceptance,
+    verified_acceptance: &'a super::store_engine::VerifiedOwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<OwnerPromotionResumeOutcome, OwnerPromotionError>>

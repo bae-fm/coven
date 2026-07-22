@@ -48,6 +48,7 @@ mod discovery;
 mod history;
 mod materialization;
 mod membership_control;
+mod owner_promotion;
 mod replay;
 mod retained_authority;
 mod snapshot_authority;
@@ -58,10 +59,14 @@ pub(crate) use discovery::*;
 pub(crate) use history::*;
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
+pub(in crate::sync::store_engine) use owner_promotion::{
+    find_request_activation as find_owner_promotion_request_activation,
+    verify_acceptance as verify_owner_promotion_acceptance,
+};
 use replay::*;
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store_engine) use snapshot_authority::{
-    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
+    verify_history_authority, verify_snapshot_for_acknowledgement, verify_snapshot_stability,
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
@@ -296,31 +301,29 @@ pub(crate) fn pull_store_commits<'a>(
                             StoreDeviceRegistrationActivationRef::Join { .. }
                         )
                     });
-                let verified_accepted_predecessor = if requires_accepted_predecessor {
+                if requires_accepted_predecessor {
                     let predecessor_cut = commit
                         .order
                         .predecessor_cut()
                         .map_err(|error| StorePullError::Database(error.to_string()))?;
-                    Some(
-                        Box::pin(verify_store_history_state(
-                            storage,
-                            None,
-                            &root,
-                            &predecessor_cut,
-                            &commit.membership_state,
-                        ))
-                        .await?,
+                    verify_history_authority(
+                        storage,
+                        &root,
+                        &predecessor_cut,
+                        &commit.membership_state,
                     )
-                } else {
-                    None
-                };
-                let registrations = match Box::pin(load_merge_commit_registrations(
+                    .await?;
+                }
+                let predecessor_authority =
+                    RegistrationPredecessorAuthority::MergeConcurrent(&predecessor_membership);
+                let exact_predecessor = VerifiedAcceptedPredecessor::Exact;
+                let registrations = match Box::pin(load_commit_registrations(
                     storage,
                     &root,
                     &commit,
                     &registration,
-                    &predecessor_membership,
-                    verified_accepted_predecessor.as_ref(),
+                    Some(&predecessor_authority),
+                    requires_accepted_predecessor.then_some(&exact_predecessor),
                 ))
                 .await
                 {

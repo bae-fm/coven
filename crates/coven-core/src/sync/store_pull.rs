@@ -32,7 +32,7 @@ use super::store_commit::{
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    StoreSerialPredecessor, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
@@ -52,7 +52,6 @@ mod ancestry;
 mod circle_packages;
 mod device_lifecycle_state;
 mod device_operations;
-mod history_state;
 mod join_bootstrap;
 mod join_validation;
 mod pull;
@@ -63,7 +62,6 @@ pub(crate) use ancestry::*;
 pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
-pub(crate) use history_state::*;
 pub(crate) use join_bootstrap::*;
 pub(crate) use join_validation::*;
 pub(crate) use pull::*;
@@ -243,165 +241,6 @@ pub(crate) struct Candidate {
     pub(crate) author: StoreDeviceRegistration,
     pub(crate) package: Option<Vec<u8>>,
     pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-}
-
-pub(crate) async fn find_owner_promotion_request_activation(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn CoordinationStorage>,
-    root: &StoreRootRef,
-    request: &super::store_commit::OwnerPromotionRequest,
-) -> Result<super::store_commit::OwnerPromotionRequestActivation, StorePullError> {
-    let promoter = load_registration_ref(storage, root, &request.promoter_registration).await?;
-    request
-        .verify(root, &promoter.value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    match &request.finalization {
-        super::store_commit::OwnerPromotionFinalization::MergeConcurrent { .. } => {
-            let discovered = discover_merge_stream(
-                storage,
-                root,
-                &request.promoter_registration,
-                &promoter.value,
-                None,
-            )
-            .await?;
-            let mut matches =
-                discovered
-                    .commits
-                    .into_iter()
-                    .filter_map(|(head_ref, _, commit_ref, commit)| {
-                        (commit.owner_promotion_request() == Some(request))
-                            .then_some((commit_ref, head_ref))
-                    });
-            let Some((commit, head)) = matches.next() else {
-                return Err(StorePullError::Database(
-                    "Owner-promotion request has no accepted Merge activation".to_string(),
-                ));
-            };
-            if matches.next().is_some() {
-                return Err(StorePullError::Database(
-                    "Owner-promotion request has more than one Merge activation".to_string(),
-                ));
-            }
-            Ok(
-                super::store_commit::OwnerPromotionRequestActivation::MergeConcurrent {
-                    commit,
-                    head,
-                },
-            )
-        }
-        super::store_commit::OwnerPromotionFinalization::Serial => {
-            let coordination = serial_coordination.ok_or_else(|| {
-                StorePullError::Serial(
-                    "Owner-promotion request discovery requires coordination".to_string(),
-                )
-            })?;
-            let head = read_serial_head(storage, coordination, root).await?;
-            let accepted = load_authorized_serial_chain(storage, root, &head.head).await?;
-            let mut matches = accepted
-                .into_iter()
-                .filter(|candidate| candidate.commit.owner_promotion_request() == Some(request));
-            let Some(accepted) = matches.next() else {
-                return Err(StorePullError::Serial(
-                    "Owner-promotion request has no accepted Serial activation".to_string(),
-                ));
-            };
-            if matches.next().is_some() {
-                return Err(StorePullError::Serial(
-                    "Owner-promotion request has more than one Serial activation".to_string(),
-                ));
-            }
-            Ok(
-                super::store_commit::OwnerPromotionRequestActivation::Serial {
-                    commit: accepted.commit_ref,
-                },
-            )
-        }
-    }
-}
-
-pub(crate) async fn verify_merge_device_state_ref(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    reference: &StoreDeviceStateRef,
-) -> Result<ResolvedStoreDeviceState, StorePullError> {
-    let StoreDeviceStateRef::MergeConcurrent { frontier, .. } = reference else {
-        return Err(StorePullError::Database(
-            "Merge authority carries Serial device state".to_string(),
-        ));
-    };
-    let CommitFrontier::MergeConcurrent(frontier) = frontier else {
-        return Err(StorePullError::Database(
-            "Merge device state carries Serial frontier".to_string(),
-        ));
-    };
-    let history = verify_merge_history_refs(
-        storage,
-        root,
-        frontier.values().cloned().collect::<Vec<_>>(),
-    )
-    .await?;
-    let state = if frontier.is_empty() {
-        history.genesis
-    } else {
-        ResolvedStoreDeviceState::merge(
-            frontier
-                .values()
-                .map(|commit| {
-                    history
-                        .commits
-                        .get(commit)
-                        .map(|verified| verified.state_after.clone())
-                        .ok_or_else(|| {
-                            StorePullError::Database(
-                                "Merge device-state frontier is absent from its verified history"
-                                    .to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?
-    };
-    let expected = StoreDeviceStateRef::merge_concurrent(
-        CommitFrontier::MergeConcurrent(frontier.clone()),
-        &state,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    if &expected != reference {
-        return Err(StorePullError::Database(
-            "Merge device-state reference differs from its verified history".to_string(),
-        ));
-    }
-    Ok(state)
-}
-
-pub(crate) async fn verify_merge_owner_conflict_acceptance(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    acceptance: &super::store_commit::OwnerConflictResolutionAcceptance,
-    resolver_pubkey: &str,
-) -> Result<(), StorePullError> {
-    let registration = load_registration_ref(storage, root, &acceptance.owner_registration).await?;
-    acceptance
-        .verify(&registration.value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let state = verify_merge_device_state_ref(storage, root, &acceptance.device_state).await?;
-    if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
-        return Err(StorePullError::Database(
-            "conflict-resolution Owner registration is not active at its exact device state"
-                .to_string(),
-        ));
-    }
-    verify_canonical_owner_registration(
-        storage,
-        root,
-        &state,
-        resolver_pubkey,
-        &acceptance.owner_registration,
-    )
-    .await?;
-    Ok(())
 }
 
 #[derive(Clone)]

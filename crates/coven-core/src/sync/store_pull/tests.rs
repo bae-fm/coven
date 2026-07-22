@@ -1,8 +1,8 @@
 use super::*;
-use crate::sync::store_commit::OpenedRetainedMergeHistorySummary;
 use crate::sync::store_commit::{
     serial_head_key, DeviceStreamAnchor, OwnerRecoveryNodeRef, StoreCommitAnchor,
 };
+use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, StoreSerialHeadState};
 
 async fn one_retained_checkpoint() -> (
     Database,
