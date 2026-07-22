@@ -1,44 +1,36 @@
 use super::*;
 
-pub(crate) mod abandonment;
-mod acknowledgements;
-mod database;
-pub(crate) mod operations;
-pub(crate) mod preparation;
-pub(crate) mod publication;
-pub(crate) mod pull;
-
-use database::StoreEngineDatabase;
+use database::StoreDatabase;
 
 #[cfg(test)]
-pub(in crate::sync::store_engine) async fn prepare_acknowledgement_activation_for_test(
+pub(in crate::sync::store) async fn prepare_acknowledgement_activation_for_test(
     db: &Database,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
-    candidate: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+    candidate: crate::sync::store::operations::PreparedStoreOperationCommit,
 ) -> Result<(), crate::database::DbError> {
-    StoreEngineDatabase::new(db)
+    StoreDatabase::new(db)
         .prepare_acknowledgement_activation(acknowledgement, candidate)
         .await
 }
 
-pub(crate) struct StoreEngine {
-    context: StoreEngineContext,
+pub(crate) struct Store {
+    context: StoreContext,
 }
 
 #[derive(Clone)]
-struct StoreEngineAccess<'a> {
+struct StoreAccess<'a> {
     db: &'a Database,
     storage: &'a dyn SyncStorage,
     store_root: StoreRootRef,
 }
 
-pub(crate) struct AuthorizedStoreEngine<'a> {
-    access: StoreEngineAccess<'a>,
+pub(crate) struct AuthorizedStore<'a> {
+    access: StoreAccess<'a>,
     membership: crate::sync::membership::MembershipChain,
     discovery_proof: MembershipDiscoveryProof,
 }
 
-impl StoreEngine {
+impl Store {
     pub(crate) fn new(
         db: Database,
         storage: Arc<CloudSyncStorage>,
@@ -51,7 +43,7 @@ impl StoreEngine {
             );
         }
         Ok(Self {
-            context: StoreEngineContext {
+            context: StoreContext {
                 db,
                 storage,
                 store_root,
@@ -110,8 +102,8 @@ impl StoreEngine {
         .await
     }
 
-    fn access(&self) -> StoreEngineAccess<'_> {
-        StoreEngineAccess {
+    fn access(&self) -> StoreAccess<'_> {
+        StoreAccess {
             db: self.db(),
             storage: &**self.storage(),
             store_root: self.store_root().clone(),
@@ -153,7 +145,7 @@ impl StoreEngine {
         .await
     }
 
-    pub(crate) async fn authorize(&self) -> Result<AuthorizedStoreEngine<'_>, SyncCycleFailure> {
+    pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
         authorize(self.access()).await
     }
 
@@ -161,7 +153,7 @@ impl StoreEngine {
     pub(crate) async fn authorize_borrowed<'a>(
         storage: &'a dyn SyncStorage,
         db: &'a Database,
-    ) -> Result<AuthorizedStoreEngine<'a>, SyncCycleFailure> {
+    ) -> Result<AuthorizedStore<'a>, SyncCycleFailure> {
         let store_root = db
             .local_store_root_ref()
             .await
@@ -338,13 +330,17 @@ impl StoreEngine {
     }
 }
 
-impl AuthorizedStoreEngine<'_> {
+impl AuthorizedStore<'_> {
     pub(crate) fn db(&self) -> &Database {
         self.access.db
     }
 
-    fn database(&self) -> StoreEngineDatabase<'_> {
-        StoreEngineDatabase::new(self.db())
+    pub(super) fn database(&self) -> StoreDatabase<'_> {
+        StoreDatabase::new(self.db())
+    }
+
+    pub(super) fn membership(&self) -> &crate::sync::membership::MembershipChain {
+        &self.membership
     }
 
     pub(crate) fn storage(&self) -> &dyn SyncStorage {
@@ -432,7 +428,7 @@ impl AuthorizedStoreEngine<'_> {
         identity: &UserKeypair,
     ) -> Result<u64, SyncCycleFailure> {
         let (root, registration, _, _) =
-            crate::sync::store_engine::engine::operations::load_local_store_authority(
+            crate::sync::store::operations::load_local_store_authority(
                 self.db(),
                 device_id,
                 identity,
@@ -507,9 +503,7 @@ impl AuthorizedStoreEngine<'_> {
     }
 }
 
-async fn authorize(
-    access: StoreEngineAccess<'_>,
-) -> Result<AuthorizedStoreEngine<'_>, SyncCycleFailure> {
+async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
     let crate::sync::pull::CycleMembership {
         chain,
         pinned_owner,
@@ -531,7 +525,7 @@ async fn authorize(
             );
         }
     };
-    Ok(AuthorizedStoreEngine {
+    Ok(AuthorizedStore {
         access,
         membership,
         discovery_proof,
@@ -543,8 +537,8 @@ pub(crate) async fn authorize_borrowed<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
     store_root: StoreRootRef,
-) -> Result<AuthorizedStoreEngine<'a>, SyncCycleFailure> {
-    authorize(StoreEngineAccess {
+) -> Result<AuthorizedStore<'a>, SyncCycleFailure> {
+    authorize(StoreAccess {
         db,
         storage,
         store_root,

@@ -1135,7 +1135,7 @@ pub(crate) async fn open_db_and_pull(
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
-    let pull_result = Box::pin(crate::sync::store_engine::pull_store_commits(
+    let pull_result = Box::pin(crate::sync::store::pull_store_commits(
         &db,
         db.synced_tables(),
         storage,

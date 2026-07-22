@@ -234,7 +234,7 @@ pub(crate) async fn abandon_merge_candidate(
             return Ok(MergeCandidateAbandonment::Abandoned);
         }
     }
-    crate::sync::store_engine::engine::publication::drain_store_writes(db, storage).await?;
+    crate::sync::store::publication::drain_store_writes(db, storage).await?;
     if !db.merge_candidate_cleanup_pending(&write_id).await? {
         return Err(StoreOutboundError::InvalidOutbound(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
@@ -260,7 +260,7 @@ async fn finish_merge_abandonment(
         }
         crate::database::MergeAbandonmentState::CandidateWon => {
             db.resume_winning_merge_candidate(write_id).await?;
-            crate::sync::store_engine::engine::publication::drain_store_writes(db, storage).await?;
+            crate::sync::store::publication::drain_store_writes(db, storage).await?;
             Ok(MergeCandidateAbandonment::CandidateActivated)
         }
         crate::database::MergeAbandonmentState::Prepared => {

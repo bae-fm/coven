@@ -220,16 +220,15 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         predecessor: None,
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
-    let result =
-        crate::sync::store_engine::engine::pull::load_retained_merge_outbound_authorization(
-            &writer_db,
-            &store.storage,
-            &root,
-            &order,
-            before_removal.head_refs(),
-            &registration_ref,
-        )
-        .await;
+    let result = crate::sync::store::pull::load_retained_merge_outbound_authorization(
+        &writer_db,
+        &store.storage,
+        &root,
+        &order,
+        before_removal.head_refs(),
+        &registration_ref,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -327,17 +326,16 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         predecessor: Some(predecessor.clone()),
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
-    let authorization =
-        crate::sync::store_engine::engine::pull::load_retained_merge_outbound_authorization(
-            &owner_db,
-            &store.storage,
-            &root,
-            &order,
-            candidate.head_refs(),
-            &registration_ref,
-        )
-        .await
-        .expect("authorize membership that causally extends the predecessor");
+    let authorization = crate::sync::store::pull::load_retained_merge_outbound_authorization(
+        &owner_db,
+        &store.storage,
+        &root,
+        &order,
+        candidate.head_refs(),
+        &registration_ref,
+    )
+    .await
+    .expect("authorize membership that causally extends the predecessor");
 
     assert_eq!(authorization.membership.head_refs(), candidate.head_refs());
     assert!(authorization.membership.can_write_now(&new_member_pubkey));

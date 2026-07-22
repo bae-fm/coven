@@ -1,4 +1,5 @@
 use super::abandonment::read_occupied_merge_head;
+use super::database::StoreDatabase;
 use super::*;
 use crate::database::VerifiedMergeMaterialization;
 use crate::sync::circle_activation::VerifiedCircleActivations;
@@ -575,7 +576,7 @@ async fn resolve_head_collision(
     if observation.winner().commit == reference {
         let (winner, winner_prepared) = observation.into_head();
         if let Some(acknowledgement) = commit.acknowledgement().cloned() {
-            StoreEngineDatabase::new(db)
+            StoreDatabase::new(db)
                 .adopt_acknowledgement_head(acknowledgement, winner, winner_prepared)
                 .await?;
             return Ok(StoreOperationPublicationOutcome::Reprepared);
@@ -604,7 +605,7 @@ async fn resolve_head_collision(
             nonactivation: Box::new(nonactivation),
         });
     };
-    StoreEngineDatabase::new(db)
+    StoreDatabase::new(db)
         .begin_acknowledgement_nonactivation(acknowledgement.clone(), nonactivation)
         .await?;
     super::acknowledgements::finish_nonactivating_acknowledgement(db, storage, acknowledgement)

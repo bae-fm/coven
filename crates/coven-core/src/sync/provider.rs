@@ -1970,7 +1970,7 @@ pub async fn publish_cross_principal_challenge(
     if authorization.attempt.attempt_id != context.attempt_id {
         return invalid("challenge publication authorization names another join attempt");
     }
-    let attempt = crate::sync::store_engine::load_verified_device_join_attempt_ref(
+    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
         protocol_storage,
         &context.root,
         &authorization.attempt,

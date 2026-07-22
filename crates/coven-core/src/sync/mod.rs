@@ -21,7 +21,7 @@ pub mod device_join;
 pub mod gate;
 pub mod hlc;
 #[doc(hidden)]
-pub mod store_engine;
+pub mod store;
 // Exercises the register clock through `Database::hlc()`.
 #[cfg(test)]
 mod cycle_tests;

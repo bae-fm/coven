@@ -123,7 +123,7 @@ pub(crate) fn verify_merge_provider_administrator(
     state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
 }
 
-pub(in crate::sync::store_engine) async fn load_device_join_authorization(
+pub(in crate::sync::store) async fn load_device_join_authorization(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,

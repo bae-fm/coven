@@ -13,15 +13,15 @@ use super::remote_object::{
 use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
+use super::store::operations::{
+    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
+};
 use super::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusion, StoreDeviceExclusionCancellation,
     StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProof,
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId, StoreDeviceExclusionProposalRef,
     StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
-};
-use super::store_engine::engine::operations::{
-    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
 use super::store_outbound::StoreOutboundError;
 
@@ -593,7 +593,7 @@ async fn prepare_proposal(
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
     );
     let plan = Box::new(
-        Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
+        Box::pin(crate::sync::store::operations::prepare_plan(
             db,
             storage,
             &authorization,
@@ -663,14 +663,12 @@ async fn prepare_proposal(
         &target_registration,
         plan.registration(),
     )?;
-    let candidate = Box::pin(
-        crate::sync::store_engine::engine::operations::prepare_candidate(
-            db,
-            storage,
-            *plan,
-            StoreOperationBatch::DeviceExclusionProposal(retained),
-        ),
-    )
+    let candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
+        db,
+        storage,
+        *plan,
+        StoreOperationBatch::DeviceExclusionProposal(retained),
+    ))
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
         DurableStoreDeviceExclusionObject::Proposal {
@@ -816,7 +814,7 @@ async fn prepare_outcome(
     authorization: MembershipChain,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
-    let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
+    let plan = Box::pin(crate::sync::store::operations::prepare_plan(
         db,
         storage,
         &authorization,
@@ -896,14 +894,12 @@ async fn prepare_outcome(
         &outcome,
         plan.registration(),
     )?;
-    let candidate = Box::pin(
-        crate::sync::store_engine::engine::operations::prepare_candidate(
-            db,
-            storage,
-            plan,
-            StoreOperationBatch::DeviceExclusionOutcome(retained),
-        ),
-    )
+    let candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
+        db,
+        storage,
+        plan,
+        StoreOperationBatch::DeviceExclusionOutcome(retained),
+    ))
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
         DurableStoreDeviceExclusionObject::Outcome {
@@ -989,7 +985,7 @@ async fn publish_device_exclusion_candidate(
             "active exclusion operation has no activation candidate".to_string(),
         )
     })?;
-    let publish = crate::sync::store_engine::engine::operations::publish_prepared_store_operation(
+    let publish = crate::sync::store::operations::publish_prepared_store_operation(
         db,
         storage,
         Box::new(candidate),
@@ -1171,7 +1167,7 @@ async fn prepare_replacement_candidate(
     let authorization = super::device_join::load_current_device_join_authorization(db, storage)
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-    let plan = crate::sync::store_engine::engine::operations::prepare_plan(
+    let plan = crate::sync::store::operations::prepare_plan(
         db,
         storage,
         &authorization,
@@ -1193,14 +1189,12 @@ async fn prepare_replacement_candidate(
         value,
         plan.registration(),
     )?;
-    Box::pin(
-        crate::sync::store_engine::engine::operations::prepare_candidate(
-            db,
-            storage,
-            plan,
-            StoreOperationBatch::DeviceExclusionOutcome(retained),
-        ),
-    )
+    Box::pin(crate::sync::store::operations::prepare_candidate(
+        db,
+        storage,
+        plan,
+        StoreOperationBatch::DeviceExclusionOutcome(retained),
+    ))
     .await
     .map_err(StoreDeviceExclusionError::from)
 }
@@ -1737,15 +1731,13 @@ mod tests {
                 tamper,
             ))
             .await;
-            Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
-                    &restored,
-                    &store.storage,
-                    &target.device_id.to_string(),
-                    &signer,
-                    candidate_write_id.clone(),
-                ),
-            )
+            Box::pin(super::super::store::abandonment::abandon_merge_candidate(
+                &restored,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
             .await
             .expect_err("tampered snapshot exclusion evidence must fail loud");
             assert!(restored
@@ -1791,18 +1783,16 @@ mod tests {
             .expect("select snapshotted exclusion locator")
             .expect("snapshotted exclusion covers restored candidate");
         assert_eq!(
-            Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
-                    &restored,
-                    &store.storage,
-                    &target.device_id.to_string(),
-                    &signer,
-                    candidate_write_id.clone(),
-                )
-            )
+            Box::pin(super::super::store::abandonment::abandon_merge_candidate(
+                &restored,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
             .await
             .expect("consume snapshotted exclusion evidence"),
-            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!restored
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -1883,7 +1873,7 @@ mod tests {
             .expect("read published pre-exclusion snapshot")
             .expect("published pre-exclusion snapshot exists");
         let (_peer_pull_temp, peer_pull_dir) = crate::sync::test_helpers::temp_store_dir();
-        let peer_pull = super::super::store_engine::pull_store_commits(
+        let peer_pull = super::super::store::pull_store_commits(
             &peer_db,
             peer_db.synced_tables(),
             &store.storage,
@@ -1899,7 +1889,7 @@ mod tests {
             (&owner_db, "2026-07-18T00:00:01Z"),
             (&peer_db, "2026-07-18T00:00:02Z"),
         ] {
-            let acknowledgement = crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+            let acknowledgement = crate::sync::store::stage_merge_acknowledgement_for_test(
                 database,
                 &store.storage,
                 snapshot_coverage.clone(),
@@ -1916,7 +1906,7 @@ mod tests {
                 published_snapshot.meta.author_registration
             );
             assert_eq!(locator.snapshot, published_snapshot.reference);
-            crate::sync::store_engine::drain_merge_acknowledgements_for_test(
+            crate::sync::store::drain_merge_acknowledgements_for_test(
                 database,
                 &store.storage,
                 &signer,
@@ -1945,7 +1935,7 @@ mod tests {
             .order
             .predecessor_cut()
             .expect("read exclusion activation predecessor");
-        let plan = super::super::store_engine::prepare_device_join_bootstrap(
+        let plan = super::super::store::prepare_device_join_bootstrap(
             &store.storage,
             &store.root,
             &replay_cut,
@@ -2016,18 +2006,16 @@ mod tests {
         assert!(!stored.0.is_empty());
         assert!(!stored.1.is_empty());
         assert_eq!(
-            Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
-                    &joining_db,
-                    &store.storage,
-                    &target.device_id.to_string(),
-                    &signer,
-                    candidate_write_id.clone(),
-                )
-            )
+            Box::pin(super::super::store::abandonment::abandon_merge_candidate(
+                &joining_db,
+                &store.storage,
+                &target.device_id.to_string(),
+                &signer,
+                candidate_write_id.clone(),
+            ))
             .await
             .expect("consume replayed exclusion evidence"),
-            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!joining_db
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -2078,27 +2066,23 @@ mod tests {
                 .expect("read owner exclusion frontier"),
         )
         .expect("shape owner exclusion frontier");
-        let acknowledgement = Box::pin(
-            super::super::store_engine::stage_merge_acknowledgement_for_test(
-                owner_db,
-                &store.storage,
-                frontier,
-                "2026-07-18T00:01:00Z".to_string(),
-                signer,
-            ),
-        )
+        let acknowledgement = Box::pin(super::super::store::stage_merge_acknowledgement_for_test(
+            owner_db,
+            &store.storage,
+            frontier,
+            "2026-07-18T00:01:00Z".to_string(),
+            signer,
+        ))
         .await
         .expect("stage owner exclusion acknowledgement");
         let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
         assert_eq!(proposal_freezes, freezes);
         assert_eq!(
-            Box::pin(
-                super::super::store_engine::drain_merge_acknowledgements_for_test(
-                    owner_db,
-                    &store.storage,
-                    signer,
-                )
-            )
+            Box::pin(super::super::store::drain_merge_acknowledgements_for_test(
+                owner_db,
+                &store.storage,
+                signer,
+            ))
             .await
             .expect("publish owner exclusion acknowledgement"),
             1
@@ -2478,8 +2462,8 @@ mod tests {
         .await
         .expect("load owner membership before surviving commit");
         let owner_device_id = local_device_id(owner_db).await.expect("owner device id");
-        assert!(Box::pin(
-            super::super::store_engine::engine::preparation::prepare_store_write(
+        assert!(
+            Box::pin(super::super::store::preparation::prepare_store_write(
                 owner_db,
                 &store.storage,
                 &owner_device_id,
@@ -2490,16 +2474,14 @@ mod tests {
                     .chain
                     .as_ref()
                     .expect("owner Merge membership chain"),
-            )
-        )
-        .await
-        .expect("prepare surviving owner commit"));
-        Box::pin(
-            super::super::store_engine::engine::publication::drain_store_writes(
-                owner_db,
-                &store.storage,
-            ),
-        )
+            ))
+            .await
+            .expect("prepare surviving owner commit")
+        );
+        Box::pin(super::super::store::publication::drain_store_writes(
+            owner_db,
+            &store.storage,
+        ))
         .await
         .expect("publish surviving owner commit");
         let peer_membership = Box::pin(super::super::pull::load_cycle_membership(
@@ -2508,7 +2490,7 @@ mod tests {
         ))
         .await
         .expect("load peer membership before surviving pull");
-        Box::pin(super::super::store_engine::pull_store_commits(
+        Box::pin(super::super::store::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
@@ -2569,7 +2551,7 @@ mod tests {
         ))
         .await
         .expect("load excluded peer membership for injected failure");
-        let error = Box::pin(super::super::store_engine::pull_store_commits(
+        let error = Box::pin(super::super::store::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
@@ -2700,8 +2682,8 @@ mod tests {
         let peer_device_id = local_device_id(&peer_db)
             .await
             .expect("excluded peer device id");
-        assert!(Box::pin(
-            super::super::store_engine::engine::preparation::prepare_store_write(
+        assert!(
+            Box::pin(super::super::store::preparation::prepare_store_write(
                 &peer_db,
                 &store.storage,
                 &peer_device_id,
@@ -2712,10 +2694,10 @@ mod tests {
                     .chain
                     .as_ref()
                     .expect("peer Merge membership chain"),
-            )
-        )
-        .await
-        .expect("prepare excluded peer candidate"));
+            ))
+            .await
+            .expect("prepare excluded peer candidate")
+        );
         let candidate = peer_db
             .oldest_prepared_store_write()
             .await
@@ -2779,12 +2761,10 @@ mod tests {
         ))
         .await;
         if materialize_before_exclusion {
-            Box::pin(
-                super::super::store_engine::engine::publication::drain_store_writes(
-                    &peer_db,
-                    &store.storage,
-                ),
-            )
+            Box::pin(super::super::store::publication::drain_store_writes(
+                &peer_db,
+                &store.storage,
+            ))
             .await
             .expect("publish excluded peer candidate before exclusion");
             let original = match peer_db
@@ -2863,7 +2843,7 @@ mod tests {
             ))
             .await
             .expect("reload excluded peer membership");
-            assert!(Box::pin(super::super::store_engine::pull_store_commits(
+            assert!(Box::pin(super::super::store::pull_store_commits(
                 &peer_db,
                 peer_db.synced_tables(),
                 &store.storage,
@@ -3010,7 +2990,7 @@ mod tests {
             let drain_db = peer_db.clone();
             let drain_store = store.clone();
             let drain = tokio::spawn(async move {
-                super::super::store_engine::engine::publication::drain_store_writes(
+                super::super::store::publication::drain_store_writes(
                     &drain_db,
                     &drain_store.storage,
                 )
@@ -3073,12 +3053,9 @@ mod tests {
                     candidate.head.value.to_bytes(),
                 );
             }
-            super::super::store_engine::engine::publication::drain_store_writes(
-                &peer_db,
-                &store.storage,
-            )
-            .await
-            .expect_err("excluded peer cannot activate its late candidate")
+            super::super::store::publication::drain_store_writes(&peer_db, &store.storage)
+                .await
+                .expect_err("excluded peer cannot activate its late candidate")
         };
         let local_position = peer_db
             .latest_local_store_position()
@@ -3191,24 +3168,24 @@ mod tests {
             .expect("load excluded peer cleanup state");
         if cleanup_pending {
             store.home.fail_exact_delete_on_call(1);
-            assert!(Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
+            assert!(
+                Box::pin(super::super::store::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
                     &signer,
                     write_id.clone(),
-                )
-            )
-            .await
-            .is_err());
+                ))
+                .await
+                .is_err()
+            );
             assert!(reopened
                 .merge_candidate_cleanup_pending(&write_id)
                 .await
                 .expect("excluded peer cleanup remains pending"));
         } else {
             assert!(matches!(
-                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3217,8 +3194,8 @@ mod tests {
                 ))
                 .await
                 .expect("observe completed excluded peer cleanup"),
-                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::NotRequired
-                    | super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned
+                super::super::store::abandonment::MergeCandidateAbandonment::NotRequired
+                    | super::super::store::abandonment::MergeCandidateAbandonment::Abandoned
             ));
         }
         if cleanup_pending && !indexed_shared_blobs.is_empty() {
@@ -3296,7 +3273,7 @@ mod tests {
             )
         {
             assert_eq!(
-                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3305,7 +3282,7 @@ mod tests {
                 ))
                 .await
                 .expect("reconcile candidate head published after the absence proof"),
-                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
+                super::super::store::abandonment::MergeCandidateAbandonment::Abandoned,
             );
         }
         if cleanup_pending && sabotage_activation_head {
@@ -3366,24 +3343,24 @@ mod tests {
                 .merge_candidate_cleanup_pending(&write_id)
                 .await
                 .is_err());
-            assert!(Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
+            assert!(
+                Box::pin(super::super::store::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
                     &signer,
                     write_id,
-                )
-            )
-            .await
-            .is_err());
+                ))
+                .await
+                .is_err()
+            );
             return;
         }
         let retried = if cleanup_pending {
             drop(reopened);
             let retried = open(&path, "excluded-peer-host");
             assert_eq!(
-                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store::abandonment::abandon_merge_candidate(
                     &retried,
                     &store.storage,
                     &peer_device_id,
@@ -3392,7 +3369,7 @@ mod tests {
                 ))
                 .await
                 .expect("resume excluded peer cleanup"),
-                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
+                super::super::store::abandonment::MergeCandidateAbandonment::Abandoned,
             );
             retried
         } else {
@@ -3619,7 +3596,7 @@ mod tests {
             .await
             .expect("block candidate before abandonment preparation");
         assert!(Box::pin(
-            super::super::store_engine::engine::abandonment::prepare_merge_candidate_abandonment(
+            super::super::store::abandonment::prepare_merge_candidate_abandonment(
                 peer_db,
                 &store.storage,
                 peer_device_id,
@@ -3892,18 +3869,16 @@ mod tests {
         ))
         .await;
         assert_eq!(
-            Box::pin(
-                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
-                    peer_db,
-                    &store.storage,
-                    peer_device_id,
-                    signer,
-                    write_id.clone(),
-                )
-            )
+            Box::pin(super::super::store::abandonment::abandon_merge_candidate(
+                peer_db,
+                &store.storage,
+                peer_device_id,
+                signer,
+                write_id.clone(),
+            ))
             .await
             .expect("exclude prepared abandonment candidates"),
-            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         for reference in [
             &candidates.candidate.head.value.commit,
@@ -3967,7 +3942,7 @@ mod tests {
         ))
         .await
         .expect("reload excluded peer membership");
-        let pull = Box::pin(super::super::store_engine::pull_store_commits(
+        let pull = Box::pin(super::super::store::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
@@ -4387,8 +4362,8 @@ mod tests {
             .await
             .expect("transfer candidate device id");
         let (temporary, store_dir) = temp_store_dir();
-        assert!(Box::pin(
-            super::super::store_engine::engine::preparation::prepare_store_write(
+        assert!(
+            Box::pin(super::super::store::preparation::prepare_store_write(
                 peer_db,
                 &store.storage,
                 &peer_device_id,
@@ -4399,10 +4374,10 @@ mod tests {
                     .chain
                     .as_ref()
                     .expect("transfer Merge membership chain"),
-            )
-        )
-        .await
-        .expect("prepare transfer candidate"));
+            ))
+            .await
+            .expect("prepare transfer candidate")
+        );
         let candidate = peer_db
             .oldest_prepared_store_write()
             .await
@@ -4448,7 +4423,7 @@ mod tests {
             .await
             .expect("load exclusion test membership");
         let device_id = local_device_id(db).await.expect("local device id");
-        let plan = crate::sync::store_engine::engine::operations::prepare_plan(
+        let plan = crate::sync::store::operations::prepare_plan(
             db,
             storage,
             membership
@@ -4514,7 +4489,7 @@ mod tests {
                 plan.registration(),
             )
             .expect("retain prepared exclusion proposal");
-        let candidate = crate::sync::store_engine::engine::operations::prepare_candidate(
+        let candidate = crate::sync::store::operations::prepare_candidate(
             db,
             storage,
             plan,
@@ -4586,28 +4561,24 @@ mod tests {
                 .expect("read exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        let acknowledgement = Box::pin(
-            super::super::store_engine::stage_merge_acknowledgement_for_test(
-                &reopened,
-                storage.as_ref(),
-                frontier,
-                "2026-07-18T00:00:00Z".to_string(),
-                &signer,
-            ),
-        )
+        let acknowledgement = Box::pin(super::super::store::stage_merge_acknowledgement_for_test(
+            &reopened,
+            storage.as_ref(),
+            frontier,
+            "2026-07-18T00:00:00Z".to_string(),
+            &signer,
+        ))
         .await
         .expect("stage exclusion acknowledgement");
         let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
         assert!(proposal_freezes.is_empty());
 
         assert_eq!(
-            Box::pin(
-                super::super::store_engine::drain_merge_acknowledgements_for_test(
-                    &reopened,
-                    storage.as_ref(),
-                    &signer,
-                )
-            )
+            Box::pin(super::super::store::drain_merge_acknowledgements_for_test(
+                &reopened,
+                storage.as_ref(),
+                &signer,
+            ))
             .await
             .expect("publish exclusion acknowledgement"),
             1
@@ -4654,7 +4625,7 @@ mod tests {
                 .expect("read competing acknowledgement frontier"),
         )
         .expect("shape competing acknowledgement frontier");
-        super::super::store_engine::stage_merge_acknowledgement_for_test(
+        super::super::store::stage_merge_acknowledgement_for_test(
             &reopened,
             storage.as_ref(),
             frontier,
@@ -4664,7 +4635,7 @@ mod tests {
         .await
         .expect("stage competing acknowledgement");
         assert_eq!(
-            super::super::store_engine::drain_merge_acknowledgements_for_test(
+            super::super::store::drain_merge_acknowledgements_for_test(
                 &reopened,
                 storage.as_ref(),
                 &signer,

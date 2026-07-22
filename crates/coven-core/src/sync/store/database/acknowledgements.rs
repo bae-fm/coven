@@ -1,7 +1,7 @@
 use super::*;
 
-impl StoreEngineDatabase<'_> {
-    pub(in crate::sync::store_engine) async fn prepare_acknowledgement_activation(
+impl StoreDatabase<'_> {
+    pub(in crate::sync::store) async fn prepare_acknowledgement_activation(
         self,
         expected: StoreAckRef,
         candidate: PreparedStoreOperationCommit,
@@ -72,7 +72,7 @@ impl StoreEngineDatabase<'_> {
             .await
     }
 
-    pub(in crate::sync::store_engine) async fn begin_acknowledgement_nonactivation(
+    pub(in crate::sync::store) async fn begin_acknowledgement_nonactivation(
         self,
         expected: StoreAckRef,
         nonactivation: VerifiedCandidateNonactivation,
@@ -234,7 +234,7 @@ impl StoreEngineDatabase<'_> {
             .await
     }
 
-    pub(in crate::sync::store_engine) async fn adopt_acknowledgement_head(
+    pub(in crate::sync::store) async fn adopt_acknowledgement_head(
         self,
         expected: StoreAckRef,
         winner: StoreDeviceHead,
@@ -321,7 +321,7 @@ impl StoreEngineDatabase<'_> {
             .await
     }
 
-    pub(in crate::sync::store_engine) async fn acknowledgement_cleanup_target(
+    pub(in crate::sync::store) async fn acknowledgement_cleanup_target(
         self,
         expected: StoreAckRef,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
@@ -361,7 +361,7 @@ impl StoreEngineDatabase<'_> {
             .await
     }
 
-    pub(in crate::sync::store_engine) async fn complete_nonactivating_acknowledgement(
+    pub(in crate::sync::store) async fn complete_nonactivating_acknowledgement(
         self,
         expected: StoreAckRef,
     ) -> Result<(), DbError> {

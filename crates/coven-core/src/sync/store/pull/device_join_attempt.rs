@@ -12,7 +12,7 @@ pub(super) struct MergeAcceptedJoinHistory<'a> {
     pub(super) frontier: &'a [StoreBatchCommitRef],
 }
 
-pub(in crate::sync::store_engine) fn verify_device_join_attempt_evidence<'a>(
+pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     evidence: LoadedDeviceJoinAttemptEvidence,

@@ -1,10 +1,10 @@
 use super::*;
-use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
-use crate::sync::store_engine::engine::pull::{
+use crate::sync::store::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, readiness,
     verified_merge_membership_prefix, verify_merge_history_refs, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
+use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
 
 async fn one_retained_checkpoint() -> (
     Database,
@@ -38,21 +38,19 @@ async fn one_retained_checkpoint() -> (
         .expect("load checkpoint device id")
         .expect("checkpoint device id exists");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(
-        super::super::store_engine::engine::preparation::prepare_store_write(
-            &db,
-            &store.storage,
-            &device_id,
-            "2026-07-21T00:00:00Z",
-            &store.signer,
-            &store_dir,
-            &membership,
-        )
-        .await
-        .expect("prepare checkpoint commit")
-    );
+    assert!(super::super::store::preparation::prepare_store_write(
+        &db,
+        &store.storage,
+        &device_id,
+        "2026-07-21T00:00:00Z",
+        &store.signer,
+        &store_dir,
+        &membership,
+    )
+    .await
+    .expect("prepare checkpoint commit"));
     assert_eq!(
-        super::super::store_engine::engine::publication::drain_store_writes(&db, &store.storage)
+        super::super::store::publication::drain_store_writes(&db, &store.storage)
             .await
             .expect("publish checkpoint commit"),
         1,
@@ -270,7 +268,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             .await
             .expect("load candidate Owner membership");
     let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let candidate_pull = Box::pin(crate::sync::store_engine::pull_store_commits(
+    let candidate_pull = Box::pin(crate::sync::store::pull_store_commits(
         &candidate_db,
         candidate_db.synced_tables(),
         &store.storage,
@@ -364,23 +362,21 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later Owner device id")
         .expect("later Owner device is activated");
     let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(
-        super::super::store_engine::engine::preparation::prepare_store_write(
-            later_db,
-            &store.storage,
-            &later_device_id,
-            "2026-07-21T00:02:00Z",
-            later_owner,
-            &later_store_dir,
-            later_membership
-                .chain
-                .as_ref()
-                .expect("later Merge membership chain"),
-        )
-        .await
-        .expect("prepare later concurrent write")
-    );
-    super::super::store_engine::engine::publication::drain_store_writes(later_db, &store.storage)
+    assert!(super::super::store::preparation::prepare_store_write(
+        later_db,
+        &store.storage,
+        &later_device_id,
+        "2026-07-21T00:02:00Z",
+        later_owner,
+        &later_store_dir,
+        later_membership
+            .chain
+            .as_ref()
+            .expect("later Merge membership chain"),
+    )
+    .await
+    .expect("prepare later concurrent write"));
+    super::super::store::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");
     let later_commit = later_db

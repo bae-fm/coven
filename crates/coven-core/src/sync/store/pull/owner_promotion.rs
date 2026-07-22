@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::sync::store_engine) async fn find_request_activation(
+pub(in crate::sync::store) async fn find_request_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
@@ -38,7 +38,7 @@ pub(in crate::sync::store_engine) async fn find_request_activation(
     Ok(super::store_commit::OwnerPromotionRequestActivation { commit, head })
 }
 
-pub(in crate::sync::store_engine) async fn verify_acceptance(
+pub(in crate::sync::store) async fn verify_acceptance(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
@@ -99,16 +99,15 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
         activation_commit,
     )
     .await?;
-    let (_, exact_head) =
-        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
-            storage,
-            root,
-            &request.promoter_registration,
-            &promoter.value,
-            Some(activation_commit),
-        )
-        .await
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
+        storage,
+        root,
+        &request.promoter_registration,
+        &promoter.value,
+        Some(activation_commit),
+    )
+    .await
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
     if opened.value != head
         || head.head_hash() != activation_head.head_hash
         || head.commit != *activation_commit

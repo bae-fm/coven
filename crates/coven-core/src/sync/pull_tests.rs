@@ -460,7 +460,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     let membership = crate::sync::pull::load_cycle_membership(storage.sync_storage(), db)
         .await
         .map_err(|error| error.to_string())?;
-    let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
+    let prepared = crate::sync::store::preparation::prepare_store_write(
         db,
         storage.sync_storage(),
         &device_id,
@@ -477,7 +477,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     if !prepared {
         return Ok(None);
     }
-    crate::sync::store_engine::engine::publication::drain_store_writes(db, storage.sync_storage())
+    crate::sync::store::publication::drain_store_writes(db, storage.sync_storage())
         .await
         .map_err(|error| error.to_string())?;
     db.latest_local_store_position()
@@ -514,7 +514,7 @@ async fn pull_exact_store_into(
     let membership = crate::sync::pull::load_cycle_membership(storage, destination)
         .await
         .expect("load exact Store membership");
-    let result = crate::sync::store_engine::pull_store_commits(
+    let result = crate::sync::store::pull_store_commits(
         destination,
         destination.synced_tables(),
         storage,
@@ -1166,15 +1166,14 @@ async fn replace_exact_commit_bytes(
         .expect("load replacement candidate history summary");
     let reference =
         publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
-    let history_summary =
-        crate::sync::store_engine::engine::pull::prepare_merge_abandonment_history_summary(
-            &candidate_summary,
-            &graph.reference,
-            &graph.commit,
-            &reference,
-            &replacement_commit,
-        )
-        .expect("prepare replacement exact Store history summary");
+    let history_summary = crate::sync::store::pull::prepare_merge_abandonment_history_summary(
+        &candidate_summary,
+        &graph.reference,
+        &graph.commit,
+        &reference,
+        &replacement_commit,
+    )
+    .expect("prepare replacement exact Store history summary");
     replace_exact_commit_head(
         storage,
         graph,
@@ -3897,7 +3896,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .await
         .expect("open exact Store before failed lazy verification");
     let failing = FaultingStorage::blob(&storage.storage);
-    let error = crate::sync::store_engine::pull_store_commits(
+    let error = crate::sync::store::pull_store_commits(
         &db2,
         db2.synced_tables(),
         &failing,
@@ -4031,7 +4030,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
         .expect("open scoped target Store");
     let (_target_temp, target_dir) = temp_store_dir();
-    let result = crate::sync::store_engine::pull_store_commits(
+    let result = crate::sync::store::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage.storage,
@@ -4148,7 +4147,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .open_into(successor)
         .await
         .expect("open Store before pulling Circle activation");
-    crate::sync::store_engine::pull_store_commits(
+    crate::sync::store::pull_store_commits(
         successor,
         successor.synced_tables(),
         &storage.storage,
@@ -4181,7 +4180,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .open_into(&receiver)
         .await
         .expect("open Store before ordered Circle pull");
-    let result = crate::sync::store_engine::pull_store_commits(
+    let result = crate::sync::store::pull_store_commits(
         &receiver,
         receiver.synced_tables(),
         &storage.storage,
@@ -6505,7 +6504,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let stream_id = commit_stream_id(&reference);
 
     let (_tmp, store_dir) = temp_store_dir();
-    let result = crate::sync::store_engine::pull_store_commits(
+    let result = crate::sync::store::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage.storage,
@@ -7249,7 +7248,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     pull_into_result(&member_db, &storage, &pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
-    crate::sync::store_engine::engine::pull::cleanup_merge_candidate(
+    crate::sync::store::pull::cleanup_merge_candidate(
         &member_db,
         &storage.storage,
         write_id.clone(),
@@ -7580,7 +7579,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let stream_id = commit_stream_id(&reference);
 
     let failing = FaultingStorage::membership(&storage.storage, 1);
-    let result = crate::sync::store_engine::pull_store_commits(
+    let result = crate::sync::store::pull_store_commits(
         &db2,
         db2.synced_tables(),
         &failing,

@@ -380,15 +380,14 @@ pub(crate) async fn verify_merge_membership_head_activation(
             "membership head differs from its exact activating Store transition".to_string(),
         );
     }
-    let activation_observation =
-        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
-            storage,
-            root,
-            &commit.author_registration,
-            &author,
-            Some(activation),
-        )
-        .await;
+    let activation_observation = crate::sync::store::operations::exact_next_announcement_slot(
+        storage,
+        root,
+        &commit.author_registration,
+        &author,
+        Some(activation),
+    )
+    .await;
     match activation_observation {
         Ok((_, Some(_))) => {}
         Ok((_, None)) => return Ok(false),

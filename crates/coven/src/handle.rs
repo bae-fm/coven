@@ -366,13 +366,13 @@ impl CovenHandle {
                 .await
                 .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
             match abandonment {
-                coven_core::sync::store_engine::MergeCandidateAbandonment::NotRequired => {
+                coven_core::sync::store::MergeCandidateAbandonment::NotRequired => {
                     return Err(crate::CovenError::CandidateResolution(
                         "blocked Merge candidate has no abandonment authority".to_string(),
                     ));
                 }
-                coven_core::sync::store_engine::MergeCandidateAbandonment::Abandoned => {}
-                coven_core::sync::store_engine::MergeCandidateAbandonment::CandidateActivated => {
+                coven_core::sync::store::MergeCandidateAbandonment::Abandoned => {}
+                coven_core::sync::store::MergeCandidateAbandonment::CandidateActivated => {
                     return Err(crate::CovenError::CandidateResolution(
                         "Merge candidate activated before abandonment and cannot be discarded"
                             .to_string(),

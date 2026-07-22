@@ -227,7 +227,7 @@ async fn activated_acknowledgements(
     Ok(acknowledgements)
 }
 
-pub(in crate::sync::store_engine) async fn verify_snapshot_for_acknowledgement(
+pub(in crate::sync::store) async fn verify_snapshot_for_acknowledgement(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
@@ -235,7 +235,7 @@ pub(in crate::sync::store_engine) async fn verify_snapshot_for_acknowledgement(
     verify_authority(storage, root, snapshot).await.map(|_| ())
 }
 
-pub(in crate::sync::store_engine) async fn verify_snapshot_stability(
+pub(in crate::sync::store) async fn verify_snapshot_stability(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,

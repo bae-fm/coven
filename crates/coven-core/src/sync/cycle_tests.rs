@@ -5563,7 +5563,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("read behind device frontier"),
     )
     .expect("validate behind device frontier");
-    crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+    crate::sync::store::stage_merge_acknowledgement_for_test(
         &behind_db,
         &storage.storage,
         behind_frontier,
@@ -5572,7 +5572,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     )
     .await
     .expect("stage behind device acknowledgement");
-    crate::sync::store_engine::drain_merge_acknowledgements_for_test(
+    crate::sync::store::drain_merge_acknowledgements_for_test(
         &behind_db,
         &storage.storage,
         &behind,
@@ -5900,7 +5900,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .await
         .expect("load local device id")
         .expect("active founder device id");
-    let plan = crate::sync::store_engine::engine::operations::prepare_plan(
+    let plan = crate::sync::store::operations::prepare_plan(
         &owner_db,
         &storage.storage,
         &fixture.authorization,
@@ -5959,7 +5959,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         attempt_hash: attempt.attempt_hash(),
         object: prepared.reference().clone(),
     };
-    crate::sync::store_engine::load_verified_device_join_attempt_ref(
+    crate::sync::store::load_verified_device_join_attempt_ref(
         &storage.storage,
         &offer.store_root,
         &attempt_ref,
@@ -6115,7 +6115,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 .expect("load exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_merge_acknowledgement_for_test(
             &excluding_db,
             &storage.storage,
             frontier,
@@ -6124,7 +6124,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         )
         .await
         .expect("stage exclusion acknowledgement");
-        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
+        crate::sync::store::drain_merge_acknowledgements_for_test(
             &excluding_db,
             &storage.storage,
             &excluding_owner,
@@ -6218,16 +6218,15 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) =
-        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
-            &storage.storage,
-            &storage.root,
-            &owner_ref,
-            &owner_registration,
-            Some(&activation),
-        )
-        .await
-        .expect("load exact next announcement slot");
+    let (next_slot, _) = crate::sync::store::operations::exact_next_announcement_slot(
+        &storage.storage,
+        &storage.root,
+        &owner_ref,
+        &owner_registration,
+        Some(&activation),
+    )
+    .await
+    .expect("load exact next announcement slot");
     let next_sequence = activation
         .coord
         .sequence()
@@ -6281,7 +6280,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .await
         .expect("load exact founder authority");
     let (next_slot, accepted_head_ref) =
-        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+        crate::sync::store::operations::exact_next_announcement_slot(
             &storage.storage,
             &storage.root,
             &owner_ref,

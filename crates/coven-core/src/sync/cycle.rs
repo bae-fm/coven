@@ -28,7 +28,7 @@ use super::hlc::Hlc;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
-use super::store_engine::{AuthorizedStoreEngine, StoreEngine};
+use super::store::{AuthorizedStore, Store};
 use super::store_pull::HeldStorePosition;
 
 /// Result of a single sync cycle.
@@ -403,7 +403,7 @@ pub(crate) async fn run_single_sync_cycle(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = StoreEngine::authorize_borrowed(storage, db).await?;
+    let authorization = Store::authorize_borrowed(storage, db).await?;
     Box::pin(run_single_sync_cycle_with_authorization(
         device_id,
         hlc,
@@ -434,7 +434,7 @@ async fn run_single_sync_cycle_with_authorization(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: AuthorizedStoreEngine<'_>,
+    authorization: AuthorizedStore<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let prepared = match Box::pin(prepare_cycle_before_pull(
         device_id,
@@ -526,7 +526,7 @@ async fn prepare_cycle_before_pull(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: &AuthorizedStoreEngine<'_>,
+    authorization: &AuthorizedStore<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
     let db = authorization.db();
     let storage = authorization.storage();
@@ -706,8 +706,8 @@ async fn complete_cycle_after_pull(
     clock: &dyn crate::clock::Clock,
     user_keypair: &UserKeypair,
     store_dir: &StoreDir,
-    authorization: &AuthorizedStoreEngine<'_>,
-    post_pull: &AuthorizedStoreEngine<'_>,
+    authorization: &AuthorizedStore<'_>,
+    post_pull: &AuthorizedStore<'_>,
     prepared: PreparedCycle,
     store_pull: super::store_pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
@@ -869,7 +869,7 @@ async fn complete_cycle_after_pull(
 async fn reclaim_cycle_packages(
     device_id: &str,
     user_keypair: &UserKeypair,
-    post_pull: &AuthorizedStoreEngine<'_>,
+    post_pull: &AuthorizedStore<'_>,
 ) -> Result<(), SyncCycleFailure> {
     match post_pull.reclaim_packages(device_id, user_keypair).await {
         Ok(result) if result.packages_deleted > 0 => info!(
@@ -1165,11 +1165,11 @@ pub async fn init_sync_over_storage(
     info!("Sync initialized (device: {device_id})");
 
     let storage = std::sync::Arc::new(storage);
-    let engine = StoreEngine::new(db.clone(), storage, store_root_ref, &store_protocol_root)
+    let store = Store::new(db.clone(), storage, store_root_ref, &store_protocol_root)
         .map_err(InitSyncError::StoreProtocolRoot)?;
 
     Ok(SyncComponents {
-        engine,
+        store,
         hlc,
         store_id,
         device_id,
@@ -1217,7 +1217,7 @@ pub async fn ensure_owner_anchored_chain(
 /// cipher, pending-rotation marker, and signing identity that initialization
 /// checked. Callers cannot replace any of them before running a cycle.
 pub struct SyncComponents {
-    engine: StoreEngine,
+    store: Store,
     hlc: std::sync::Arc<Hlc>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
@@ -1233,11 +1233,11 @@ pub struct SyncComponents {
 impl SyncComponents {
     #[doc(hidden)]
     pub fn database(&self) -> &Database {
-        self.engine.database()
+        self.store.database()
     }
 
     pub fn storage(&self) -> &std::sync::Arc<CloudSyncStorage> {
-        self.engine.cloud_storage()
+        self.store.cloud_storage()
     }
 
     pub fn hlc(&self) -> &std::sync::Arc<Hlc> {
@@ -1249,7 +1249,7 @@ impl SyncComponents {
     }
 
     pub fn blob_path_scheme(&self) -> BlobPathScheme {
-        self.engine.blob_path_scheme()
+        self.store.blob_path_scheme()
     }
 
     pub fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
@@ -1257,7 +1257,7 @@ impl SyncComponents {
     }
 
     pub fn self_uploader(&self) -> String {
-        self.engine.self_uploader()
+        self.store.self_uploader()
     }
 
     pub async fn drain_uploads(
@@ -1266,7 +1266,7 @@ impl SyncComponents {
         store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
-        self.engine
+        self.store
             .drain_uploads(
                 store_dir,
                 clock,
@@ -1287,7 +1287,7 @@ impl SyncComponents {
         let encryption = self
             .current_encryption()
             .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
-        self.engine
+        self.store
             .invite_member(
                 &self.user_keypair,
                 &self.hlc,
@@ -1309,7 +1309,7 @@ impl SyncComponents {
         let encryption = self
             .current_encryption()
             .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
-        self.engine
+        self.store
             .remove_member(
                 &self.user_keypair,
                 &self.hlc,
@@ -1334,7 +1334,7 @@ impl SyncComponents {
         &self,
         name: &str,
     ) -> Result<super::circle::CircleId, super::circle_ops::CircleOperationError> {
-        self.engine
+        self.store
             .create_circle(
                 &self.device_id,
                 &self.hlc.now().to_string(),
@@ -1349,7 +1349,7 @@ impl SyncComponents {
         circle_id: super::circle::CircleId,
         name: &str,
     ) -> Result<(), super::circle_ops::CircleOperationError> {
-        self.engine
+        self.store
             .rename_circle(
                 &self.device_id,
                 &self.hlc.now().to_string(),
@@ -1367,7 +1367,7 @@ impl SyncComponents {
         super::store_device_exclusion::StoreDeviceExclusionResult,
         super::store_device_exclusion::StoreDeviceExclusionError,
     > {
-        self.engine
+        self.store
             .propose_device_exclusion(&self.user_keypair, target)
             .await
     }
@@ -1379,7 +1379,7 @@ impl SyncComponents {
         super::store_device_exclusion::StoreDeviceExclusionResult,
         super::store_device_exclusion::StoreDeviceExclusionError,
     > {
-        self.engine
+        self.store
             .cancel_device_exclusion(&self.user_keypair, proposal)
             .await
     }
@@ -1391,7 +1391,7 @@ impl SyncComponents {
         super::store_device_exclusion::StoreDeviceExclusionResult,
         super::store_device_exclusion::StoreDeviceExclusionError,
     > {
-        self.engine
+        self.store
             .finalize_device_exclusion(&self.user_keypair, proposal)
             .await
     }
@@ -1402,7 +1402,7 @@ impl SyncComponents {
         Vec<super::store_device_exclusion::StoreDeviceExclusionOperationInfo>,
         super::store_device_exclusion::StoreDeviceExclusionError,
     > {
-        self.engine.device_exclusion_operations().await
+        self.store.device_exclusion_operations().await
     }
 
     pub async fn run_cycle(
@@ -1412,8 +1412,8 @@ impl SyncComponents {
         store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
-        self.engine.resume_operations(&self.user_keypair).await?;
-        let authorization = self.engine.authorize().await?;
+        self.store.resume_operations(&self.user_keypair).await?;
+        let authorization = self.store.authorize().await?;
         run_single_sync_cycle_with_authorization(
             &self.device_id,
             &self.hlc,
@@ -1424,7 +1424,7 @@ impl SyncComponents {
             custody,
             self.routing_encryption.as_ref(),
             store_dir,
-            Some(self.engine.cloud_home()),
+            Some(self.store.cloud_home()),
             observer,
             authorization,
         )

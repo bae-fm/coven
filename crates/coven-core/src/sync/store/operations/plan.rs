@@ -329,18 +329,17 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         predecessor: previous,
         dependencies: dependencies.0,
     };
-    let authorization =
-        crate::sync::store_engine::engine::pull::load_merge_conflict_resolution_authorization(
-            db,
-            storage,
-            &root,
-            &order,
-            candidate_membership_heads,
-            &registration_ref,
-            &registration.author_pubkey,
-        )
-        .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let authorization = crate::sync::store::pull::load_merge_conflict_resolution_authorization(
+        db,
+        storage,
+        &root,
+        &order,
+        candidate_membership_heads,
+        &registration_ref,
+        &registration.author_pubkey,
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     Ok(MergeConflictResolutionCommitPlan {
         root,
         registration_ref,

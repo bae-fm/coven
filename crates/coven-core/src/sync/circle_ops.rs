@@ -1309,10 +1309,7 @@ async fn prepare_circle_operation_request(
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     let (root, author_registration, author, device_signer) =
-        crate::sync::store_engine::engine::operations::load_local_store_authority(
-            db, device_id, signer,
-        )
-        .await?;
+        crate::sync::store::operations::load_local_store_authority(db, device_id, signer).await?;
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let founder = db
@@ -1482,7 +1479,7 @@ async fn prepare_circle_operation_request(
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        let history_summary = super::store_engine::engine::pull::prepare_merge_history_successor(
+        let history_summary = super::store::pull::prepare_merge_history_successor(
             db,
             &root,
             &commit,
@@ -1491,7 +1488,7 @@ async fn prepare_circle_operation_request(
             &author,
             None,
             resolved_devices,
-            super::store_engine::engine::pull::MergeHistorySuccessorEvidence::none(),
+            super::store::pull::MergeHistorySuccessorEvidence::none(),
         )
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -1651,15 +1648,14 @@ async fn publish_circle_operation(
                     "Merge Circle operation lacks its prepared Store head".to_string(),
                 )
             })?;
-        let (_, state_after) =
-            super::store_engine::engine::pull::retained_merge_device_state_for_order(
-                db,
-                storage,
-                &root,
-                &commit.order,
-            )
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let (_, state_after) = super::store::pull::retained_merge_device_state_for_order(
+            db,
+            storage,
+            &root,
+            &commit.order,
+        )
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let head_ref = super::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),
@@ -3074,7 +3070,7 @@ mod tests {
         let db = open_test_db();
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
-        super::super::store_engine::stage_merge_acknowledgement_for_test(
+        super::super::store::stage_merge_acknowledgement_for_test(
             &db,
             &store.storage,
             super::super::store_commit::CommitFrontier::from_refs(
@@ -3495,11 +3491,10 @@ mod tests {
         );
 
         let (_store_temp, store_dir) = temp_store_dir();
-        let engine =
-            super::super::store_engine::StoreEngine::authorize_borrowed(&store.storage, &db)
-                .await
-                .expect("authorize Merge engine for pull");
-        let pull = engine
+        let authorized_store = super::super::store::Store::authorize_borrowed(&store.storage, &db)
+            .await
+            .expect("authorize Store pull");
+        let pull = authorized_store
             .pull(&store_dir, &signer)
             .await
             .expect("pull reports the invented access commit as held");

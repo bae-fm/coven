@@ -39,11 +39,9 @@ pub(crate) async fn push_store_snapshot(
             SnapshotError::PublicationState("local Store device registration is absent".to_string())
         })?;
     let (root, registration_ref, registration, device_signer) =
-        crate::sync::store_engine::engine::operations::load_local_store_authority(
-            db, &device_id, keypair,
-        )
-        .await
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        crate::sync::store::operations::load_local_store_authority(db, &device_id, keypair)
+            .await
+            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     if root.store_root_hash != store_root_hash {
         return Err(SnapshotError::PublicationState(
             "snapshot Store root differs from the activated local root".to_string(),
@@ -74,18 +72,17 @@ pub(crate) async fn push_store_snapshot(
         membership: membership_state,
         devices,
     };
-    let history_summary =
-        super::store_engine::engine::pull::prepare_merge_snapshot_history_summary(
-            db,
-            &root,
-            &coverage,
-            membership,
-            &resolved_devices,
-            &registration_ref,
-            &registration,
-        )
-        .await
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+    let history_summary = super::store::pull::prepare_merge_snapshot_history_summary(
+        db,
+        &root,
+        &coverage,
+        membership,
+        &resolved_devices,
+        &registration_ref,
+        &registration,
+    )
+    .await
+    .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     let previous = db
         .latest_local_store_snapshot()
         .await
@@ -705,7 +702,7 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     let mut stable = Vec::new();
     let mut maximal_rejection = None;
     for snapshot in candidates {
-        match super::store_engine::verify_store_snapshot_stability(storage, root, &snapshot).await {
+        match super::store::verify_store_snapshot_stability(storage, root, &snapshot).await {
             Ok(stability) => stable.push(SelectedStableStoreSnapshot {
                 snapshot,
                 stability,
@@ -1000,7 +997,7 @@ mod tests {
         )
         .await
         .expect("publish exact snapshot selector fixture");
-        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_merge_acknowledgement_for_test(
             &db,
             &store.storage,
             CommitFrontier(BTreeMap::new()),
@@ -1009,13 +1006,9 @@ mod tests {
         )
         .await
         .expect("stage exact snapshot selector acknowledgement");
-        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
-            &db,
-            &store.storage,
-            &signer,
-        )
-        .await
-        .expect("activate exact snapshot selector acknowledgement");
+        crate::sync::store::drain_merge_acknowledgements_for_test(&db, &store.storage, &signer)
+            .await
+            .expect("activate exact snapshot selector acknowledgement");
 
         let (_, selected, image, _) = select_store_snapshot(
             &store.storage,
@@ -1106,11 +1099,9 @@ mod tests {
             .expect("load continued Store root")
             .expect("continued Store root exists");
         let (_, registration_ref, registration, _) =
-            crate::sync::store_engine::engine::operations::load_local_store_authority(
-                &db, &device_id, &signer,
-            )
-            .await
-            .expect("load continued snapshot authority");
+            crate::sync::store::operations::load_local_store_authority(&db, &device_id, &signer)
+                .await
+                .expect("load continued snapshot authority");
         let published = db
             .latest_local_store_snapshot()
             .await

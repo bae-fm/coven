@@ -106,7 +106,7 @@ impl Database {
     pub(crate) async fn replace_outbound_store_device_exclusion_candidate(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+        replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let DurableStoreDeviceExclusionOperation::CandidatePrepared { object, candidate } =
             expected.clone()
@@ -335,7 +335,7 @@ impl Database {
     pub(crate) async fn begin_outbound_store_device_exclusion_replacement(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+        replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let expected_candidate = expected.candidate().cloned().ok_or_else(|| {

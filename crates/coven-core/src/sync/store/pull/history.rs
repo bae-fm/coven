@@ -1151,7 +1151,7 @@ async fn verify_merge_history_refs_impl(
             )
         })?;
         let (_, accepted_head) = Box::pin(
-            crate::sync::store_engine::engine::operations::exact_next_announcement_slot_for_verified_commit(
+            crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
                 storage,
                 root,
                 &commit.author_registration,

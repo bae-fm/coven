@@ -291,10 +291,7 @@ async fn prepare_self_retirement(
         .device_id
         .to_string();
     let (root, registration_ref, registration, device_signer) =
-        crate::sync::store_engine::engine::operations::load_local_store_authority(
-            db, &device_id, signer,
-        )
-        .await?;
+        crate::sync::store::operations::load_local_store_authority(db, &device_id, signer).await?;
     let write_id = db.new_write_id();
     let previous = db
         .latest_local_store_position()
@@ -433,7 +430,7 @@ async fn prepare_self_retirement(
     let state_after = predecessor_state
         .self_retire(retirement_ref.clone())
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store_engine::engine::pull::prepare_merge_history_successor(
+    let history = super::store::pull::prepare_merge_history_successor(
         db,
         &root,
         &commit,
@@ -442,7 +439,7 @@ async fn prepare_self_retirement(
         &registration,
         None,
         state_after,
-        super::store_engine::engine::pull::MergeHistorySuccessorEvidence::none(),
+        super::store::pull::MergeHistorySuccessorEvidence::none(),
     )
     .await
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
@@ -1627,7 +1624,7 @@ pub async fn recover_owner_device_merge(
             }),
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store_engine::engine::pull::prepare_merge_history_successor(
+    let history = super::store::pull::prepare_merge_history_successor(
         db,
         &root,
         &commit,
@@ -1636,7 +1633,7 @@ pub async fn recover_owner_device_merge(
         &registration,
         Some(&registration_ref),
         state_after,
-        super::store_engine::engine::pull::MergeHistorySuccessorEvidence {
+        super::store::pull::MergeHistorySuccessorEvidence {
             registrations: vec![super::store_commit::RetainedVerifiedRegistration {
                 reference: registration_ref.clone(),
                 value: registration.clone(),

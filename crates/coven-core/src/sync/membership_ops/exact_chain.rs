@@ -160,9 +160,7 @@ async fn validate_membership_head_activation(
     reference: &MembershipHeadRef,
     head: &AuthorHead,
     entry: &MembershipEntry,
-    verified_activations: Option<
-        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix,
-    >,
+    verified_activations: Option<&crate::sync::store::pull::VerifiedMergeMembershipPrefix>,
 ) -> Result<bool, AnchoredChainError> {
     match (
         membership_entry_requires_store_activation(entry),
@@ -187,7 +185,7 @@ async fn validate_membership_head_activation(
                 return Ok(true);
             }
             Box::pin(
-                crate::sync::store_engine::engine::pull::verify_merge_membership_head_activation(
+                crate::sync::store::pull::verify_merge_membership_head_activation(
                     storage, root, reference, head, commit,
                 ),
             )
@@ -616,9 +614,9 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
     owner_pubkey: &str,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix,
+    verified_activations: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
     pending_resolution: Option<
-        &crate::sync::store_engine::engine::pull::VerifiedMergeConflictResolutionActivation,
+        &crate::sync::store::pull::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> Result<MembershipChain, AnchoredChainError> {
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(

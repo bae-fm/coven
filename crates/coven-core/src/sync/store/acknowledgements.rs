@@ -1,3 +1,4 @@
+use super::database::StoreDatabase;
 use super::*;
 
 pub(super) async fn finish_nonactivating_acknowledgement(
@@ -5,7 +6,7 @@ pub(super) async fn finish_nonactivating_acknowledgement(
     storage: &dyn SyncStorage,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
 ) -> Result<(), crate::sync::store_outbound::StoreOutboundError> {
-    let database = StoreEngineDatabase::new(db);
+    let database = StoreDatabase::new(db);
     if let Some(target) = database
         .acknowledgement_cleanup_target(acknowledgement.clone())
         .await?
@@ -19,7 +20,7 @@ pub(super) async fn finish_nonactivating_acknowledgement(
     Ok(())
 }
 
-impl AuthorizedStoreEngine<'_> {
+impl AuthorizedStore<'_> {
     pub(crate) async fn stage_and_publish_ack(
         &self,
         identity: &UserKeypair,
@@ -61,7 +62,7 @@ impl AuthorizedStoreEngine<'_> {
                 crate::database::LOCAL_DEVICE_ID_STATE_KEY,
             ))?;
         let (root, registration_ref, registration, device_signer) =
-            crate::sync::store_engine::engine::operations::load_local_store_authority(
+            crate::sync::store::operations::load_local_store_authority(
                 self.db(),
                 &device_id,
                 identity,
@@ -188,7 +189,7 @@ impl AuthorizedStoreEngine<'_> {
                     let plan = operations::prepare_plan(
                         self.db(),
                         self.storage(),
-                        &self.membership,
+                        self.membership(),
                         &device_id,
                         identity,
                     )
@@ -199,7 +200,7 @@ impl AuthorizedStoreEngine<'_> {
                         self.db(),
                         self.storage(),
                         plan,
-                        crate::sync::store_engine::engine::operations::StoreOperationBatch::Acknowledgement {
+                        crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
                             reference: outbound.reference.clone(),
                             value: outbound.ack.value.clone(),
                         },
@@ -246,17 +247,17 @@ impl AuthorizedStoreEngine<'_> {
             ))
             .await?
             {
-                crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Activated(_) => {
+                crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {
                     self.db()
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                 }
-                crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Nonactivated(_) => {}
-                crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Reprepared => {
+                crate::sync::store::operations::StoreOperationPublicationOutcome::Nonactivated(_) => {}
+                crate::sync::store::operations::StoreOperationPublicationOutcome::Reprepared => {
                     continue;
                 }
-                crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::RepreparedCandidate(_)
-                | crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
+                crate::sync::store::operations::StoreOperationPublicationOutcome::RepreparedCandidate(_)
+                | crate::sync::store::operations::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
                     return Err(crate::sync::store_ack::StoreAckError::InvalidOutbound(
                         "acknowledgement publication returned non-acknowledgement conflict state"
                             .to_string(),

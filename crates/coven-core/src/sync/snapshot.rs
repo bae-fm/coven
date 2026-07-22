@@ -942,26 +942,21 @@ mod tests {
                 ),
             )
             .await;
-            assert!(
-                super::super::store_engine::engine::preparation::prepare_store_write(
-                    &source,
-                    &store.storage,
-                    &device_id,
-                    "2026-07-21T00:00:00Z",
-                    &signer,
-                    &store_dir,
-                    &membership,
-                )
-                .await
-                .expect("prepare snapshot history write")
-            );
+            assert!(super::super::store::preparation::prepare_store_write(
+                &source,
+                &store.storage,
+                &device_id,
+                "2026-07-21T00:00:00Z",
+                &signer,
+                &store_dir,
+                &membership,
+            )
+            .await
+            .expect("prepare snapshot history write"));
             assert_eq!(
-                super::super::store_engine::engine::publication::drain_store_writes(
-                    &source,
-                    &store.storage
-                )
-                .await
-                .expect("publish snapshot history write"),
+                super::super::store::publication::drain_store_writes(&source, &store.storage)
+                    .await
+                    .expect("publish snapshot history write"),
                 1,
             );
         }
@@ -1037,7 +1032,7 @@ mod tests {
         )
         .await
         .expect("publish bootstrap database image");
-        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+        crate::sync::store::stage_merge_acknowledgement_for_test(
             &source,
             &store.storage,
             CommitFrontier(BTreeMap::new()),
@@ -1046,13 +1041,9 @@ mod tests {
         )
         .await
         .expect("stage snapshot stability acknowledgement");
-        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
-            &source,
-            &store.storage,
-            &signer,
-        )
-        .await
-        .expect("activate snapshot stability acknowledgement");
+        crate::sync::store::drain_merge_acknowledgements_for_test(&source, &store.storage, &signer)
+            .await
+            .expect("activate snapshot stability acknowledgement");
 
         let destination = tempfile::tempdir().expect("bootstrap destination");
         let database_path = destination.path().join("store.db");

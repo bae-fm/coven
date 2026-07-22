@@ -131,7 +131,7 @@ pub(crate) async fn publish_acknowledgement_object(
     storage: &dyn SyncStorage,
     device_id: &str,
     outbound: &crate::database::OutboundStoreAck,
-    candidate: &crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+    candidate: &crate::sync::store::operations::PreparedStoreOperationCommit,
 ) -> Result<bool, StoreAckError> {
     let context = ProtocolObjectContext::signed_plaintext(
         outbound.ack.value.store_root_hash,
@@ -255,7 +255,7 @@ mod tests {
                 .expect("read acknowledgement frontier"),
         )
         .expect("shape acknowledgement frontier");
-        super::super::store_engine::stage_merge_acknowledgement_for_test(
+        super::super::store::stage_merge_acknowledgement_for_test(
             db,
             storage,
             frontier,
@@ -272,8 +272,7 @@ mod tests {
         signer: &'a UserKeypair,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, StoreAckError>> + 'a>> {
         Box::pin(async move {
-            super::super::store_engine::drain_merge_acknowledgements_for_test(db, storage, signer)
-                .await
+            super::super::store::drain_merge_acknowledgements_for_test(db, storage, signer).await
         })
     }
 
@@ -282,7 +281,7 @@ mod tests {
         storage: &CloudSyncStorage,
         signer: &UserKeypair,
         outbound: &crate::database::OutboundStoreAck,
-    ) -> crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit {
+    ) -> crate::sync::store::operations::PreparedStoreOperationCommit {
         let membership = super::super::pull::load_cycle_membership(storage, db)
             .await
             .expect("load acknowledgement test membership");
@@ -291,7 +290,7 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
-        let plan = super::super::store_engine::engine::operations::prepare_plan(
+        let plan = super::super::store::operations::prepare_plan(
             db,
             storage,
             membership
@@ -306,18 +305,18 @@ mod tests {
         plan.common()
             .validate_acknowledgement(&outbound.ack.value)
             .expect("acknowledgement matches activation predecessor");
-        let candidate = super::super::store_engine::engine::operations::prepare_candidate(
+        let candidate = super::super::store::operations::prepare_candidate(
             db,
             storage,
             plan,
-            crate::sync::store_engine::engine::operations::StoreOperationBatch::Acknowledgement {
+            crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
                 reference: outbound.reference.clone(),
                 value: outbound.ack.value.clone(),
             },
         )
         .await
         .expect("prepare acknowledgement candidate");
-        super::super::store_engine::prepare_merge_acknowledgement_activation_for_test(
+        super::super::store::prepare_merge_acknowledgement_activation_for_test(
             db,
             outbound.reference.clone(),
             candidate.clone(),
@@ -333,7 +332,7 @@ mod tests {
         storage: CloudSyncStorage,
         db: Database,
         outbound: crate::database::OutboundStoreAck,
-        losing: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+        losing: crate::sync::store::operations::PreparedStoreOperationCommit,
     }
 
     async fn losing_merge_ack_fixture(path: &Path) -> LosingMergeAckFixture {
@@ -357,18 +356,16 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
-        let competing_plan = Box::pin(
-            super::super::store_engine::engine::operations::prepare_plan(
-                &db,
-                &storage,
-                membership
-                    .chain
-                    .as_ref()
-                    .expect("resolved Merge membership"),
-                &device_id,
-                &signer,
-            ),
-        )
+        let competing_plan = Box::pin(super::super::store::operations::prepare_plan(
+            &db,
+            &storage,
+            membership
+                .chain
+                .as_ref()
+                .expect("resolved Merge membership"),
+            &device_id,
+            &signer,
+        ))
         .await
         .expect("prepare competing Store operation");
         let grant_id = super::super::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
@@ -385,14 +382,12 @@ mod tests {
                 super::super::store_commit::ObjectHash::digest(grant_bytes),
             ),
         };
-        let competing = Box::pin(
-            super::super::store_engine::engine::operations::prepare_candidate(
-                &db,
-                &storage,
-                competing_plan,
-                crate::sync::store_engine::engine::operations::StoreOperationBatch::ProviderAccessGrant(grant),
-            ),
-        )
+        let competing = Box::pin(super::super::store::operations::prepare_candidate(
+            &db,
+            &storage,
+            competing_plan,
+            crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
+        ))
         .await
         .expect("prepare competing candidate");
         assert_ne!(competing.reference, losing.reference);
@@ -684,7 +679,7 @@ mod tests {
         db.mark_remote_object_uploaded(acknowledgement_remote)
             .await
             .expect("record acknowledgement upload");
-        super::super::store_engine::engine::operations::publish_prepared(
+        super::super::store::operations::publish_prepared(
             &db,
             &storage,
             Box::new(candidate),
@@ -1009,7 +1004,7 @@ mod tests {
         let expected_head = candidate.head.clone();
         let expected_prepared = candidate.prepared_head.clone();
         let (root, registration_ref, _, device_signer) =
-            crate::sync::store_engine::engine::operations::load_local_store_authority(
+            crate::sync::store::operations::load_local_store_authority(
                 &db,
                 &outbound.reference.registration.device_id.to_string(),
                 &signer,

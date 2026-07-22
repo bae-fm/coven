@@ -11,15 +11,15 @@ use crate::sync::remote_object::{
     remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
 };
 use crate::sync::storage::PreparedExactObject;
+use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
-use crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit;
 
 #[derive(Clone, Copy)]
-pub(super) struct StoreEngineDatabase<'a> {
+pub(super) struct StoreDatabase<'a> {
     database: &'a Database,
 }
 
-impl<'a> StoreEngineDatabase<'a> {
+impl<'a> StoreDatabase<'a> {
     pub(super) fn new(database: &'a Database) -> Self {
         Self { database }
     }

@@ -1,7 +1,7 @@
 use super::registration_authority::verify_merge_provider_administrator;
 use super::*;
 
-pub(in crate::sync::store_engine) async fn verify_accepted_provider_access_activation(
+pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &super::store_commit::StoreProtocolRoot,

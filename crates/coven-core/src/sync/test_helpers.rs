@@ -1295,20 +1295,18 @@ pub async fn publish_merge_store_ack_fixture(
     frontier: crate::sync::store_commit::CommitFrontier,
     signer: &UserKeypair,
 ) -> Result<(), String> {
-    Box::pin(
-        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
-            db,
-            storage,
-            frontier,
-            "2026-07-16T00:00:01Z".to_string(),
-            signer,
-        ),
-    )
+    Box::pin(crate::sync::store::stage_merge_acknowledgement_for_test(
+        db,
+        storage,
+        frontier,
+        "2026-07-16T00:00:01Z".to_string(),
+        signer,
+    ))
     .await
     .map_err(|error| error.to_string())?;
-    let published = Box::pin(
-        crate::sync::store_engine::drain_merge_acknowledgements_for_test(db, storage, signer),
-    )
+    let published = Box::pin(crate::sync::store::drain_merge_acknowledgements_for_test(
+        db, storage, signer,
+    ))
     .await
     .map_err(|error| error.to_string())?;
     if published != 1 {
@@ -1377,7 +1375,7 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "provider administrator device id is absent".to_string())?;
         let (_, observer_registration, _, _) =
-            crate::sync::store_engine::engine::operations::load_local_store_authority(
+            crate::sync::store::operations::load_local_store_authority(
                 observer_db,
                 &observer_device_id,
                 &store.signer,
@@ -1478,7 +1476,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let membership = Box::pin(store.open_into(local_db)).await?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
-        let bootstrap_pull = Box::pin(crate::sync::store_engine::pull_store_commits(
+        let bootstrap_pull = Box::pin(crate::sync::store::pull_store_commits(
             local_db,
             local_db.synced_tables(),
             &store.storage,
@@ -1563,7 +1561,7 @@ pub async fn promote_active_member_fixture(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Member Store device id is absent".to_string())?;
     let (_, member_registration, _, _) =
-        crate::sync::store_engine::engine::operations::load_local_store_authority(
+        crate::sync::store::operations::load_local_store_authority(
             member_db,
             &member_device_id,
             member,
@@ -1604,7 +1602,7 @@ pub async fn promote_active_member_fixture(
         .chain
         .ok_or_else(|| "promoted member has no membership chain".to_string())?;
     let (_temp, store_dir) = temp_store_dir();
-    let pull = Box::pin(crate::sync::store_engine::pull_store_commits(
+    let pull = Box::pin(crate::sync::store::pull_store_commits(
         member_db,
         member_db.synced_tables(),
         &store.storage,
@@ -2135,7 +2133,7 @@ impl TestStore {
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
+        let prepared = crate::sync::store::preparation::prepare_store_write(
             &db,
             &self.storage,
             &device_id,
@@ -2149,7 +2147,7 @@ impl TestStore {
         if !prepared {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        crate::sync::store_engine::engine::publication::drain_store_writes(&db, &self.storage)
+        crate::sync::store::publication::drain_store_writes(&db, &self.storage)
             .await
             .map_err(|error| error.to_string())?;
         db.latest_local_store_position()
@@ -2250,7 +2248,7 @@ impl TestStore {
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
+        let prepared = crate::sync::store::preparation::prepare_store_write(
             db,
             &self.storage,
             &device_id,
@@ -2261,10 +2259,9 @@ impl TestStore {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let published =
-            crate::sync::store_engine::engine::publication::drain_store_writes(db, &self.storage)
-                .await
-                .map_err(|error| error.to_string())?;
+        let published = crate::sync::store::publication::drain_store_writes(db, &self.storage)
+            .await
+            .map_err(|error| error.to_string())?;
         if published > 0 {
             crate::sync::cycle::drain_published_blob_drop_intents(db, store_dir, u64::MAX).await?;
             crate::blob::local_cleanup::drain(db, store_dir)
@@ -2291,7 +2288,7 @@ pub async fn pull_into_result(
             crate::sync::store_pull::StorePullMembershipError::Message(error),
         )
     })?);
-    let result = Box::pin(crate::sync::store_engine::pull_store_commits(
+    let result = Box::pin(crate::sync::store::pull_store_commits(
         db,
         db.synced_tables(),
         &store.storage,

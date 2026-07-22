@@ -371,7 +371,7 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
         &fixture.store.root,
         &fixture.owner_pubkey,
         current.head_refs(),
-        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
     )
     .await
     .expect("project direct membership to the empty Store prefix");
@@ -418,7 +418,7 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
         &fixture.store.root,
         &fixture.owner_pubkey,
         candidate.head_refs(),
-        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
     )
     .await
     .expect("project membership before the Owner promotion Store control");
@@ -873,7 +873,7 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
     };
     let statuses = membership_projection_statuses(
         &graph,
-        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
         &BTreeMap::new(),
     )
     .expect("project deep predecessor path");

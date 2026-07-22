@@ -12,28 +12,35 @@ use super::storage::SyncStorage;
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 use super::store_pull::StorePullResult;
 
-pub(crate) mod engine;
+pub(crate) mod abandonment;
+mod acknowledgements;
+mod database;
+pub(crate) mod operations;
+mod owner;
+pub(crate) mod preparation;
+pub(crate) mod publication;
+pub(crate) mod pull;
 
 #[doc(hidden)]
-pub use engine::abandonment::MergeCandidateAbandonment;
-pub(crate) use engine::{AuthorizedStoreEngine, StoreEngine};
+pub use abandonment::MergeCandidateAbandonment;
+pub(crate) use owner::{AuthorizedStore, Store};
 
-enum StoreEngineLoadError {
+enum StoreLoadError {
     Database(crate::database::DbError),
     Object(super::store_objects::StoreObjectError),
     MissingRoot,
     Invalid(String),
 }
 
-impl From<StoreEngineLoadError> for super::store_outbound::StoreOutboundError {
-    fn from(error: StoreEngineLoadError) -> Self {
+impl From<StoreLoadError> for super::store_outbound::StoreOutboundError {
+    fn from(error: StoreLoadError) -> Self {
         match error {
-            StoreEngineLoadError::Database(error) => error.into(),
-            StoreEngineLoadError::Object(error) => Self::Object(error),
-            StoreEngineLoadError::MissingRoot => Self::MissingState {
-                key: engine::operations::STORE_ROOT_AUTHORITY,
+            StoreLoadError::Database(error) => error.into(),
+            StoreLoadError::Object(error) => Self::Object(error),
+            StoreLoadError::MissingRoot => Self::MissingState {
+                key: operations::STORE_ROOT_AUTHORITY,
             },
-            StoreEngineLoadError::Invalid(reason) => Self::InvalidOutbound(reason),
+            StoreLoadError::Invalid(reason) => Self::InvalidOutbound(reason),
         }
     }
 }
@@ -46,27 +53,26 @@ pub async fn abandon_merge_candidate(
     identity: &UserKeypair,
     write_id: crate::WriteId,
 ) -> Result<MergeCandidateAbandonment, super::store_outbound::StoreOutboundError> {
-    load_store_engine(db, storage)
+    load_store(db, storage)
         .await?
         .abandon_candidate(device_id, identity, write_id)
         .await
 }
 
-async fn load_store_engine(
+async fn load_store(
     db: &Database,
     storage: Arc<CloudSyncStorage>,
-) -> Result<StoreEngine, StoreEngineLoadError> {
+) -> Result<Store, StoreLoadError> {
     let store_root = db
         .local_store_root_ref()
         .await
-        .map_err(StoreEngineLoadError::Database)?
-        .ok_or(StoreEngineLoadError::MissingRoot)?;
+        .map_err(StoreLoadError::Database)?
+        .ok_or(StoreLoadError::MissingRoot)?;
     let verified_root = super::store_objects::load_store_protocol_root(&*storage, &store_root)
         .await
-        .map_err(StoreEngineLoadError::Object)?
+        .map_err(StoreLoadError::Object)?
         .value;
-    StoreEngine::new(db.clone(), storage, store_root, &verified_root)
-        .map_err(StoreEngineLoadError::Invalid)
+    Store::new(db.clone(), storage, store_root, &verified_root).map_err(StoreLoadError::Invalid)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -77,10 +83,10 @@ pub(crate) async fn stage_merge_acknowledgement_for_test(
     sync_time: String,
     identity: &UserKeypair,
 ) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError> {
-    let engine = StoreEngine::authorize_borrowed(storage, db)
+    let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
-    engine
+    store
         .stage_acknowledgement(frontier, sync_time, identity)
         .await
 }
@@ -91,19 +97,19 @@ pub(crate) async fn drain_merge_acknowledgements_for_test(
     storage: &dyn SyncStorage,
     identity: &UserKeypair,
 ) -> Result<u64, super::store_ack::StoreAckError> {
-    let engine = StoreEngine::authorize_borrowed(storage, db)
+    let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
-    engine.drain_acknowledgements(identity).await
+    store.drain_acknowledgements(identity).await
 }
 
 #[cfg(test)]
 pub(crate) async fn prepare_merge_acknowledgement_activation_for_test(
     db: &Database,
     acknowledgement: super::store_commit::StoreAckRef,
-    candidate: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
+    candidate: crate::sync::store::operations::PreparedStoreOperationCommit,
 ) -> Result<(), crate::database::DbError> {
-    engine::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
+    owner::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
 }
 
 pub(crate) async fn verify_store_snapshot_stability(
@@ -111,7 +117,7 @@ pub(crate) async fn verify_store_snapshot_stability(
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<super::store_pull::VerifiedStoreSnapshotStability, super::store_pull::StorePullError> {
-    engine::pull::verify_snapshot_stability(storage, root, snapshot).await
+    pull::verify_snapshot_stability(storage, root, snapshot).await
 }
 
 #[cfg(test)]
@@ -120,7 +126,7 @@ pub(crate) async fn verify_merge_snapshot_for_acknowledgement_for_test(
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<(), super::store_pull::StorePullError> {
-    engine::pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
+    pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -134,7 +140,7 @@ pub fn pull_store_commits<'a>(
     membership: &'a super::membership::MembershipChain,
     identity: Option<&'a UserKeypair>,
 ) -> super::store_pull::StorePullFuture<'a, StorePullResult> {
-    engine::pull::pull_store_commits(
+    pull::pull_store_commits(
         db,
         tables,
         storage,
@@ -159,7 +165,7 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
             storage, root, reference, owner,
         )
         .await?;
-        engine::pull::verify_device_join_attempt_evidence(storage, root, evidence).await
+        pull::verify_device_join_attempt_evidence(storage, root, evidence).await
     })
 }
 
@@ -172,7 +178,7 @@ pub(crate) fn verify_device_join_cleanup_activation<'a>(
         let evidence =
             super::store_pull::load_device_join_cleanup_activation(storage, root, activation)
                 .await?;
-        engine::pull::verify_device_join_cleanup_activation(storage, root, evidence).await
+        pull::verify_device_join_cleanup_activation(storage, root, evidence).await
     })
 }
 
@@ -186,7 +192,7 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     let root_value = super::store_objects::load_store_protocol_root(storage, root)
         .await?
         .value;
-    engine::pull::verify_accepted_provider_access_activation(
+    pull::verify_accepted_provider_access_activation(
         storage,
         root,
         &root_value,
@@ -204,7 +210,7 @@ pub(crate) fn prepare_device_join_bootstrap<'a>(
     attempt_activation: &'a super::store_commit::StoreBatchCommitRef,
     membership_state: &'a super::circle_control::StoreMembershipStateRef,
 ) -> super::store_pull::StorePullFuture<'a, super::store_pull::DeviceJoinBootstrapPlan> {
-    engine::pull::prepare_device_join_bootstrap(
+    pull::prepare_device_join_bootstrap(
         storage,
         root,
         coverage,
@@ -221,7 +227,7 @@ pub(crate) fn materialize_device_join_activation<'a>(
     expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
     membership_state: &'a super::circle_control::StoreMembershipStateRef,
 ) -> super::store_pull::StorePullFuture<'a, ()> {
-    engine::pull::materialize_device_join_activation(
+    pull::materialize_device_join_activation(
         db,
         storage,
         root,
@@ -239,7 +245,7 @@ pub(crate) async fn find_owner_promotion_request_activation(
     request: &super::store_commit::OwnerPromotionRequest,
 ) -> Result<super::store_commit::OwnerPromotionRequestActivation, super::store_pull::StorePullError>
 {
-    engine::pull::find_owner_promotion_request_activation(storage, root, request).await
+    pull::find_owner_promotion_request_activation(storage, root, request).await
 }
 
 pub(crate) async fn verify_owner_promotion_acceptance(
@@ -247,18 +253,18 @@ pub(crate) async fn verify_owner_promotion_acceptance(
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
 ) -> Result<VerifiedOwnerPromotionAcceptance, super::store_pull::StorePullError> {
-    engine::pull::verify_owner_promotion_acceptance(storage, root, acceptance)
+    pull::verify_owner_promotion_acceptance(storage, root, acceptance)
         .await
         .map(|()| VerifiedOwnerPromotionAcceptance)
 }
 
-pub(super) struct StoreEngineContext {
+pub(super) struct StoreContext {
     db: Database,
     storage: Arc<CloudSyncStorage>,
     store_root: StoreRootRef,
 }
 
-impl StoreEngineContext {
+impl StoreContext {
     fn db(&self) -> &Database {
         &self.db
     }

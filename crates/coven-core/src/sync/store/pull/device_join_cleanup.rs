@@ -2,7 +2,7 @@ use super::registration_authority::verify_merge_provider_administrator;
 use super::*;
 use crate::sync::store_pull::LoadedDeviceJoinCleanupActivation;
 
-pub(in crate::sync::store_engine) fn verify_device_join_cleanup_activation<'a>(
+pub(in crate::sync::store) fn verify_device_join_cleanup_activation<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     activation: LoadedDeviceJoinCleanupActivation,

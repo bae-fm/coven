@@ -60,24 +60,24 @@ mod snapshot_authority;
 mod terminal_authority;
 mod terminal_cleanup;
 
-pub(in crate::sync::store_engine) use device_join_attempt::verify_device_join_attempt_evidence;
-pub(in crate::sync::store_engine) use device_join_cleanup::verify_device_join_cleanup_activation;
+pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence;
+pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
 pub(crate) use device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,
 };
 pub(crate) use discovery::*;
 pub(crate) use history::*;
-pub(in crate::sync::store_engine) use join_bootstrap::{
+pub(in crate::sync::store) use join_bootstrap::{
     materialize_device_join_activation, prepare_device_join_bootstrap,
 };
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
-pub(in crate::sync::store_engine) use owner_promotion::{
+pub(in crate::sync::store) use owner_promotion::{
     find_request_activation as find_owner_promotion_request_activation,
     verify_acceptance as verify_owner_promotion_acceptance,
 };
-pub(in crate::sync::store_engine) use provider_access::verify_accepted_provider_access_activation;
-pub(in crate::sync::store_engine) use registration_authority::load_device_join_authorization;
+pub(in crate::sync::store) use provider_access::verify_accepted_provider_access_activation;
+pub(in crate::sync::store) use registration_authority::load_device_join_authorization;
 pub(crate) use registration_authority::{
     load_merge_predecessor_membership, load_merge_predecessor_membership_with_verified_activations,
     verify_merge_membership_state_ref,
@@ -85,7 +85,7 @@ pub(crate) use registration_authority::{
 use registration_validation::load_merge_commit_registrations;
 use replay::*;
 pub(crate) use retained_authority::*;
-pub(in crate::sync::store_engine) use snapshot_authority::{
+pub(in crate::sync::store) use snapshot_authority::{
     verify_snapshot_for_acknowledgement, verify_snapshot_stability,
 };
 pub(super) use terminal_authority::*;
@@ -124,7 +124,7 @@ impl LoadedMergePredecessorMemberships {
     }
 }
 
-impl AuthorizedStoreEngine<'_> {
+impl AuthorizedStore<'_> {
     pub(crate) async fn pull(
         &self,
         store_dir: &StoreDir,
@@ -136,7 +136,7 @@ impl AuthorizedStoreEngine<'_> {
             self.storage(),
             self.store_root().store_root_hash,
             store_dir,
-            &self.membership,
+            self.membership(),
             Some(identity),
         )
         .await

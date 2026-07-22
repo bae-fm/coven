@@ -377,7 +377,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
     assert!(
-        crate::sync::store_engine::engine::preparation::prepare_store_write(
+        crate::sync::store::preparation::prepare_store_write(
             &member_db,
             &storage.storage,
             &member_device_id,
@@ -393,12 +393,9 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    crate::sync::store_engine::engine::publication::drain_store_writes(
-        &member_db,
-        &storage.storage,
-    )
-    .await
-    .expect("publish member commit while grant is active");
+    crate::sync::store::publication::drain_store_writes(&member_db, &storage.storage)
+        .await
+        .expect("publish member commit while grant is active");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
