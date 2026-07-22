@@ -1,5 +1,9 @@
 use super::*;
 
+mod database;
+
+use database::SerialDatabase;
+
 pub(super) struct SerialStoreEngine {
     context: StoreEngineContext,
 }
@@ -23,6 +27,10 @@ impl SerialStoreEngine {
     }
     pub(super) fn db(&self) -> &Database {
         self.context.db()
+    }
+
+    fn database(&self) -> SerialDatabase<'_> {
+        SerialDatabase::new(self.db())
     }
 
     pub(super) fn storage(&self) -> &Arc<CloudSyncStorage> {
@@ -74,21 +82,6 @@ impl SerialStoreEngine {
         authorize_serial(self.access()).await
     }
 
-    async fn device_id(&self) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
-        self.db()
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| {
-                crate::sync::membership_ops::MembershipOpsError::Database(error.to_string())
-            })?
-            .ok_or(
-                crate::sync::store_outbound::StoreOutboundError::MissingState {
-                    key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-                },
-            )
-            .map_err(Into::into)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn invite_member(
         &self,
@@ -101,7 +94,7 @@ impl SerialStoreEngine {
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::membership_ops::MembershipOpsError> {
-        let device_id = self.device_id().await?;
+        let device_id = self.database().required_device_id().await?;
         crate::sync::membership_ops::invite_serial_member(
             &**self.storage(),
             self.storage().cloud_home(),
@@ -131,7 +124,7 @@ impl SerialStoreEngine {
         cipher: &crate::sync::cloud_storage::CloudCipherState,
         pending_rotation: &crate::sync::cloud_storage::PendingRotation,
     ) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
-        let device_id = self.device_id().await?;
+        let device_id = self.database().required_device_id().await?;
         crate::sync::membership_ops::remove_serial_member_and_adopt(
             &**self.storage(),
             self.storage().cloud_home(),
@@ -249,6 +242,10 @@ impl AuthorizedSerialStoreEngine<'_> {
         self.access.db
     }
 
+    fn database(&self) -> SerialDatabase<'_> {
+        SerialDatabase::new(self.db())
+    }
+
     pub(super) fn storage(&self) -> &dyn SyncStorage {
         self.access.storage
     }
@@ -346,46 +343,19 @@ impl AuthorizedSerialStoreEngine<'_> {
             SyncCycleFailure::operation("reload Serial authorization after publication", error)
         })?
         .head;
-        let Some(branch) = self
-            .db()
-            .unresolved_serial_branch()
+        self.database()
+            .should_stop_before_pull(authoritative_head)
             .await
-            .map_err(|error| format!("read unresolved Serial branch: {error}"))?
-        else {
-            return Ok(false);
-        };
-        let stale = branch.base != authoritative_head;
-        if !branch.conflicted && stale {
-            let authoritative_predecessor = self
-                .db()
-                .exact_serial_predecessor(authoritative_head)
-                .await
-                .map_err(|error| format!("resolve exact Serial head: {error}"))?;
-            self.db()
-                .mark_serial_branch_conflict(
-                    branch.branch_id,
-                    branch.base,
-                    authoritative_predecessor,
-                )
-                .await
-                .map_err(|error| format!("record Serial branch conflict: {error}"))?;
-        }
-        Ok(branch.conflicted || stale)
+            .map_err(|error| format!("inspect Serial branch before pull: {error}").into())
     }
 
     pub(super) async fn required_membership(
         &self,
     ) -> Result<crate::sync::membership::SerialMembershipState, SyncCycleFailure> {
-        self.db()
-            .serial_authorization_state()
+        self.database()
+            .required_membership()
             .await
-            .map_err(|error| format!("read materialized Serial membership: {error}"))?
-            .ok_or_else(|| {
-                "materialized Serial authorization is absent"
-                    .to_string()
-                    .into()
-            })
-            .map(|state| state.membership)
+            .map_err(|error| format!("read materialized Serial membership: {error}").into())
     }
 
     pub(super) async fn prepare_pending_store_write(
