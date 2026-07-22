@@ -1,5 +1,35 @@
 use super::*;
 
+pub(super) async fn replay_merge_device_history(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    tip: &StoreBatchCommitRef,
+) -> Result<
+    (
+        ResolvedStoreDeviceState,
+        VerifiedStoreDeviceOperations,
+        StoreBatchCommit,
+        Option<VerifiedCircleActivations>,
+    ),
+    StorePullError,
+> {
+    let history = verify_merge_history_refs(storage, root, [tip.clone()]).await?;
+    let verified = history.commits.get(tip).ok_or_else(|| {
+        StorePullError::Database(
+            "author exclusion activation is absent from its verified history".to_string(),
+        )
+    })?;
+    Ok((
+        verified.predecessor_state.clone(),
+        verified.operations.clone(),
+        verified.commit.clone(),
+        verified
+            .membership_control
+            .as_ref()
+            .map(|control| control.activations.clone()),
+    ))
+}
+
 pub(super) async fn verified_terminal_merge_retractions(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -210,7 +240,7 @@ pub(super) async fn verified_terminal_merge_retractions(
     Ok(verified_by_reference.into_values().collect())
 }
 
-pub(crate) fn replay_retained_merge_projection_on(
+pub(super) fn replay_retained_merge_projection_on(
     live: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
