@@ -281,13 +281,12 @@ async fn resolve_candidate_device_operations(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    candidate: &Candidate,
+    merge_candidate: &MergeCandidate,
 ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
-    match &candidate.device_operations {
-        CandidateDeviceOperations::Verified(operations) => Ok(operations.clone()),
-        CandidateDeviceOperations::MergePending {
-            predecessor_membership,
-        } => {
+    match &merge_candidate.device_operations {
+        MergeCandidateDeviceOperations::Verified(operations) => Ok(operations.clone()),
+        MergeCandidateDeviceOperations::Pending => {
+            let candidate = &merge_candidate.candidate;
             let (state_ref, state) = db
                 .store_device_state_for_order(&candidate.commit.order)
                 .await?;
@@ -297,8 +296,9 @@ async fn resolve_candidate_device_operations(
                         .to_string(),
                 ));
             }
-            let authority =
-                RegistrationPredecessorAuthority::MergeConcurrent(predecessor_membership);
+            let authority = RegistrationPredecessorAuthority::MergeConcurrent(
+                &merge_candidate.predecessor_membership,
+            );
             let resolver = DeviceStateResolver::Database(db);
             load_commit_device_operations(
                 Some(&resolver),
@@ -317,7 +317,7 @@ async fn resolve_candidate_device_operations(
     }
 }
 
-pub(crate) async fn apply_candidate(
+pub(super) async fn apply_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -329,7 +329,7 @@ pub(crate) async fn apply_candidate(
 ) -> Result<ApplyOutcome, StorePullError> {
     let candidate = &merge_candidate.candidate;
     let device_operations =
-        resolve_candidate_device_operations(db, storage, root, candidate).await?;
+        resolve_candidate_device_operations(db, storage, root, merge_candidate).await?;
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     let verified_circle_activations = match load_pull_circle_activations(
         db,

@@ -58,6 +58,38 @@ pub(crate) use membership_control::*;
 pub(crate) use replay::*;
 pub(crate) use retained_authority::*;
 
+#[derive(Clone)]
+enum MergeCandidateDeviceOperations {
+    Verified(VerifiedStoreDeviceOperations),
+    Pending,
+}
+
+#[derive(Clone)]
+struct MergeCandidate {
+    candidate: Candidate,
+    activation_head: StoreDeviceHead,
+    activation_head_object: ExactObjectRef,
+    predecessor_membership: MembershipChain,
+    device_operations: MergeCandidateDeviceOperations,
+}
+
+struct LoadedMergePredecessorMemberships {
+    by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
+}
+
+impl LoadedMergePredecessorMemberships {
+    fn membership_for(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<&MembershipChain, StorePullError> {
+        self.by_commit.get(reference).ok_or_else(|| {
+            StorePullError::Database(format!(
+                "retained Merge commit {reference:?} has no loaded predecessor membership"
+            ))
+        })
+    }
+}
+
 impl AuthorizedMergeStoreEngine<'_> {
     pub(in crate::sync::store_engine) async fn pull(
         &self,
@@ -317,16 +349,14 @@ pub(crate) fn pull_store_commits<'a>(
                 let device_operations = if commit.device_exclusion_proposals().is_empty()
                     && commit.device_exclusion_outcomes().is_empty()
                 {
-                    CandidateDeviceOperations::Verified(
+                    MergeCandidateDeviceOperations::Verified(
                         crate::sync::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                             &commit,
                         )
                         .map_err(|error| StorePullError::Database(error.to_string()))?,
                     )
                 } else {
-                    CandidateDeviceOperations::MergePending {
-                        predecessor_membership: predecessor_membership.clone(),
-                    }
+                    MergeCandidateDeviceOperations::Pending
                 };
                 candidates.insert(
                     key,
@@ -339,9 +369,9 @@ pub(crate) fn pull_store_commits<'a>(
                             author: registration.clone(),
                             package,
                             registrations,
-                            device_operations,
                         },
                         predecessor_membership,
+                        device_operations,
                     },
                 );
             }

@@ -26,7 +26,8 @@ use crate::sync::storage::{
 use crate::sync::store_commit::{
     serial_head_key, ObjectHash, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
-    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, VerifiedStoreDeviceOperations,
+    SERIAL_STREAM_ID,
 };
 use crate::sync::store_objects::{
     load_founder_registration, load_founder_registration_with_root, load_registration_ref,
@@ -49,6 +50,13 @@ pub use resolution::SerialResolutionPlan;
 pub(crate) use resolution::{
     cleanup_serial_candidates, prepare_serial_resolution, SerialResolutionCommit,
 };
+
+struct SerialApplicationCandidate {
+    candidate: Candidate,
+    device_operations: VerifiedStoreDeviceOperations,
+    membership_authority: SerialAuthorizationState,
+    authorization_after: SerialAuthorizationState,
+}
 
 impl AuthorizedSerialStoreEngine<'_> {
     pub(in crate::sync::store_engine) async fn pull(
@@ -178,10 +186,8 @@ async fn pull_verified_store_commits(
                 author: authorized.author,
                 package,
                 registrations: authorized.registrations,
-                device_operations: CandidateDeviceOperations::Verified(
-                    authorized.device_operations,
-                ),
             },
+            device_operations: authorized.device_operations,
             membership_authority: authorized.authorization_before,
             authorization_after: authorized.authorization_after,
         });

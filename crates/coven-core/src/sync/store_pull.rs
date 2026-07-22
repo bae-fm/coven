@@ -247,38 +247,6 @@ pub(crate) struct Candidate {
     pub(crate) author: StoreDeviceRegistration,
     pub(crate) package: Option<Vec<u8>>,
     pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    pub(crate) device_operations: CandidateDeviceOperations,
-}
-
-#[derive(Clone)]
-pub(crate) struct MergeCandidate {
-    pub(crate) candidate: Candidate,
-    pub(crate) activation_head: StoreDeviceHead,
-    pub(crate) activation_head_object: ExactObjectRef,
-    pub(crate) predecessor_membership: MembershipChain,
-}
-
-pub(crate) struct LoadedMergePredecessorMemberships {
-    pub(crate) by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
-}
-
-impl LoadedMergePredecessorMemberships {
-    pub(crate) fn membership_for(
-        &self,
-        reference: &StoreBatchCommitRef,
-    ) -> Result<&MembershipChain, StorePullError> {
-        self.by_commit.get(reference).ok_or_else(|| {
-            StorePullError::Database(format!(
-                "retained Merge commit {reference:?} has no loaded predecessor membership"
-            ))
-        })
-    }
-}
-
-pub(crate) struct SerialApplicationCandidate {
-    pub(crate) candidate: Candidate,
-    pub(crate) membership_authority: SerialAuthorizationState,
-    pub(crate) authorization_after: SerialAuthorizationState,
 }
 
 pub(crate) struct VerifiedAuthorExclusionActivation {
@@ -548,14 +516,6 @@ pub(crate) struct CirclePackageAccess {
 
 pub(crate) type CirclePackageAccesses =
     BTreeMap<(super::circle::CircleId, super::circle::CircleControlCoord), CirclePackageAccess>;
-
-#[derive(Clone)]
-pub(crate) enum CandidateDeviceOperations {
-    Verified(VerifiedStoreDeviceOperations),
-    MergePending {
-        predecessor_membership: MembershipChain,
-    },
-}
 
 pub(crate) fn parse_candidate_store_package(
     candidate: &Candidate,

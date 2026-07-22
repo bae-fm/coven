@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) async fn verified_terminal_merge_retractions(
+pub(super) async fn verified_terminal_merge_retractions(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

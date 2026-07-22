@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) async fn apply_serial_candidate(
+pub(super) async fn apply_serial_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
@@ -10,14 +10,7 @@ pub(crate) async fn apply_serial_candidate(
     identity: Option<&crate::keys::UserKeypair>,
 ) -> Result<Vec<RowChange>, StorePullError> {
     let candidate = &application.candidate;
-    let device_operations = match &candidate.device_operations {
-        CandidateDeviceOperations::Verified(operations) => operations.clone(),
-        CandidateDeviceOperations::MergePending { .. } => {
-            return Err(StorePullError::Serial(
-                "Serial candidate carries unresolved Merge device operations".to_string(),
-            ))
-        }
-    };
+    let device_operations = application.device_operations.clone();
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     let verified_circle_activations = match Box::pin(load_pull_circle_activations(
         db,

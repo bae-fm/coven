@@ -101,6 +101,7 @@ pub(crate) async fn prepare_serial_resolution(
     let mut prior_circle_accesses = CirclePackageAccesses::new();
     let mut verified_prefix = VerifiedStreamActivationPrefix::empty();
     for authorized in authorized_chain.into_iter().skip(first) {
+        let device_operations = authorized.device_operations;
         let package =
             load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
                 .await?;
@@ -129,7 +130,6 @@ pub(crate) async fn prepare_serial_resolution(
             author: authorized.author,
             package,
             registrations: authorized.registrations,
-            device_operations: CandidateDeviceOperations::Verified(authorized.device_operations),
         };
         let prepared = prepare_serial_candidate(
             db,
@@ -150,14 +150,6 @@ pub(crate) async fn prepare_serial_resolution(
                 ));
             }
         }
-        let device_operations = match candidate.device_operations {
-            CandidateDeviceOperations::Verified(operations) => operations,
-            CandidateDeviceOperations::MergePending { .. } => {
-                return Err(StorePullError::Serial(
-                    "Serial resolution contains unresolved Merge device operations".to_string(),
-                ));
-            }
-        };
         verified_prefix
             .extend(verified_circle_activations.stream_activations())
             .map_err(|error| StorePullError::Serial(error.to_string()))?;
