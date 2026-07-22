@@ -1,6 +1,7 @@
 use super::*;
 
 mod acknowledgements;
+pub(crate) mod publication;
 pub(super) mod pull;
 
 pub(super) struct MergeStoreEngine {
@@ -270,7 +271,7 @@ impl AuthorizedMergeStoreEngine<'_> {
     pub(super) async fn drain_store_writes(
         &self,
     ) -> Result<u64, crate::sync::store_outbound::StoreOutboundError> {
-        crate::sync::store_outbound::drain_merge_store_writes(self.db(), self.storage()).await
+        publication::drain_store_writes(self.db(), self.storage()).await
     }
 
     pub(super) async fn prepare_pending_store_write(

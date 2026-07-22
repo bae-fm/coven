@@ -797,7 +797,7 @@ impl SyncManager {
                     SyncError::Protocol(format!("Serial coordination: {error}"))
                 })?;
                 let reference =
-                    crate::sync::store_outbound::current_serial_head_ref(&self.db, coordination)
+                    crate::sync::store_engine::current_serial_head_ref(&self.db, coordination)
                         .await
                         .map_err(|error| SyncError::Protocol(error.to_string()))?;
                 crate::join_code::MembershipFloor::Serial(reference)

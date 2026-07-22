@@ -2,6 +2,7 @@ use super::*;
 
 mod acknowledgements;
 mod database;
+pub(crate) mod publication;
 pub(super) mod pull;
 
 use database::SerialDatabase;
@@ -297,12 +298,7 @@ impl AuthorizedSerialStoreEngine<'_> {
     pub(super) async fn drain_store_writes(
         &self,
     ) -> Result<u64, crate::sync::store_outbound::StoreOutboundError> {
-        crate::sync::store_outbound::drain_serial_store_writes(
-            self.db(),
-            self.storage(),
-            self.coordination(),
-        )
-        .await
+        publication::drain_store_writes(self.db(), self.storage(), self.coordination()).await
     }
 
     pub(super) async fn snapshot_position(

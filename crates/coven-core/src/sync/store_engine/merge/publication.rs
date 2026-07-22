@@ -1,39 +1,13 @@
 use super::*;
+use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use crate::sync::store_commit::{
+    commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreCommitCoord,
+    StoreDeviceHeadRef,
+};
+use crate::sync::store_objects::StoreObjectError;
+use crate::sync::store_outbound::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub async fn drain_store_writes(
-    db: &Database,
-    storage: &dyn SyncStorage,
-) -> Result<u64, StoreOutboundError> {
-    drain_merge_store_writes(db, storage).await
-}
-
-#[cfg(test)]
-pub(crate) async fn drain_store_writes_with_coordination(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-) -> Result<u64, StoreOutboundError> {
-    if db.write_policy() == crate::WritePolicy::Serial {
-        return drain_serial_store_writes(
-            db,
-            storage,
-            coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?,
-        )
-        .await;
-    }
-    drain_merge_store_writes(db, storage).await
-}
-
-pub(crate) async fn drain_serial_store_writes(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-) -> Result<u64, StoreOutboundError> {
-    drain_serial_store_branch(db, storage, coordination).await
-}
-
-pub(crate) async fn drain_merge_store_writes(
+pub(crate) async fn drain_store_writes(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreOutboundError> {
@@ -53,7 +27,7 @@ pub(crate) async fn drain_merge_store_writes(
             let commit = &batch.commit.value;
             if !matches!(
                 commit.body,
-                super::store_commit::StoreCommitBody::AbandonCandidates { .. }
+                crate::sync::store_commit::StoreCommitBody::AbandonCandidates { .. }
             ) {
                 publish_prepared_remote_objects(db, storage, &write_id, store_root_hash).await?;
             }

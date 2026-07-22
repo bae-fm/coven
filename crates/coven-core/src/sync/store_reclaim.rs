@@ -2271,10 +2271,10 @@ mod tests {
         .await
         .expect("prepare Serial target package");
         assert_eq!(
-            super::super::store_outbound::drain_store_writes_with_coordination(
+            super::super::store_engine::serial::publication::drain_store_writes(
                 &db,
                 &store.storage,
-                Some(&store.storage),
+                &store.storage,
             )
             .await
             .expect("publish Serial target package"),

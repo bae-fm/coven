@@ -158,12 +158,13 @@ async fn remove_serial_member(
                 )))
             })?;
         if plan.revokee_pubkey == public_key_hex {
-            let authorization = crate::sync::store_outbound::current_serial_authorization(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let authorization =
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             if serial_removal_receipt_is_current(&plan, &authorization)? {
                 let fingerprint =
                     serde_json::from_slice(&receipt.result_bytes).map_err(|error| {
@@ -201,12 +202,13 @@ async fn remove_serial_member(
             (plan, progress, row.intent_hash)
         }
         None => {
-            let authorization = crate::sync::store_outbound::current_serial_authorization(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let authorization =
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             let authority_refs =
                 authorization.active_wrapped_keys_for(&crate::keys::public_key_hex(user_keypair));
             let current_keyring = crate::sync::invite::load_authorized_owner_keyring(

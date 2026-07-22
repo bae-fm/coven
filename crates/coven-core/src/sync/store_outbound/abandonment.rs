@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store_engine::serial::publication::{observe_serial_head, SerialHeadObservation};
 
 pub async fn prepare_merge_candidate_abandonment(
     db: &Database,
@@ -560,7 +561,7 @@ pub async fn abandon_merge_candidate(
             return Ok(MergeCandidateAbandonment::Abandoned);
         }
     }
-    drain_merge_store_writes(db, storage).await?;
+    crate::sync::store_engine::merge::publication::drain_store_writes(db, storage).await?;
     if !db.merge_candidate_cleanup_pending(&write_id).await? {
         return Err(StoreOutboundError::InvalidOutbound(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
@@ -586,7 +587,7 @@ async fn finish_merge_abandonment(
         }
         crate::database::MergeAbandonmentState::CandidateWon => {
             db.resume_winning_merge_candidate(write_id).await?;
-            drain_merge_store_writes(db, storage).await?;
+            crate::sync::store_engine::merge::publication::drain_store_writes(db, storage).await?;
             Ok(MergeCandidateAbandonment::CandidateActivated)
         }
         crate::database::MergeAbandonmentState::Prepared => {
@@ -715,7 +716,7 @@ impl VerifiedMergeWinner {
         &self.winner_commit
     }
 
-    pub(super) fn into_head(self) -> (StoreDeviceHead, PreparedExactObject) {
+    pub(crate) fn into_head(self) -> (StoreDeviceHead, PreparedExactObject) {
         (self.winner, self.winner_prepared)
     }
 
@@ -775,7 +776,7 @@ pub(super) async fn observe_excluded_candidate_head(
     }
 }
 
-pub(super) fn verify_merge_candidate_nonactivations(
+pub(crate) fn verify_merge_candidate_nonactivations(
     observation: &VerifiedMergeWinner,
     targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
     author: &StoreDeviceRegistration,
@@ -800,7 +801,7 @@ pub(super) fn verify_merge_candidate_nonactivations(
     Ok(nonactivations)
 }
 
-pub(super) async fn read_occupied_merge_head(
+pub(crate) async fn read_occupied_merge_head(
     db: &Database,
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,

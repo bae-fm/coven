@@ -2359,7 +2359,7 @@ impl TestStore {
         if !prepared {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        crate::sync::store_outbound::drain_store_writes(&db, &self.storage)
+        crate::sync::store_engine::merge::publication::drain_store_writes(&db, &self.storage)
             .await
             .map_err(|error| error.to_string())?;
         db.latest_local_store_position()
@@ -2467,9 +2467,10 @@ impl TestStore {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let published = crate::sync::store_outbound::drain_store_writes(db, &self.storage)
-            .await
-            .map_err(|error| error.to_string())?;
+        let published =
+            crate::sync::store_engine::merge::publication::drain_store_writes(db, &self.storage)
+                .await
+                .map_err(|error| error.to_string())?;
         if published > 0 {
             crate::sync::cycle::drain_published_blob_drop_intents(db, store_dir, u64::MAX).await?;
             crate::blob::local_cleanup::drain(db, store_dir)

@@ -979,9 +979,12 @@ mod tests {
             .await
             .expect("prepare snapshot history write"));
             assert_eq!(
-                super::super::store_outbound::drain_store_writes(&source, &store.storage)
-                    .await
-                    .expect("publish snapshot history write"),
+                super::super::store_engine::merge::publication::drain_store_writes(
+                    &source,
+                    &store.storage
+                )
+                .await
+                .expect("publish snapshot history write"),
                 1,
             );
         }

@@ -44,7 +44,7 @@ async fn one_retained_checkpoint() -> (
     .await
     .expect("prepare checkpoint commit"));
     assert_eq!(
-        super::super::store_outbound::drain_store_writes(&db, &store.storage)
+        super::super::store_engine::merge::publication::drain_store_writes(&db, &store.storage)
             .await
             .expect("publish checkpoint commit"),
         1,
@@ -508,7 +508,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("prepare later concurrent write"));
-    super::super::store_outbound::drain_store_writes(later_db, &store.storage)
+    super::super::store_engine::merge::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");
     let later_commit = later_db

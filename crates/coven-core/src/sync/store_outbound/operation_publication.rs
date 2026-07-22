@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store_engine::serial::publication::activate_serial_commit_head;
 
 #[derive(Clone, Copy)]
 pub(crate) enum StoreOperationPublicationMode<'a> {

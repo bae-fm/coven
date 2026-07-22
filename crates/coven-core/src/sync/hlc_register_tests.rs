@@ -398,7 +398,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    crate::sync::store_outbound::drain_store_writes(&member_db, &storage.storage)
+    crate::sync::store_engine::merge::publication::drain_store_writes(&member_db, &storage.storage)
         .await
         .expect("publish member commit while grant is active");
 

@@ -47,13 +47,9 @@ async fn two_serial_writes_publish_as_one_branch_with_one_head_cas() {
     .expect("prepare one Serial branch"));
 
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .expect("activate one Serial branch"),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .expect("activate one Serial branch"),
         2,
     );
     assert_eq!(home.head_mutation_count(), head_mutations_before + 1);
@@ -299,13 +295,9 @@ async fn lost_successful_serial_head_response_completes_from_the_exact_authorita
     home.fail_next_head_mutation_after_visibility();
 
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .expect("recognize exact tip after lost response"),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .expect("recognize exact tip after lost response"),
         2,
     );
     assert_eq!(home.head_mutation_count(), head_mutations_before + 1);
@@ -812,13 +804,9 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     home.replace_after_next_head_mutation(other.to_bytes());
 
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .expect("record competing authoritative tip"),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .expect("record competing authoritative tip"),
         0,
     );
     assert_eq!(home.head_mutation_count(), head_mutations_before + 2);
@@ -1189,13 +1177,9 @@ async fn write_arriving_during_serial_publication_rebases_after_activation() {
     let suffix = db.pending_writes().await.unwrap().pop().unwrap().write_id;
 
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .unwrap(),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .unwrap(),
         2
     );
     assert!(prepare_pending_store_write_with_coordination(
@@ -1211,13 +1195,9 @@ async fn write_arriving_during_serial_publication_rebases_after_activation() {
     .await
     .expect("prepare rebased suffix"));
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .unwrap(),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .unwrap(),
         1
     );
     assert!(matches!(
@@ -1259,13 +1239,9 @@ async fn write_arriving_during_serial_publication_conflicts_with_the_branch_on_c
     home.replace_after_next_head_mutation(other.to_bytes());
 
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .unwrap(),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .unwrap(),
         0
     );
     let expected_branch = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
@@ -1297,13 +1273,9 @@ async fn missing_serial_head_fails_when_a_materialized_position_exists() {
     )
     .await
     .unwrap());
-    drain_store_writes_with_coordination(
-        &db,
-        &storage,
-        Some(storage.serial_coordination().unwrap()),
-    )
-    .await
-    .unwrap();
+    drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap())
+        .await
+        .unwrap();
     home.remove(serial_head_key());
 
     assert!(matches!(
@@ -1359,13 +1331,9 @@ async fn missing_serial_head_during_activation_names_the_coordination_head() {
     .expect("prepare exact Serial write"));
     home.remove(serial_head_key());
 
-    let error = drain_store_writes_with_coordination(
-        &db,
-        &storage,
-        Some(storage.serial_coordination().unwrap()),
-    )
-    .await
-    .expect_err("an absent coordination head blocks activation");
+    let error = drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap())
+        .await
+        .expect_err("an absent coordination head blocks activation");
     assert!(matches!(
         error,
         StoreOutboundError::MissingState {

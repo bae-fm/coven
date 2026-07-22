@@ -249,12 +249,13 @@ pub(crate) async fn invite_serial_member(
             && plan.store_id == store_id
             && plan.store_name == store_name
         {
-            let authorization = crate::sync::store_outbound::current_serial_authorization(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let authorization =
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             if serial_invite_receipt_is_current(&plan, &authorization)? {
                 return serde_json::from_slice(&receipt.result_bytes).map_err(|error| {
                     MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
@@ -295,12 +296,13 @@ pub(crate) async fn invite_serial_member(
             let root = crate::sync::store_objects::load_store_protocol_root(storage, &root_ref)
                 .await?
                 .value;
-            let authorization = crate::sync::store_outbound::current_serial_authorization(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let authorization =
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             let invitee_was_member = authorization
                 .membership
                 .current_members()

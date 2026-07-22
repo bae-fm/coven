@@ -1,7 +1,7 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn prepare_partition_package(
+pub(crate) async fn prepare_partition_package(
     db: &Database,
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -490,7 +490,7 @@ async fn materialize_previous_blob(
     Ok(destination)
 }
 
-pub(super) fn close_prepared_packages(
+pub(crate) fn close_prepared_packages(
     packages: Vec<PreparedPartitionPackage>,
     commit: &StoreBatchCommit,
     owner: &StoreBatchCommitRef,

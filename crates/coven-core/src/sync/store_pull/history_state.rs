@@ -882,7 +882,7 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
 
 pub(crate) enum VerifiedOwnerPromotionAcceptance {
     MergeConcurrent,
-    Serial(super::store_outbound::SerialAuthorizationSnapshot),
+    Serial(crate::sync::store_engine::serial::publication::SerialAuthorizationSnapshot),
 }
 
 pub(crate) async fn verify_owner_promotion_acceptance(
@@ -995,7 +995,7 @@ pub(crate) async fn verify_owner_promotion_acceptance(
                 StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
             };
             Ok(VerifiedOwnerPromotionAcceptance::Serial(
-                super::store_outbound::SerialAuthorizationSnapshot {
+                crate::sync::store_engine::serial::publication::SerialAuthorizationSnapshot {
                     base,
                     base_head: verified_head.object,
                     authorization,

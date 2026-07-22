@@ -2589,10 +2589,12 @@ mod tests {
             .await
             .expect("prepare surviving owner commit")
         );
-        Box::pin(super::super::store_outbound::drain_store_writes(
-            owner_db,
-            &store.storage,
-        ))
+        Box::pin(
+            super::super::store_engine::merge::publication::drain_store_writes(
+                owner_db,
+                &store.storage,
+            ),
+        )
         .await
         .expect("publish surviving owner commit");
         let peer_membership = Box::pin(super::super::pull::load_cycle_membership(
@@ -2868,10 +2870,12 @@ mod tests {
         ))
         .await;
         if materialize_before_exclusion {
-            Box::pin(super::super::store_outbound::drain_store_writes(
-                &peer_db,
-                &store.storage,
-            ))
+            Box::pin(
+                super::super::store_engine::merge::publication::drain_store_writes(
+                    &peer_db,
+                    &store.storage,
+                ),
+            )
             .await
             .expect("publish excluded peer candidate before exclusion");
             let original = match peer_db
@@ -3095,8 +3099,11 @@ mod tests {
             let drain_db = peer_db.clone();
             let drain_store = store.clone();
             let drain = tokio::spawn(async move {
-                super::super::store_outbound::drain_store_writes(&drain_db, &drain_store.storage)
-                    .await
+                super::super::store_engine::merge::publication::drain_store_writes(
+                    &drain_db,
+                    &drain_store.storage,
+                )
+                .await
             });
             commit_uploaded.notified().await;
             let expected_held = if matches!(
@@ -3155,9 +3162,12 @@ mod tests {
                     candidate.head.value.to_bytes(),
                 );
             }
-            super::super::store_outbound::drain_store_writes(&peer_db, &store.storage)
-                .await
-                .expect_err("excluded peer cannot activate its late candidate")
+            super::super::store_engine::merge::publication::drain_store_writes(
+                &peer_db,
+                &store.storage,
+            )
+            .await
+            .expect_err("excluded peer cannot activate its late candidate")
         };
         let local_position = peer_db
             .latest_local_store_position()

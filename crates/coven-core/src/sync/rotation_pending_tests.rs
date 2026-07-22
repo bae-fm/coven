@@ -364,13 +364,14 @@ async fn activate_external_serial_member_role(
         .await
         .expect("read Serial Store root")
         .expect("Serial Store root exists");
-    let authorization = crate::sync::store_outbound::current_serial_authorization(
-        &fixture.db,
-        fixture.storage.as_ref(),
-        fixture.storage.serial_coordination().unwrap(),
-    )
-    .await
-    .expect("load current Serial authorization");
+    let authorization =
+        crate::sync::store_engine::serial::publication::current_serial_authorization(
+            &fixture.db,
+            fixture.storage.as_ref(),
+            fixture.storage.serial_coordination().unwrap(),
+        )
+        .await
+        .expect("load current Serial authorization");
     assert_eq!(
         authorization.key_generation,
         encryption.current_generation()
@@ -725,13 +726,14 @@ async fn serial_invite_does_not_reuse_receipt_after_remote_role_change() {
         crate::join_code::encode(&first),
         crate::join_code::encode(&second)
     );
-    let authorization = crate::sync::store_outbound::current_serial_authorization(
-        &fixture.db,
-        fixture.storage.as_ref(),
-        fixture.storage.serial_coordination().unwrap(),
-    )
-    .await
-    .expect("load re-invited Serial authorization");
+    let authorization =
+        crate::sync::store_engine::serial::publication::current_serial_authorization(
+            &fixture.db,
+            fixture.storage.as_ref(),
+            fixture.storage.serial_coordination().unwrap(),
+        )
+        .await
+        .expect("load re-invited Serial authorization");
     assert_eq!(
         authorization
             .membership
@@ -774,13 +776,14 @@ async fn serial_removal_does_not_reuse_receipt_after_remote_reinvite() {
         .expect("remove externally re-invited Serial member");
 
     assert_ne!(first, second);
-    let authorization = crate::sync::store_outbound::current_serial_authorization(
-        &fixture.db,
-        fixture.storage.as_ref(),
-        fixture.storage.serial_coordination().unwrap(),
-    )
-    .await
-    .expect("load second Serial removal authorization");
+    let authorization =
+        crate::sync::store_engine::serial::publication::current_serial_authorization(
+            &fixture.db,
+            fixture.storage.as_ref(),
+            fixture.storage.serial_coordination().unwrap(),
+        )
+        .await
+        .expect("load second Serial removal authorization");
     assert_eq!(authorization.key_generation, 3);
     assert!(!authorization
         .membership

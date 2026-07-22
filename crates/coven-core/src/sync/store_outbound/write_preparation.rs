@@ -67,7 +67,15 @@ pub(crate) async fn prepare_pending_serial_store_write(
     keypair: &UserKeypair,
     store_dir: &StoreDir,
 ) -> Result<bool, StoreOutboundError> {
-    prepare_serial_store_branch(db, storage, coordination, device_id, keypair, store_dir).await
+    crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
+        db,
+        storage,
+        coordination,
+        device_id,
+        keypair,
+        store_dir,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

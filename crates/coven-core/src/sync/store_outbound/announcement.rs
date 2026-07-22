@@ -172,7 +172,7 @@ async fn exact_next_announcement_slot_impl(
     ))
 }
 
-pub(super) async fn reject_excluded_merge_candidate(
+pub(crate) async fn reject_excluded_merge_candidate(
     db: &Database,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,

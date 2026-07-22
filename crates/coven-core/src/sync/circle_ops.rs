@@ -1709,12 +1709,13 @@ async fn prepare_circle_operation_request(
                     "Serial circle creation requires coordination storage".to_string(),
                 )
             })?;
-            let snapshot = super::store_outbound::current_serial_authorization_snapshot(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let snapshot =
+                super::store_engine::serial::publication::current_serial_authorization_snapshot(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             if !snapshot.authorization.membership.can_write(&author_pubkey) {
                 return Err(CircleOperationError::InvalidState(
                     "circle creator is not a current Store writer".to_string(),
@@ -2281,25 +2282,26 @@ async fn publish_circle_operation(
                     "Serial circle activation requires coordination storage".to_string(),
                 )
             })?;
-            if let Err(error) = super::store_outbound::activate_serial_commit_head(
-                db,
-                storage,
-                coordination,
-                &base_head,
-                &commit,
-                journal
-                    .operation()
-                    .prepared_objects
-                    .get("store-commit")
-                    .ok_or_else(|| {
-                        CircleOperationError::Journal(
-                            "Circle operation lacks its prepared Store commit".to_string(),
-                        )
-                    })?,
-                &journal.operation().commit_ref,
-                &head,
-            )
-            .await
+            if let Err(error) =
+                super::store_engine::serial::publication::activate_serial_commit_head(
+                    db,
+                    storage,
+                    coordination,
+                    &base_head,
+                    &commit,
+                    journal
+                        .operation()
+                        .prepared_objects
+                        .get("store-commit")
+                        .ok_or_else(|| {
+                            CircleOperationError::Journal(
+                                "Circle operation lacks its prepared Store commit".to_string(),
+                            )
+                        })?,
+                    &journal.operation().commit_ref,
+                    &head,
+                )
+                .await
             {
                 if matches!(
                     error,
@@ -4854,9 +4856,13 @@ mod tests {
         let coordination = storage.serial_coordination().expect("Serial coordination");
 
         let authorization =
-            super::super::store_outbound::current_serial_authorization(&db, storage, coordination)
-                .await
-                .expect("founder authorization");
+            super::super::store_engine::serial::publication::current_serial_authorization(
+                &db,
+                storage,
+                coordination,
+            )
+            .await
+            .expect("founder authorization");
         let successor_pubkey = keys::public_key_hex(&successor);
         let successor_wrap = prepare_serial_test_wrap(
             storage,
@@ -4918,9 +4924,13 @@ mod tests {
             .bytes;
 
         let authorization =
-            super::super::store_outbound::current_serial_authorization(&db, storage, coordination)
-                .await
-                .expect("authorization before removal");
+            super::super::store_engine::serial::publication::current_serial_authorization(
+                &db,
+                storage,
+                coordination,
+            )
+            .await
+            .expect("authorization before removal");
         let remove_founder = authorization
             .membership
             .signed_remove_member(
@@ -5010,9 +5020,13 @@ mod tests {
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
         let authorization =
-            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
-                .await
-                .expect("founder authorization");
+            super::super::store_engine::serial::publication::current_serial_authorization(
+                &db,
+                &storage,
+                coordination,
+            )
+            .await
+            .expect("founder authorization");
         let successor_pubkey = keys::public_key_hex(&successor);
         let wrap = prepare_serial_test_wrap(
             &storage,
@@ -5290,10 +5304,10 @@ mod tests {
             .await
             .expect("prepare competing Serial Store write")
         );
-        super::super::store_outbound::drain_store_writes_with_coordination(
+        super::super::store_engine::serial::publication::drain_store_writes(
             &db,
             &storage,
-            Some(coordination),
+            coordination,
         )
         .await
         .expect("activate competing Serial Store write");

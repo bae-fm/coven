@@ -1,6 +1,23 @@
 use super::*;
+use crate::database::{
+    PreparedProtocolObject, PreparedSerialStoreBranch, SerialStoreWritePreparation,
+    SerialStoreWritePreparationEntry,
+};
+use crate::sync::membership::SerialAuthorizationState;
+use crate::sync::storage::{
+    BlobWriteAuthority, CoordinationError, CreateHeadError, PreparedExactObject,
+    ProtocolObjectContext, ProtocolObjectDomain, ReplaceHeadError, VersionToken, VersionedObject,
+};
+use crate::sync::store_commit::{
+    commit_semantic_prefix, serial_head_key, CandidateFamilyId, CirclePackageInput,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
+    StoreCommitOrder, StorePackageInput, StoreSerialHead, StoreSerialHeadState,
+    StoreSerialPredecessor, SERIAL_STREAM_ID,
+};
+use crate::sync::store_objects::StoreObjectError;
+use crate::sync::store_outbound::*;
 
-pub(super) enum SerialHeadObservation {
+pub(crate) enum SerialHeadObservation {
     Absent,
     Present {
         head: StoreSerialHead,
@@ -39,7 +56,7 @@ pub(crate) async fn current_serial_authorization_snapshot(
         key: SERIAL_COORDINATION_HEAD,
     })?;
     let authorization =
-        super::store_pull::load_serial_authorization_at_head(storage, &root_ref, head)
+        crate::sync::store_pull::load_serial_authorization_at_head(storage, &root_ref, head)
             .await
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let base = match observed.predecessor()? {
@@ -66,7 +83,7 @@ pub(crate) async fn activate_serial_commit_head(
     commit_prepared: &PreparedExactObject,
     commit_ref: &StoreBatchCommitRef,
     head: &StoreSerialHead,
-) -> Result<super::store_commit::VerifiedStoreDeviceOperations, StoreOutboundError> {
+) -> Result<crate::sync::store_commit::VerifiedStoreDeviceOperations, StoreOutboundError> {
     let observed = observe_serial_head(db, coordination).await?;
     let head_bytes = head.to_bytes();
     if observed.bytes() == Some(head_bytes.as_slice()) {
@@ -90,9 +107,11 @@ pub(crate) async fn activate_serial_commit_head(
             ));
         }
         let root = required_store_root(db).await?;
-        return super::store_pull::load_local_commit_device_operations(db, storage, &root, commit)
-            .await
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()));
+        return crate::sync::store_pull::load_local_commit_device_operations(
+            db, storage, &root, commit,
+        )
+        .await
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()));
     }
     if observed.versioned().as_ref() != Some(base_head) {
         let StoreCommitOrder::Serial {
@@ -134,7 +153,7 @@ pub(crate) async fn activate_serial_commit_head(
     }
     let root = required_store_root(db).await?;
     let device_operations =
-        super::store_pull::load_local_commit_device_operations(db, storage, &root, commit)
+        crate::sync::store_pull::load_local_commit_device_operations(db, storage, &root, commit)
             .await
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let activation = match observed.version() {
@@ -183,28 +202,28 @@ pub(crate) async fn activate_serial_commit_head(
 }
 
 impl SerialHeadObservation {
-    pub(super) fn head(&self) -> Option<&StoreSerialHead> {
+    pub(crate) fn head(&self) -> Option<&StoreSerialHead> {
         match self {
             Self::Absent => None,
             Self::Present { head, .. } => Some(head),
         }
     }
 
-    pub(super) fn version(&self) -> Option<&VersionToken> {
+    pub(crate) fn version(&self) -> Option<&VersionToken> {
         match self {
             Self::Absent => None,
             Self::Present { version, .. } => Some(version),
         }
     }
 
-    pub(super) fn bytes(&self) -> Option<&[u8]> {
+    pub(crate) fn bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Absent => None,
             Self::Present { bytes, .. } => Some(bytes),
         }
     }
 
-    pub(super) fn predecessor(&self) -> Result<StoreSerialPredecessor, StoreOutboundError> {
+    pub(crate) fn predecessor(&self) -> Result<StoreSerialPredecessor, StoreOutboundError> {
         match self {
             Self::Absent => Err(StoreOutboundError::MissingState {
                 key: SERIAL_COORDINATION_HEAD,
@@ -224,10 +243,10 @@ impl SerialHeadObservation {
         }
     }
 
-    pub(super) fn versioned(&self) -> Option<super::storage::VersionedObject> {
+    pub(crate) fn versioned(&self) -> Option<VersionedObject> {
         match self {
             Self::Absent => None,
-            Self::Present { bytes, version, .. } => Some(super::storage::VersionedObject {
+            Self::Present { bytes, version, .. } => Some(VersionedObject {
                 bytes: bytes.clone(),
                 version: version.clone(),
             }),
@@ -245,7 +264,7 @@ pub async fn current_serial_head_ref(
     }
 }
 
-pub(super) async fn observe_serial_head(
+pub(crate) async fn observe_serial_head(
     db: &Database,
     coordination: &dyn CoordinationStorage,
 ) -> Result<SerialHeadObservation, StoreOutboundError> {
@@ -290,7 +309,7 @@ pub(super) async fn observe_serial_head(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn prepare_serial_store_branch(
+pub(crate) async fn prepare_serial_store_branch(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
@@ -331,7 +350,8 @@ pub(super) async fn prepare_serial_store_branch(
         let store_root_hash = root.store_root_hash;
         let mut predecessor = branch.base.clone();
         let mut prepared = Vec::with_capacity(branch.writes.len());
-        let mut resolved_device_state: Option<super::store_commit::ResolvedStoreDeviceState> = None;
+        let mut resolved_device_state: Option<crate::sync::store_commit::ResolvedStoreDeviceState> =
+            None;
         for write in branch.writes {
             if !write.changeset.is_empty() && write.inverse_changeset.is_empty() {
                 return Err(StoreOutboundError::InvalidOutbound(format!(
@@ -339,11 +359,11 @@ pub(super) async fn prepare_serial_store_branch(
                     write.write_id
                 )));
             }
-            let payload = super::service::prepare_store_payload(
+            let payload = crate::sync::service::prepare_store_payload(
                 &write.blob_facts,
                 keypair,
                 store_dir,
-                super::service::StorePayloadMembership::Serial,
+                crate::sync::service::StorePayloadMembership::Serial,
             )
             .await
             .map_err(StoreOutboundError::Preparation)?;
@@ -371,12 +391,12 @@ pub(super) async fn prepare_serial_store_branch(
                 StoreCommitOrder::Serial { predecessor, .. } => predecessor.clone(),
                 StoreCommitOrder::MergeConcurrent { .. } => unreachable!(),
             };
-            let device_state = super::store_commit::StoreDeviceStateRef::serial(
+            let device_state = crate::sync::store_commit::StoreDeviceStateRef::serial(
                 serial_position.clone(),
                 &resolved_devices,
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            let membership_state = super::circle_control::StoreMembershipStateRef::serial(
+            let membership_state = crate::sync::circle_control::StoreMembershipStateRef::serial(
                 serial_position,
                 resolved_devices.recovery.clone(),
                 &snapshot.authorization,
@@ -437,7 +457,7 @@ pub(super) async fn prepare_serial_store_branch(
             );
             let store_package = prepared_packages
                 .iter()
-                .find(|package| package.audience == super::circle::Audience::Store)
+                .find(|package| package.audience == crate::sync::circle::Audience::Store)
                 .map(|package| StorePackageInput {
                     candidate_family,
                     schema_version: db.schema_version(),
@@ -447,7 +467,7 @@ pub(super) async fn prepare_serial_store_branch(
             let circle_packages = prepared_packages
                 .iter()
                 .filter_map(|package| {
-                    let super::circle::Audience::Circle(circle_id) = package.audience else {
+                    let crate::sync::circle::Audience::Circle(circle_id) = package.audience else {
                         return None;
                     };
                     Some(CirclePackageInput {
@@ -521,7 +541,7 @@ pub(super) async fn prepare_serial_store_branch(
             let (remote_objects, audiences) =
                 close_prepared_packages(prepared_packages, &commit, &commit_ref)?;
             let local_cleanup =
-                super::service::bind_local_cleanup(payload.local_cleanup, &audiences.blobs)
+                crate::sync::service::bind_local_cleanup(payload.local_cleanup, &audiences.blobs)
                     .map_err(StoreOutboundError::Preparation)?;
             predecessor = Some(commit_ref);
             prepared.push(SerialStoreWritePreparationEntry {
@@ -633,7 +653,7 @@ async fn conflict_serial_branch(
     Ok(0)
 }
 
-pub(super) async fn drain_serial_store_branch(
+pub(crate) async fn drain_store_writes(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,

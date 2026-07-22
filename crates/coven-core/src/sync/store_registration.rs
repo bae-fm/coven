@@ -73,7 +73,7 @@ enum RetirementPolicyPreparation {
         membership: MembershipChain,
         predecessor_state: super::store_commit::ResolvedStoreDeviceState,
     },
-    Serial(Box<super::store_outbound::SerialAuthorizationSnapshot>),
+    Serial(Box<super::store_engine::serial::publication::SerialAuthorizationSnapshot>),
 }
 
 impl DurableRetirement {
@@ -409,12 +409,13 @@ async fn prepare_self_retirement(
                     "Serial self-retirement requires coordination".into(),
                 )
             })?;
-            let snapshot = super::store_outbound::current_serial_authorization_snapshot(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
+            let snapshot =
+                super::store_engine::serial::publication::current_serial_authorization_snapshot(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
             let seq = snapshot
                 .base
                 .as_ref()
@@ -852,7 +853,7 @@ async fn publish_self_retirement(
             })?;
             let head = StoreSerialHead::parse(head_bytes, root.store_root_hash, &registration)
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            super::store_outbound::activate_serial_commit_head(
+            super::store_engine::serial::publication::activate_serial_commit_head(
                 db,
                 storage,
                 coordination,
@@ -2116,9 +2117,12 @@ pub async fn recover_owner_device_serial(
             &registration_prefix,
         )
         .await?;
-    let snapshot =
-        super::store_outbound::current_serial_authorization_snapshot(db, storage, coordination)
-            .await?;
+    let snapshot = super::store_engine::serial::publication::current_serial_authorization_snapshot(
+        db,
+        storage,
+        coordination,
+    )
+    .await?;
     if !snapshot
         .authorization
         .membership
@@ -2315,7 +2319,7 @@ pub async fn recover_owner_device_serial(
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    super::store_outbound::activate_serial_commit_head(
+    super::store_engine::serial::publication::activate_serial_commit_head(
         db,
         storage,
         coordination,

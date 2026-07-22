@@ -1749,7 +1749,7 @@ pub async fn load_current_device_join_authorization(
         crate::WritePolicy::Serial => {
             let coordination = coordination.ok_or(DeviceJoinError::MembershipConflict)?;
             Ok(DeviceJoinAuthorization::Serial(
-                crate::sync::store_outbound::current_serial_authorization(
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
                     db,
                     storage,
                     coordination,

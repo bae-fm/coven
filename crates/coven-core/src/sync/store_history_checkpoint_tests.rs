@@ -38,7 +38,7 @@ async fn publish_note(
         "host write produces a prepared Store commit",
     );
     assert_eq!(
-        super::store_outbound::drain_store_writes(db, &store.storage)
+        super::store_engine::merge::publication::drain_store_writes(db, &store.storage)
             .await
             .expect("publish Merge Store write"),
         1,
@@ -193,7 +193,7 @@ async fn prepare_sabotaged_successor(
     .await
     {
         Err(error) => error.to_string(),
-        Ok(true) => super::store_outbound::drain_store_writes(db, &store.storage)
+        Ok(true) => super::store_engine::merge::publication::drain_store_writes(db, &store.storage)
             .await
             .expect_err("checkpoint sabotage must fail before remote publication")
             .to_string(),

@@ -4,7 +4,12 @@ use std::sync::{Arc, RwLock};
 use super::*;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
-use crate::sync::storage::VersionedObject;
+use crate::sync::storage::{CreateHeadError, VersionToken, VersionedObject};
+use crate::sync::store_engine::merge::publication::drain_store_writes;
+use crate::sync::store_engine::serial::publication::{
+    current_serial_authorization, current_serial_head_ref,
+    drain_store_writes as drain_serial_store_writes,
+};
 use crate::sync::test_helpers::{
     create_exact_test_store, host_exec, install_active_device_fixture, open_serial_test_db,
     open_test_db, promote_active_member_fixture, pubkey_hex, temp_store_dir, test_migrations,

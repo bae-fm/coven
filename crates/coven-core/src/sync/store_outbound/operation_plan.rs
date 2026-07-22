@@ -1,4 +1,7 @@
 use super::*;
+use crate::sync::store_engine::serial::publication::{
+    current_serial_authorization_snapshot, SerialAuthorizationSnapshot,
+};
 
 pub(crate) enum StoreOperationBatch {
     Control(StoreControl),

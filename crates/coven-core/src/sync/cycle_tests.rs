@@ -686,7 +686,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             }
             crate::WritePolicy::Serial => {
                 crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_outbound::current_serial_authorization(
+                    crate::sync::store_engine::serial::publication::current_serial_authorization(
                         owner_db,
                         &storage.storage,
                         coordination.expect("Serial test Store has coordination"),
@@ -837,7 +837,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             }
             crate::WritePolicy::Serial => {
                 crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_outbound::current_serial_authorization(
+                    crate::sync::store_engine::serial::publication::current_serial_authorization(
                         owner_db,
                         &storage.storage,
                         coordination.expect("Serial test Store has coordination"),
@@ -995,7 +995,7 @@ fn exercise_post_attempt_cancellation<'a>(
             }
             crate::WritePolicy::Serial => {
                 crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_outbound::current_serial_authorization(
+                    crate::sync::store_engine::serial::publication::current_serial_authorization(
                         owner_db,
                         &storage.storage,
                         coordination.expect("Serial test Store has coordination"),
@@ -1734,7 +1734,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
                     .expect("load exact Merge membership"),
             ),
             crate::WritePolicy::Serial => DeviceJoinAuthorization::Serial(
-                crate::sync::store_outbound::current_serial_authorization(
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
                     owner_db,
                     &storage.storage,
                     coordination.expect("Serial test Store has coordination"),
@@ -3527,13 +3527,14 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
             .await
             .expect("successor promotion task")
             .expect("promote active successor Owner");
-            let authorization = crate::sync::store_outbound::current_serial_authorization(
-                &remote,
-                storage,
-                coordination,
-            )
-            .await
-            .unwrap();
+            let authorization =
+                crate::sync::store_engine::serial::publication::current_serial_authorization(
+                    &remote,
+                    storage,
+                    coordination,
+                )
+                .await
+                .unwrap();
             let founder_pubkey = pubkey_hex(&founder);
             let founder_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
                 storage,
@@ -3699,10 +3700,10 @@ async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remo
             .unwrap()
         );
         assert_eq!(
-            crate::sync::store_outbound::drain_store_writes_with_coordination(
+            crate::sync::store_engine::serial::publication::drain_store_writes(
                 &remote,
                 &storage,
-                Some(storage.serial_coordination().unwrap()),
+                storage.serial_coordination().unwrap(),
             )
             .await
             .unwrap(),

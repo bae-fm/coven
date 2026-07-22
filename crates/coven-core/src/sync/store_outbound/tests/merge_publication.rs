@@ -1340,13 +1340,9 @@ async fn discarding_a_blocked_serial_branch_allows_a_new_branch_to_publish() {
     .await
     .expect("prepare new branch after discarded Serial branch"));
     assert_eq!(
-        drain_store_writes_with_coordination(
-            &db,
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-        )
-        .await
-        .unwrap(),
+        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
+            .await
+            .unwrap(),
         1
     );
 }

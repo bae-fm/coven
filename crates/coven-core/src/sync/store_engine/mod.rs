@@ -12,11 +12,14 @@ use super::storage::{CoordinationStorage, SyncStorage};
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 use super::store_pull::{SerialCycleAuthorization, StorePullResult};
 
-mod merge;
-mod serial;
+pub(crate) mod merge;
+pub(crate) mod serial;
 
 use merge::{AuthorizedMergeStoreEngine, MergeStoreEngine};
 use serial::{AuthorizedSerialStoreEngine, SerialStoreEngine};
+
+#[doc(hidden)]
+pub use serial::publication::current_serial_head_ref;
 
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]

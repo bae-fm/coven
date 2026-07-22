@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
+pub(crate) fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
     match error {
         StoreOutboundError::Database(_)
         | StoreOutboundError::BlobStorage { .. }
@@ -95,7 +95,7 @@ pub(super) async fn record_preparation_failure(
         })
 }
 
-pub(super) async fn publish_prepared_remote_objects(
+pub(crate) async fn publish_prepared_remote_objects(
     db: &Database,
     storage: &dyn SyncStorage,
     write_id: &crate::WriteId,
@@ -243,7 +243,7 @@ pub(super) async fn publish_prepared_remote_objects(
     Ok(())
 }
 
-pub(super) async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreOutboundError> {
+pub(crate) async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreOutboundError> {
     db.local_store_root_ref()
         .await?
         .ok_or(StoreOutboundError::MissingState {

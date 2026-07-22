@@ -481,7 +481,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     if !prepared {
         return Ok(None);
     }
-    crate::sync::store_outbound::drain_store_writes(db, storage.sync_storage())
+    crate::sync::store_engine::merge::publication::drain_store_writes(db, storage.sync_storage())
         .await
         .map_err(|error| error.to_string())?;
     db.latest_local_store_position()
@@ -4070,10 +4070,10 @@ fn publish_serial_circle_move<'a>(
         .await
         .expect("prepare cross-Circle Serial move");
         assert!(prepared);
-        crate::sync::store_outbound::drain_store_writes_with_coordination(
+        crate::sync::store_engine::serial::publication::drain_store_writes(
             source,
             &storage.storage,
-            Some(coordination),
+            coordination,
         )
         .await
         .expect("publish cross-Circle Serial move");
@@ -4195,10 +4195,10 @@ fn resolve_conflicting_serial_branch<'a>(
             .serial_coordination()
             .expect("Serial test Store exposes coordination");
         assert_eq!(
-            crate::sync::store_outbound::drain_store_writes_with_coordination(
+            crate::sync::store_engine::serial::publication::drain_store_writes(
                 db,
                 &storage.storage,
-                Some(coordination),
+                coordination,
             )
             .await
             .expect("detect losing Serial branch"),
@@ -4610,10 +4610,10 @@ async fn serial_circle_pull_scenario() {
     .await
     .expect("prepare Serial Circle-only write");
     assert!(prepared);
-    crate::sync::store_outbound::drain_store_writes_with_coordination(
+    crate::sync::store_engine::serial::publication::drain_store_writes(
         &source,
         &storage.storage,
-        Some(coordination),
+        coordination,
     )
     .await
     .expect("publish Serial Circle-only write");

@@ -8,8 +8,8 @@ use super::membership::{MembershipChain, SerialAuthorizationState};
 #[cfg(test)]
 use super::membership_ops;
 use super::storage::{
-    BlobWriteAuthority, CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef,
-    ReplaceHeadError, StorageError, SyncStorage, VersionToken, VersionedObject,
+    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, ReplaceHeadError,
+    StorageError, SyncStorage, VersionedObject,
 };
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
@@ -30,13 +30,12 @@ use super::{
     store_objects, store_pull, store_reclaim, wrapped_store_key,
 };
 
-const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
-const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
+pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
+pub(crate) const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, MergeCandidateAbandonmentPreparation, PreparedAudienceBlob, PreparedAudienceObjects,
-    PreparedAudiencePackage, PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
-    SerialCandidateAbandonmentPreparation, SerialStoreWritePreparation,
-    SerialStoreWritePreparationEntry, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
+    PreparedAudiencePackage, PreparedProtocolObject, PreparedStoreWrite,
+    SerialCandidateAbandonmentPreparation, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWritePreparation, VerifiedMergeMaterialization,
 };
 use crate::keys::UserKeypair;
@@ -45,34 +44,30 @@ use crate::store_dir::StoreDir;
 mod abandonment;
 mod announcement;
 mod audience_preparation;
-mod merge_publication;
 mod operation_candidate;
 mod operation_plan;
 mod operation_publication;
 mod prepared_operation;
 mod publication_support;
-mod serial_publication;
 mod write_preparation;
 
 pub use abandonment::*;
 pub(crate) use announcement::*;
 pub(crate) use audience_preparation::*;
-pub use merge_publication::*;
 pub(crate) use operation_candidate::*;
 pub(crate) use operation_plan::*;
 pub(crate) use operation_publication::*;
 pub(crate) use prepared_operation::*;
-use publication_support::*;
-pub use serial_publication::*;
+pub(crate) use publication_support::*;
 pub use write_preparation::*;
 
-struct PreparedPartitionPackage {
-    audience: super::circle::Audience,
-    control: Option<super::gate::CirclePartitionControl>,
-    key_fingerprint: Option<crate::KeyFingerprint>,
-    semantic_bytes: Vec<u8>,
-    prepared: PreparedExactObject,
-    blobs: Vec<PreparedPartitionBlob>,
+pub(crate) struct PreparedPartitionPackage {
+    pub(crate) audience: super::circle::Audience,
+    pub(crate) control: Option<super::gate::CirclePartitionControl>,
+    pub(crate) key_fingerprint: Option<crate::KeyFingerprint>,
+    pub(crate) semantic_bytes: Vec<u8>,
+    pub(crate) prepared: PreparedExactObject,
+    pub(crate) blobs: Vec<PreparedPartitionBlob>,
 }
 
 pub(crate) struct PreparedPartitionBlob {
@@ -140,7 +135,9 @@ fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
         .ok_or(StoreOutboundError::SequenceExhausted { current })
 }
 
-fn next_store_sequence(previous: Option<&StoreBatchCommitRef>) -> Result<u64, StoreOutboundError> {
+pub(crate) fn next_store_sequence(
+    previous: Option<&StoreBatchCommitRef>,
+) -> Result<u64, StoreOutboundError> {
     previous.map_or(Ok(1), |reference| {
         successor_store_sequence(reference.coord.sequence())
     })
