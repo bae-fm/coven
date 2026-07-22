@@ -1,12 +1,9 @@
 //! Durable exact Store acknowledgement publication.
 
-use super::membership::MembershipChain;
-use super::storage::{
-    CoordinationStorage, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
+use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
-    ack_slot_prefix, CommitFrontier, DeviceStreamAnchor, StoreAck, StoreAckExclusionState,
-    StoreHistoryCut, StoreSerialPredecessor, SuccessorLink,
+    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreHistoryCut,
+    SuccessorLink,
 };
 use super::store_objects::StoreObjectError;
 use crate::database::Database;
@@ -20,10 +17,6 @@ pub enum StoreAckError {
     Object(#[from] StoreObjectError),
     #[error("Store acknowledgement protocol state {0:?} is absent")]
     MissingState(&'static str),
-    #[error("exact Store root authority is absent")]
-    ExactRootAuthorityMissing,
-    #[error("Store acknowledgement protocol state {key:?} is invalid: {reason}")]
-    InvalidState { key: &'static str, reason: String },
     #[error("outbound Store acknowledgement is invalid: {0}")]
     InvalidOutbound(String),
     #[error("Store acknowledgement activation: {0}")]
@@ -38,59 +31,29 @@ impl From<crate::database::DbError> for StoreAckError {
     }
 }
 
-pub async fn stage_store_ack(
+pub(crate) struct ResolvedStoreAckPlan {
+    pub(crate) root: super::store_commit::StoreRootRef,
+    pub(crate) registration_ref: super::store_commit::StoreDeviceRegistrationRef,
+    pub(crate) registration: super::store_commit::StoreDeviceRegistration,
+    pub(crate) device_signer: UserKeypair,
+    pub(crate) device_id: String,
+    pub(crate) history_cut: StoreHistoryCut,
+    pub(crate) device_state: super::store_commit::StoreDeviceStateRef,
+    pub(crate) snapshot: Option<super::store_commit::StoreSnapshotLocator>,
+    pub(crate) exclusions: StoreAckExclusionState,
+    pub(crate) last_sync: String,
+}
+
+pub(crate) async fn stage_resolved_store_ack(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    frontier: CommitFrontier,
-    last_sync: String,
-    signer: &UserKeypair,
+    plan: ResolvedStoreAckPlan,
 ) -> Result<StoreAck, StoreAckError> {
     if db.oldest_outbound_store_ack().await?.is_some() {
         return Err(StoreAckError::InvalidOutbound(
             "a prior acknowledgement remains queued".to_string(),
         ));
     }
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await?
-        .ok_or(StoreAckError::MissingState(
-            crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        ))?;
-    let (root, registration_ref, registration, device_signer) =
-        super::store_outbound::load_local_store_authority(db, &device_id, signer)
-            .await
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
-    if frontier.policy() != db.write_policy() {
-        return Err(StoreAckError::InvalidOutbound(format!(
-            "acknowledgement frontier uses {:?}, database uses {:?}",
-            frontier.policy(),
-            db.write_policy()
-        )));
-    }
-    let history_cut = match &frontier {
-        CommitFrontier::MergeConcurrent(commits) => {
-            StoreHistoryCut::merge_concurrent(commits.clone())
-        }
-        CommitFrontier::Serial(Some(commit)) => {
-            StoreHistoryCut::serial(StoreSerialPredecessor::Commit(commit.clone()))
-        }
-        CommitFrontier::Serial(None) => {
-            if !matches!(
-                registration.origin,
-                super::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
-            ) {
-                return Err(StoreAckError::InvalidOutbound(
-                    "only the exact founder registration can acknowledge Serial genesis"
-                        .to_string(),
-                ));
-            }
-            StoreHistoryCut::serial(StoreSerialPredecessor::Genesis {
-                root: root.clone(),
-                founder_registration: registration_ref.clone(),
-            })
-        }
-    };
     let previous = db.latest_local_store_ack().await?;
     let (sequence, predecessor, current_slot) = match previous {
         Some(previous) => (
@@ -102,40 +65,22 @@ pub async fn stage_store_ack(
             Some(previous.reference.object),
             previous.successor_slot,
         ),
-        None => (1, None, acknowledgement_first_slot(&registration)?.clone()),
-    };
-    let (device_state, _) = db.store_device_state_for_history_cut(&history_cut).await?;
-    let snapshot = super::store_snapshot::select_store_snapshot_for_acknowledgement(
-        db,
-        storage,
-        coordination,
-        &root,
-        &frontier,
-        &device_state,
-    )
-    .await?;
-    let proposal_freezes = db.store_device_exclusion_freezes().await?;
-    let exclusions = match frontier {
-        CommitFrontier::MergeConcurrent(_) => {
-            StoreAckExclusionState::MergeConcurrent { proposal_freezes }
-        }
-        CommitFrontier::Serial(_) if proposal_freezes.is_empty() => StoreAckExclusionState::Serial,
-        CommitFrontier::Serial(_) => {
-            return Err(StoreAckError::InvalidOutbound(
-                "Serial Store contains Merge device exclusion freezes".to_string(),
-            ))
-        }
+        None => (
+            1,
+            None,
+            acknowledgement_first_slot(&plan.registration)?.clone(),
+        ),
     };
     let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
+        plan.root.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
-    let semantic_prefix = ack_slot_prefix(&device_id, sequence);
+    let semantic_prefix = ack_slot_prefix(&plan.device_id, sequence);
     let next_slot = storage
         .allocate_protocol_slot(
             &context,
             &ack_slot_prefix(
-                &device_id,
+                &plan.device_id,
                 sequence.checked_add(1).ok_or_else(|| {
                     StoreAckError::InvalidOutbound(
                         "Store acknowledgement sequence overflow".to_string(),
@@ -146,193 +91,98 @@ pub async fn stage_store_ack(
         )
         .await
         .map_err(StoreObjectError::from)?;
-    let activation = registration
-        .store_acknowledgement_activation(&registration_ref)
+    let activation = plan
+        .registration
+        .store_acknowledgement_activation(&plan.registration_ref)
         .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
         .activation_id();
-    let ack = StoreAck::signed(
-        root.store_root_hash,
-        registration_ref.clone(),
+    let acknowledgement = StoreAck::signed(
+        plan.root.store_root_hash,
+        plan.registration_ref,
         sequence,
-        history_cut,
-        device_state,
-        snapshot,
-        exclusions,
-        last_sync,
+        plan.history_cut,
+        plan.device_state,
+        plan.snapshot,
+        plan.exclusions,
+        plan.last_sync,
         SuccessorLink {
             activation,
             predecessor,
             next_slot,
         },
-        &device_signer,
+        &plan.device_signer,
     )
     .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
     let prepared = storage
-        .prepare_protocol_object(&context, current_slot, &semantic_prefix, ack.to_bytes())
+        .prepare_protocol_object(
+            &context,
+            current_slot,
+            &semantic_prefix,
+            acknowledgement.to_bytes(),
+        )
         .map_err(StoreObjectError::from)?;
-    db.stage_store_ack(ack.clone(), prepared).await?;
-    Ok(ack)
+    db.stage_store_ack(acknowledgement.clone(), prepared)
+        .await?;
+    Ok(acknowledgement)
 }
 
-pub async fn drain_outbound_store_acks(
+pub(crate) async fn publish_acknowledgement_object(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    signer: &UserKeypair,
-    membership: Option<&MembershipChain>,
-) -> Result<u64, StoreAckError> {
-    let root = db
-        .local_store_root_ref()
-        .await?
-        .ok_or(StoreAckError::ExactRootAuthorityMissing)?;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await?
-        .ok_or(StoreAckError::MissingState(
-            crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        ))?;
+    device_id: &str,
+    outbound: &crate::database::OutboundStoreAck,
+    candidate: &super::store_outbound::PreparedStoreOperationCommit,
+) -> Result<bool, StoreAckError> {
     let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
+        outbound.ack.value.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
-    let mut published = 0_u64;
-    while let Some(outbound) = db.oldest_outbound_store_ack().await? {
-        if let Some(activated) = db
-            .activated_store_ack(&outbound.reference.registration)
-            .await?
-        {
-            if activated == outbound.reference {
-                db.complete_outbound_store_ack(outbound.reference).await?;
-                published = published.checked_add(1).ok_or_else(|| {
-                    StoreAckError::Database("ack publish count exceeded u64".into())
-                })?;
-                continue;
-            }
-            if activated.sequence >= outbound.reference.sequence {
-                return Err(StoreAckError::InvalidOutbound(
-                    "queued Store acknowledgement differs from the activated exact ref".to_string(),
-                ));
-            }
+    if let Err(error) = storage.create_protocol_object(&outbound.ack.prepared).await {
+        if !matches!(error, super::storage::StorageError::SlotCollision(_)) {
+            return Err(StoreObjectError::from(error).into());
         }
-        let candidate = match outbound.activation.clone() {
-            crate::database::OutboundStoreAckActivation::AwaitingCandidate => {
-                let plan = super::store_outbound::prepare_store_operation_commit(
-                    db,
-                    storage,
-                    super::store_outbound::StoreOperationPreparation::from_dependencies(
-                        db.write_policy(),
-                        coordination,
-                        membership,
-                    )?,
-                    &device_id,
-                    signer,
-                )
-                .await?;
-                plan.validate_acknowledgement(&outbound.ack.value)?;
-                let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
-                    db,
-                    storage,
-                    plan,
-                    super::store_outbound::StoreOperationBatch::Acknowledgement {
-                        reference: outbound.reference.clone(),
-                        value: outbound.ack.value.clone(),
-                    },
-                ))
-                .await?;
-                db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate)
-                    .await?;
-                continue;
-            }
-            crate::database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
-            crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
-                super::store_outbound::finish_nonactivating_store_ack(
-                    db,
-                    storage,
-                    outbound.reference,
-                )
-                .await?;
-                published = published.checked_add(1).ok_or_else(|| {
-                    StoreAckError::Database("ack publish count exceeded u64".into())
-                })?;
-                continue;
-            }
-        };
-        if let Err(error) = storage.create_protocol_object(&outbound.ack.prepared).await {
-            if !matches!(error, super::storage::StorageError::SlotCollision(_)) {
-                return Err(StoreObjectError::from(error).into());
-            }
-            let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);
-            let (winner_bytes, winner_prepared) = storage
-                .read_prepared_protocol_slot(
-                    &context,
-                    outbound.reference.object.slot(),
-                    &semantic_prefix,
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
-            db.adopt_outbound_store_ack_slot_winner(
-                outbound.reference,
-                winner_bytes,
-                winner_prepared,
-            )
-            .await?;
-            continue;
-        }
-        let opened = storage
-            .read_protocol_object(
+        let semantic_prefix = ack_slot_prefix(device_id, outbound.reference.sequence);
+        let (winner_bytes, winner_prepared) = storage
+            .read_prepared_protocol_slot(
                 &context,
-                &outbound.reference.object,
-                &ack_slot_prefix(&device_id, outbound.reference.sequence),
+                outbound.reference.object.slot(),
+                &semantic_prefix,
             )
             .await
             .map_err(StoreObjectError::from)?;
-        if opened != outbound.ack.bytes {
-            return Err(StoreAckError::InvalidOutbound(
-                "Store acknowledgement exact readback differs from prepared bytes".to_string(),
-            ));
-        }
-        let acknowledgement_remote = candidate
-            .acknowledgement_remote_objects(&outbound.ack)?
-            .into_iter()
-            .find(|remote| remote.object() == &outbound.reference.object)
-            .ok_or_else(|| {
-                StoreAckError::InvalidOutbound(
-                    "prepared activation does not own its acknowledgement object".to_string(),
-                )
-            })?;
-        db.mark_remote_object_uploaded(acknowledgement_remote)
-            .await?;
-        let outcome = Box::pin(super::store_outbound::publish_prepared_store_operation(
-            db,
-            storage,
-            super::store_outbound::StoreOperationPublicationMode::from_dependencies(
-                db.write_policy(),
-                coordination,
-            )?,
-            Box::new(candidate),
-        ))
+        db.adopt_outbound_store_ack_slot_winner(
+            outbound.reference.clone(),
+            winner_bytes,
+            winner_prepared,
+        )
         .await?;
-        match outcome {
-            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => {
-                db.complete_outbound_store_ack(outbound.reference).await?;
-            }
-            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(_) => {}
-            super::store_outbound::StoreOperationPublicationOutcome::Reprepared => continue,
-            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(_)
-            | super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
-                ..
-            } => {
-                return Err(StoreAckError::InvalidOutbound(
-                    "acknowledgement publication returned non-acknowledgement conflict state"
-                        .to_string(),
-                ));
-            }
-        }
-        published = published
-            .checked_add(1)
-            .ok_or_else(|| StoreAckError::Database("ack publish count exceeded u64".into()))?;
+        return Ok(false);
     }
-    Ok(published)
+    let opened = storage
+        .read_protocol_object(
+            &context,
+            &outbound.reference.object,
+            &ack_slot_prefix(device_id, outbound.reference.sequence),
+        )
+        .await
+        .map_err(StoreObjectError::from)?;
+    if opened != outbound.ack.bytes {
+        return Err(StoreAckError::InvalidOutbound(
+            "Store acknowledgement exact readback differs from prepared bytes".to_string(),
+        ));
+    }
+    let acknowledgement_remote = candidate
+        .acknowledgement_remote_objects(&outbound.ack)?
+        .into_iter()
+        .find(|remote| remote.object() == &outbound.reference.object)
+        .ok_or_else(|| {
+            StoreAckError::InvalidOutbound(
+                "prepared activation does not own its acknowledgement object".to_string(),
+            )
+        })?;
+    db.mark_remote_object_uploaded(acknowledgement_remote)
+        .await?;
+    Ok(true)
 }
 
 fn acknowledgement_first_slot(
@@ -354,6 +204,8 @@ mod tests {
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::storage::CoordinationStorage;
+    use crate::sync::store_commit::CommitFrontier;
 
     fn open(path: &Path, device_id: &str) -> Database {
         open_with_policy(path, device_id, crate::WritePolicy::MergeConcurrent)
@@ -414,21 +266,29 @@ mod tests {
                 .expect("read acknowledgement frontier"),
         )
         .expect("shape acknowledgement frontier");
-        let coordination = match db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => None,
-            crate::WritePolicy::Serial => {
-                Some(storage as &dyn super::super::storage::CoordinationStorage)
+        match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                super::super::store_engine::stage_merge_acknowledgement_for_test(
+                    db,
+                    storage,
+                    frontier,
+                    last_sync.to_string(),
+                    signer,
+                )
+                .await
             }
-        };
-        stage_store_ack(
-            db,
-            storage,
-            coordination,
-            frontier,
-            last_sync.to_string(),
-            signer,
-        )
-        .await
+            crate::WritePolicy::Serial => {
+                super::super::store_engine::stage_serial_acknowledgement_for_test(
+                    db,
+                    storage,
+                    storage,
+                    frontier,
+                    last_sync.to_string(),
+                    signer,
+                )
+                .await
+            }
+        }
         .expect("stage exact acknowledgement")
     }
 
@@ -438,10 +298,20 @@ mod tests {
         signer: &'a UserKeypair,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, StoreAckError>> + 'a>> {
         Box::pin(async move {
-            let membership = super::super::pull::load_cycle_membership(storage, db)
-                .await
-                .expect("load acknowledgement test membership");
-            drain_outbound_store_acks(db, storage, None, signer, membership.chain.as_ref()).await
+            match db.write_policy() {
+                crate::WritePolicy::MergeConcurrent => {
+                    super::super::store_engine::drain_merge_acknowledgements_for_test(
+                        db, storage, signer,
+                    )
+                    .await
+                }
+                crate::WritePolicy::Serial => {
+                    super::super::store_engine::drain_serial_acknowledgements_for_test(
+                        db, storage, storage, signer,
+                    )
+                    .await
+                }
+            }
         })
     }
 
@@ -459,23 +329,22 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
-        let plan = super::super::store_outbound::prepare_store_operation_commit(
+        let plan = super::super::store_engine::merge::operations::prepare_plan(
             db,
             storage,
-            super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
-                membership: membership
-                    .chain
-                    .as_ref()
-                    .expect("resolved Merge membership"),
-            },
+            membership
+                .chain
+                .as_ref()
+                .expect("resolved Merge membership"),
             &device_id,
             signer,
         )
         .await
         .expect("prepare acknowledgement activation");
-        plan.validate_acknowledgement(&outbound.ack.value)
+        plan.common()
+            .validate_acknowledgement(&outbound.ack.value)
             .expect("acknowledgement matches activation predecessor");
-        let candidate = super::super::store_outbound::prepare_store_operation_candidate(
+        let candidate = super::super::store_engine::merge::operations::prepare_candidate(
             db,
             storage,
             plan,
@@ -486,6 +355,8 @@ mod tests {
         )
         .await
         .expect("prepare acknowledgement candidate");
+        let candidate =
+            super::super::store_outbound::PreparedStoreOperationCommit::MergeConcurrent(candidate);
         db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate.clone())
             .await
             .expect("persist acknowledgement candidate");
@@ -503,20 +374,15 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
-        let plan = super::super::store_outbound::prepare_store_operation_commit(
-            db,
-            storage,
-            super::super::store_outbound::StoreOperationPreparation::Serial {
-                coordination: storage,
-            },
-            &device_id,
-            signer,
+        let plan = super::super::store_engine::serial::operations::prepare_plan(
+            db, storage, storage, &device_id, signer,
         )
         .await
         .expect("prepare Serial acknowledgement activation");
-        plan.validate_acknowledgement(&outbound.ack.value)
+        plan.common()
+            .validate_acknowledgement(&outbound.ack.value)
             .expect("Serial acknowledgement matches activation predecessor");
-        let candidate = super::super::store_outbound::prepare_store_operation_candidate(
+        let candidate = super::super::store_engine::serial::operations::prepare_candidate(
             db,
             storage,
             plan,
@@ -527,6 +393,8 @@ mod tests {
         )
         .await
         .expect("prepare Serial acknowledgement candidate");
+        let candidate =
+            super::super::store_outbound::PreparedStoreOperationCommit::Serial(candidate);
         db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate.clone())
             .await
             .expect("persist Serial acknowledgement candidate");
@@ -563,20 +431,16 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
-        let competing_plan = Box::pin(
-            super::super::store_outbound::prepare_store_operation_commit(
-                &db,
-                &storage,
-                super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
-                    membership: membership
-                        .chain
-                        .as_ref()
-                        .expect("resolved Merge membership"),
-                },
-                &device_id,
-                &signer,
-            ),
-        )
+        let competing_plan = Box::pin(super::super::store_engine::merge::operations::prepare_plan(
+            &db,
+            &storage,
+            membership
+                .chain
+                .as_ref()
+                .expect("resolved Merge membership"),
+            &device_id,
+            &signer,
+        ))
         .await
         .expect("prepare competing Store operation");
         let grant_id = super::super::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
@@ -594,7 +458,7 @@ mod tests {
             ),
         };
         let competing = Box::pin(
-            super::super::store_outbound::prepare_store_operation_candidate(
+            super::super::store_engine::merge::operations::prepare_candidate(
                 &db,
                 &storage,
                 competing_plan,
@@ -603,6 +467,8 @@ mod tests {
         )
         .await
         .expect("prepare competing candidate");
+        let competing =
+            super::super::store_outbound::PreparedStoreOperationCommit::MergeConcurrent(competing);
         assert_ne!(competing.reference, losing.reference);
         let (_, competing_head) = competing
             .merge_publication_for_test()
@@ -653,14 +519,8 @@ mod tests {
             .unwrap()
             .expect("local Store device id");
         let competing_plan = Box::pin(
-            super::super::store_outbound::prepare_store_operation_commit(
-                &db,
-                &storage,
-                super::super::store_outbound::StoreOperationPreparation::Serial {
-                    coordination: &storage,
-                },
-                &device_id,
-                &signer,
+            super::super::store_engine::serial::operations::prepare_plan(
+                &db, &storage, &storage, &device_id, &signer,
             ),
         )
         .await
@@ -680,7 +540,7 @@ mod tests {
             ),
         };
         let competing = Box::pin(
-            super::super::store_outbound::prepare_store_operation_candidate(
+            super::super::store_engine::serial::operations::prepare_candidate(
                 &db,
                 &storage,
                 competing_plan,
@@ -691,13 +551,12 @@ mod tests {
         .expect("prepare competing Serial candidate");
         assert!(matches!(
             Box::pin(
-                super::super::store_outbound::publish_prepared_store_operation(
+                super::super::store_engine::serial::operations::publish_prepared(
                     &db,
                     &storage,
-                    super::super::store_outbound::StoreOperationPublicationMode::Serial {
-                        coordination: &storage,
-                    },
+                    &storage,
                     Box::new(competing),
+                    None,
                 )
             )
             .await
@@ -877,12 +736,7 @@ mod tests {
             .map(|remote| remote.object_id())
             .collect::<Vec<_>>();
 
-        let result = match write_policy {
-            crate::WritePolicy::MergeConcurrent => drain(&loser_db, &storage, &signer).await,
-            crate::WritePolicy::Serial => {
-                drain_outbound_store_acks(&loser_db, &storage, Some(&storage), &signer, None).await
-            }
-        };
+        let result = drain(&loser_db, &storage, &signer).await;
         assert_eq!(
             result.expect("adopt and activate acknowledgement slot winner"),
             1
@@ -1017,11 +871,17 @@ mod tests {
         db.mark_remote_object_uploaded(acknowledgement_remote)
             .await
             .expect("record acknowledgement upload");
-        super::super::store_outbound::publish_prepared_store_operation(
+        let super::super::store_outbound::PreparedStoreOperationCommit::MergeConcurrent(candidate) =
+            candidate
+        else {
+            panic!("Merge acknowledgement candidate changed policy")
+        };
+        super::super::store_engine::merge::operations::publish_prepared(
             &db,
             &storage,
-            super::super::store_outbound::StoreOperationPublicationMode::MergeConcurrent,
             Box::new(candidate),
+            None,
+            None,
         )
         .await
         .expect("activate acknowledgement commit");
@@ -1412,15 +1272,9 @@ mod tests {
         } = Box::pin(losing_serial_ack_fixture(Path::new(":memory:"))).await;
 
         assert_eq!(
-            Box::pin(drain_outbound_store_acks(
-                &db,
-                &storage,
-                Some(&storage),
-                &signer,
-                None,
-            ))
-            .await
-            .expect("settle losing Serial acknowledgement activation"),
+            drain(&db, &storage, &signer)
+                .await
+                .expect("settle losing Serial acknowledgement activation"),
             1
         );
         assert!(db.oldest_outbound_store_ack().await.unwrap().is_none());
@@ -1465,15 +1319,7 @@ mod tests {
             .expect("record uploaded losing Serial commit");
         home.fail_exact_delete_on_call(1);
 
-        assert!(Box::pin(drain_outbound_store_acks(
-            &db,
-            &storage,
-            Some(&storage),
-            &signer,
-            None,
-        ))
-        .await
-        .is_err());
+        assert!(drain(&db, &storage, &signer).await.is_err());
         assert!(matches!(
             db.oldest_outbound_store_ack()
                 .await
@@ -1493,15 +1339,9 @@ mod tests {
         let reopened =
             open_with_policy(&path, "ack-serial-loser-device", crate::WritePolicy::Serial);
         assert_eq!(
-            Box::pin(drain_outbound_store_acks(
-                &reopened,
-                &storage,
-                Some(&storage),
-                &signer,
-                None,
-            ))
-            .await
-            .expect("resume Serial acknowledgement cleanup"),
+            drain(&reopened, &storage, &signer)
+                .await
+                .expect("resume Serial acknowledgement cleanup"),
             1
         );
         assert!(reopened
@@ -1542,15 +1382,9 @@ mod tests {
             .expect("replace Serial head with the same signed bytes");
 
         assert_eq!(
-            Box::pin(drain_outbound_store_acks(
-                &db,
-                &storage,
-                Some(&storage),
-                &signer,
-                None,
-            ))
-            .await
-            .expect("retry acknowledgement from the newer provider receipt"),
+            drain(&db, &storage, &signer)
+                .await
+                .expect("retry acknowledgement from the newer provider receipt"),
             1
         );
         assert_eq!(
@@ -1609,12 +1443,17 @@ mod tests {
             .await
             .unwrap()
             .expect("local Store device id");
+        let super::super::store_outbound::PreparedStoreOperationCommit::Serial(serial_candidate) =
+            &candidate
+        else {
+            panic!("Serial acknowledgement candidate changed policy")
+        };
         let successor_plan = Box::pin(
-            super::super::store_outbound::serial_successor_plan_for_test(
+            super::super::store_engine::serial::operations::prepare_successor_plan_for_test(
                 &db,
                 &device_id,
                 &signer,
-                &candidate,
+                serial_candidate,
                 accepted_candidate_head,
             ),
         )
@@ -1625,7 +1464,7 @@ mod tests {
             super::super::store_commit::provider_access_grant_semantic_prefix(&grant_id);
         let grant_bytes = b"accepted Serial successor provider grant";
         let successor = Box::pin(
-            super::super::store_outbound::prepare_store_operation_candidate(
+            super::super::store_engine::serial::operations::prepare_candidate(
                 &db,
                 &storage,
                 successor_plan,
@@ -1648,13 +1487,12 @@ mod tests {
         .await
         .expect("prepare accepted Serial successor candidate");
         let successor_materialization = Box::pin(
-            super::super::store_outbound::publish_prepared_store_operation(
+            super::super::store_engine::serial::operations::publish_prepared(
                 &db,
                 &storage,
-                super::super::store_outbound::StoreOperationPublicationMode::Serial {
-                    coordination: &storage,
-                },
+                &storage,
                 Box::new(successor),
+                None,
             ),
         )
         .await
@@ -1664,15 +1502,9 @@ mod tests {
             .contains("durable predecessor is None"));
 
         assert_eq!(
-            Box::pin(drain_outbound_store_acks(
-                &db,
-                &storage,
-                Some(&storage),
-                &signer,
-                None,
-            ))
-            .await
-            .expect("complete accepted acknowledgement ancestor"),
+            drain(&db, &storage, &signer)
+                .await
+                .expect("complete accepted acknowledgement ancestor"),
             1
         );
         assert_eq!(

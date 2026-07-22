@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use super::circle_activation::VerifiedCircleActivations;
 use super::membership::{MembershipChain, SerialAuthorizationState};
 #[cfg(test)]
 use super::membership_ops;

@@ -88,16 +88,9 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     )
     .await
     .expect("publish join snapshot");
-    publish_store_ack_fixture(
-        &owner_db,
-        &store.storage,
-        None,
-        snapshot_coverage,
-        &owner,
-        Some(&membership),
-    )
-    .await
-    .expect("publish join snapshot acknowledgement");
+    publish_merge_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
+        .await
+        .expect("publish join snapshot acknowledgement");
     let authorization =
         crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(membership);
     let invite_code = encode(&invite);

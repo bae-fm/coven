@@ -46,8 +46,8 @@ use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     create_exact_test_store, host_exec, open_serial_test_db, open_test_db, open_test_db_with_blob,
-    pubkey_hex, publish_store_ack_fixture, temp_store_dir, test_migrations, test_synced_tables,
-    test_synced_tables_with_blob,
+    pubkey_hex, publish_merge_store_ack_fixture, publish_serial_store_ack_fixture, temp_store_dir,
+    test_migrations, test_synced_tables, test_synced_tables_with_blob,
 };
 
 struct RestoreCloudKitOps {
@@ -1040,16 +1040,9 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     )
     .await
     .expect("publish owner snapshot");
-    publish_store_ack_fixture(
-        &db,
-        &owner_storage,
-        None,
-        snapshot_coverage,
-        &owner_keypair,
-        Some(&membership),
-    )
-    .await
-    .expect("publish owner snapshot acknowledgement");
+    publish_merge_store_ack_fixture(&db, &owner_storage, snapshot_coverage, &owner_keypair)
+        .await
+        .expect("publish owner snapshot acknowledgement");
 
     let joiner_keypair = owner_keypair.clone();
     let joiner_storage = CloudSyncStorage::new(
@@ -1400,23 +1393,16 @@ async fn prepare_owner_recovery_restore(
     )
     .await
     .expect("publish recovery snapshot");
-    let coordination = match write_policy {
-        crate::WritePolicy::MergeConcurrent => None,
-        crate::WritePolicy::Serial => Some(
-            owner_storage
-                .serial_coordination()
-                .expect("Serial recovery fixture has coordination storage"),
-        ),
-    };
-    publish_store_ack_fixture(
-        &owner_db,
-        &owner_storage,
-        coordination,
-        snapshot_coverage,
-        &owner,
-        membership.as_ref(),
-    )
-    .await
+    match write_policy {
+        crate::WritePolicy::MergeConcurrent => {
+            publish_merge_store_ack_fixture(&owner_db, &owner_storage, snapshot_coverage, &owner)
+                .await
+        }
+        crate::WritePolicy::Serial => {
+            publish_serial_store_ack_fixture(&owner_db, &owner_storage, snapshot_coverage, &owner)
+                .await
+        }
+    }
     .expect("publish recovery snapshot acknowledgement");
     let authority = published_owner_recovery_authority(&owner_storage, &root, &owner).await;
     let code = encode_restore_code(&RestoreCode {
@@ -1572,16 +1558,9 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
     )
     .await
     .expect("publish owner snapshot");
-    publish_store_ack_fixture(
-        &db_owner,
-        &owner_storage,
-        None,
-        snapshot_coverage,
-        &owner_keypair,
-        Some(&membership),
-    )
-    .await
-    .expect("publish owner snapshot acknowledgement");
+    publish_merge_store_ack_fixture(&db_owner, &owner_storage, snapshot_coverage, &owner_keypair)
+        .await
+        .expect("publish owner snapshot acknowledgement");
 
     let snapshot_before = owner_storage
         .cloud_home()
@@ -1757,13 +1736,11 @@ async fn restore_pins_the_chain_founder_as_owner() {
     )
     .await
     .expect("publish owner snapshot");
-    publish_store_ack_fixture(
+    publish_merge_store_ack_fixture(
         &db_owner,
         &storage.storage,
-        None,
         snapshot_coverage,
         &owner_keypair,
-        Some(&chain),
     )
     .await
     .expect("publish owner snapshot acknowledgement");

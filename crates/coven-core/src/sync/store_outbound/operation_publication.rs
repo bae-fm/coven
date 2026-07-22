@@ -89,15 +89,6 @@ async fn publish_prepared_store_operation_with_membership_completion(
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    let root = required_store_root(db).await?;
-    super::store_pull::validate_serial_control_wrapped_keys(
-        storage,
-        &root,
-        prepared.commit.control(),
-    )
-    .await
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let retained_operation_objects = retained_store_operation_objects(&prepared.commit)?;
     match (mode, *prepared) {
         (
             StoreOperationPublicationMode::Serial { coordination },
@@ -108,91 +99,26 @@ async fn publish_prepared_store_operation_with_membership_completion(
                     "Serial membership publication received Merge membership objects".to_string(),
                 ));
             }
-            let base_head = candidate.base_head.clone();
-            let head = candidate.head.clone();
-            let authorization_after = candidate.authorization_after.clone();
-            let activation = PreparedStoreOperationActivation {
-                candidate: Box::new(PreparedStoreOperationCommit::Serial(candidate)),
-                retained_operation_objects,
-            };
-            let attempt = Box::pin(crate::sync::store_engine::serial::operations::publish(
+            crate::sync::store_engine::serial::operations::publish_prepared(
                 db,
                 storage,
                 coordination,
-                activation,
-                base_head,
-                head,
-                authorization_after,
+                Box::new(candidate),
                 membership_completion,
-            ))
-            .await?;
-            match attempt {
-                crate::sync::store_engine::serial::operations::StoreOperationAttempt::Activated(reference) => {
-                    Ok(StoreOperationPublicationOutcome::Activated(reference))
-                }
-                crate::sync::store_engine::serial::operations::StoreOperationAttempt::Conflict {
-                    activation,
-                    commit,
-                    reference,
-                    authorization_after,
-                    membership_completion,
-                } => {
-                    Box::pin(crate::sync::store_engine::serial::operations::resolve_conflict(
-                        db,
-                        storage,
-                        coordination,
-                        activation,
-                        commit,
-                        reference,
-                        authorization_after,
-                        membership_completion,
-                    ))
-                    .await
-                }
-            }
+            )
+            .await
         }
         (
             StoreOperationPublicationMode::MergeConcurrent,
             PreparedStoreOperationCommit::MergeConcurrent(candidate),
         ) => {
-            let head = candidate.head.clone();
-            let prepared_head = candidate.prepared_head.clone();
-            let history_summary = candidate.history_summary.clone();
-            let activation = PreparedStoreOperationActivation {
-                candidate: Box::new(PreparedStoreOperationCommit::MergeConcurrent(candidate)),
-                retained_operation_objects,
-            };
-            let circle_activations = if matches!(
-                activation.candidate.commit.control(),
-                Some(StoreControl::MergeMembership { .. })
-            ) {
-                super::store_pull::verify_merge_membership_control(
-                    storage,
-                    &root,
-                    &activation.candidate.reference,
-                    &activation.candidate.commit,
-                )
-                .await
-                .map_err(StoreOutboundError::InvalidOutbound)?
-            } else {
-                VerifiedCircleActivations::none(
-                    &activation.candidate.commit,
-                    &activation.candidate.reference,
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
-            };
-            Box::pin(crate::sync::store_engine::merge::operations::publish(
+            crate::sync::store_engine::merge::operations::publish_prepared(
                 db,
                 storage,
-                root,
-                activation,
-                head,
-                prepared_head,
-                history_summary,
+                Box::new(candidate),
                 membership_objects,
                 membership_completion,
-                circle_activations,
-            ))
+            )
             .await
         }
         (
@@ -343,7 +269,7 @@ impl StoreMembershipJournalCompletion {
     }
 }
 
-fn retained_store_operation_objects(
+pub(crate) fn retained_store_operation_objects(
     commit: &StoreBatchCommit,
 ) -> Result<Vec<ExactObjectRef>, StoreOutboundError> {
     let objects = commit

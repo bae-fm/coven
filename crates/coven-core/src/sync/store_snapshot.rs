@@ -7,7 +7,7 @@ use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
     StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotHistorySummary,
-    StoreSnapshotLocator, StoreSnapshotRef, StoreSnapshotState,
+    StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::keys::UserKeypair;
 
@@ -844,54 +844,6 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     })?)
 }
 
-pub(crate) async fn select_store_snapshot_for_acknowledgement(
-    db: &crate::database::Database,
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    root: &StoreRootRef,
-    frontier: &CommitFrontier,
-    device_state: &super::store_commit::StoreDeviceStateRef,
-) -> Result<Option<StoreSnapshotLocator>, SnapshotError> {
-    if frontier.policy() != db.write_policy() {
-        return Err(SnapshotError::PublicationState(
-            "Store acknowledgement frontier uses another write policy".to_string(),
-        ));
-    }
-    let registrations = db
-        .activated_store_device_registration_records()
-        .await
-        .map_err(publication_error)?;
-    let mut candidates = Vec::new();
-    for (registration_ref, registration) in registrations {
-        for snapshot in
-            load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?
-        {
-            if snapshot.meta.coverage.policy() != frontier.policy()
-                || !frontier.covers(&snapshot.meta.coverage)
-                || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
-                || snapshot.meta.state.devices.recovery() != device_state.recovery()
-            {
-                continue;
-            }
-            super::store_pull::verify_store_snapshot_for_acknowledgement(
-                storage,
-                serial_coordination,
-                root,
-                &snapshot,
-            )
-            .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-            candidates.push(snapshot);
-        }
-    }
-    Ok(
-        select_maximal_store_snapshot(candidates).map(|snapshot| StoreSnapshotLocator {
-            author_registration: snapshot.meta.author_registration,
-            snapshot: snapshot.reference,
-        }),
-    )
-}
-
 fn publication_error(error: crate::database::DbError) -> SnapshotError {
     SnapshotError::PublicationState(error.to_string())
 }
@@ -1176,22 +1128,19 @@ mod tests {
         )
         .await
         .expect("publish exact snapshot selector fixture");
-        crate::sync::store_ack::stage_store_ack(
+        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &db,
             &store.storage,
-            None,
             CommitFrontier::MergeConcurrent(BTreeMap::new()),
             "2026-07-16T00:00:01Z".to_string(),
             &signer,
         )
         .await
         .expect("stage exact snapshot selector acknowledgement");
-        crate::sync::store_ack::drain_outbound_store_acks(
+        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
             &db,
             &store.storage,
-            None,
             &signer,
-            Some(&membership),
         )
         .await
         .expect("activate exact snapshot selector acknowledgement");

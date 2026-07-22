@@ -226,30 +226,25 @@ async fn recover_serial_owner_state(
     )
     .await
     .expect("publish Serial bootstrap snapshot");
-    crate::sync::store_ack::stage_store_ack(
+    crate::sync::store_engine::stage_serial_acknowledgement_for_test(
         source,
         storage,
-        Some(
-            storage
-                .serial_coordination()
-                .expect("Serial bootstrap coordination"),
-        ),
+        storage
+            .serial_coordination()
+            .expect("Serial bootstrap coordination"),
         crate::sync::store_commit::CommitFrontier::Serial(None),
         "2024-01-01T00:00:01Z".to_string(),
         owner,
     )
     .await
     .expect("stage Serial bootstrap stability acknowledgement");
-    crate::sync::store_ack::drain_outbound_store_acks(
+    crate::sync::store_engine::drain_serial_acknowledgements_for_test(
         source,
         storage,
-        Some(
-            storage
-                .serial_coordination()
-                .expect("Serial bootstrap coordination"),
-        ),
+        storage
+            .serial_coordination()
+            .expect("Serial bootstrap coordination"),
         owner,
-        None,
     )
     .await
     .expect("activate Serial bootstrap stability acknowledgement");
@@ -6578,25 +6573,19 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("read behind device frontier"),
     )
     .expect("validate behind device frontier");
-    crate::sync::store_ack::stage_store_ack(
+    crate::sync::store_engine::stage_merge_acknowledgement_for_test(
         &behind_db,
         &storage.storage,
-        None,
         behind_frontier,
         T0.to_string(),
         &behind,
     )
     .await
     .expect("stage behind device acknowledgement");
-    let behind_membership = crate::sync::pull::load_cycle_membership(&storage.storage, &behind_db)
-        .await
-        .expect("load behind device membership");
-    crate::sync::store_ack::drain_outbound_store_acks(
+    crate::sync::store_engine::drain_merge_acknowledgements_for_test(
         &behind_db,
         &storage.storage,
-        None,
         &behind,
-        behind_membership.chain.as_ref(),
     )
     .await
     .expect("publish behind device acknowledgement");
@@ -7274,25 +7263,19 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 .expect("load exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        crate::sync::store_ack::stage_store_ack(
+        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &excluding_db,
             &storage.storage,
-            None,
             frontier,
             "2026-07-20T00:01:00Z".to_string(),
             &excluding_owner,
         )
         .await
         .expect("stage exclusion acknowledgement");
-        let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &excluding_db)
-            .await
-            .expect("load exclusion membership");
-        crate::sync::store_ack::drain_outbound_store_acks(
+        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
             &excluding_db,
             &storage.storage,
-            None,
             &excluding_owner,
-            membership.chain.as_ref(),
         )
         .await
         .expect("publish exclusion acknowledgement");

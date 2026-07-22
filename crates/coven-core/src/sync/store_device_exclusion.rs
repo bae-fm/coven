@@ -1752,13 +1752,11 @@ mod tests {
         )
         .await
         .expect("publish author exclusion snapshot");
-        crate::sync::test_helpers::publish_store_ack_fixture(
+        crate::sync::test_helpers::publish_merge_store_ack_fixture(
             &owner_db,
             &store.storage,
-            None,
             snapshot_coverage,
             &signer,
-            Some(&membership),
         )
         .await
         .expect("acknowledge author exclusion snapshot");
@@ -1979,10 +1977,9 @@ mod tests {
             (&owner_db, "2026-07-18T00:00:01Z"),
             (&peer_db, "2026-07-18T00:00:02Z"),
         ] {
-            let acknowledgement = crate::sync::store_ack::stage_store_ack(
+            let acknowledgement = crate::sync::store_engine::stage_merge_acknowledgement_for_test(
                 database,
                 &store.storage,
-                None,
                 snapshot_coverage.clone(),
                 timestamp.to_string(),
                 &signer,
@@ -1997,12 +1994,10 @@ mod tests {
                 published_snapshot.meta.author_registration
             );
             assert_eq!(locator.snapshot, published_snapshot.reference);
-            crate::sync::store_ack::drain_outbound_store_acks(
+            crate::sync::store_engine::drain_merge_acknowledgements_for_test(
                 database,
                 &store.storage,
-                None,
                 &signer,
-                Some(&membership),
             )
             .await
             .expect("activate pre-exclusion snapshot acknowledgement");
@@ -2172,14 +2167,15 @@ mod tests {
                 .expect("read owner exclusion frontier"),
         )
         .expect("shape owner exclusion frontier");
-        let acknowledgement = Box::pin(super::super::store_ack::stage_store_ack(
-            owner_db,
-            &store.storage,
-            None,
-            frontier,
-            "2026-07-18T00:01:00Z".to_string(),
-            signer,
-        ))
+        let acknowledgement = Box::pin(
+            super::super::store_engine::stage_merge_acknowledgement_for_test(
+                owner_db,
+                &store.storage,
+                frontier,
+                "2026-07-18T00:01:00Z".to_string(),
+                signer,
+            ),
+        )
         .await
         .expect("stage owner exclusion acknowledgement");
         let StoreAckExclusionState::MergeConcurrent { proposal_freezes } =
@@ -2188,20 +2184,14 @@ mod tests {
             panic!("Merge acknowledgement changed policy")
         };
         assert_eq!(proposal_freezes, freezes);
-        let membership = Box::pin(super::super::pull::load_cycle_membership(
-            &store.storage,
-            owner_db,
-        ))
-        .await
-        .expect("load owner exclusion membership");
         assert_eq!(
-            Box::pin(super::super::store_ack::drain_outbound_store_acks(
-                owner_db,
-                &store.storage,
-                None,
-                signer,
-                membership.chain.as_ref(),
-            ))
+            Box::pin(
+                super::super::store_engine::drain_merge_acknowledgements_for_test(
+                    owner_db,
+                    &store.storage,
+                    signer,
+                )
+            )
             .await
             .expect("publish owner exclusion acknowledgement"),
             1
@@ -4693,14 +4683,15 @@ mod tests {
                 .expect("read exclusion frontier"),
         )
         .expect("shape exclusion frontier");
-        let acknowledgement = Box::pin(super::super::store_ack::stage_store_ack(
-            &reopened,
-            storage.as_ref(),
-            None,
-            frontier,
-            "2026-07-18T00:00:00Z".to_string(),
-            &signer,
-        ))
+        let acknowledgement = Box::pin(
+            super::super::store_engine::stage_merge_acknowledgement_for_test(
+                &reopened,
+                storage.as_ref(),
+                frontier,
+                "2026-07-18T00:00:00Z".to_string(),
+                &signer,
+            ),
+        )
         .await
         .expect("stage exclusion acknowledgement");
         let StoreAckExclusionState::MergeConcurrent { proposal_freezes } =
@@ -4710,17 +4701,14 @@ mod tests {
         };
         assert!(proposal_freezes.is_empty());
 
-        let membership = super::super::pull::load_cycle_membership(storage.as_ref(), &reopened)
-            .await
-            .expect("reload exclusion membership");
         assert_eq!(
-            Box::pin(super::super::store_ack::drain_outbound_store_acks(
-                &reopened,
-                storage.as_ref(),
-                None,
-                &signer,
-                membership.chain.as_ref(),
-            ))
+            Box::pin(
+                super::super::store_engine::drain_merge_acknowledgements_for_test(
+                    &reopened,
+                    storage.as_ref(),
+                    &signer,
+                )
+            )
             .await
             .expect("publish exclusion acknowledgement"),
             1
@@ -4769,26 +4757,20 @@ mod tests {
                 .expect("read competing acknowledgement frontier"),
         )
         .expect("shape competing acknowledgement frontier");
-        super::super::store_ack::stage_store_ack(
+        super::super::store_engine::stage_merge_acknowledgement_for_test(
             &reopened,
             storage.as_ref(),
-            None,
             frontier,
             "2026-07-18T00:01:00Z".to_string(),
             &signer,
         )
         .await
         .expect("stage competing acknowledgement");
-        let membership = super::super::pull::load_cycle_membership(storage.as_ref(), &reopened)
-            .await
-            .expect("reload competing acknowledgement membership");
         assert_eq!(
-            super::super::store_ack::drain_outbound_store_acks(
+            super::super::store_engine::drain_merge_acknowledgements_for_test(
                 &reopened,
                 storage.as_ref(),
-                None,
                 &signer,
-                membership.chain.as_ref(),
             )
             .await
             .expect("publish competing acknowledgement"),

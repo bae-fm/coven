@@ -450,7 +450,7 @@ async fn authorize_serial(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(super) async fn authorize_borrowed<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,

@@ -88,6 +88,64 @@ async fn load_store_engine(
         .map_err(super::store_outbound::StoreOutboundError::InvalidOutbound)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn stage_merge_acknowledgement_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    frontier: CommitFrontier,
+    sync_time: String,
+    identity: &UserKeypair,
+) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError> {
+    let engine = StoreEngine::authorize_borrowed(storage, None, db)
+        .await
+        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+    engine
+        .stage_acknowledgement_for_test(frontier, sync_time, identity)
+        .await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn stage_serial_acknowledgement_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    frontier: CommitFrontier,
+    sync_time: String,
+    identity: &UserKeypair,
+) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError> {
+    let engine = StoreEngine::authorize_borrowed(storage, Some(coordination), db)
+        .await
+        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+    engine
+        .stage_acknowledgement_for_test(frontier, sync_time, identity)
+        .await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn drain_merge_acknowledgements_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity: &UserKeypair,
+) -> Result<u64, super::store_ack::StoreAckError> {
+    let engine = StoreEngine::authorize_borrowed(storage, None, db)
+        .await
+        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+    engine.drain_acknowledgements_for_test(identity).await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn drain_serial_acknowledgements_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    identity: &UserKeypair,
+) -> Result<u64, super::store_ack::StoreAckError> {
+    let engine = StoreEngine::authorize_borrowed(storage, Some(coordination), db)
+        .await
+        .map_err(|error| super::store_ack::StoreAckError::InvalidOutbound(error.to_string()))?;
+    engine.drain_acknowledgements_for_test(identity).await
+}
+
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn pull_store_commits<'a>(
@@ -479,7 +537,7 @@ impl StoreEngine {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn authorize_borrowed<'a>(
         storage: &'a dyn SyncStorage,
         coordination: Option<&'a dyn CoordinationStorage>,
@@ -724,6 +782,42 @@ impl<'engine> AuthorizedStoreEngine<'engine> {
             }
         }
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn stage_acknowledgement_for_test(
+        &self,
+        frontier: CommitFrontier,
+        sync_time: String,
+        identity: &UserKeypair,
+    ) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError> {
+        match &self.0 {
+            AuthorizedStoreEngineKind::Merge(engine) => {
+                engine
+                    .stage_acknowledgement(frontier, sync_time, identity)
+                    .await
+            }
+            AuthorizedStoreEngineKind::Serial(engine) => {
+                engine
+                    .stage_acknowledgement(frontier, sync_time, identity)
+                    .await
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn drain_acknowledgements_for_test(
+        &self,
+        identity: &UserKeypair,
+    ) -> Result<u64, super::store_ack::StoreAckError> {
+        match &self.0 {
+            AuthorizedStoreEngineKind::Merge(engine) => {
+                engine.drain_acknowledgements(identity).await
+            }
+            AuthorizedStoreEngineKind::Serial(engine) => {
+                engine.drain_acknowledgements(identity).await
+            }
+        }
+    }
 }
 
 impl PostPullStoreEngine<'_, '_> {
@@ -785,50 +879,4 @@ fn snapshot_position_for_stream(
         // Missing local-stream coverage is an exact genesis position.
         .map(|reference| reference.coord.sequence())
         .unwrap_or(0))
-}
-async fn stage_and_publish_ack(
-    engine: &impl AcknowledgementEngine,
-    identity: &UserKeypair,
-    sync_time: &str,
-) -> Result<(), SyncCycleFailure> {
-    engine
-        .drain_acknowledgements(identity)
-        .await
-        .map_err(|error| {
-            SyncCycleFailure::operation("publish queued Store acknowledgement", error)
-        })?;
-    let frontier = engine
-        .acknowledgement_database()
-        .materialized_frontier()
-        .await
-        .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
-    let frontier = CommitFrontier::from_refs(engine.acknowledgement_policy(), frontier)
-        .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-    engine
-        .stage_acknowledgement(frontier, sync_time.to_owned(), identity)
-        .await
-        .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-    engine
-        .drain_acknowledgements(identity)
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
-    Ok(())
-}
-
-trait AcknowledgementEngine {
-    fn acknowledgement_database(&self) -> &Database;
-
-    fn acknowledgement_policy(&self) -> crate::WritePolicy;
-
-    async fn drain_acknowledgements(
-        &self,
-        identity: &UserKeypair,
-    ) -> Result<u64, super::store_ack::StoreAckError>;
-
-    async fn stage_acknowledgement(
-        &self,
-        frontier: CommitFrontier,
-        sync_time: String,
-        identity: &UserKeypair,
-    ) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError>;
 }

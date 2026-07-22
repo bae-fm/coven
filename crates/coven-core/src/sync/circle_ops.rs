@@ -3816,10 +3816,9 @@ mod tests {
         let db = open_test_db();
         let (store, signer, mut journal) =
             persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
-        super::super::store_ack::stage_store_ack(
+        super::super::store_engine::stage_merge_acknowledgement_for_test(
             &db,
             &store.storage,
-            None,
             super::super::store_commit::CommitFrontier::from_refs(
                 crate::WritePolicy::MergeConcurrent,
                 db.materialized_frontier()

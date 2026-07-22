@@ -186,6 +186,25 @@ impl StoreOperationPlanCommon {
     pub(crate) fn device_signer(&self) -> &UserKeypair {
         &self.device_signer
     }
+
+    pub(crate) fn validate_acknowledgement(
+        &self,
+        acknowledgement: &super::store_commit::StoreAck,
+    ) -> Result<(), StoreOutboundError> {
+        let predecessor_cut = self
+            .order
+            .predecessor_cut()
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        if acknowledgement.registration != self.registration_ref
+            || acknowledgement.store_cut != predecessor_cut
+            || acknowledgement.device_state != self.device_state
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Store acknowledgement differs from its operation commit predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl MergeStoreOperationCommitPlan {
@@ -436,90 +455,6 @@ impl StoreOperationCommitPlan {
         };
         Some(&serial.authorization)
     }
-
-    pub(crate) fn validate_acknowledgement(
-        &self,
-        acknowledgement: &super::store_commit::StoreAck,
-    ) -> Result<(), StoreOutboundError> {
-        if acknowledgement.registration != self.registration_ref
-            || acknowledgement.store_cut != self.predecessor_cut()?
-            || acknowledgement.device_state != self.device_state
-        {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Store acknowledgement differs from its operation commit predecessor".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-pub(crate) async fn serial_successor_plan_for_test(
-    db: &Database,
-    device_id: &str,
-    signer: &UserKeypair,
-    predecessor: &PreparedStoreOperationCommit,
-    base_head: VersionedObject,
-) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
-    let PreparedStoreOperationCommit::Serial(predecessor) = predecessor else {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "test Serial successor predecessor uses Merge publication".to_string(),
-        ));
-    };
-    if base_head.bytes != predecessor.head.to_bytes() {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "test Serial successor receipt differs from its predecessor head".to_string(),
-        ));
-    }
-    let (root, registration_ref, registration, device_signer) =
-        load_local_store_authority(db, device_id, signer).await?;
-    let sequence = predecessor
-        .reference
-        .coord
-        .sequence()
-        .checked_add(1)
-        .ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "test Serial successor sequence overflow".to_string(),
-            )
-        })?;
-    let position = StoreSerialPredecessor::Commit(predecessor.reference.clone());
-    let membership_state = super::circle_control::StoreMembershipStateRef::serial(
-        position.clone(),
-        predecessor.commit.membership_state.recovery().to_vec(),
-        &predecessor.authorization_after,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let device_state = super::store_commit::StoreDeviceStateRef::Serial {
-        position: position.clone(),
-        recovery: predecessor.commit.device_state.recovery().to_vec(),
-        state_hash: predecessor.commit.device_state.state_hash(),
-    };
-    let owner_grant = predecessor
-        .authorization_after
-        .membership
-        .active_owner_grant(&registration.author_pubkey);
-    Ok(StoreOperationCommitPlan::Serial(
-        SerialStoreOperationCommitPlan {
-            common: StoreOperationPlanCommon {
-                root,
-                registration_ref,
-                registration: Box::new(registration),
-                device_signer,
-                coord: StoreCommitCoord::Serial { sequence },
-                order: StoreCommitOrder::Serial {
-                    seq: sequence,
-                    predecessor: position,
-                },
-                membership_state,
-                device_state,
-                membership_authority: StoreOperationMembershipAuthority::Serial,
-                owner_grant,
-            },
-            base_head,
-            authorization: predecessor.authorization_after.clone(),
-        },
-    ))
 }
 
 pub(crate) async fn prepare_merge_conflict_resolution_commit(

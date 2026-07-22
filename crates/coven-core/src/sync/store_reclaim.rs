@@ -1635,13 +1635,11 @@ mod tests {
         )
         .await
         .expect("publish stable snapshot");
-        crate::sync::test_helpers::publish_store_ack_fixture(
+        crate::sync::test_helpers::publish_merge_store_ack_fixture(
             &db,
             &store.storage,
-            None,
             first_coverage,
             &signer,
-            Some(chain),
         )
         .await
         .expect("acknowledge stable snapshot");
@@ -2035,13 +2033,11 @@ mod tests {
         )
         .await
         .expect("publish covering snapshot");
-        crate::sync::test_helpers::publish_store_ack_fixture(
+        crate::sync::test_helpers::publish_merge_store_ack_fixture(
             &db,
             &store.storage,
-            None,
             coverage,
             &signer,
-            Some(chain),
         )
         .await
         .expect("publish covering acknowledgement");

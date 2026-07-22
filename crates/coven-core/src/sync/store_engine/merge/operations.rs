@@ -252,6 +252,61 @@ pub(crate) async fn prepare_candidate(
     })
 }
 
+pub(crate) async fn publish_prepared(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    candidate: Box<PreparedMergeStoreOperationCommit>,
+    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    let root = crate::sync::store_outbound::required_store_root(db).await?;
+    crate::sync::store_pull::validate_serial_control_wrapped_keys(
+        storage,
+        &root,
+        candidate.commit.control(),
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let retained_operation_objects =
+        crate::sync::store_outbound::retained_store_operation_objects(&candidate.commit)?;
+    let head = candidate.head.clone();
+    let prepared_head = candidate.prepared_head.clone();
+    let history_summary = candidate.history_summary.clone();
+    let candidate = Box::new(PreparedStoreOperationCommit::MergeConcurrent(*candidate));
+    let circle_activations = if matches!(
+        candidate.commit.control(),
+        Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
+    ) {
+        crate::sync::store_pull::verify_merge_membership_control(
+            storage,
+            &root,
+            &candidate.reference,
+            &candidate.commit,
+        )
+        .await
+        .map_err(StoreOutboundError::InvalidOutbound)?
+    } else {
+        VerifiedCircleActivations::none(&candidate.commit, &candidate.reference)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+    };
+    publish(
+        db,
+        storage,
+        root,
+        PreparedStoreOperationActivation {
+            candidate,
+            retained_operation_objects,
+        },
+        head,
+        prepared_head,
+        history_summary,
+        membership_objects,
+        membership_completion,
+        circle_activations,
+    )
+    .await
+}
+
 pub(crate) async fn upload_commit(
     storage: &dyn SyncStorage,
     candidate: &PreparedStoreOperationCommit,

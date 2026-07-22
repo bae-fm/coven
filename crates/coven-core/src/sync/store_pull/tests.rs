@@ -105,7 +105,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 
 #[tokio::test]
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
-    let (db, store, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+    let (db, store, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
         crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
@@ -113,13 +113,11 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
-    crate::sync::test_helpers::publish_store_ack_fixture(
+    crate::sync::test_helpers::publish_merge_store_ack_fixture(
         &db,
         &store.storage,
-        None,
         coverage,
         &store.signer,
-        Some(&membership),
     )
     .await
     .expect("publish retained acknowledgement");

@@ -87,6 +87,68 @@ pub(crate) async fn prepare_plan_from_snapshot(
     ))
 }
 
+#[cfg(test)]
+pub(crate) async fn prepare_successor_plan_for_test(
+    db: &Database,
+    device_id: &str,
+    signer: &UserKeypair,
+    predecessor: &PreparedSerialStoreOperationCommit,
+    base_head: VersionedObject,
+) -> Result<SerialStoreOperationCommitPlan, StoreOutboundError> {
+    if base_head.bytes != predecessor.head.to_bytes() {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "test Serial successor receipt differs from its predecessor head".to_string(),
+        ));
+    }
+    let (root, registration_ref, registration, device_signer) =
+        crate::sync::store_outbound::load_local_store_authority(db, device_id, signer).await?;
+    let sequence = predecessor
+        .reference
+        .coord
+        .sequence()
+        .checked_add(1)
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "test Serial successor sequence overflow".to_string(),
+            )
+        })?;
+    let position = StoreSerialPredecessor::Commit(predecessor.reference.clone());
+    let membership_state = crate::sync::circle_control::StoreMembershipStateRef::serial(
+        position.clone(),
+        predecessor.commit.membership_state.recovery().to_vec(),
+        &predecessor.authorization_after,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let device_state = crate::sync::store_commit::StoreDeviceStateRef::Serial {
+        position: position.clone(),
+        recovery: predecessor.commit.device_state.recovery().to_vec(),
+        state_hash: predecessor.commit.device_state.state_hash(),
+    };
+    let owner_grant = predecessor
+        .authorization_after
+        .membership
+        .active_owner_grant(&registration.author_pubkey);
+    Ok(SerialStoreOperationCommitPlan::new(
+        crate::sync::store_outbound::StoreOperationPlanCommon::new(
+            root,
+            registration_ref,
+            registration,
+            device_signer,
+            crate::sync::store_commit::StoreCommitCoord::Serial { sequence },
+            StoreCommitOrder::Serial {
+                seq: sequence,
+                predecessor: position,
+            },
+            membership_state,
+            device_state,
+            crate::sync::store_commit::StoreOperationMembershipAuthority::Serial,
+            owner_grant,
+        ),
+        base_head,
+        predecessor.authorization_after.clone(),
+    ))
+}
+
 pub(crate) async fn prepare_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -119,6 +181,69 @@ pub(crate) async fn prepare_candidate(
         head,
         authorization_after,
     })
+}
+
+pub(crate) async fn publish_prepared(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    candidate: Box<PreparedSerialStoreOperationCommit>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    let root = required_store_root(db).await?;
+    crate::sync::store_pull::validate_serial_control_wrapped_keys(
+        storage,
+        &root,
+        candidate.commit.control(),
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let retained_operation_objects =
+        crate::sync::store_outbound::retained_store_operation_objects(&candidate.commit)?;
+    let base_head = candidate.base_head.clone();
+    let head = candidate.head.clone();
+    let authorization_after = candidate.authorization_after.clone();
+    let activation = PreparedStoreOperationActivation {
+        candidate: Box::new(
+            crate::sync::store_outbound::PreparedStoreOperationCommit::Serial(*candidate),
+        ),
+        retained_operation_objects,
+    };
+    match publish(
+        db,
+        storage,
+        coordination,
+        activation,
+        base_head,
+        head,
+        authorization_after,
+        membership_completion,
+    )
+    .await?
+    {
+        StoreOperationAttempt::Activated(reference) => {
+            Ok(StoreOperationPublicationOutcome::Activated(reference))
+        }
+        StoreOperationAttempt::Conflict {
+            activation,
+            commit,
+            reference,
+            authorization_after,
+            membership_completion,
+        } => {
+            resolve_conflict(
+                db,
+                storage,
+                coordination,
+                activation,
+                commit,
+                reference,
+                authorization_after,
+                membership_completion,
+            )
+            .await
+        }
+    }
 }
 
 pub(crate) enum StoreOperationAttempt {

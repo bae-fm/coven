@@ -1062,22 +1062,19 @@ mod tests {
         )
         .await
         .expect("publish bootstrap database image");
-        crate::sync::store_ack::stage_store_ack(
+        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &source,
             &store.storage,
-            None,
             CommitFrontier::MergeConcurrent(BTreeMap::new()),
             "2026-07-16T00:00:01Z".to_string(),
             &signer,
         )
         .await
         .expect("stage snapshot stability acknowledgement");
-        crate::sync::store_ack::drain_outbound_store_acks(
+        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
             &source,
             &store.storage,
-            None,
             &signer,
-            Some(&membership),
         )
         .await
         .expect("activate snapshot stability acknowledgement");
@@ -1221,22 +1218,19 @@ mod tests {
         )
         .await
         .expect("publish terminal-receipt bootstrap database image");
-        crate::sync::store_ack::stage_store_ack(
+        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &source,
             &store.storage,
-            None,
             CommitFrontier::MergeConcurrent(BTreeMap::new()),
             "2026-07-16T00:00:01Z".to_string(),
             &signer,
         )
         .await
         .expect("stage terminal-receipt snapshot stability acknowledgement");
-        crate::sync::store_ack::drain_outbound_store_acks(
+        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
             &source,
             &store.storage,
-            None,
             &signer,
-            Some(&membership),
         )
         .await
         .expect("activate terminal-receipt snapshot stability acknowledgement");

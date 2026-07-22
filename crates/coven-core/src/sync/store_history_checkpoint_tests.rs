@@ -458,7 +458,7 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_acknowledgement() {
-    let (db, store, _device_id, membership, _temp, _store_dir) = published_history(1).await;
+    let (db, store, _device_id, _membership, _temp, _store_dir) = published_history(1).await;
     let coverage = crate::sync::store_commit::CommitFrontier::from_refs(
         crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
@@ -466,13 +466,11 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
-    crate::sync::test_helpers::publish_store_ack_fixture(
+    crate::sync::test_helpers::publish_merge_store_ack_fixture(
         &db,
         &store.storage,
-        None,
         coverage,
         &store.signer,
-        Some(&membership),
     )
     .await
     .expect("publish retained acknowledgement");

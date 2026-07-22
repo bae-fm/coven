@@ -1430,30 +1430,58 @@ pub async fn publish_snapshot_fixture(
     .map_err(|error| error.to_string())
 }
 
-pub async fn publish_store_ack_fixture(
+pub async fn publish_merge_store_ack_fixture(
     db: &Database,
     storage: &dyn crate::sync::storage::SyncStorage,
-    coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
     frontier: crate::sync::store_commit::CommitFrontier,
     signer: &UserKeypair,
-    membership: Option<&crate::sync::membership::MembershipChain>,
 ) -> Result<(), String> {
-    crate::sync::store_ack::stage_store_ack(
-        db,
-        storage,
-        coordination,
-        frontier,
-        "2026-07-16T00:00:01Z".to_string(),
-        signer,
+    Box::pin(
+        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
+            db,
+            storage,
+            frontier,
+            "2026-07-16T00:00:01Z".to_string(),
+            signer,
+        ),
     )
     .await
     .map_err(|error| error.to_string())?;
-    let published = crate::sync::store_ack::drain_outbound_store_acks(
-        db,
-        storage,
-        coordination,
-        signer,
-        membership,
+    let published = Box::pin(
+        crate::sync::store_engine::drain_merge_acknowledgements_for_test(db, storage, signer),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if published != 1 {
+        return Err(format!(
+            "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
+        ));
+    }
+    Ok(())
+}
+
+pub async fn publish_serial_store_ack_fixture(
+    db: &Database,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    frontier: crate::sync::store_commit::CommitFrontier,
+    signer: &UserKeypair,
+) -> Result<(), String> {
+    Box::pin(
+        crate::sync::store_engine::stage_serial_acknowledgement_for_test(
+            db,
+            storage,
+            storage,
+            frontier,
+            "2026-07-16T00:00:01Z".to_string(),
+            signer,
+        ),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let published = Box::pin(
+        crate::sync::store_engine::drain_serial_acknowledgements_for_test(
+            db, storage, storage, signer,
+        ),
     )
     .await
     .map_err(|error| error.to_string())?;
