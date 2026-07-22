@@ -1,5 +1,31 @@
 use super::*;
 
+pub(crate) async fn load_serial_store_package(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &super::store_commit::StoreBatchCommit,
+) -> Result<Option<Vec<u8>>, StorePullError> {
+    if let Some(package) = commit.store_package() {
+        if package.schema_version > db.schema_version() {
+            return Err(StorePullError::Serial(format!(
+                "commit {} requires schema {}, local schema is {}",
+                commit.seq(),
+                package.schema_version,
+                db.schema_version()
+            )));
+        }
+    }
+    match super::store_objects::load_store_package(storage, commit_ref, commit).await? {
+        Some(package) => Ok(Some(package.value)),
+        None if commit.store_package().is_none() => Ok(None),
+        None => Err(StorePullError::Serial(format!(
+            "commit {} Store package is absent",
+            commit.seq()
+        ))),
+    }
+}
+
 pub(super) async fn apply_serial_candidate(
     db: &Database,
     storage: &dyn SyncStorage,

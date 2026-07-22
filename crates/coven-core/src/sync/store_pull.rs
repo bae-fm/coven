@@ -41,7 +41,7 @@ use super::store_objects::{
     load_founder_registration_with_root, load_owner_recovery_node_ref,
     load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
     load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
-    load_store_ack_predecessor, load_store_ack_ref, load_store_package, load_store_protocol_root,
+    load_store_ack_predecessor, load_store_ack_ref, load_store_protocol_root,
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::changeset::RowChange;

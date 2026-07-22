@@ -56,26 +56,6 @@ pub(crate) async fn load_circle_payload_activations(
     .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
 }
 
-pub(crate) async fn load_applicable_circle_packages(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    activations: &[super::circle_ops::VerifiedCircleReference],
-    author: &StoreDeviceRegistration,
-) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
-    load_applicable_circle_packages_with_prior_accesses(
-        db,
-        storage,
-        commit_ref,
-        commit,
-        activations,
-        author,
-        &CirclePackageAccesses::new(),
-    )
-    .await
-}
-
 fn circle_package_access(
     activation: &super::circle_ops::VerifiedCircleReference,
 ) -> Result<Option<CirclePackageAccess>, String> {
@@ -264,30 +244,4 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
         });
     }
     Ok(loaded)
-}
-
-pub(crate) async fn load_serial_store_package(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-) -> Result<Option<Vec<u8>>, StorePullError> {
-    if let Some(package) = commit.store_package() {
-        if package.schema_version > db.schema_version() {
-            return Err(StorePullError::Serial(format!(
-                "commit {} requires schema {}, local schema is {}",
-                commit.seq(),
-                package.schema_version,
-                db.schema_version()
-            )));
-        }
-    }
-    match load_store_package(storage, commit_ref, commit).await? {
-        Some(package) => Ok(Some(package.value)),
-        None if commit.store_package().is_none() => Ok(None),
-        None => Err(StorePullError::Serial(format!(
-            "commit {} Store package is absent",
-            commit.seq()
-        ))),
-    }
 }
