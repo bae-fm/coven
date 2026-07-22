@@ -153,6 +153,7 @@ pub(crate) use operation_models::{
     PublishedStoreSnapshot, TerminalMembershipMutation,
 };
 use operation_models::{LocalDeviceRegistrationJournalRow, PreparedLocalDeviceRegistrationRow};
+#[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
 use prepared_audience_objects::{
     validate_prepared_audience_blob_bindings, validate_prepared_audience_blob_graph,
