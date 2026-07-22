@@ -6,16 +6,11 @@
 use rusqlite::OptionalExtension;
 use tracing::{debug, info};
 
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 #[cfg(test)]
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
-use crate::sync::{
-    blocking, cloud_storage, membership, remote_object, storage, store_commit, store_objects,
-    wrapped_store_key,
-};
-
-use crate::database::Database;
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::{
