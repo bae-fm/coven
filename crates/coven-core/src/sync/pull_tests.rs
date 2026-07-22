@@ -3985,7 +3985,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
         .expect("read scoped source device")
         .expect("scoped source device exists");
-    let circle_id = crate::sync::circle_ops::create_circle(
+    let circle_id = crate::sync::store::circle_controls::create_circle(
         &source,
         &storage.storage,
         &device_id,
@@ -4136,7 +4136,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("read Circle activator device")
         .expect("Circle activator device exists");
-    let circle_id = crate::sync::circle_ops::create_circle(
+    let circle_id = crate::sync::store::circle_controls::create_circle(
         activator,
         &storage.storage,
         &activator_device,
@@ -4168,7 +4168,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("read Circle successor device")
         .expect("Circle successor device exists");
-    crate::sync::circle_ops::rename_circle(
+    crate::sync::store::circle_controls::rename_circle(
         successor,
         &storage.storage,
         &successor_device,

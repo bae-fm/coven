@@ -2,6 +2,7 @@ use crate::database::remote_object_records::merge_prepared_remote_object;
 
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
+use crate::sync::store_commit::commit_semantic_prefix;
 
 use super::fixtures::*;
 

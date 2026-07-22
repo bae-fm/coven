@@ -7,12 +7,12 @@ use super::reclaim as store_reclaim;
 use super::StoreError;
 use super::*;
 use crate::database::VerifiedMergeMaterialization;
-use crate::sync::circle_activation::VerifiedCircleActivations;
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{
     BlobWriteAuthority, ExactObjectRef, PreparedExactObject, ProtocolObjectContext,
     ProtocolObjectDomain, StorageError,
 };
+use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef,

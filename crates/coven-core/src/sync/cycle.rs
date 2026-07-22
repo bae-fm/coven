@@ -1324,7 +1324,7 @@ impl SyncComponents {
     pub async fn create_circle(
         &self,
         name: &str,
-    ) -> Result<super::circle::CircleId, super::circle_ops::CircleOperationError> {
+    ) -> Result<super::circle::CircleId, super::store::CircleOperationError> {
         self.store
             .create_circle(
                 &self.device_id,
@@ -1339,7 +1339,7 @@ impl SyncComponents {
         &self,
         circle_id: super::circle::CircleId,
         name: &str,
-    ) -> Result<(), super::circle_ops::CircleOperationError> {
+    ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .rename_circle(
                 &self.device_id,

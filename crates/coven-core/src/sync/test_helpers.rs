@@ -264,14 +264,14 @@ fn install_test_circle_current_state(
         CircleMetadataHead, CircleRole, CircleRosterHead, CircleTransitionDraft,
         CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
     };
-    use crate::sync::circle_activation::{
-        CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
-    };
     use crate::sync::membership::{
         MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
         MembershipStatus,
     };
     use crate::sync::storage::ExactObjectRef;
+    use crate::sync::store::circle_controls::activation::{
+        CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
+    };
     use crate::sync::store_commit::{
         CandidateFamilyId, CircleActivationObjects, CircleMetadataObjectRef, DeviceStreamAnchor,
         GrantStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,

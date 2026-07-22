@@ -52,7 +52,6 @@ use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::sync::circle::Audience;
-use crate::sync::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{
@@ -70,15 +69,18 @@ use crate::sync::retained_replay::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::store::circle_controls::activation::{
+    VerifiedCircleActivations, VerifiedStreamActivations,
+};
 use crate::sync::store::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
     StoreReclaimJournalError,
 };
 use crate::sync::store_commit::{
-    ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
-    CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
-    RetainedStoreDeviceOperations, RetainedStoreDeviceRegistrationActivations, SnapshotImageRef,
-    SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CirclePackageRef,
+    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceOperations,
+    RetainedStoreDeviceRegistrationActivations, SnapshotImageRef, SnapshotMeta, StoreAck,
+    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSnapshotRef,
@@ -136,7 +138,9 @@ mod write_models;
 mod write_publication_records;
 
 pub(crate) use blob_records::previous_row_blob_for_write_on;
-use circle_operation_records::*;
+pub(crate) use circle_operation_records::{
+    load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
+};
 use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
 use merge_candidate_records::*;
 pub(crate) use operation_models::{

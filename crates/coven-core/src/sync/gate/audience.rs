@@ -13,8 +13,8 @@ use super::outbound::{
 };
 use super::{query_mapped_rows, query_row_optional, GateError};
 use crate::sync::circle::{row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey};
-use crate::sync::circle_activation::CircleCurrentState;
 use crate::sync::session::quote_ident;
+use crate::sync::store::circle_controls::activation::CircleCurrentState;
 
 pub(crate) fn is_routing_table(table: &str) -> bool {
     matches!(table, "_coven_audience" | "_coven_row_routes")

@@ -1,4 +1,5 @@
 mod acknowledgements;
+mod circle_controls;
 mod device_exclusion;
 mod owner_promotion;
 mod reclaim;

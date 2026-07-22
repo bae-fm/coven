@@ -116,9 +116,13 @@ impl Store {
         self.resume_device_exclusion(identity)
             .await
             .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
-        crate::sync::circle_ops::resume_circle_operations(self.db(), &**self.storage(), identity)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
+        crate::sync::store::circle_controls::resume_circle_operations(
+            self.db(),
+            &**self.storage(),
+            identity,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }
 
     pub(crate) async fn abandon_candidate(
@@ -224,11 +228,11 @@ impl Store {
         timestamp: &str,
         name: &str,
         identity: &UserKeypair,
-    ) -> Result<crate::sync::circle::CircleId, crate::sync::circle_ops::CircleOperationError> {
+    ) -> Result<crate::sync::circle::CircleId, super::CircleOperationError> {
         if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(crate::sync::circle_ops::CircleOperationError::BrowsableStorage);
+            return Err(super::CircleOperationError::BrowsableStorage);
         }
-        crate::sync::circle_ops::create_circle(
+        crate::sync::store::circle_controls::create_circle(
             self.db(),
             &**self.storage(),
             device_id,
@@ -246,11 +250,11 @@ impl Store {
         circle_id: crate::sync::circle::CircleId,
         name: &str,
         identity: &UserKeypair,
-    ) -> Result<(), crate::sync::circle_ops::CircleOperationError> {
+    ) -> Result<(), super::CircleOperationError> {
         if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(crate::sync::circle_ops::CircleOperationError::BrowsableStorage);
+            return Err(super::CircleOperationError::BrowsableStorage);
         }
-        crate::sync::circle_ops::rename_circle(
+        crate::sync::store::circle_controls::rename_circle(
             self.db(),
             &**self.storage(),
             device_id,

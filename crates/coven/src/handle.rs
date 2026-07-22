@@ -2755,7 +2755,7 @@ mod tests {
                 matches!(
                     &circle,
                     Err(SyncError::Circle(
-                        crate::sync::circle_ops::CircleOperationError::BrowsableStorage
+                        crate::sync::store::CircleOperationError::BrowsableStorage
                     ))
                 ),
                 "{circle:?}"

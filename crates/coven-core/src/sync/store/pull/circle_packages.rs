@@ -38,7 +38,7 @@ pub(crate) async fn load_circle_payload_activations(
             )
         })?;
     Box::pin(
-        super::circle_activation::load_circle_activations_with_prefix(
+        crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
             db,
             storage,
             root,
@@ -55,7 +55,7 @@ pub(crate) async fn load_circle_payload_activations(
 }
 
 fn circle_package_access(
-    activation: &super::circle_ops::VerifiedCircleReference,
+    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
 ) -> Result<Option<CirclePackageAccess>, String> {
     let Some(access) = activation.local_access.as_ref() else {
         return Ok(None);
@@ -112,7 +112,7 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
-    activations: &[super::circle_ops::VerifiedCircleReference],
+    activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
     prior_accesses: &CirclePackageAccesses,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {

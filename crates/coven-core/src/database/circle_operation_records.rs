@@ -1,14 +1,14 @@
 use super::*;
 
-pub(super) struct PreparedCircleOperationRow {
-    pub(super) operation_id: String,
-    pub(super) circle_id: String,
-    pub(super) payload: Vec<u8>,
+pub(crate) struct PreparedCircleOperationRow {
+    pub(crate) operation_id: String,
+    pub(crate) circle_id: String,
+    pub(crate) payload: Vec<u8>,
 }
 
 impl PreparedCircleOperationRow {
-    pub(super) fn from_journal(
-        journal: crate::sync::circle_ops::CircleOperationJournal,
+    pub(crate) fn from_journal(
+        journal: crate::sync::store::circle_controls::CircleOperationJournal,
     ) -> Result<Self, DbError> {
         journal
             .validate_identity()
@@ -26,13 +26,15 @@ impl PreparedCircleOperationRow {
     }
 }
 
-pub(super) fn parse_circle_operation_row(
+pub(crate) fn parse_circle_operation_row(
     stored_operation_id: &str,
     stored_circle_id: &str,
     payload: &[u8],
-) -> Result<crate::sync::circle_ops::CircleOperationJournal, DbError> {
-    let journal: crate::sync::circle_ops::CircleOperationJournal = serde_json::from_slice(payload)
-        .map_err(|error| DbError::Message(format!("parse circle operation journal: {error}")))?;
+) -> Result<crate::sync::store::circle_controls::CircleOperationJournal, DbError> {
+    let journal: crate::sync::store::circle_controls::CircleOperationJournal =
+        serde_json::from_slice(payload).map_err(|error| {
+            DbError::Message(format!("parse circle operation journal: {error}"))
+        })?;
     journal
         .validate_identity()
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -51,10 +53,10 @@ pub(super) fn parse_circle_operation_row(
     Ok(journal)
 }
 
-pub(super) fn load_circle_operation_on(
+pub(crate) fn load_circle_operation_on(
     conn: &Connection,
     operation_id: &str,
-) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
+) -> Result<Option<crate::sync::store::circle_controls::CircleOperationJournal>, DbError> {
     conn.query_row(
         "SELECT operation_id, circle_id, payload
          FROM circle_operations

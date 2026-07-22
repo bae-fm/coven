@@ -18,7 +18,6 @@ use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::audience_package::{AudiencePackage, PackageAudience};
-use crate::sync::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivationPrefix};
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
 use crate::sync::membership::{MembershipChain, MembershipStatus};
@@ -29,6 +28,9 @@ use crate::sync::session::SyncedTable;
 use crate::sync::storage::{
     BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     SyncStorage,
+};
+use crate::sync::store::circle_controls::activation::{
+    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 use crate::sync::store::device_join;
 use crate::sync::store::StoreError;
@@ -57,8 +59,8 @@ use crate::sync::store_objects::{
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::sync::{
-    causal_grants, circle, circle_activation, circle_ops, gate, hlc, membership, provider,
-    remote_object, retained_replay, session, store_commit, store_objects,
+    causal_grants, circle, gate, hlc, membership, provider, remote_object, retained_replay,
+    session, store_commit, store_objects,
 };
 
 mod ancestry;

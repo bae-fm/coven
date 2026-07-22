@@ -613,7 +613,7 @@ impl Database {
         conn: &Connection,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
-        activations: &[crate::sync::circle_ops::VerifiedCircleReference],
+        activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         if activations.len() != commit.circle_controls().len() {
             return Err(DbError::Message(

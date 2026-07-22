@@ -119,14 +119,13 @@ enum SyncCommand {
     CreateCircle {
         name: String,
         reply: tokio::sync::oneshot::Sender<
-            Result<crate::CircleId, crate::sync::circle_ops::CircleOperationError>,
+            Result<crate::CircleId, crate::sync::store::CircleOperationError>,
         >,
     },
     RenameCircle {
         circle_id: crate::CircleId,
         name: String,
-        reply:
-            tokio::sync::oneshot::Sender<Result<(), crate::sync::circle_ops::CircleOperationError>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::sync::store::CircleOperationError>>,
     },
 }
 
@@ -480,7 +479,7 @@ impl SyncLoopHandle {
     pub(crate) async fn create_circle(
         &self,
         name: &str,
-    ) -> Result<crate::CircleId, crate::sync::circle_ops::CircleOperationError> {
+    ) -> Result<crate::CircleId, crate::sync::store::CircleOperationError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.command_tx
             .send(SyncCommand::CreateCircle {
@@ -488,17 +487,17 @@ impl SyncLoopHandle {
                 reply,
             })
             .await
-            .map_err(|_| crate::sync::circle_ops::CircleOperationError::CommandChannelClosed)?;
+            .map_err(|_| crate::sync::store::CircleOperationError::CommandChannelClosed)?;
         response
             .await
-            .map_err(|_| crate::sync::circle_ops::CircleOperationError::ReplyChannelClosed)?
+            .map_err(|_| crate::sync::store::CircleOperationError::ReplyChannelClosed)?
     }
 
     pub(crate) async fn rename_circle(
         &self,
         circle_id: crate::CircleId,
         name: &str,
-    ) -> Result<(), crate::sync::circle_ops::CircleOperationError> {
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.command_tx
             .send(SyncCommand::RenameCircle {
@@ -507,10 +506,10 @@ impl SyncLoopHandle {
                 reply,
             })
             .await
-            .map_err(|_| crate::sync::circle_ops::CircleOperationError::CommandChannelClosed)?;
+            .map_err(|_| crate::sync::store::CircleOperationError::CommandChannelClosed)?;
         response
             .await
-            .map_err(|_| crate::sync::circle_ops::CircleOperationError::ReplyChannelClosed)?
+            .map_err(|_| crate::sync::store::CircleOperationError::ReplyChannelClosed)?
     }
 }
 

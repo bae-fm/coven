@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
+use crate::sync::store_commit::commit_semantic_prefix;
 
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {
     let bytes = path.as_bytes();

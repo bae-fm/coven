@@ -66,7 +66,7 @@ pub enum SyncError {
     #[error("membership error: {0}")]
     Membership(Box<crate::sync::store::membership::MembershipOpsError>),
     #[error("circle operation: {0}")]
-    Circle(#[from] crate::sync::circle_ops::CircleOperationError),
+    Circle(#[from] crate::sync::store::CircleOperationError),
     #[error("device join: {0}")]
     DeviceJoin(#[from] crate::DeviceJoinError),
     #[error("{0}")]

@@ -1,0 +1,128 @@
+use super::*;
+
+#[tokio::test]
+async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
+    let db = open_test_db();
+    let (_store, _signer, journal) =
+        persist_merge_operation(&db, "circle-operation-id-mismatch").await;
+    let expected_operation_id = journal.operation_id.clone();
+    let replacement_write_id =
+        crate::WriteId::from_generated("another-circle-operation".to_string());
+    let mut replacement = journal.clone();
+    replacement.operation_id = CircleOperationId::from_write_id(replacement_write_id.clone());
+    let mut replacement_commit = replacement.commit().expect("parse replacement commit");
+    replacement_commit.write_id = replacement_write_id;
+    replacement.operation_mut().commit_bytes =
+        serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
+    let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
+            rusqlite::params![expected_operation_id.as_str(), payload],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("install mismatched Circle operation payload");
+
+    let error = StoreDatabase::new(&db)
+        .circle_operation(&journal.operation_id)
+        .await
+        .expect_err("lookup authority must match the payload operation id");
+    assert!(error.to_string().contains("operation id"), "{error}");
+}
+
+#[tokio::test]
+async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
+    let db = open_test_db();
+    let (_store, _signer, journal) = persist_merge_operation(&db, "circle-id-mismatch").await;
+    let expected_operation_id = journal.operation_id.clone();
+    let replacement_circle_id = CircleId::from_bytes([7; 16]);
+    let mut replacement = journal.clone();
+    replacement.circle_id = replacement_circle_id;
+    replacement.operation_mut().creation.circle_id = replacement_circle_id;
+    let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
+            rusqlite::params![expected_operation_id.as_str(), payload],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("install mismatched Circle operation payload");
+
+    let error = StoreDatabase::new(&db)
+        .circle_operation(&journal.operation_id)
+        .await
+        .expect_err("lookup authority must match the payload Circle id");
+    assert!(error.to_string().contains("payload circle id"), "{error}");
+}
+
+#[tokio::test]
+async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
+    let db = open_test_db();
+    let (store, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
+    let device_id = local_device_id(&db).await;
+    let second = prepare_circle_operation(
+        &db,
+        &store.storage,
+        &device_id,
+        "0000000002000-0000-creator",
+        "Second household",
+        &signer,
+    )
+    .await
+    .expect("prepare second Circle operation");
+    StoreDatabase::new(&db)
+        .insert_circle_operation(second.clone())
+        .await
+        .expect("persist second Circle operation");
+
+    StoreDatabase::new(&db)
+        .block_circle_operation(&first.operation_id, "authority changed".to_string())
+        .await
+        .expect("block first Circle operation");
+
+    let first = StoreDatabase::new(&db)
+        .circle_operation(&first.operation_id)
+        .await
+        .expect("read first Circle operation")
+        .expect("first Circle operation remains durable");
+    let second = StoreDatabase::new(&db)
+        .circle_operation(&second.operation_id)
+        .await
+        .expect("read second Circle operation")
+        .expect("second Circle operation remains durable");
+    assert!(matches!(
+        first.state(),
+        CircleOperationState::Blocked { .. }
+    ));
+    assert_eq!(second.state(), CircleOperationState::Pending);
+}
+
+#[tokio::test]
+async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
+    let db = open_test_db();
+    let (store, signer, journal) = persist_merge_operation(&db, "circle-publish-id").await;
+    let absent_operation_id = CircleOperationId::from_write_id(crate::WriteId::from_generated(
+        "absent-circle-operation".to_string(),
+    ));
+
+    let error = publish_circle_operation(&db, &store.storage, &absent_operation_id, &signer)
+        .await
+        .expect_err("publication requires the exact durable operation id");
+
+    assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_operation(&journal.operation_id)
+            .await
+            .expect("read exact Circle operation")
+            .expect("exact Circle operation remains durable")
+            .state(),
+        CircleOperationState::Pending
+    );
+}

@@ -12,6 +12,7 @@ use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 
 pub(crate) mod abandonment;
 mod acknowledgements;
+pub(crate) mod circle_controls;
 mod database;
 pub(crate) mod device_exclusion;
 #[doc(hidden)]
@@ -31,6 +32,7 @@ pub(crate) mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
+pub use circle_controls::CircleOperationError;
 #[cfg(test)]
 pub(in crate::sync) use database::store_package_is_retained_for_replay_for_test;
 pub(crate) use device_exclusion::{
