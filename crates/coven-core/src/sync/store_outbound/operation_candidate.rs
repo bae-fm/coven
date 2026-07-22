@@ -12,21 +12,6 @@ pub(crate) enum StoreOperationPublicationOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum StoreOperationPublication {
-    MergeConcurrent {
-        head: StoreDeviceHead,
-        prepared: PreparedExactObject,
-        history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
-    },
-    Serial {
-        base_head: VersionedObject,
-        head: StoreSerialHead,
-        authorization_after: SerialAuthorizationState,
-    },
-}
-
 pub(crate) async fn prepare_store_operation_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -322,7 +307,7 @@ pub(crate) async fn prepare_store_operation_candidate(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, plan.coord.clone(), prepared.reference().clone())
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let publication = match plan.policy {
+    let candidate = match plan.policy {
         StoreOperationPolicyPlan::Serial(serial) => {
             let authorization_after = serial
                 .authorization
@@ -337,11 +322,17 @@ pub(crate) async fn prepare_store_operation_candidate(
                 &plan.device_signer,
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            StoreOperationPublication::Serial {
+            PreparedStoreOperationCommit::Serial(PreparedSerialStoreOperationCommit {
+                common: PreparedStoreOperationCommon {
+                    commit,
+                    prepared,
+                    reference: commit_ref,
+                    registration_activation,
+                },
                 base_head: serial.base_head,
                 head,
                 authorization_after,
-            }
+            })
         }
         StoreOperationPolicyPlan::MergeConcurrent {
             membership,
@@ -445,18 +436,18 @@ pub(crate) async fn prepare_store_operation_candidate(
                     head.to_bytes(),
                 )
                 .map_err(StoreObjectError::from)?;
-            StoreOperationPublication::MergeConcurrent {
+            PreparedStoreOperationCommit::MergeConcurrent(PreparedMergeStoreOperationCommit {
+                common: PreparedStoreOperationCommon {
+                    commit,
+                    prepared,
+                    reference: commit_ref,
+                    registration_activation,
+                },
                 head,
-                prepared: prepared_head,
+                prepared_head,
                 history_summary: successor.summary,
-            }
+            })
         }
     };
-    Ok(PreparedStoreOperationCommit {
-        commit,
-        prepared,
-        reference: commit_ref,
-        publication,
-        registration_activation,
-    })
+    Ok(candidate)
 }

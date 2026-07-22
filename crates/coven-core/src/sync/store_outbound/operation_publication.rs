@@ -98,25 +98,23 @@ async fn publish_prepared_store_operation_with_membership_completion(
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let retained_operation_objects = retained_store_operation_objects(&prepared.commit)?;
-    let publication = prepared.publication.clone();
-    let activation = PreparedStoreOperationActivation {
-        candidate: prepared,
-        retained_operation_objects,
-    };
-    match (mode, publication) {
+    match (mode, *prepared) {
         (
             StoreOperationPublicationMode::Serial { coordination },
-            StoreOperationPublication::Serial {
-                base_head,
-                head,
-                authorization_after,
-            },
+            PreparedStoreOperationCommit::Serial(candidate),
         ) => {
             if membership_objects.is_some() {
                 return Err(StoreOutboundError::InvalidOutbound(
                     "Serial membership publication received Merge membership objects".to_string(),
                 ));
             }
+            let base_head = candidate.base_head.clone();
+            let head = candidate.head.clone();
+            let authorization_after = candidate.authorization_after.clone();
+            let activation = PreparedStoreOperationActivation {
+                candidate: Box::new(PreparedStoreOperationCommit::Serial(candidate)),
+                retained_operation_objects,
+            };
             let attempt = Box::pin(crate::sync::store_engine::serial::operations::publish(
                 db,
                 storage,
@@ -155,12 +153,15 @@ async fn publish_prepared_store_operation_with_membership_completion(
         }
         (
             StoreOperationPublicationMode::MergeConcurrent,
-            StoreOperationPublication::MergeConcurrent {
-                head,
-                prepared: prepared_head,
-                history_summary,
-            },
+            PreparedStoreOperationCommit::MergeConcurrent(candidate),
         ) => {
+            let head = candidate.head.clone();
+            let prepared_head = candidate.prepared_head.clone();
+            let history_summary = candidate.history_summary.clone();
+            let activation = PreparedStoreOperationActivation {
+                candidate: Box::new(PreparedStoreOperationCommit::MergeConcurrent(candidate)),
+                retained_operation_objects,
+            };
             let circle_activations = if matches!(
                 activation.candidate.commit.control(),
                 Some(StoreControl::MergeMembership { .. })
@@ -196,13 +197,13 @@ async fn publish_prepared_store_operation_with_membership_completion(
         }
         (
             StoreOperationPublicationMode::MergeConcurrent,
-            StoreOperationPublication::Serial { .. },
+            PreparedStoreOperationCommit::Serial(_),
         ) => Err(StoreOutboundError::InvalidOutbound(
             "Merge publication received a Serial Store candidate".to_string(),
         )),
         (
             StoreOperationPublicationMode::Serial { .. },
-            StoreOperationPublication::MergeConcurrent { .. },
+            PreparedStoreOperationCommit::MergeConcurrent(_),
         ) => Err(StoreOutboundError::InvalidOutbound(
             "Serial publication received a Merge Store candidate".to_string(),
         )),

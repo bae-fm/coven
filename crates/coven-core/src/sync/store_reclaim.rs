@@ -2431,7 +2431,7 @@ mod tests {
         .await
         .expect("activate Serial reclaim commit");
         let activation = super::super::store_reclaim_journal::ReclaimCommitActivation::serial(
-            candidate.reference,
+            candidate.reference.clone(),
         )
         .expect("valid Serial reclaim activation");
 

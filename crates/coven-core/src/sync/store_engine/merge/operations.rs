@@ -57,7 +57,7 @@ pub(crate) fn publish<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
     root: StoreRootRef,
-    activation: PreparedStoreOperationActivation,
+    mut activation: PreparedStoreOperationActivation,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
     history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
@@ -209,6 +209,7 @@ pub(crate) fn publish<'a>(
         let registrations = activation
             .candidate
             .registration_activation
+            .take()
             .into_iter()
             .map(|activation| (activation.registration, activation.authority))
             .collect::<Vec<_>>();

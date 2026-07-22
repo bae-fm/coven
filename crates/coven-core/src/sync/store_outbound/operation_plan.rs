@@ -334,17 +334,12 @@ pub(crate) async fn serial_successor_plan_for_test(
     predecessor: &PreparedStoreOperationCommit,
     base_head: VersionedObject,
 ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
-    let StoreOperationPublication::Serial {
-        head,
-        authorization_after,
-        ..
-    } = &predecessor.publication
-    else {
+    let PreparedStoreOperationCommit::Serial(predecessor) = predecessor else {
         return Err(StoreOutboundError::InvalidOutbound(
             "test Serial successor predecessor uses Merge publication".to_string(),
         ));
     };
-    if base_head.bytes != head.to_bytes() {
+    if base_head.bytes != predecessor.head.to_bytes() {
         return Err(StoreOutboundError::InvalidOutbound(
             "test Serial successor receipt differs from its predecessor head".to_string(),
         ));
@@ -365,7 +360,7 @@ pub(crate) async fn serial_successor_plan_for_test(
     let membership_state = super::circle_control::StoreMembershipStateRef::serial(
         position.clone(),
         predecessor.commit.membership_state.recovery().to_vec(),
-        authorization_after,
+        &predecessor.authorization_after,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let device_state = super::store_commit::StoreDeviceStateRef::Serial {
@@ -373,7 +368,8 @@ pub(crate) async fn serial_successor_plan_for_test(
         recovery: predecessor.commit.device_state.recovery().to_vec(),
         state_hash: predecessor.commit.device_state.state_hash(),
     };
-    let owner_grant = authorization_after
+    let owner_grant = predecessor
+        .authorization_after
         .membership
         .active_owner_grant(&registration.author_pubkey);
     Ok(StoreOperationCommitPlan {
@@ -392,7 +388,7 @@ pub(crate) async fn serial_successor_plan_for_test(
         owner_grant,
         policy: StoreOperationPolicyPlan::Serial(Box::new(StoreOperationSerialPlan {
             base_head,
-            authorization: authorization_after.clone(),
+            authorization: predecessor.authorization_after.clone(),
         })),
     })
 }
