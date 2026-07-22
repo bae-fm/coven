@@ -123,15 +123,10 @@ pub(super) fn indexed_retained_replay_owners_on(
                 "retained replay object {object_id} input hash: {error}"
             ))
         })?;
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence: commit_sequence,
-        } = &commit.coord
-        else {
-            return Err(DbError::Message(format!(
-                "retained replay object {object_id} names a Serial commit"
-            )));
-        };
+        } = &commit.coord;
         let sequence = u64::try_from(sequence).map_err(|_| {
             DbError::Message(format!(
                 "retained replay object {object_id} has an invalid sequence"
@@ -157,15 +152,10 @@ pub(super) fn index_retained_replay_owner_on(
     owner: &RetainedReplayOwner,
 ) -> Result<(), DbError> {
     let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-    let StoreCommitCoord::MergeConcurrent {
+    let StoreCommitCoord {
         stream_id,
         sequence,
-    } = &commit.coord
-    else {
-        return Err(DbError::Message(
-            "retained replay object owner names a Serial commit".to_string(),
-        ));
-    };
+    } = &commit.coord;
     let device_id = stream_id.to_string();
     let sequence = Database::sequence_to_sqlite(&device_id, *sequence)?;
     let commit_ref = serde_json::to_string(commit).map_err(|error| {

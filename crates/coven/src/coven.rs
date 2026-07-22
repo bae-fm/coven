@@ -22,7 +22,7 @@ use crate::store_dir::PathTokenError;
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::sync::session::SyncedTable;
 use crate::sync::sync_manager::ConfigProvider;
-use coven_core::{WriteId, WritePolicy, WriteReceipt};
+use coven_core::{WriteId, WriteReceipt};
 
 pub type CovenResult<T> = Result<T, CovenError>;
 
@@ -48,10 +48,6 @@ pub enum CovenError {
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven store")]
     MissingMigrations,
-    #[error("write_policy must be set before opening a coven store")]
-    MissingWritePolicy,
-    #[error("Serial branch resolution failed: {0}")]
-    SerialResolution(String),
     #[error("candidate resolution failed: {0}")]
     CandidateResolution(String),
     #[error("blob_tombstone_grace must be a positive duration")]
@@ -124,7 +120,6 @@ impl Coven {
             config,
             synced_tables: None,
             migrations: None,
-            write_policy: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
@@ -142,7 +137,6 @@ pub struct CovenBuilder {
     config: CovenConfig,
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
-    write_policy: Option<WritePolicy>,
     blob_tombstone_grace: chrono::Duration,
     max_concurrent_uploads: NonZeroUsize,
     max_concurrent_downloads: NonZeroUsize,
@@ -210,11 +204,6 @@ impl StoreOpenGuard {
 }
 
 impl CovenBuilder {
-    pub fn write_policy(mut self, policy: WritePolicy) -> Self {
-        self.write_policy = Some(policy);
-        self
-    }
-
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.synced_tables = Some(tables);
         self
@@ -231,7 +220,7 @@ impl CovenBuilder {
     }
 
     /// How many blob uploads the sync cycle's upload drain runs at once. Defaults
-    /// to one (fully serial). A [`NonZeroUsize`] so a zero — which would leave the
+    /// to one (one at a time). A [`NonZeroUsize`] so a zero — which would leave the
     /// drain admitting nothing and never completing — cannot be set.
     pub fn max_concurrent_uploads(mut self, n: NonZeroUsize) -> Self {
         self.max_concurrent_uploads = n;
@@ -239,7 +228,7 @@ impl CovenBuilder {
     }
 
     /// How many blob downloads a [`pin`](CovenHandle::pin) call fetches at once.
-    /// Defaults to one (fully serial). A [`NonZeroUsize`] so a zero — which would
+    /// Defaults to one (one at a time). A [`NonZeroUsize`] so a zero — which would
     /// leave the pin loop admitting nothing and never completing — cannot be set.
     pub fn max_concurrent_downloads(mut self, n: NonZeroUsize) -> Self {
         self.max_concurrent_downloads = n;
@@ -321,7 +310,6 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        let write_policy = self.write_policy.ok_or(CovenError::MissingWritePolicy)?;
         validate_storage_scope(&config, &tables)?;
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
@@ -340,7 +328,6 @@ impl CovenBuilder {
             tables.clone(),
             self.blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             config.device_id.clone(),
             &migrations,
         )?;
@@ -355,7 +342,6 @@ impl CovenBuilder {
             tables,
             self.blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             config.device_id.clone(),
             &migrations,
         )?;
@@ -400,7 +386,6 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        let write_policy = self.write_policy.ok_or(CovenError::MissingWritePolicy)?;
         validate_storage_scope(&config, &tables)?;
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
@@ -416,7 +401,6 @@ impl CovenBuilder {
                 uploads: self.max_concurrent_uploads,
                 downloads: self.max_concurrent_downloads,
             },
-            write_policy,
             config.device_id.clone(),
             &migrations,
         )?;
@@ -565,20 +549,6 @@ pub(crate) struct StagedBlob {
 }
 
 impl CovenHandle {
-    async fn prepare_pending_branch_resolution(
-        &self,
-        branch_id: &coven_core::PendingBranchId,
-    ) -> CovenResult<crate::sync::store_engine::SerialResolutionPlan> {
-        let branch_base = self.db().conflicted_serial_branch_base(branch_id).await?;
-        let manager = self
-            .sync_manager()
-            .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?;
-        manager
-            .prepare_serial_resolution(branch_base, &self.store_dir())
-            .await
-            .map_err(|error| CovenError::SerialResolution(error.to_string()))
-    }
-
     pub async fn sql<F, R>(&self, f: F) -> CovenResult<WriteReceipt<R>>
     where
         F: for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
@@ -588,11 +558,10 @@ impl CovenHandle {
         let tables = self.db().synced_tables().to_vec();
         let gates = self.db().gates();
         let blob_decls = self.db().blob_decls();
-        let write_policy = self.db().write_policy();
-        let routing_encryption = (write_policy == WritePolicy::MergeConcurrent
-            && gates.has_scoped_graph())
-        .then(|| self.routing_encryption())
-        .transpose()?;
+        let routing_encryption = gates
+            .has_scoped_graph()
+            .then(|| self.routing_encryption())
+            .transpose()?;
         let write_id = self.db().new_write_id();
         let outcome = self
             .db()
@@ -602,7 +571,6 @@ impl CovenHandle {
                     &tables,
                     &gates,
                     &blob_decls,
-                    write_policy,
                     routing_encryption.as_ref(),
                     write_id,
                     |tx| f(SqlContext::new(tx, stamper)),
@@ -611,75 +579,6 @@ impl CovenHandle {
             .await
             .map_err(CovenError::from)?;
         outcome
-    }
-
-    pub async fn discard_pending_branch(
-        &self,
-        branch_id: coven_core::PendingBranchId,
-    ) -> CovenResult<()> {
-        match self.db().serial_branch_discard_state(&branch_id).await? {
-            coven_core::database::SerialBranchDiscardState::Local => {
-                self.db().discard_local_serial_branch(branch_id).await?;
-            }
-            coven_core::database::SerialBranchDiscardState::Abandonment => {
-                let outcome = self
-                    .sync_manager()
-                    .ok_or_else(|| {
-                        CovenError::SerialResolution("sync is not connected".to_string())
-                    })?
-                    .abandon_serial_branch(branch_id, &self.store_dir())
-                    .await
-                    .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
-                if matches!(
-                    outcome,
-                    coven_core::sync::store_engine::SerialBranchAbandonment::OriginalBranchActivated
-                ) {
-                    return Err(CovenError::SerialResolution(
-                        "the original Serial branch activated before abandonment and cannot be discarded"
-                            .to_string(),
-                    ));
-                }
-            }
-            coven_core::database::SerialBranchDiscardState::Conflict => {
-                let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
-                self.sync_manager()
-                    .ok_or_else(|| {
-                        CovenError::SerialResolution("sync is not connected".to_string())
-                    })?
-                    .cleanup_serial_candidates(branch_id.clone(), &plan)
-                    .await
-                    .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
-                plan.discard_pending_branch(self.db(), branch_id).await?;
-            }
-        }
-        self.sync_now();
-        Ok(())
-    }
-
-    pub async fn replace_pending_branch<F, R>(
-        &self,
-        branch_id: coven_core::PendingBranchId,
-        f: F,
-    ) -> CovenResult<WriteReceipt<R>>
-    where
-        F: for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
-        self.sync_manager()
-            .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?
-            .cleanup_serial_candidates(branch_id.clone(), &plan)
-            .await
-            .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
-        let write_id = self.db().new_write_id();
-        let stamper = self.stamper();
-        let receipt = plan
-            .replace_pending_branch(self.db(), branch_id, write_id, move |tx| {
-                f(SqlContext::new(tx, stamper))
-            })
-            .await?;
-        self.sync_now();
-        Ok(receipt)
     }
 
     /// Run a pure read against this handle's read-only companion connection and
@@ -732,11 +631,10 @@ impl CovenHandle {
         let stamper = self.stamper();
         let gates = self.db().gates();
         let blob_decls = self.db().blob_decls();
-        let write_policy = self.db().write_policy();
-        let routing_encryption = (write_policy == WritePolicy::MergeConcurrent
-            && gates.has_scoped_graph())
-        .then(|| self.routing_encryption())
-        .transpose()?;
+        let routing_encryption = gates
+            .has_scoped_graph()
+            .then(|| self.routing_encryption())
+            .transpose()?;
         let write_id = self.db().new_write_id();
         let deleted = batch.deleted_blobs;
         let store_dir = self.store_dir();
@@ -751,7 +649,6 @@ impl CovenHandle {
                     tables,
                     gates,
                     blob_decls,
-                    write_policy,
                     routing_encryption,
                     write_id,
                     sql,
@@ -959,7 +856,6 @@ fn run_write_batch_on_connection<R>(
     tables: Vec<SyncedTable>,
     gates: Arc<crate::sync::gate::Gates>,
     decls: Arc<crate::blob::decl::BlobDecls>,
-    write_policy: WritePolicy,
     routing_encryption: Option<crate::encryption::EncryptionService>,
     write_id: WriteId,
     sql: WriteSql<R>,
@@ -970,7 +866,6 @@ fn run_write_batch_on_connection<R>(
         &tables,
         &gates,
         &decls,
-        write_policy,
         routing_encryption.as_ref(),
         write_id,
         |tx| -> CovenResult<R> {
@@ -1182,7 +1077,6 @@ mod tests {
     fn open_gated_roots_handle() -> (tempfile::TempDir, CovenHandle) {
         let tmp = tempfile::tempdir().expect("temp dir");
         let handle = Coven::builder(config(StoreDir::new(tmp.path())))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![gated_roots_table()])
             .migrations(vec![gated_roots_migration()])
             .open()
@@ -1190,9 +1084,8 @@ mod tests {
         (tmp, handle)
     }
 
-    fn open_gated_roots_at(dir: StoreDir, write_policy: WritePolicy) -> CovenResult<CovenHandle> {
+    fn open_gated_roots_at(dir: StoreDir) -> CovenResult<CovenHandle> {
         Coven::builder(config(dir))
-            .write_policy(write_policy)
             .synced_tables(vec![gated_roots_table()])
             .migrations(vec![gated_roots_migration()])
             .open()
@@ -1205,88 +1098,12 @@ mod tests {
     }
 
     #[test]
-    fn serial_store_opens_without_a_provider_or_coordination() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let handle = Coven::builder(config(StoreDir::new(tmp.path())))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open()
-            .expect("open local Serial store");
-
-        assert!(matches!(
-            *handle.subscribe_sync_status().borrow(),
-            crate::SyncLoopStatus::Offline
-        ));
-    }
-
-    #[tokio::test]
-    async fn local_serial_branch_can_be_discarded_without_sync() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let handle = Coven::builder(config(StoreDir::new(tmp.path())))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open()
-            .expect("open local Serial store");
-        let receipt = handle
-            .sql(|ctx| {
-                ctx.execute(
-                    "INSERT INTO roots (id, title, shared, _updated_at)
-                     VALUES ('discard-me', 'local', 1, '2026-01-01T00:00:00Z')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("write local Serial branch");
-        let branch_id = receipt
-            .pending_branch_id
-            .expect("local Serial write names its pending branch");
-        let second = handle
-            .sql(|ctx| {
-                ctx.execute(
-                    "INSERT INTO roots (id, title, shared, _updated_at)
-                     VALUES ('discard-me-too', 'local', 1, '2026-01-01T00:00:01Z')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("write another transaction on the local Serial branch");
-        assert_eq!(second.pending_branch_id.as_ref(), Some(&branch_id));
-
-        handle
-            .discard_pending_branch(branch_id)
-            .await
-            .expect("discard local Serial branch");
-
-        assert!(!row_exists(handle.db(), "SELECT 1 FROM roots WHERE id = 'discard-me'").await);
-        assert!(
-            !row_exists(
-                handle.db(),
-                "SELECT 1 FROM roots WHERE id = 'discard-me-too'"
-            )
-            .await
-        );
-        assert!(handle
-            .db()
-            .pending_branches()
-            .await
-            .expect("read discarded Serial branch")
-            .is_none());
-    }
-
-    #[test]
     fn precreated_empty_sqlite_file_initializes_coven_metadata() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         precreate_database(&dir, "");
 
-        let handle = open_gated_roots_at(dir, WritePolicy::Serial)
-            .expect("initialize Coven in an empty SQLite database");
-
-        assert_eq!(handle.db().write_policy(), WritePolicy::Serial);
+        open_gated_roots_at(dir).expect("initialize Coven in an empty SQLite database");
     }
 
     #[test]
@@ -1304,10 +1121,7 @@ mod tests {
              PRAGMA user_version = 1;",
         );
 
-        let handle = open_gated_roots_at(dir, WritePolicy::Serial)
-            .expect("initialize Coven beside an existing host schema");
-
-        assert_eq!(handle.db().write_policy(), WritePolicy::Serial);
+        open_gated_roots_at(dir).expect("initialize Coven beside an existing host schema");
     }
 
     #[test]
@@ -1322,7 +1136,7 @@ mod tests {
              ) STRICT;",
         );
 
-        let error = match open_gated_roots_at(dir, WritePolicy::Serial) {
+        let error = match open_gated_roots_at(dir) {
             Ok(_) => panic!("partial Coven schema has no valid initialization commit"),
             Err(error) => error,
         };
@@ -1332,84 +1146,6 @@ mod tests {
             CovenError::Database(DbError::Message(reason))
                 if reason.contains("without the required initialization marker")
         ));
-    }
-
-    #[tokio::test]
-    async fn reopen_refuses_a_write_policy_that_differs_from_the_created_store() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let serial = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open()
-            .expect("create Serial store");
-        drop(serial);
-
-        let wrong = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open();
-        if let Ok(wrong) = wrong {
-            wrong
-                .sql(|sql| {
-                    sql.execute(
-                        "INSERT INTO roots (id, title, shared, _updated_at) \
-                         VALUES ('wrong-policy', 'wrong', 1, \
-                                 '0000000001000-0000-device-test')",
-                        [],
-                    )?;
-                    Ok(())
-                })
-                .await
-                .expect("the mismatched open currently permits a host write");
-            panic!("a store must reject a different write policy at open");
-        }
-
-        let reopened = Coven::builder(config(dir))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open()
-            .expect("the store reopens with its selected policy");
-        assert!(reopened.db().pending_writes().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn reopen_refuses_a_store_missing_required_write_policy_metadata() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let handle = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open()
-            .expect("create Serial store");
-        handle
-            .db()
-            .call(|conn| {
-                let marker: String = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = 'coven_initialized'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                assert_eq!(marker, "1");
-                conn.execute("DELETE FROM protocol_state WHERE key = 'write_policy'", [])
-                    .map_err(crate::database::DbError::from)
-            })
-            .await
-            .expect("remove required policy metadata");
-        drop(handle);
-
-        let reopened = Coven::builder(config(dir))
-            .write_policy(WritePolicy::Serial)
-            .synced_tables(vec![gated_roots_table()])
-            .migrations(vec![gated_roots_migration()])
-            .open();
-        assert!(matches!(reopened, Err(CovenError::Database(_))));
     }
 
     #[tokio::test]
@@ -1494,7 +1230,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -1507,7 +1242,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let first = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -1515,7 +1249,6 @@ mod tests {
         let clone = first.clone();
 
         let second = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open();
@@ -1527,7 +1260,6 @@ mod tests {
         drop(first);
 
         let still_locked = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open();
@@ -1539,7 +1271,6 @@ mod tests {
         drop(clone);
 
         Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -1552,7 +1283,6 @@ mod tests {
             let tmp = tempfile::tempdir().expect("temp dir");
             let dir = StoreDir::new(tmp.path());
             let result = Coven::builder(config(dir))
-                .write_policy(WritePolicy::MergeConcurrent)
                 .synced_tables(vec![files_table()])
                 .migrations(vec![files_migration()])
                 .blob_tombstone_grace(grace)
@@ -1569,7 +1299,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .blob_tombstone_grace(chrono::Duration::hours(1))
@@ -1581,7 +1310,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![remote_root_files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -1736,7 +1464,6 @@ mod tests {
 
         assert_eq!(receipt.value, "saved");
         assert_eq!(receipt.status, coven_core::WriteStatus::LocalOnly);
-        assert!(receipt.pending_branch_id.is_none());
         assert_eq!(
             handle
                 .write_status(&receipt.write_id)
@@ -1801,7 +1528,6 @@ mod tests {
             .expect("mixed transaction");
 
         assert_eq!(receipt.status, coven_core::WriteStatus::Pending);
-        assert!(receipt.pending_branch_id.is_none());
         let pending = handle.pending_writes().await.expect("pending mixed write");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].write_id, receipt.write_id);
@@ -2006,7 +1732,6 @@ mod tests {
 
         // Open with a two-step ladder so the db lands at synced-schema version 2.
         let ahead = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![
                 files_migration(),
@@ -2020,7 +1745,6 @@ mod tests {
         // already migrated. The remedy is "update the app", so the host must be able
         // to match the specific variant rather than string-scrape a DbError.
         let reopened = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open();
@@ -2163,7 +1887,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -2189,7 +1912,6 @@ mod tests {
         write_raw_file(&temp, b"interrupted write").await;
 
         let _handle = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -2439,7 +2161,6 @@ mod tests {
             coven_core::MasterKeyring::from(coven_core::EncryptionService::from_key([42; 32]));
         let open = || {
             Coven::builder(config(dir.clone()))
-                .write_policy(WritePolicy::MergeConcurrent)
                 .synced_tables(vec![remote_root_files_table()])
                 .migrations(vec![files_migration()])
                 .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
@@ -3488,7 +3209,6 @@ mod tests {
 
     fn try_open(dir: &StoreDir) -> CovenResult<CovenHandle> {
         Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -3527,7 +3247,6 @@ mod tests {
             dir.clone(),
             "Test".to_string(),
         ))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -3595,7 +3314,6 @@ mod tests {
             dir.clone(),
             "Test".to_string(),
         ))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -3731,7 +3449,6 @@ mod tests {
 
     fn try_open_read_only(dir: &StoreDir) -> CovenResult<crate::read_handle::CovenReadHandle> {
         Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open_read_only()
@@ -3869,7 +3586,6 @@ mod tests {
 
         // A newer binary migrates the db to synced-schema version 2.
         let ahead = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![
                 files_migration(),
@@ -3882,7 +3598,6 @@ mod tests {
         // An older binary opens the same db read-only with only the version-1 ladder:
         // it cannot understand the schema, so it refuses with the matchable variant.
         let reopened = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .open_read_only();
@@ -3904,7 +3619,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let writer = Coven::builder(config(dir.clone()))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![remote_root_files_table()])
             .migrations(vec![files_migration()])
             .open()
@@ -3937,7 +3651,6 @@ mod tests {
             .expect("writer stores the row and blob");
 
         let reader = Coven::builder(config(dir))
-            .write_policy(WritePolicy::MergeConcurrent)
             .synced_tables(vec![remote_root_files_table()])
             .migrations(vec![files_migration()])
             .open_read_only()

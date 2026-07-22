@@ -11,8 +11,7 @@ use crate::sync::membership::{
     MembershipCoord, MembershipEntry, MembershipGrantId, OwnerStreamBarrier,
 };
 use crate::sync::storage::{
-    CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef, ProviderDeviceBinding,
-    ReplaceHeadError, StorageError, StoreProviderBinding, SyncStorage, VersionedObject,
+    ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding, SyncStorage,
 };
 use crate::sync::store_commit::{
     DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
@@ -21,7 +20,6 @@ use crate::sync::store_commit::{
 };
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";
-const SERIAL_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-serial-probe.v1\0";
 const CROSS_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-cross-principal-probe.v1\0";
 const CROSS_CHALLENGE_DOMAIN: &[u8] = b"coven.provider-cross-principal-challenge.v1\0";
 const CROSS_RESPONSE_DOMAIN: &[u8] = b"coven.provider-cross-principal-response.v1\0";
@@ -88,10 +86,6 @@ pub enum ProbePayloadLabel {
     ExactCreateFirst,
     ExactCreateSecond,
     LostResponse,
-    SerialCreateFirst,
-    SerialCreateSecond,
-    SerialReplaceFirst,
-    SerialReplaceSecond,
     CrossAdministrator,
     CrossPeer,
 }
@@ -102,10 +96,6 @@ impl ProbePayloadLabel {
             Self::ExactCreateFirst => b"exact-create-first",
             Self::ExactCreateSecond => b"exact-create-second",
             Self::LostResponse => b"lost-response",
-            Self::SerialCreateFirst => b"serial-create-first",
-            Self::SerialCreateSecond => b"serial-create-second",
-            Self::SerialReplaceFirst => b"serial-replace-first",
-            Self::SerialReplaceSecond => b"serial-replace-second",
             Self::CrossAdministrator => b"cross-administrator",
             Self::CrossPeer => b"cross-peer",
         }
@@ -168,7 +158,6 @@ pub fn canonical_custom_s3_origin(input: &str) -> Result<String, StorageError> {
 #[serde(deny_unknown_fields)]
 pub struct ProviderCapabilityProof {
     pub exact_slots: ExactSlotProbeReceipt,
-    pub serial_coordination: Option<SerialCoordinationProbeReceipt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,19 +174,8 @@ impl ProviderCapabilityProof {
         &self,
         store: &StoreProviderBinding,
         device: &ProviderDeviceBinding,
-        serial_required: bool,
     ) -> Result<(), ProviderProbeError> {
-        self.exact_slots.verify(store, device)?;
-        match (serial_required, &self.serial_coordination) {
-            (true, Some(receipt)) => receipt.verify(store, device),
-            (false, None) => Ok(()),
-            (true, None) => Err(ProviderProbeError::InvalidReceipt(
-                "Serial Store has no serial coordination receipt".to_string(),
-            )),
-            (false, Some(_)) => Err(ProviderProbeError::InvalidReceipt(
-                "Merge-concurrent Store carries a serial coordination receipt".to_string(),
-            )),
-        }
+        self.exact_slots.verify(store, device)
     }
 }
 
@@ -324,20 +302,6 @@ pub enum ProbeCreateOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProbeReplaceAttempt {
-    pub payload_hash: ObjectHash,
-    pub outcome: ProbeReplaceOutcome,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProbeReplaceOutcome {
-    Replaced,
-    RejectedVersionMismatch,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LostResponseProbeReceipt {
     pub logical_key: String,
     pub slot: ObjectSlot,
@@ -353,86 +317,6 @@ pub struct ProbeRangeReceipt {
     pub start: u64,
     pub end: u64,
     pub bytes_hash: ObjectHash,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCoordinationProbeReceipt {
-    pub transcript: SerialCoordinationProbeTranscript,
-    pub transcript_hash: ObjectHash,
-}
-
-impl SerialCoordinationProbeReceipt {
-    pub fn from_transcript(
-        transcript: SerialCoordinationProbeTranscript,
-        store: &StoreProviderBinding,
-        device: &ProviderDeviceBinding,
-    ) -> Self {
-        Self {
-            transcript_hash: serial_transcript_hash(store, device, &transcript),
-            transcript,
-        }
-    }
-
-    pub fn verify(
-        &self,
-        store: &StoreProviderBinding,
-        device: &ProviderDeviceBinding,
-    ) -> Result<(), ProviderProbeError> {
-        if self.transcript_hash != serial_transcript_hash(store, device, &self.transcript) {
-            return invalid("serial transcript hash does not match its context");
-        }
-        let t = &self.transcript;
-        let create_payloads = [
-            probe_payload(&t.probe_id, ProbePayloadLabel::SerialCreateFirst),
-            probe_payload(&t.probe_id, ProbePayloadLabel::SerialCreateSecond),
-        ];
-        let replace_payloads = [
-            probe_payload(&t.probe_id, ProbePayloadLabel::SerialReplaceFirst),
-            probe_payload(&t.probe_id, ProbePayloadLabel::SerialReplaceSecond),
-        ];
-        verify_race_create(&t.create_attempts, &create_payloads)?;
-        verify_race_replace(&t.replace_attempts, &replace_payloads)?;
-        let created_winner = t
-            .create_attempts
-            .iter()
-            .position(|attempt| attempt.outcome == ProbeCreateOutcome::Created)
-            .expect("race verifier requires a winner");
-        let replaced_winner = t
-            .replace_attempts
-            .iter()
-            .position(|attempt| attempt.outcome == ProbeReplaceOutcome::Replaced)
-            .expect("race verifier requires a winner");
-        if t.created_bytes_hash != ObjectHash::digest(&create_payloads[created_winner])
-            || t.replaced_bytes_hash != ObjectHash::digest(&replace_payloads[replaced_winner])
-            || t.authoritative_read_bytes_hash != t.replaced_bytes_hash
-            || t.created_version_hash == ObjectHash::digest(&[])
-            || t.replaced_version_hash == ObjectHash::digest(&[])
-            || t.authoritative_read_version_hash != t.replaced_version_hash
-            || !t.delete_verified_absent
-        {
-            return invalid(
-                "serial winner, version, authoritative read, or deletion evidence is invalid",
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCoordinationProbeTranscript {
-    pub probe_id: ProviderProbeId,
-    pub logical_key: String,
-    pub create_attempts: [ProbeCreateAttempt; 2],
-    pub created_bytes_hash: ObjectHash,
-    pub created_version_hash: ObjectHash,
-    pub replace_attempts: [ProbeReplaceAttempt; 2],
-    pub replaced_bytes_hash: ObjectHash,
-    pub replaced_version_hash: ObjectHash,
-    pub authoritative_read_bytes_hash: ObjectHash,
-    pub authoritative_read_version_hash: ObjectHash,
-    pub delete_verified_absent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1294,21 +1178,15 @@ pub struct ProviderAdminGrantRecord {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderAdminGrantOrigin {
     Founder { root: StoreRootRef },
-    MergeMembership { coord: MembershipCoord },
-    SerialCommit { commit: StoreBatchCommitRef },
+    Membership { coord: MembershipCoord },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum ProviderAdminMembershipChange {
-    MergeConcurrent {
-        change: ProviderAdminChange,
-        #[serde(with = "ordered_owner_barriers")]
-        owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
-    },
-    Serial {
-        change: ProviderAdminChange,
-    },
+#[serde(deny_unknown_fields)]
+pub struct ProviderAdminMembershipChange {
+    pub change: ProviderAdminChange,
+    #[serde(with = "ordered_owner_barriers")]
+    pub owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1500,21 +1378,10 @@ impl ProviderAdminState {
         change: ProviderAdminMembershipChange,
         origin: ProviderAdminGrantOrigin,
     ) -> Result<(), ProviderAdminReducerError> {
-        let change = match (change, &origin) {
-            (
-                ProviderAdminMembershipChange::MergeConcurrent {
-                    change,
-                    owner_barriers: _,
-                },
-                ProviderAdminGrantOrigin::MergeMembership { .. },
-            ) => change,
-            (
-                ProviderAdminMembershipChange::Serial { change },
-                ProviderAdminGrantOrigin::SerialCommit { .. },
-            ) => change,
-            _ => return Err(ProviderAdminReducerError::PolicyOriginMismatch),
-        };
-        self.apply(change, origin)
+        if !matches!(origin, ProviderAdminGrantOrigin::Membership { .. }) {
+            return Err(ProviderAdminReducerError::PolicyOriginMismatch);
+        }
+        self.apply(change.change, origin)
     }
 
     pub fn state_hash(&self) -> ObjectHash {
@@ -1622,7 +1489,7 @@ impl ProviderAdminState {
             if let Some(change) = entry.provider_admin.clone() {
                 state.apply_membership_change(
                     change,
-                    ProviderAdminGrantOrigin::MergeMembership {
+                    ProviderAdminGrantOrigin::Membership {
                         coord: coord.clone(),
                     },
                 )?;
@@ -1692,7 +1559,7 @@ impl ProviderAdminState {
         let mut cyclic_sources = Vec::new();
         let mut involved_grants = BTreeSet::new();
         for (coord, entry) in &by_coord {
-            if let Some(ProviderAdminMembershipChange::MergeConcurrent {
+            if let Some(ProviderAdminMembershipChange {
                 change: ProviderAdminChange::Remove { removes },
                 ..
             }) = &entry.provider_admin
@@ -1746,7 +1613,6 @@ pub enum ProviderProbeError {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderProbeJournalRecord {
     Exact(ExactProbeJournal),
-    Serial(SerialProbeJournal),
     CrossPrincipal(CrossPrincipalCompletionJournal),
 }
 
@@ -1754,7 +1620,6 @@ impl ProviderProbeJournalRecord {
     pub fn probe_id(&self) -> ProviderProbeId {
         match self {
             Self::Exact(record) => record.probe_id,
-            Self::Serial(record) => record.probe_id,
             Self::CrossPrincipal(record) => record.probe_id,
         }
     }
@@ -1762,7 +1627,6 @@ impl ProviderProbeJournalRecord {
     pub fn validate_begin(&self) -> Result<(), ProviderProbeJournalError> {
         let prepared = match self {
             Self::Exact(record) => matches!(record.progress, ExactProbeProgress::Prepared),
-            Self::Serial(record) => matches!(record.progress, SerialProbeProgress::Prepared),
             Self::CrossPrincipal(record) => {
                 matches!(record.progress, CrossPrincipalCompletionProgress::Prepared)
             }
@@ -1784,15 +1648,6 @@ impl ProviderProbeJournalRecord {
                     return Err(ProviderProbeJournalError::ImmutableFactsChanged);
                 }
                 validate_exact_progress_transition(&previous.progress, &next.progress)
-            }
-            (Self::Serial(previous), Self::Serial(next)) => {
-                if previous.probe_id != next.probe_id
-                    || previous.binding != next.binding
-                    || previous.logical_key != next.logical_key
-                {
-                    return Err(ProviderProbeJournalError::ImmutableFactsChanged);
-                }
-                validate_serial_progress_transition(&previous.progress, &next.progress)
             }
             (Self::CrossPrincipal(previous), Self::CrossPrincipal(next)) => {
                 if previous.probe_id != next.probe_id
@@ -1831,46 +1686,6 @@ pub enum ProviderProbeJournalError {
     NonAdjacentProgress,
     #[error("provider probe journal advance changes established evidence")]
     EvidenceChanged,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialProbeJournal {
-    pub probe_id: ProviderProbeId,
-    pub binding: crate::sync::storage::ResolvedProviderBinding,
-    pub logical_key: String,
-    pub progress: SerialProbeProgress,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SerialProbeProgress {
-    Prepared,
-    Created {
-        attempts: [ProbeCreateAttempt; 2],
-        object: VersionedObject,
-    },
-    Replaced {
-        create_attempts: [ProbeCreateAttempt; 2],
-        created: VersionedObject,
-        replace_attempts: [ProbeReplaceAttempt; 2],
-        replaced: VersionedObject,
-    },
-    ReadVerified {
-        create_attempts: [ProbeCreateAttempt; 2],
-        created: VersionedObject,
-        replace_attempts: [ProbeReplaceAttempt; 2],
-        replaced: VersionedObject,
-    },
-    Absent {
-        create_attempts: [ProbeCreateAttempt; 2],
-        created: VersionedObject,
-        replace_attempts: [ProbeReplaceAttempt; 2],
-        replaced: VersionedObject,
-    },
-    ReceiptReady {
-        receipt: SerialCoordinationProbeReceipt,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1958,75 +1773,6 @@ fn validate_exact_progress_transition(
                 .iter()
                 .map(|attempt| attempt.outcome)
                 .eq(outcomes.iter().copied())
-        }
-        _ => return Err(ProviderProbeJournalError::NonAdjacentProgress),
-    };
-    if !evidence_matches {
-        return Err(ProviderProbeJournalError::EvidenceChanged);
-    }
-    Ok(())
-}
-
-fn validate_serial_progress_transition(
-    previous: &SerialProbeProgress,
-    next: &SerialProbeProgress,
-) -> Result<(), ProviderProbeJournalError> {
-    let evidence_matches = match (previous, next) {
-        (SerialProbeProgress::Prepared, SerialProbeProgress::Created { .. }) => true,
-        (
-            SerialProbeProgress::Created { attempts, object },
-            SerialProbeProgress::Replaced {
-                create_attempts,
-                created,
-                ..
-            },
-        ) => attempts == create_attempts && object == created,
-        (
-            SerialProbeProgress::Replaced {
-                create_attempts: previous_create,
-                created: previous_created,
-                replace_attempts: previous_replace,
-                replaced: previous_replaced,
-            },
-            SerialProbeProgress::ReadVerified {
-                create_attempts: next_create,
-                created: next_created,
-                replace_attempts: next_replace,
-                replaced: next_replaced,
-            },
-        )
-        | (
-            SerialProbeProgress::ReadVerified {
-                create_attempts: previous_create,
-                created: previous_created,
-                replace_attempts: previous_replace,
-                replaced: previous_replaced,
-            },
-            SerialProbeProgress::Absent {
-                create_attempts: next_create,
-                created: next_created,
-                replace_attempts: next_replace,
-                replaced: next_replaced,
-            },
-        ) => {
-            previous_create == next_create
-                && previous_created == next_created
-                && previous_replace == next_replace
-                && previous_replaced == next_replaced
-        }
-        (
-            SerialProbeProgress::Absent {
-                create_attempts,
-                created,
-                replace_attempts,
-                replaced,
-            },
-            SerialProbeProgress::ReceiptReady { receipt },
-        ) => {
-            receipt.transcript.create_attempts == *create_attempts
-                && receipt.transcript.created_bytes_hash == ObjectHash::digest(&created.bytes)
-                && receipt.transcript.replace_attempts == *replace_attempts
-                && receipt.transcript.replaced_bytes_hash == ObjectHash::digest(&replaced.bytes)
         }
         _ => return Err(ProviderProbeJournalError::NonAdjacentProgress),
     };
@@ -2824,466 +2570,6 @@ pub async fn probe_exact_slots(
     Ok(receipt)
 }
 
-pub async fn probe_serial_coordination_receipt(
-    first: &dyn CoordinationStorage,
-    second: &dyn CoordinationStorage,
-    journal: &dyn ProviderProbeJournal,
-    probe_id: ProviderProbeId,
-    binding: &crate::sync::storage::ResolvedProviderBinding,
-) -> Result<SerialCoordinationProbeReceipt, ProviderProbeError> {
-    binding.validate()?;
-    let first_binding = first
-        .provider_binding()
-        .await
-        .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    let second_binding = second
-        .provider_binding()
-        .await
-        .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    if first_binding != *binding || second_binding != *binding {
-        return invalid("serial coordination clients do not match the receipt binding");
-    }
-    let logical_key = format!(
-        "__coven_probe__/serial/{}",
-        hex::encode(probe_id.as_bytes())
-    );
-    let mut durable = match journal.load(probe_id).await? {
-        Some(existing) => existing,
-        None => {
-            journal
-                .begin(ProviderProbeJournalRecord::Serial(SerialProbeJournal {
-                    probe_id,
-                    binding: binding.clone(),
-                    logical_key: logical_key.clone(),
-                    progress: SerialProbeProgress::Prepared,
-                }))
-                .await?
-        }
-    };
-    let ProviderProbeJournalRecord::Serial(mut record) = durable.clone() else {
-        return invalid("serial probe id belongs to a different durable probe kind");
-    };
-    if record.binding != *binding
-        || record.probe_id != probe_id
-        || record.logical_key != logical_key
-    {
-        return invalid("durable serial probe differs from its requested context");
-    }
-    if let SerialProbeProgress::ReceiptReady { receipt } = &record.progress {
-        receipt.verify(&binding.store, &binding.device)?;
-        return Ok(receipt.clone());
-    }
-    let create_payloads = [
-        probe_payload(&probe_id, ProbePayloadLabel::SerialCreateFirst),
-        probe_payload(&probe_id, ProbePayloadLabel::SerialCreateSecond),
-    ];
-    if matches!(record.progress, SerialProbeProgress::Prepared) {
-        let (attempts, object) = match first.read_head(&logical_key).await {
-            Err(CoordinationError::NotFound(_)) => {
-                let (left, right) = tokio::join!(
-                    first.create_head(&logical_key, &create_payloads[0]),
-                    second.create_head(&logical_key, &create_payloads[1]),
-                );
-                classify_serial_create(left, right, &create_payloads)?
-            }
-            Ok(object) if object.bytes == create_payloads[0] => {
-                require_serial_create_rejection(
-                    second.create_head(&logical_key, &create_payloads[1]).await,
-                )?;
-                (
-                    [
-                        ProbeCreateAttempt {
-                            payload_hash: ObjectHash::digest(&create_payloads[0]),
-                            outcome: ProbeCreateOutcome::Created,
-                        },
-                        ProbeCreateAttempt {
-                            payload_hash: ObjectHash::digest(&create_payloads[1]),
-                            outcome: ProbeCreateOutcome::RejectedOccupied,
-                        },
-                    ],
-                    object,
-                )
-            }
-            Ok(object) if object.bytes == create_payloads[1] => {
-                require_serial_create_rejection(
-                    first.create_head(&logical_key, &create_payloads[0]).await,
-                )?;
-                (
-                    [
-                        ProbeCreateAttempt {
-                            payload_hash: ObjectHash::digest(&create_payloads[0]),
-                            outcome: ProbeCreateOutcome::RejectedOccupied,
-                        },
-                        ProbeCreateAttempt {
-                            payload_hash: ObjectHash::digest(&create_payloads[1]),
-                            outcome: ProbeCreateOutcome::Created,
-                        },
-                    ],
-                    object,
-                )
-            }
-            Ok(_) => return invalid("durable serial probe key contains unknown create bytes"),
-            Err(error) => {
-                return Err(ProviderProbeError::Storage(StorageError::Storage(
-                    error.to_string(),
-                )))
-            }
-        };
-        advance_serial(
-            journal,
-            &mut durable,
-            &mut record,
-            SerialProbeProgress::Created { attempts, object },
-        )
-        .await?;
-    }
-    let (create_attempts, created) = serial_created_state(&record.progress)?;
-    let replace_payloads = [
-        probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceFirst),
-        probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceSecond),
-    ];
-    if matches!(record.progress, SerialProbeProgress::Created { .. }) {
-        let observed = first.read_head(&logical_key).await.map_err(|error| {
-            ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
-        })?;
-        let (replace_attempts, replaced) = if observed == created {
-            let (left, right) = tokio::join!(
-                first.replace_head(&logical_key, &created.version, &replace_payloads[0]),
-                second.replace_head(&logical_key, &created.version, &replace_payloads[1]),
-            );
-            classify_serial_replace(left, right, &replace_payloads)?
-        } else if observed.bytes == replace_payloads[0] {
-            require_serial_replace_rejection(
-                second
-                    .replace_head(&logical_key, &created.version, &replace_payloads[1])
-                    .await,
-            )?;
-            (
-                [
-                    ProbeReplaceAttempt {
-                        payload_hash: ObjectHash::digest(&replace_payloads[0]),
-                        outcome: ProbeReplaceOutcome::Replaced,
-                    },
-                    ProbeReplaceAttempt {
-                        payload_hash: ObjectHash::digest(&replace_payloads[1]),
-                        outcome: ProbeReplaceOutcome::RejectedVersionMismatch,
-                    },
-                ],
-                observed,
-            )
-        } else if observed.bytes == replace_payloads[1] {
-            require_serial_replace_rejection(
-                first
-                    .replace_head(&logical_key, &created.version, &replace_payloads[0])
-                    .await,
-            )?;
-            (
-                [
-                    ProbeReplaceAttempt {
-                        payload_hash: ObjectHash::digest(&replace_payloads[0]),
-                        outcome: ProbeReplaceOutcome::RejectedVersionMismatch,
-                    },
-                    ProbeReplaceAttempt {
-                        payload_hash: ObjectHash::digest(&replace_payloads[1]),
-                        outcome: ProbeReplaceOutcome::Replaced,
-                    },
-                ],
-                observed,
-            )
-        } else {
-            return invalid("durable serial probe key contains unknown replacement bytes");
-        };
-        advance_serial(
-            journal,
-            &mut durable,
-            &mut record,
-            SerialProbeProgress::Replaced {
-                create_attempts,
-                created: created.clone(),
-                replace_attempts,
-                replaced,
-            },
-        )
-        .await?;
-    }
-    let (create_attempts, created, replace_attempts, replaced) =
-        serial_replaced_state(&record.progress)?;
-    if matches!(record.progress, SerialProbeProgress::Replaced { .. }) {
-        let observed = second.read_head(&logical_key).await.map_err(|error| {
-            ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
-        })?;
-        if observed != replaced {
-            return invalid("serial authoritative read differs from replacement winner");
-        }
-        advance_serial(
-            journal,
-            &mut durable,
-            &mut record,
-            SerialProbeProgress::ReadVerified {
-                create_attempts: create_attempts.clone(),
-                created: created.clone(),
-                replace_attempts: replace_attempts.clone(),
-                replaced: replaced.clone(),
-            },
-        )
-        .await?;
-    }
-    if matches!(record.progress, SerialProbeProgress::ReadVerified { .. }) {
-        match first.read_head(&logical_key).await {
-            Err(CoordinationError::NotFound(_)) => {}
-            Ok(object) if object == replaced => {
-                first.delete_head(&logical_key).await.map_err(|error| {
-                    ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
-                })?;
-                match first.read_head(&logical_key).await {
-                    Err(CoordinationError::NotFound(_)) => {}
-                    Ok(_) => return invalid("serial coordination object remains after deletion"),
-                    Err(error) => {
-                        return Err(ProviderProbeError::Storage(StorageError::Storage(
-                            error.to_string(),
-                        )))
-                    }
-                }
-            }
-            Ok(_) => return invalid("serial cleanup found different authoritative bytes/version"),
-            Err(error) => {
-                return Err(ProviderProbeError::Storage(StorageError::Storage(
-                    error.to_string(),
-                )))
-            }
-        }
-        advance_serial(
-            journal,
-            &mut durable,
-            &mut record,
-            SerialProbeProgress::Absent {
-                create_attempts: create_attempts.clone(),
-                created: created.clone(),
-                replace_attempts: replace_attempts.clone(),
-                replaced: replaced.clone(),
-            },
-        )
-        .await?;
-    }
-    let transcript = SerialCoordinationProbeTranscript {
-        probe_id,
-        logical_key,
-        create_attempts,
-        created_bytes_hash: ObjectHash::digest(&created.bytes),
-        created_version_hash: ObjectHash::digest(created.version.cloud().as_provider().as_bytes()),
-        replace_attempts,
-        replaced_bytes_hash: ObjectHash::digest(&replaced.bytes),
-        replaced_version_hash: ObjectHash::digest(
-            replaced.version.cloud().as_provider().as_bytes(),
-        ),
-        authoritative_read_bytes_hash: ObjectHash::digest(&replaced.bytes),
-        authoritative_read_version_hash: ObjectHash::digest(
-            replaced.version.cloud().as_provider().as_bytes(),
-        ),
-        delete_verified_absent: true,
-    };
-    let receipt = SerialCoordinationProbeReceipt::from_transcript(
-        transcript,
-        &binding.store,
-        &binding.device,
-    );
-    receipt.verify(&binding.store, &binding.device)?;
-    advance_serial(
-        journal,
-        &mut durable,
-        &mut record,
-        SerialProbeProgress::ReceiptReady {
-            receipt: receipt.clone(),
-        },
-    )
-    .await?;
-    Ok(receipt)
-}
-
-async fn advance_serial(
-    journal: &dyn ProviderProbeJournal,
-    durable: &mut ProviderProbeJournalRecord,
-    record: &mut SerialProbeJournal,
-    progress: SerialProbeProgress,
-) -> Result<(), ProviderProbeError> {
-    record.progress = progress;
-    let next = ProviderProbeJournalRecord::Serial(record.clone());
-    journal.advance(durable, next.clone()).await?;
-    *durable = next;
-    Ok(())
-}
-
-fn classify_serial_create(
-    left: Result<VersionedObject, CreateHeadError>,
-    right: Result<VersionedObject, CreateHeadError>,
-    payloads: &[Vec<u8>; 2],
-) -> Result<([ProbeCreateAttempt; 2], VersionedObject), ProviderProbeError> {
-    let (outcomes, object) = match (left, right) {
-        (Ok(object), Err(CreateHeadError::AlreadyExists)) => (
-            [
-                ProbeCreateOutcome::Created,
-                ProbeCreateOutcome::RejectedOccupied,
-            ],
-            object,
-        ),
-        (Err(CreateHeadError::AlreadyExists), Ok(object)) => (
-            [
-                ProbeCreateOutcome::RejectedOccupied,
-                ProbeCreateOutcome::Created,
-            ],
-            object,
-        ),
-        (left, right) => {
-            return invalid(&format!(
-                "serial create race did not produce one create and one occupied rejection: left={left:?}, right={right:?}"
-            ));
-        }
-    };
-    Ok((
-        [
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&payloads[0]),
-                outcome: outcomes[0],
-            },
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&payloads[1]),
-                outcome: outcomes[1],
-            },
-        ],
-        object,
-    ))
-}
-
-fn require_serial_create_rejection(
-    result: Result<VersionedObject, CreateHeadError>,
-) -> Result<(), ProviderProbeError> {
-    match result {
-        Err(CreateHeadError::AlreadyExists) => Ok(()),
-        Ok(_) => invalid("settled serial contender unexpectedly created a second head"),
-        Err(error) => Err(ProviderProbeError::Storage(StorageError::Storage(
-            error.to_string(),
-        ))),
-    }
-}
-
-fn classify_serial_replace(
-    left: Result<VersionedObject, ReplaceHeadError>,
-    right: Result<VersionedObject, ReplaceHeadError>,
-    payloads: &[Vec<u8>; 2],
-) -> Result<([ProbeReplaceAttempt; 2], VersionedObject), ProviderProbeError> {
-    let (outcomes, object) = match (left, right) {
-        (Ok(object), Err(ReplaceHeadError::VersionMismatch)) => (
-            [
-                ProbeReplaceOutcome::Replaced,
-                ProbeReplaceOutcome::RejectedVersionMismatch,
-            ],
-            object,
-        ),
-        (Err(ReplaceHeadError::VersionMismatch), Ok(object)) => (
-            [
-                ProbeReplaceOutcome::RejectedVersionMismatch,
-                ProbeReplaceOutcome::Replaced,
-            ],
-            object,
-        ),
-        (left, right) => {
-            return invalid(&format!(
-                "serial replacement race did not produce one replace and one version rejection: left={left:?}, right={right:?}"
-            ));
-        }
-    };
-    Ok((
-        [
-            ProbeReplaceAttempt {
-                payload_hash: ObjectHash::digest(&payloads[0]),
-                outcome: outcomes[0],
-            },
-            ProbeReplaceAttempt {
-                payload_hash: ObjectHash::digest(&payloads[1]),
-                outcome: outcomes[1],
-            },
-        ],
-        object,
-    ))
-}
-
-fn require_serial_replace_rejection(
-    result: Result<VersionedObject, ReplaceHeadError>,
-) -> Result<(), ProviderProbeError> {
-    match result {
-        Err(ReplaceHeadError::VersionMismatch) => Ok(()),
-        Ok(_) => invalid("settled serial contender unexpectedly replaced the head"),
-        Err(error) => Err(ProviderProbeError::Storage(StorageError::Storage(
-            error.to_string(),
-        ))),
-    }
-}
-
-fn serial_created_state(
-    progress: &SerialProbeProgress,
-) -> Result<([ProbeCreateAttempt; 2], VersionedObject), ProviderProbeError> {
-    match progress {
-        SerialProbeProgress::Created { attempts, object } => Ok((attempts.clone(), object.clone())),
-        SerialProbeProgress::Replaced {
-            create_attempts,
-            created,
-            ..
-        }
-        | SerialProbeProgress::ReadVerified {
-            create_attempts,
-            created,
-            ..
-        }
-        | SerialProbeProgress::Absent {
-            create_attempts,
-            created,
-            ..
-        } => Ok((create_attempts.clone(), created.clone())),
-        SerialProbeProgress::Prepared | SerialProbeProgress::ReceiptReady { .. } => {
-            invalid("serial journal has no durable create result")
-        }
-    }
-}
-
-fn serial_replaced_state(
-    progress: &SerialProbeProgress,
-) -> Result<
-    (
-        [ProbeCreateAttempt; 2],
-        VersionedObject,
-        [ProbeReplaceAttempt; 2],
-        VersionedObject,
-    ),
-    ProviderProbeError,
-> {
-    match progress {
-        SerialProbeProgress::Replaced {
-            create_attempts,
-            created,
-            replace_attempts,
-            replaced,
-        }
-        | SerialProbeProgress::ReadVerified {
-            create_attempts,
-            created,
-            replace_attempts,
-            replaced,
-        }
-        | SerialProbeProgress::Absent {
-            create_attempts,
-            created,
-            replace_attempts,
-            replaced,
-        } => Ok((
-            create_attempts.clone(),
-            created.clone(),
-            replace_attempts.clone(),
-            replaced.clone(),
-        )),
-        _ => invalid("serial journal has no durable replacement result"),
-    }
-}
-
 async fn advance_exact(
     journal: &dyn ProviderProbeJournal,
     durable: &mut ProviderProbeJournalRecord,
@@ -3631,69 +2917,6 @@ fn exact_transcript_hash(
     ))
 }
 
-fn serial_transcript_hash(
-    store: &StoreProviderBinding,
-    device: &ProviderDeviceBinding,
-    transcript: &SerialCoordinationProbeTranscript,
-) -> ObjectHash {
-    ObjectHash::digest(&domain_json(
-        SERIAL_TRANSCRIPT_DOMAIN,
-        &(store, device, transcript),
-    ))
-}
-
-fn verify_race_create(
-    attempts: &[ProbeCreateAttempt; 2],
-    payloads: &[Vec<u8>; 2],
-) -> Result<(), ProviderProbeError> {
-    for (attempt, payload) in attempts.iter().zip(payloads) {
-        if attempt.payload_hash != ObjectHash::digest(payload) {
-            return invalid("serial create payload hash is not deterministic");
-        }
-    }
-    if attempts
-        .iter()
-        .filter(|attempt| attempt.outcome == ProbeCreateOutcome::Created)
-        .count()
-        != 1
-        || attempts
-            .iter()
-            .filter(|attempt| attempt.outcome == ProbeCreateOutcome::RejectedOccupied)
-            .count()
-            != 1
-    {
-        return invalid("serial create race must contain one create and one occupied rejection");
-    }
-    Ok(())
-}
-
-fn verify_race_replace(
-    attempts: &[ProbeReplaceAttempt; 2],
-    payloads: &[Vec<u8>; 2],
-) -> Result<(), ProviderProbeError> {
-    for (attempt, payload) in attempts.iter().zip(payloads) {
-        if attempt.payload_hash != ObjectHash::digest(payload) {
-            return invalid("serial replacement payload hash is not deterministic");
-        }
-    }
-    if attempts
-        .iter()
-        .filter(|attempt| attempt.outcome == ProbeReplaceOutcome::Replaced)
-        .count()
-        != 1
-        || attempts
-            .iter()
-            .filter(|attempt| attempt.outcome == ProbeReplaceOutcome::RejectedVersionMismatch)
-            .count()
-            != 1
-    {
-        return invalid(
-            "serial replacement race must contain one replace and one version rejection",
-        );
-    }
-    Ok(())
-}
-
 mod ordered_owner_barriers {
     use super::*;
 
@@ -3954,7 +3177,6 @@ mod tests {
             },
             capability: ProviderCapabilityProof {
                 exact_slots: test_exact_receipt(),
-                serial_coordination: None,
             },
             created_at: ProviderAdminGrantOrigin::Founder { root },
         }

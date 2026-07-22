@@ -135,7 +135,6 @@ pub struct RetainedMergeMembershipProof {
 pub struct RetainedVerifiedMergeHistorySummary {
     pub version: u32,
     pub store_root_hash: ObjectHash,
-    pub policy: WritePolicy,
     #[serde(with = "ordered_map_entries")]
     pub causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
     pub post_state: StoreDeviceStateRef,
@@ -167,16 +166,8 @@ impl RetainedVerifiedMergeHistorySummary {
     ) -> Result<BTreeMap<AuthorStreamId, StoreBatchCommitRef>, StoreProtocolError> {
         let mut frontier = BTreeMap::new();
         for reference in self.causal_cut.values() {
-            let StoreCommitCoord::MergeConcurrent {
-                stream_id,
-                sequence,
-            } = reference.coord
-            else {
-                return Err(StoreProtocolError::WritePolicyMismatch {
-                    expected: WritePolicy::MergeConcurrent,
-                    actual: WritePolicy::Serial,
-                });
-            };
+            let stream_id = reference.coord.stream_id;
+            let sequence = reference.coord.sequence;
             match frontier.entry(stream_id) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(reference.clone());
@@ -193,32 +184,16 @@ impl RetainedVerifiedMergeHistorySummary {
 
     pub fn validate_shape(&self) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
-        if self.policy != WritePolicy::MergeConcurrent
-            || self.post_state.write_policy() != WritePolicy::MergeConcurrent
-        {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: self.policy,
-            });
-        }
         self.membership_floor.validate()?;
         for (coord, reference) in &self.causal_cut {
-            if coord != &reference.coord
-                || !matches!(coord, StoreCommitCoord::MergeConcurrent { .. })
-            {
+            if coord != &reference.coord {
                 return Err(StoreProtocolError::Malformed(
                     "Merge history causal cut contains a mismatched coordinate".to_string(),
                 ));
             }
         }
-        let expected_frontier = CommitFrontier::MergeConcurrent(self.frontier()?);
-        let StoreDeviceStateRef::MergeConcurrent { frontier, .. } = &self.post_state else {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            });
-        };
-        if frontier != &expected_frontier {
+        let expected_frontier = CommitFrontier(self.frontier()?);
+        if self.post_state.frontier() != &expected_frontier {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         for (device_id, registration) in &self.registrations {
@@ -283,10 +258,10 @@ impl RetainedVerifiedMergeHistorySummary {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
             proof.commit.verify_commit(&proof.commit_value)?;
-            let Some(StoreControl::MergeMembership { transition }) = proof.commit_value.control()
-            else {
+            let Some(control) = proof.commit_value.control() else {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             };
+            let transition = &control.transition;
             if transition.body.entry != proof.entry
                 || proof.entry.coord != proof.entry_value.coord()
                 || !crate::sync::membership::verify_membership_entry(&proof.entry_value)
@@ -360,14 +335,9 @@ impl RetainedVerifiedMergeHistorySummary {
         }
         for (stream_id, announcement) in &self.announcement_frontier {
             self.validate_announcement(announcement)?;
-            if !matches!(
-                announcement.value.commit.coord,
-                StoreCommitCoord::MergeConcurrent {
-                    stream_id: announcement_stream,
-                    ..
-                } if announcement_stream == *stream_id
-            ) || self.causal_cut.get(&announcement.value.commit.coord)
-                != Some(&announcement.value.commit)
+            if announcement.value.commit.coord.stream_id != *stream_id
+                || self.causal_cut.get(&announcement.value.commit.coord)
+                    != Some(&announcement.value.commit)
             {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
@@ -466,16 +436,8 @@ impl RetainedVerifiedMergeHistorySummary {
             &registration.value,
             commit_ref,
         )?;
-        let StoreCommitCoord::MergeConcurrent {
-            stream_id,
-            sequence,
-        } = commit_ref.coord
-        else {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            });
-        };
+        let stream_id = commit_ref.coord.stream_id;
+        let sequence = commit_ref.coord.sequence;
         let frontier = self.frontier()?;
         for (accepted_stream, accepted_commit) in &frontier {
             if *accepted_stream == stream_id {
@@ -494,19 +456,17 @@ impl RetainedVerifiedMergeHistorySummary {
             }
         }
         let current_membership_floor_matches = match commit.control() {
-            Some(StoreControl::MergeMembership { .. }) => {
-                self.membership_proofs.get(commit_ref).is_some_and(|proof| {
-                    self.membership_floor
-                        .effective_coordinates
-                        .contains(&proof.entry.coord)
-                        && proof.head_value.body.resolutions.iter().all(|resolution| {
-                            self.membership_floor
-                                .resolutions
-                                .binary_search(resolution)
-                                .is_ok()
-                        })
-                })
-            }
+            Some(_) => self.membership_proofs.get(commit_ref).is_some_and(|proof| {
+                self.membership_floor
+                    .effective_coordinates
+                    .contains(&proof.entry.coord)
+                    && proof.head_value.body.resolutions.iter().all(|resolution| {
+                        self.membership_floor
+                            .resolutions
+                            .binary_search(resolution)
+                            .is_ok()
+                    })
+            }),
             _ => true,
         };
         if !current_membership_floor_matches
@@ -514,8 +474,7 @@ impl RetainedVerifiedMergeHistorySummary {
                 .membership_proofs
                 .iter()
                 .any(|(reference, proof)| proof.announcement.is_none() && reference != commit_ref)
-            || matches!(commit.control(), Some(StoreControl::MergeMembership { .. }))
-                != self.membership_proofs.contains_key(commit_ref)
+            || commit.control().is_some() != self.membership_proofs.contains_key(commit_ref)
             || commit.acknowledgement().is_some_and(|reference| {
                 self.acknowledgements
                     .get(&reference.registration.device_id)
@@ -536,12 +495,8 @@ impl RetainedVerifiedMergeHistorySummary {
         }
         let predecessor = self.announcement_frontier.get(&stream_id);
         let first_slot = match &registration.value.store_commits {
-            StoreCommitAnchor::MergeConcurrent {
-                announcements: DeviceStreamAnchor::StoreAnnouncements { first_slot },
-            } => first_slot,
-            StoreCommitAnchor::MergeConcurrent { .. } | StoreCommitAnchor::Serial => {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            }
+            DeviceStreamAnchor::StoreAnnouncements { first_slot } => first_slot,
+            _ => return Err(StoreProtocolError::DeviceStateMismatch),
         };
         if predecessor.is_none() && (sequence != 1 || head_ref.object.slot() != first_slot)
             || predecessor

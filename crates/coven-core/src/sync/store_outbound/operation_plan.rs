@@ -1,8 +1,6 @@
 use super::*;
-use crate::sync::store_engine::serial::publication::SerialAuthorizationSnapshot;
 
 pub(crate) enum StoreOperationBatch {
-    Control(StoreControl),
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
         value: super::store_commit::StoreAck,
@@ -34,11 +32,6 @@ pub(crate) struct DeviceJoinRegistrationActivation {
     pub authority: super::store_commit::StoreDeviceRegistrationActivation,
 }
 
-pub(crate) enum StoreOperationCommitPlan {
-    MergeConcurrent(MergeStoreOperationCommitPlan),
-    Serial(SerialStoreOperationCommitPlan),
-}
-
 pub(crate) struct StoreOperationPlanCommon {
     pub(super) root: StoreRootRef,
     pub(super) registration_ref: StoreDeviceRegistrationRef,
@@ -52,83 +45,20 @@ pub(crate) struct StoreOperationPlanCommon {
     pub(super) owner_grant: Option<super::membership::MembershipGrantId>,
 }
 
-pub(crate) struct MergeStoreOperationCommitPlan {
+pub(crate) struct StoreOperationCommitPlan {
     pub(super) common: StoreOperationPlanCommon,
     pub(super) membership: MembershipChain,
     pub(super) predecessor_state: super::store_commit::ResolvedStoreDeviceState,
 }
 
-pub(crate) struct SerialStoreOperationCommitPlan {
-    pub(super) common: StoreOperationPlanCommon,
-    pub(super) base_head: VersionedObject,
-    pub(super) authorization: SerialAuthorizationState,
-}
-
 #[derive(Clone, Copy)]
-pub(crate) enum StoreOperationPreparation<'a> {
-    MergeConcurrent {
-        membership: &'a MembershipChain,
-    },
-    Serial {
-        coordination: &'a dyn CoordinationStorage,
-    },
+pub(crate) struct StoreOperationPreparation<'a> {
+    pub(crate) membership: &'a MembershipChain,
 }
 
 impl<'a> StoreOperationPreparation<'a> {
-    pub(crate) fn from_dependencies(
-        policy: crate::WritePolicy,
-        coordination: Option<&'a dyn CoordinationStorage>,
-        membership: Option<&'a MembershipChain>,
-    ) -> Result<Self, StoreOutboundError> {
-        match (policy, coordination, membership) {
-            (crate::WritePolicy::MergeConcurrent, None, Some(membership)) => {
-                Ok(StoreOperationPreparation::MergeConcurrent { membership })
-            }
-            (crate::WritePolicy::Serial, Some(coordination), None) => {
-                Ok(StoreOperationPreparation::Serial { coordination })
-            }
-            (crate::WritePolicy::MergeConcurrent, _, None) => {
-                Err(StoreOutboundError::InvalidOutbound(
-                    "Merge Store operation has no exact membership state".to_string(),
-                ))
-            }
-            (crate::WritePolicy::MergeConcurrent, Some(_), Some(_)) => {
-                Err(StoreOutboundError::InvalidOutbound(
-                    "Merge Store operation received Serial coordination".to_string(),
-                ))
-            }
-            (crate::WritePolicy::Serial, None, _) => {
-                Err(StoreOutboundError::MissingSerialCoordination)
-            }
-            (crate::WritePolicy::Serial, Some(_), Some(_)) => {
-                Err(StoreOutboundError::InvalidOutbound(
-                    "Serial Store operation received Merge membership".to_string(),
-                ))
-            }
-        }
-    }
-
-    fn policy(self) -> crate::WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => crate::WritePolicy::Serial,
-        }
-    }
-}
-
-impl std::ops::Deref for MergeStoreOperationCommitPlan {
-    type Target = StoreOperationPlanCommon;
-
-    fn deref(&self) -> &Self::Target {
-        &self.common
-    }
-}
-
-impl std::ops::Deref for SerialStoreOperationCommitPlan {
-    type Target = StoreOperationPlanCommon;
-
-    fn deref(&self) -> &Self::Target {
-        &self.common
+    pub(crate) fn new(membership: &'a MembershipChain) -> Self {
+        Self { membership }
     }
 }
 
@@ -136,10 +66,7 @@ impl std::ops::Deref for StoreOperationCommitPlan {
     type Target = StoreOperationPlanCommon;
 
     fn deref(&self) -> &Self::Target {
-        match self {
-            Self::MergeConcurrent(plan) => &plan.common,
-            Self::Serial(plan) => &plan.common,
-        }
+        &self.common
     }
 }
 
@@ -171,22 +98,6 @@ impl StoreOperationPlanCommon {
         }
     }
 
-    pub(crate) fn root(&self) -> &StoreRootRef {
-        &self.root
-    }
-
-    pub(crate) fn registration_ref(&self) -> &StoreDeviceRegistrationRef {
-        &self.registration_ref
-    }
-
-    pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
-        &self.registration
-    }
-
-    pub(crate) fn device_signer(&self) -> &UserKeypair {
-        &self.device_signer
-    }
-
     pub(crate) fn validate_acknowledgement(
         &self,
         acknowledgement: &super::store_commit::StoreAck,
@@ -207,7 +118,7 @@ impl StoreOperationPlanCommon {
     }
 }
 
-impl MergeStoreOperationCommitPlan {
+impl StoreOperationCommitPlan {
     pub(crate) fn new(
         common: StoreOperationPlanCommon,
         membership: MembershipChain,
@@ -230,32 +141,6 @@ impl MergeStoreOperationCommitPlan {
 
     pub(crate) fn predecessor_state(&self) -> &super::store_commit::ResolvedStoreDeviceState {
         &self.predecessor_state
-    }
-}
-
-impl SerialStoreOperationCommitPlan {
-    pub(crate) fn new(
-        common: StoreOperationPlanCommon,
-        base_head: VersionedObject,
-        authorization: SerialAuthorizationState,
-    ) -> Self {
-        Self {
-            common,
-            base_head,
-            authorization,
-        }
-    }
-
-    pub(crate) fn common(&self) -> &StoreOperationPlanCommon {
-        &self.common
-    }
-
-    pub(crate) fn base_head(&self) -> &VersionedObject {
-        &self.base_head
-    }
-
-    pub(crate) fn authorization(&self) -> &SerialAuthorizationState {
-        &self.authorization
     }
 }
 
@@ -330,33 +215,31 @@ impl MergeConflictResolutionCommitPlan {
                     .to_string(),
             ));
         }
-        let membership_state = super::circle_control::StoreMembershipStateRef::merge_concurrent(
+        let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
             membership.head_refs().to_vec(),
             membership.resolution_refs().to_vec(),
             self.device_state.recovery().to_vec(),
             resolved.state_hash,
         )
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        Ok(StoreOperationCommitPlan::MergeConcurrent(
-            MergeStoreOperationCommitPlan {
-                common: StoreOperationPlanCommon {
-                    root: self.root,
-                    registration_ref: self.registration_ref,
-                    registration: self.registration,
-                    device_signer: self.device_signer,
-                    coord: self.coord,
-                    order: self.order,
-                    membership_state,
-                    device_state: self.device_state,
-                    membership_authority: StoreOperationMembershipAuthority::MergeConcurrent {
-                        predecessor: authority,
-                    },
-                    owner_grant: Some(replacement_grant),
+        Ok(StoreOperationCommitPlan {
+            common: StoreOperationPlanCommon {
+                root: self.root,
+                registration_ref: self.registration_ref,
+                registration: self.registration,
+                device_signer: self.device_signer,
+                coord: self.coord,
+                order: self.order,
+                membership_state,
+                device_state: self.device_state,
+                membership_authority: StoreOperationMembershipAuthority {
+                    predecessor: authority,
                 },
-                membership: membership.clone(),
-                predecessor_state: self.device_state_value,
+                owner_grant: Some(replacement_grant),
             },
-        ))
+            membership: membership.clone(),
+            predecessor_state: self.device_state_value,
+        })
     }
 }
 
@@ -428,33 +311,6 @@ impl StoreOperationCommitPlan {
     pub(crate) fn owner_grant(&self) -> Option<&super::membership::MembershipGrantId> {
         self.owner_grant.as_ref()
     }
-
-    pub(crate) fn serial_member_grant(
-        &self,
-        member_pubkey: &str,
-    ) -> Option<super::membership::MembershipGrantId> {
-        let Self::Serial(serial) = self else {
-            return None;
-        };
-        let grants = serial
-            .authorization
-            .membership
-            .active_grant_ids(member_pubkey);
-        let grant = grants.iter().next()?;
-        (grants.len() == 1
-            && serial
-                .authorization
-                .membership
-                .is_member_grant(member_pubkey, grant))
-        .then(|| grant.clone())
-    }
-
-    pub(crate) fn serial_authorization(&self) -> Option<&SerialAuthorizationState> {
-        let Self::Serial(serial) = self else {
-            return None;
-        };
-        Some(&serial.authorization)
-    }
 }
 
 pub(crate) async fn prepare_merge_conflict_resolution_commit(
@@ -464,22 +320,14 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
     keypair: &UserKeypair,
     candidate_membership_heads: &[super::membership::MembershipHeadRef],
 ) -> Result<MergeConflictResolutionCommitPlan, StoreOutboundError> {
-    if db.write_policy() != crate::WritePolicy::MergeConcurrent {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "membership conflict resolution requires MergeConcurrent policy".to_string(),
-        ));
-    }
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
     let previous = db.latest_local_store_position().await?;
-    let dependencies = super::store_commit::CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
-        db.materialized_frontier().await?,
-    )
-    .and_then(|frontier| frontier.merge_commits().cloned())
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let dependencies =
+        super::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
-    let coord = StoreCommitCoord::MergeConcurrent {
+    let coord = StoreCommitCoord {
         stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &registration_ref,
@@ -487,13 +335,13 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         ),
         sequence: seq,
     };
-    let order = StoreCommitOrder::MergeConcurrent {
+    let order = StoreCommitOrder {
         seq,
         predecessor: previous,
-        dependencies,
+        dependencies: dependencies.0,
     };
     let authorization =
-        crate::sync::store_engine::merge::pull::load_merge_conflict_resolution_authorization(
+        crate::sync::store_engine::engine::pull::load_merge_conflict_resolution_authorization(
             db,
             storage,
             &root,
@@ -517,19 +365,6 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
     })
 }
 
-pub(crate) async fn prepare_store_operation_commit_from_serial_snapshot(
-    db: &Database,
-    device_id: &str,
-    keypair: &UserKeypair,
-    snapshot: SerialAuthorizationSnapshot,
-) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
-    crate::sync::store_engine::serial::operations::prepare_plan_from_snapshot(
-        db, device_id, keypair, snapshot,
-    )
-    .await
-    .map(StoreOperationCommitPlan::Serial)
-}
-
 pub(crate) async fn prepare_store_operation_commit(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -537,31 +372,12 @@ pub(crate) async fn prepare_store_operation_commit(
     device_id: &str,
     keypair: &UserKeypair,
 ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
-    if db.write_policy() != preparation.policy() {
-        return Err(StoreOutboundError::InvalidOutbound(format!(
-            "Store operation preparation policy {:?} differs from database policy {:?}",
-            preparation.policy(),
-            db.write_policy()
-        )));
-    }
-    match preparation {
-        StoreOperationPreparation::MergeConcurrent { membership } => {
-            crate::sync::store_engine::merge::operations::prepare_plan(
-                db, storage, membership, device_id, keypair,
-            )
-            .await
-            .map(StoreOperationCommitPlan::MergeConcurrent)
-        }
-        StoreOperationPreparation::Serial { coordination } => {
-            crate::sync::store_engine::serial::operations::prepare_plan(
-                db,
-                storage,
-                coordination,
-                device_id,
-                keypair,
-            )
-            .await
-            .map(StoreOperationCommitPlan::Serial)
-        }
-    }
+    crate::sync::store_engine::engine::operations::prepare_plan(
+        db,
+        storage,
+        preparation.membership,
+        device_id,
+        keypair,
+    )
+    .await
 }

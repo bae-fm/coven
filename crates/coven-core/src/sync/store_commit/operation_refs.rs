@@ -137,30 +137,16 @@ pub(super) fn validate_device_retirement_refs(
     if retirements.len() > 1 {
         return Err(StoreProtocolError::DeviceStateMismatch);
     }
-    let expected_cut = match order {
-        StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => {
-            let mut cut = dependencies.clone();
-            if let Some(predecessor) = predecessor {
-                let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord else {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                };
-                if cut
-                    .insert(stream_id, predecessor.clone())
-                    .is_some_and(|existing| existing != *predecessor)
-                {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-            }
-            StoreHistoryCut::MergeConcurrent(cut)
+    let mut cut = order.dependencies.clone();
+    if let Some(predecessor) = &order.predecessor {
+        if cut
+            .insert(predecessor.coord.stream_id, predecessor.clone())
+            .is_some_and(|existing| existing != *predecessor)
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        StoreCommitOrder::Serial { predecessor, .. } => {
-            StoreHistoryCut::Serial(predecessor.clone())
-        }
-    };
+    }
+    let expected_cut = StoreHistoryCut(cut);
     for retirement in retirements {
         if retirement.candidate_family != candidate_family
             || retirement.target != *author

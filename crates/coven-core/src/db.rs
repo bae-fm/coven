@@ -24,7 +24,6 @@ macro_rules! coven_tables {
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     generation INTEGER NOT NULL CHECK (generation >= 0),
-    write_policy TEXT NOT NULL CHECK (json_valid(write_policy)),
     exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
     schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
     routing_hash TEXT NOT NULL CHECK (length(routing_hash) = 64),
@@ -42,8 +41,7 @@ macro_rules! coven_tables {
     input_hash TEXT NOT NULL CHECK (length(input_hash) = 64),
     canonical_input BLOB NOT NULL CHECK (length(canonical_input) > 0),
     PRIMARY KEY (device_id, seq),
-    UNIQUE (device_id, seq, commit_ref, input_hash),
-    CHECK (device_id != 'serial')
+    UNIQUE (device_id, seq, commit_ref, input_hash)
 "
         );
         $visit!(
@@ -55,8 +53,7 @@ macro_rules! coven_tables {
     cleanup_hash TEXT NOT NULL CHECK (length(cleanup_hash) = 64),
     canonical_cleanup BLOB NOT NULL CHECK (length(canonical_cleanup) > 0),
     PRIMARY KEY (device_id, seq),
-    UNIQUE (commit_ref),
-    CHECK (device_id != 'serial')
+    UNIQUE (commit_ref)
 "
         );
         $visit!(
@@ -65,14 +62,9 @@ macro_rules! coven_tables {
     device_id TEXT NOT NULL,
     seq INTEGER NOT NULL CHECK (seq > 0),
     commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
-    retained_commit_ref TEXT CHECK (retained_commit_ref IS NULL OR json_valid(retained_commit_ref)),
-    retained_input_hash TEXT CHECK (retained_input_hash IS NULL OR length(retained_input_hash) = 64),
+    retained_commit_ref TEXT NOT NULL CHECK (json_valid(retained_commit_ref)),
+    retained_input_hash TEXT NOT NULL CHECK (length(retained_input_hash) = 64),
     PRIMARY KEY (device_id, seq),
-    CHECK (
-        (device_id = 'serial') =
-        (retained_commit_ref IS NULL AND retained_input_hash IS NULL)
-    ),
-    CHECK ((retained_commit_ref IS NULL) = (retained_input_hash IS NULL)),
     FOREIGN KEY (device_id, seq, retained_commit_ref, retained_input_hash)
         REFERENCES retained_merge_materializations(device_id, seq, commit_ref, input_hash)
 "
@@ -237,7 +229,6 @@ macro_rules! coven_tables {
     input_hash TEXT NOT NULL CHECK (length(input_hash) = 64),
     object_id TEXT NOT NULL CHECK (length(object_id) = 64),
     PRIMARY KEY (device_id, seq, object_id),
-    CHECK (device_id != 'serial'),
     FOREIGN KEY (device_id, seq, commit_ref, input_hash)
         REFERENCES retained_merge_materializations(device_id, seq, commit_ref, input_hash),
     FOREIGN KEY (object_id) REFERENCES remote_objects(object_id)
@@ -311,16 +302,6 @@ macro_rules! coven_tables {
     intent_hash TEXT NOT NULL CHECK (length(intent_hash) = 64),
     plan_bytes BLOB NOT NULL,
     progress_bytes BLOB NOT NULL
-"
-        );
-        $visit!(
-            terminal_membership_mutation,
-            "
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    kind TEXT NOT NULL CHECK (kind IN ('serial_invite', 'serial_removal')),
-    intent_hash TEXT NOT NULL UNIQUE CHECK (length(intent_hash) = 64),
-    plan_bytes BLOB NOT NULL,
-    result_bytes BLOB NOT NULL
 "
         );
         $visit!(
@@ -445,15 +426,6 @@ macro_rules! coven_tables {
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     membership_graph TEXT NOT NULL CHECK (json_valid(membership_graph))
-"
-        );
-        $visit!(
-            serial_head_receipt,
-            "
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    head_bytes BLOB NOT NULL,
-    version_token TEXT NOT NULL CHECK (json_valid(version_token)),
-    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref))
 "
         );
         $visit!(
@@ -853,7 +825,7 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
-/// Create the MergeConcurrent audience mirror and private route map. The
+/// Create the audience mirror and private route map. The
 /// initializer calls this only when the routing contract has a scoped graph.
 pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
@@ -1083,13 +1055,6 @@ mod tests {
             ["a".repeat(64)],
         )
         .expect("materialize Merge commit with retained input");
-
-        conn.execute(
-            "INSERT INTO materialized_commits (device_id, seq, commit_ref)
-             VALUES ('serial', 1, '{}')",
-            [],
-        )
-        .expect("Serial materialization has no Merge retained input");
     }
 
     #[test]
@@ -1099,10 +1064,9 @@ mod tests {
         let insert = |singleton: i64, generation: i64| {
             conn.execute(
                 "INSERT INTO retained_replay_baselines
-                 (singleton, generation, write_policy, exact_cut, schema_version,
+                 (singleton, generation, exact_cut, schema_version,
                   routing_hash, image_hash, image_bytes, authority_bytes)
-                 VALUES (?1, ?2, '\"merge_concurrent\"',
-                         '{\"merge_concurrent\":{}}', 1, ?3, ?4, x'01', x'01')",
+                 VALUES (?1, ?2, '{}', 1, ?3, ?4, x'01', x'01')",
                 rusqlite::params![singleton, generation, "a".repeat(64), "b".repeat(64)],
             )
         };

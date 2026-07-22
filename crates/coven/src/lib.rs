@@ -433,33 +433,11 @@ pub(crate) mod storage {
                     &self,
                     _scope: &CloudKitScope,
                     _key: &str,
-                ) -> Result<crate::storage::cloud::CloudVersionedHead, CloudHomeError>
+                ) -> Result<crate::storage::cloud::CloudVersionedObject, CloudHomeError>
                 {
                     unimplemented!("not exercised by these tests")
                 }
-                fn create_record(
-                    &self,
-                    _scope: &CloudKitScope,
-                    _key: &str,
-                    _data: Vec<u8>,
-                ) -> Result<
-                    crate::storage::cloud::CloudVersionedHead,
-                    crate::storage::cloud::CloudHeadCreateError,
-                > {
-                    unimplemented!("not exercised by these tests")
-                }
-                fn replace_record(
-                    &self,
-                    _scope: &CloudKitScope,
-                    _key: &str,
-                    _expected: &crate::storage::cloud::CloudHeadVersion,
-                    _data: Vec<u8>,
-                ) -> Result<
-                    crate::storage::cloud::CloudVersionedHead,
-                    crate::storage::cloud::CloudHeadReplaceError,
-                > {
-                    unimplemented!("not exercised by these tests")
-                }
+
                 fn begin_atomic_create(
                     &self,
                     _scope: &CloudKitScope,
@@ -657,8 +635,7 @@ pub use coven_core::{BlobDecl, Migration, MigrationStep, RowIdentity, SyncedTabl
 // Config.
 pub use coven_core::sync::storage::CloudKitEnvironment;
 pub use coven_core::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, CustomS3Serial,
-    HomeStorage, WritePolicy,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, HomeStorage,
 };
 
 // Blob descriptors, cache error, the host-implemented transition observer.
@@ -695,16 +672,16 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
 pub use coven_core::sync::device_join::{
-    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinAuthorization,
-    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
-    DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
-    DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness,
-    DeviceJoinRole, DeviceJoinStatus, DeviceJoinWriteRevocationExecutor,
-    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
-    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
-    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
+    DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
+    DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer,
+    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
+    DeviceJoinStatus, DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
+    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
+    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
+    ProvisionalDeviceBootstrap,
 };
 pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
@@ -740,16 +717,15 @@ pub use coven_core::sync::provider::{
     CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt,
     ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange, ProviderAdminGrantId,
     ProviderAdminGrantRecord, ProviderAdminMembershipChange, ProviderAdminState,
-    ProviderCapabilityProof, ProviderProbeId, SerialCoordinationProbeReceipt,
+    ProviderCapabilityProof, ProviderProbeId,
 };
 pub use coven_core::sync::storage::{
     AwsPrincipal, GoogleDriveCorpus, ProviderDeviceBinding, ProviderPrincipalId,
     ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
 pub use coven_core::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
-    CloudHeadReplaceError, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudVersionedHead, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, PartSink, UploadProgress,
 };
 
 // Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
@@ -757,8 +733,7 @@ pub use coven_core::{
 // bundle, the per-device activity, and the held-changeset detail the alerts carry.
 pub use coven_core::{
     AffectedRow, DeviceActivity, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
-    ObjectHash, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition,
-    SerializationConflict, StoreBatchCommitRef, StoreCommitCoord, StoreSerialPredecessor,
+    ObjectHash, PendingWrite, PublishedPosition, StoreBatchCommitRef, StoreCommitCoord,
     SyncLoopAlerts, SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt, WriteResolution,
     WriteStatus,
 };

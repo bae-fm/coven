@@ -8,13 +8,11 @@ use super::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleMetadataHeadRef,
     CircleOperationId, CircleOperationKind, CircleOperationState, CircleRosterHeadRef,
-    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
-    CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
+    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionPolicyObjects,
+    PreparedCircleTransition, StoreMembershipStateRef,
 };
-use super::membership::SerialAuthorizationState;
 use super::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-    VersionedObject,
 };
 use super::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
@@ -23,8 +21,7 @@ use super::store_commit::{
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreOperationMembershipAuthority,
-    StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, StreamActivation,
-    StreamAnchorDomain, SuccessorLink, SERIAL_STREAM_ID,
+    StoreRootRef, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
 use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
@@ -32,26 +29,17 @@ use crate::keys::{self, UserKeypair};
 
 pub(crate) use super::circle_activation::{
     load_circle_activations, load_exact_slot_bytes, verify_control_context, CircleAuthoringState,
-    CircleMembershipAuthority, VerifiedCircleAccess, VerifiedCircleActivations,
-    VerifiedCircleActive, VerifiedCircleReference,
+    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleReference,
 };
 
 #[cfg(test)]
 use super::circle::CircleRole;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum CircleOperationPolicy {
-    MergeConcurrent {
-        head: StoreDeviceHead,
-        history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
-    },
-    Serial {
-        head: StoreSerialHead,
-        base: Option<StoreBatchCommitRef>,
-        base_head: VersionedObject,
-        authorization: SerialAuthorizationState,
-    },
+#[serde(deny_unknown_fields)]
+pub(crate) struct CircleOperationPolicy {
+    pub head: StoreDeviceHead,
+    pub history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,28 +178,26 @@ impl CircleOperationJournal {
             )
             .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
         );
-        if let CircleOperationPolicy::MergeConcurrent { head, .. } = &operation.policy {
-            let prepared = operation
-                .prepared_objects
-                .get("store-head")
-                .ok_or_else(|| {
-                    CircleOperationError::Journal(
-                        "Merge Circle operation lacks its prepared Store head".to_string(),
-                    )
-                })?;
-            remotes.push(
-                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                    super::store_commit::StoreDeviceHeadRef {
-                        head_hash: head.head_hash(),
-                        object: prepared.reference().clone(),
-                    },
-                    head.to_bytes(),
-                    prepared.stored_bytes().to_vec(),
-                    operation.commit_ref.clone(),
+        let prepared = operation
+            .prepared_objects
+            .get("store-head")
+            .ok_or_else(|| {
+                CircleOperationError::Journal(
+                    "Circle operation lacks its prepared Store head".to_string(),
                 )
-                .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
-            );
-        }
+            })?;
+        remotes.push(
+            super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                super::store_commit::StoreDeviceHeadRef {
+                    head_hash: operation.policy.head.head_hash(),
+                    object: prepared.reference().clone(),
+                },
+                operation.policy.head.to_bytes(),
+                prepared.stored_bytes().to_vec(),
+                operation.commit_ref.clone(),
+            )
+            .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+        );
         Ok(remotes)
     }
 
@@ -278,7 +264,7 @@ fn verify_prepared_objects_are_signed(
         operation.commit_ref.object.clone(),
         objects.control.clone(),
     ]);
-    signed.extend(reference.head_object().cloned());
+    signed.insert(reference.head_object().clone());
     signed.extend(objects.roster_entries.values().cloned());
     signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
     signed.extend(objects.roster_resolutions.values().cloned());
@@ -299,12 +285,7 @@ fn verify_prepared_objects_are_signed(
         signed.insert(access.envelope.object.clone());
     }
     for (step, prepared) in &operation.prepared_objects {
-        let is_merge_head = step == "store-head"
-            && matches!(
-                operation.policy,
-                CircleOperationPolicy::MergeConcurrent { .. }
-            );
-        if !is_merge_head && !signed.contains(prepared.reference()) {
+        if step != "store-head" && !signed.contains(prepared.reference()) {
             return Err(CircleOperationError::Journal(format!(
                 "Circle upload step {step:?} names an object outside its signed Store commit graph"
             )));
@@ -448,649 +429,211 @@ async fn prepare_circle_activation_objects(
     let mut prepared = BTreeMap::new();
     let mut stream_activations = Vec::new();
 
-    let policy_objects = match &mut draft.policy {
-        CircleTransitionDraftPolicy::Serial => CircleTransitionPolicyObjects::Serial,
-        CircleTransitionDraftPolicy::MergeConcurrent { roster_entry } => {
-            let owner_grant = draft.metadata.author_owner_grant.clone();
-            let selects_authored_metadata = match &draft.control.value.value {
-                super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } => {
-                    active_epoch.metadata.selected == draft.metadata.coord()
-                }
-                super::circle::CircleControlValue::Serial { .. } => {
-                    return Err(CircleOperationError::InvalidState(
-                        "Merge Circle draft carries Serial control".to_string(),
-                    ));
-                }
-            };
-            let roster_stream = StreamActivation::grant_authorized_stream_id(
-                store_root_hash,
-                author_registration,
-                &owner_grant,
-                StreamAnchorDomain::CircleRoster {
-                    circle_id: draft.circle_id,
-                },
-            );
-            let metadata_stream = StreamActivation::grant_authorized_stream_id(
-                store_root_hash,
-                author_registration,
-                &owner_grant,
-                StreamAnchorDomain::CircleMetadata {
-                    circle_id: draft.circle_id,
-                },
-            );
-            let control_stream = StreamActivation::grant_authorized_stream_id(
-                store_root_hash,
-                author_registration,
-                &owner_grant,
-                StreamAnchorDomain::CircleControl {
-                    circle_id: draft.circle_id,
-                },
-            );
-            if roster_stream == metadata_stream
-                || roster_stream == control_stream
-                || metadata_stream == control_stream
+    let roster_entry = &mut draft.policy.roster_entry;
+    let policy_objects = {
+        let owner_grant = draft.metadata.author_owner_grant.clone();
+        let selects_authored_metadata =
+            draft.control.value.value.active_epoch.metadata.selected == draft.metadata.coord();
+        let roster_stream = StreamActivation::grant_authorized_stream_id(
+            store_root_hash,
+            author_registration,
+            &owner_grant,
+            StreamAnchorDomain::CircleRoster {
+                circle_id: draft.circle_id,
+            },
+        );
+        let metadata_stream = StreamActivation::grant_authorized_stream_id(
+            store_root_hash,
+            author_registration,
+            &owner_grant,
+            StreamAnchorDomain::CircleMetadata {
+                circle_id: draft.circle_id,
+            },
+        );
+        let control_stream = StreamActivation::grant_authorized_stream_id(
+            store_root_hash,
+            author_registration,
+            &owner_grant,
+            StreamAnchorDomain::CircleControl {
+                circle_id: draft.circle_id,
+            },
+        );
+        if roster_stream == metadata_stream
+            || roster_stream == control_stream
+            || metadata_stream == control_stream
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle control, roster, and metadata domains derived the same stream".to_string(),
+            ));
+        }
+
+        let prepared_roster = if let Some(entry) = roster_entry {
+            entry.stream_id = roster_stream;
+            entry.signature = keys::sign_hex(identity_signer, &entry.canonical_bytes()).1;
+            let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
+                circle_id: draft.circle_id,
+                coord: &entry.coord(),
+            });
+            let entry_prepared = prepare_circle_object(
+                storage,
+                &roster_context,
+                &entry_prefix,
+                ".json",
+                serde_json::to_vec(entry).expect("Circle roster entry serialization cannot fail"),
+            )
+            .await?;
+            prepared.insert("roster-entry".to_string(), entry_prepared.clone());
+            roster_entries.insert(entry.coord(), entry_prepared.reference().clone());
+
+            let stream_key = entry.coord().stream_key();
+            if roster_heads
+                .iter()
+                .any(|head| head.coord.stream_key() == stream_key)
             {
                 return Err(CircleOperationError::InvalidState(
-                    "Circle control, roster, and metadata domains derived the same stream"
-                        .to_string(),
+                    "Circle founder roster stream is already active".to_string(),
                 ));
             }
-
-            let prepared_roster = if let Some(entry) = roster_entry {
-                entry.stream_id = roster_stream;
-                entry.signature = keys::sign_hex(identity_signer, &entry.canonical_bytes()).1;
-                let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
+            let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, 1);
+            let current_slot = storage
+                .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
+                .await
+                .map_err(super::store_objects::StoreObjectError::from)?;
+            let activation = StreamActivation::grant_authorized(
+                store_root_hash,
+                author_registration.clone(),
+                owner_grant.clone(),
+                GrantStreamAnchor::CircleRoster {
                     circle_id: draft.circle_id,
-                    coord: &entry.coord(),
-                });
-                let entry_prepared = prepare_circle_object(
-                    storage,
+                    first_slot: current_slot.clone(),
+                },
+            );
+            let next_slot = storage
+                .allocate_protocol_slot(
                     &roster_context,
-                    &entry_prefix,
+                    &circle_roster_head_prefix(draft.circle_id, &stream_key, 2),
                     ".json",
-                    serde_json::to_vec(entry)
-                        .expect("Circle roster entry serialization cannot fail"),
                 )
-                .await?;
-                prepared.insert("roster-entry".to_string(), entry_prepared.clone());
-                roster_entries.insert(entry.coord(), entry_prepared.reference().clone());
+                .await
+                .map_err(super::store_objects::StoreObjectError::from)?;
+            let head = super::circle::CircleRosterHead::signed(
+                entry,
+                entry_prepared.reference().clone(),
+                SuccessorLink {
+                    activation: activation.activation_id(),
+                    predecessor: None,
+                    next_slot,
+                },
+                device_signer,
+            );
+            let head_prepared = prepare_circle_object_at(
+                storage,
+                &roster_context,
+                current_slot,
+                &current_prefix,
+                serde_json::to_vec(&head).expect("Circle roster head serialization cannot fail"),
+            )?;
+            let head_ref =
+                CircleRosterHeadRef::from_stored_head(&head, head_prepared.reference().clone());
+            prepared.insert("roster-head".to_string(), head_prepared);
+            roster_heads.push(head_ref.clone());
+            roster_heads.sort_by_key(|head| head.coord.stream_key());
+            stream_activations.push(activation);
+            Some((entry.clone(), head, head_ref))
+        } else {
+            None
+        };
 
-                let stream_key = entry.coord().stream_key();
-                if roster_heads
-                    .iter()
-                    .any(|head| head.coord.stream_key() == stream_key)
-                {
+        if let Some((entry, head, reference)) = &prepared_roster {
+            let exact_head =
+                super::circle::ExactCircleRosterHead::bind(head.clone(), reference.clone())
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            draft.roster = super::circle::CircleRosterChain::from_entries_with_heads(
+                vec![entry.clone()],
+                vec![exact_head],
+            )
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+            .resolved();
+        }
+
+        let roster_state = super::circle::MergeCircleRosterStateRef {
+            heads: roster_heads.clone(),
+            resolutions: roster_resolutions.keys().cloned().collect(),
+            state_hash: draft.roster.state_hash,
+        };
+        draft.metadata.author_roster = roster_state.clone();
+
+        let prior_metadata = metadata_heads
+            .iter()
+            .find(|head| head.coord.stream_id == metadata_stream)
+            .cloned();
+        let (metadata_slot, metadata_seq, metadata_previous, metadata_activation) =
+            if let Some(reference) = &prior_metadata {
+                let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+                    circle_id: draft.circle_id,
+                    head: reference,
+                });
+                let bytes =
+                    load_exact_slot_bytes(storage, &metadata_context, &reference.object, &prefix)
+                        .await?;
+                let head: super::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle metadata head: {error}"
+                        ))
+                    })?;
+                if !head.verify_for_registration(author) || head.coord() != reference.coord {
                     return Err(CircleOperationError::InvalidState(
-                        "Circle founder roster stream is already active".to_string(),
+                        "Circle metadata predecessor head failed verification".to_string(),
                     ));
                 }
-                let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, 1);
-                let current_slot = storage
-                    .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
+                (
+                    head.successor.next_slot.clone(),
+                    head.seq.checked_add(1).ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle metadata sequence overflow".to_string(),
+                        )
+                    })?,
+                    Some(head.tip_hash),
+                    None,
+                )
+            } else {
+                let stream_key = super::circle::CircleAuthorStreamKey {
+                    author_pubkey: draft.metadata.author_pubkey.clone(),
+                    device_id: draft.metadata.device_id.clone(),
+                    stream_id: metadata_stream,
+                    author_owner_grant: owner_grant.clone(),
+                };
+                let prefix = circle_metadata_head_prefix(draft.circle_id, &stream_key, 1);
+                let slot = storage
+                    .allocate_protocol_slot(&metadata_context, &prefix, ".json")
                     .await
                     .map_err(super::store_objects::StoreObjectError::from)?;
                 let activation = StreamActivation::grant_authorized(
                     store_root_hash,
                     author_registration.clone(),
                     owner_grant.clone(),
-                    GrantStreamAnchor::CircleRoster {
+                    GrantStreamAnchor::CircleMetadata {
                         circle_id: draft.circle_id,
-                        first_slot: current_slot.clone(),
+                        first_slot: slot.clone(),
                     },
                 );
-                let next_slot = storage
-                    .allocate_protocol_slot(
-                        &roster_context,
-                        &circle_roster_head_prefix(draft.circle_id, &stream_key, 2),
-                        ".json",
-                    )
-                    .await
-                    .map_err(super::store_objects::StoreObjectError::from)?;
-                let head = super::circle::CircleRosterHead::signed(
-                    entry,
-                    entry_prepared.reference().clone(),
-                    SuccessorLink {
-                        activation: activation.activation_id(),
-                        predecessor: None,
-                        next_slot,
-                    },
-                    device_signer,
-                );
-                let head_prepared = prepare_circle_object_at(
-                    storage,
-                    &roster_context,
-                    current_slot,
-                    &current_prefix,
-                    serde_json::to_vec(&head)
-                        .expect("Circle roster head serialization cannot fail"),
-                )?;
-                let head_ref =
-                    CircleRosterHeadRef::from_stored_head(&head, head_prepared.reference().clone());
-                prepared.insert("roster-head".to_string(), head_prepared);
-                roster_heads.push(head_ref.clone());
-                roster_heads.sort_by_key(|head| head.coord.stream_key());
-                stream_activations.push(activation);
-                Some((entry.clone(), head, head_ref))
-            } else {
-                None
+                (slot, 1, None, Some(activation))
             };
-
-            if let Some((entry, head, reference)) = &prepared_roster {
-                let exact_head =
-                    super::circle::ExactCircleRosterHead::bind(head.clone(), reference.clone())
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-                draft.roster = super::circle::CircleMaterializedRoster::MergeConcurrent(
-                    super::circle::CircleRosterChain::from_entries_with_heads(
-                        vec![entry.clone()],
-                        vec![exact_head],
-                    )
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-                    .resolved(),
-                );
-            }
-
-            let roster_state = match &draft.roster {
-                super::circle::CircleMaterializedRoster::MergeConcurrent(roster) => {
-                    super::circle::MergeCircleRosterStateRef {
-                        heads: roster_heads.clone(),
-                        resolutions: roster_resolutions.keys().cloned().collect(),
-                        state_hash: roster.state_hash,
-                    }
-                }
-                super::circle::CircleMaterializedRoster::Serial(_) => {
-                    return Err(CircleOperationError::InvalidState(
-                        "Merge Circle draft carries a Serial roster".to_string(),
-                    ));
-                }
-            };
-            draft.metadata.author_roster =
-                super::circle::CircleRosterStateRef::MergeConcurrent(roster_state.clone());
-
-            let prior_metadata = metadata_heads
-                .iter()
-                .find(|head| head.coord.stream_id == metadata_stream)
-                .cloned();
-            let (metadata_slot, metadata_seq, metadata_previous, metadata_activation) =
-                if let Some(reference) = &prior_metadata {
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                        circle_id: draft.circle_id,
-                        head: reference,
-                    });
-                    let bytes = load_exact_slot_bytes(
-                        storage,
-                        &metadata_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: super::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle metadata head: {error}"
-                            ))
-                        })?;
-                    if !head.verify_for_registration(author) || head.coord() != reference.coord {
-                        return Err(CircleOperationError::InvalidState(
-                            "Circle metadata predecessor head failed verification".to_string(),
-                        ));
-                    }
-                    (
-                        head.successor.next_slot.clone(),
-                        head.seq.checked_add(1).ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle metadata sequence overflow".to_string(),
-                            )
-                        })?,
-                        Some(head.tip_hash),
-                        None,
-                    )
-                } else {
-                    let stream_key = super::circle::CircleAuthorStreamKey {
-                        author_pubkey: draft.metadata.author_pubkey.clone(),
-                        device_id: draft.metadata.device_id.clone(),
-                        stream_id: metadata_stream,
-                        author_owner_grant: owner_grant.clone(),
-                    };
-                    let prefix = circle_metadata_head_prefix(draft.circle_id, &stream_key, 1);
-                    let slot = storage
-                        .allocate_protocol_slot(&metadata_context, &prefix, ".json")
-                        .await
-                        .map_err(super::store_objects::StoreObjectError::from)?;
-                    let activation = StreamActivation::grant_authorized(
-                        store_root_hash,
-                        author_registration.clone(),
-                        owner_grant.clone(),
-                        GrantStreamAnchor::CircleMetadata {
-                            circle_id: draft.circle_id,
-                            first_slot: slot.clone(),
-                        },
-                    );
-                    (slot, 1, None, Some(activation))
-                };
-            draft.metadata.stream_id = metadata_stream;
-            draft.metadata.seq = metadata_seq;
-            draft.metadata.previous_hash = metadata_previous;
-            draft.metadata.dependencies = metadata_heads
-                .iter()
-                .map(|head| head.coord.clone())
-                .collect();
-            draft.metadata.signature =
-                keys::sign_hex(identity_signer, &draft.metadata.canonical_bytes()).1;
-            let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
-                circle_id: draft.circle_id,
-                coord: &draft.metadata.coord(),
-            });
-            let metadata_prepared = prepare_circle_object(
-                storage,
-                &metadata_context,
-                &metadata_prefix,
-                ".json",
-                serde_json::to_vec(&draft.metadata)
-                    .expect("Circle metadata serialization cannot fail"),
-            )
-            .await?;
-            prepared.insert("metadata".to_string(), metadata_prepared.clone());
-            metadata_entries.insert(
-                draft.metadata.coord(),
-                CircleMetadataObjectRef {
-                    key_fingerprint: draft.metadata.key_fingerprint,
-                    object: metadata_prepared.reference().clone(),
-                },
-            );
-            let metadata_activation_id = match &metadata_activation {
-                Some(activation) => activation.activation_id(),
-                None => {
-                    let reference = prior_metadata.as_ref().expect("prior metadata head");
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                        circle_id: draft.circle_id,
-                        head: reference,
-                    });
-                    let bytes = load_exact_slot_bytes(
-                        storage,
-                        &metadata_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: super::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle metadata head: {error}"
-                            ))
-                        })?;
-                    head.successor.activation
-                }
-            };
-            let metadata_stream_key = draft.metadata.coord().stream_key();
-            let metadata_next_slot = storage
-                .allocate_protocol_slot(
-                    &metadata_context,
-                    &circle_metadata_head_prefix(
-                        draft.circle_id,
-                        &metadata_stream_key,
-                        metadata_seq.checked_add(1).ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle metadata sequence overflow".to_string(),
-                            )
-                        })?,
-                    ),
-                    ".json",
-                )
-                .await
-                .map_err(super::store_objects::StoreObjectError::from)?;
-            let metadata_head = super::circle::CircleMetadataHead::signed(
-                &draft.metadata,
-                metadata_prepared.reference().clone(),
-                SuccessorLink {
-                    activation: metadata_activation_id,
-                    predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
-                    next_slot: metadata_next_slot,
-                },
-                device_signer,
-            );
-            let metadata_head_prefix =
-                circle_metadata_head_prefix(draft.circle_id, &metadata_stream_key, metadata_seq);
-            let metadata_head_prepared = prepare_circle_object_at(
-                storage,
-                &metadata_context,
-                metadata_slot,
-                &metadata_head_prefix,
-                serde_json::to_vec(&metadata_head)
-                    .expect("Circle metadata head serialization cannot fail"),
-            )?;
-            let metadata_head_ref = CircleMetadataHeadRef::from_stored_head(
-                &metadata_head,
-                metadata_head_prepared.reference().clone(),
-            );
-            prepared.insert("metadata-head".to_string(), metadata_head_prepared);
-            metadata_heads.retain(|head| head.coord.stream_id != metadata_stream);
-            metadata_heads.push(metadata_head_ref);
-            metadata_heads.sort_by_key(|head| head.coord.stream_key());
-            if let Some(activation) = metadata_activation {
-                stream_activations.push(activation);
-            }
-
-            let selected = match &draft.control.value.value {
-                super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } => {
-                    if selects_authored_metadata || active_epoch.metadata.heads.is_empty() {
-                        draft.metadata.coord()
-                    } else {
-                        active_epoch.metadata.selected.clone()
-                    }
-                }
-                super::circle::CircleControlValue::Serial { .. } => {
-                    return Err(CircleOperationError::InvalidState(
-                        "Merge Circle draft carries Serial control".to_string(),
-                    ));
-                }
-            };
-            let metadata_state = super::circle::MergeCircleMetadataStateRef {
-                heads: metadata_heads.clone(),
-                selected: selected.clone(),
-                state_hash: if selected == draft.metadata.coord() {
-                    draft.metadata.metadata_hash()
-                } else {
-                    match &draft.control.value.value {
-                        super::circle::CircleControlValue::MergeConcurrent {
-                            active_epoch, ..
-                        } => active_epoch.metadata.state_hash,
-                        super::circle::CircleControlValue::Serial { .. } => unreachable!(),
-                    }
-                },
-            };
-
-            for access in &mut draft.access {
-                if let CircleAccessDisposition::Active { roster, .. } =
-                    &mut access.leaf.value.disposition
-                {
-                    *roster =
-                        super::circle::CircleRosterStateRef::MergeConcurrent(roster_state.clone());
-                }
-                access.leaf.value.signature =
-                    keys::sign_hex(identity_signer, &access.leaf.value.canonical_bytes()).1;
-                let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] =
-                    hex::decode(&access.leaf.value.recipient_pubkey)
-                        .map_err(|_| {
-                            CircleOperationError::InvalidState(
-                                "Circle access recipient key is malformed".to_string(),
-                            )
-                        })?
-                        .try_into()
-                        .map_err(|_| {
-                            CircleOperationError::InvalidState(
-                                "Circle access recipient key has the wrong length".to_string(),
-                            )
-                        })?;
-                let recipient_x25519 = keys::ed25519_to_x25519_public_key(&recipient_ed25519)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "convert Circle access recipient key: {error}"
-                        ))
-                    })?;
-                let plaintext = serde_json::to_vec(&access.leaf.value)
-                    .expect("Circle access serialization cannot fail");
-                access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
-                access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
-            }
-            let leaf_hashes = draft
-                .access
-                .iter()
-                .map(|access| access.leaf.leaf_hash)
-                .collect::<Vec<_>>();
-            let (access_root, proofs) = super::circle::merkle_root_and_proofs(&leaf_hashes);
-
-            let mut control_frontier = match &draft.control.value.value {
-                super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } => {
-                    active_epoch.covered_control_heads.clone()
-                }
-                super::circle::CircleControlValue::Serial { .. } => unreachable!(),
-            };
-            if let Some(previous) = previous_control {
-                let (Some(head_hash), Some(head_object)) =
-                    (previous.head_hash(), previous.head_object())
-                else {
-                    return Err(CircleOperationError::InvalidState(
-                        "Merge Circle successor lacks its exact prior control head".to_string(),
-                    ));
-                };
-                control_frontier.retain(|head| {
-                    head.coord
-                        .stream_key()
-                        .zip(previous.control().stream_key())
-                        .is_none_or(|(left, right)| left != right)
-                });
-                control_frontier.push(super::circle::MergeCircleControlHeadRef {
-                    coord: previous.control().clone(),
-                    head_hash,
-                    object: head_object.clone(),
-                });
-            }
-            control_frontier.sort_by_key(|head| head.coord.stream_key());
-            let prior_control = control_frontier
-                .iter()
-                .find(|head| {
-                    head.coord
-                        .stream_key()
-                        .is_some_and(|key| key.stream_id == control_stream)
-                })
-                .cloned();
-            let (control_slot, control_seq, control_previous, control_activation) =
-                if let Some(reference) = &prior_control {
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                        circle_id: draft.circle_id,
-                        control: &reference.coord,
-                        head_hash: reference.head_hash,
-                    });
-                    let bytes = load_exact_slot_bytes(
-                        storage,
-                        &control_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: super::circle::CircleControlHead = serde_json::from_slice(&bytes)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle control head: {error}"
-                            ))
-                        })?;
-                    (
-                        head.successor.next_slot.clone(),
-                        match &head.control {
-                            super::circle::CircleControlCoord::MergeConcurrent { seq, .. } => {
-                                seq.checked_add(1).ok_or_else(|| {
-                                    CircleOperationError::InvalidState(
-                                        "Circle control sequence overflow".to_string(),
-                                    )
-                                })?
-                            }
-                            super::circle::CircleControlCoord::Serial { .. } => {
-                                return Err(CircleOperationError::InvalidState(
-                                    "Merge Circle frontier contains Serial control".to_string(),
-                                ));
-                            }
-                        },
-                        Some(head.control.control_hash()),
-                        None,
-                    )
-                } else {
-                    let stream_key = super::circle::CircleAuthorStreamKey {
-                        author_pubkey: draft.control.value.author_pubkey.clone(),
-                        device_id: author_registration.device_id.to_string(),
-                        stream_id: control_stream,
-                        author_owner_grant: owner_grant.clone(),
-                    };
-                    let prefix = circle_control_head_prefix(draft.circle_id, &stream_key, 1);
-                    let slot = storage
-                        .allocate_protocol_slot(&control_context, &prefix, ".json")
-                        .await
-                        .map_err(super::store_objects::StoreObjectError::from)?;
-                    let activation = StreamActivation::grant_authorized(
-                        store_root_hash,
-                        author_registration.clone(),
-                        owner_grant.clone(),
-                        GrantStreamAnchor::CircleControl {
-                            circle_id: draft.circle_id,
-                            first_slot: slot.clone(),
-                        },
-                    );
-                    (slot, 1, None, Some(activation))
-                };
-
-            let super::circle::CircleControlValue::MergeConcurrent {
-                order,
-                active_epoch,
-                author_authority,
-                ..
-            } = &mut draft.control.value.value
-            else {
-                unreachable!()
-            };
-            order.device_id = author_registration.device_id.to_string();
-            order.stream_id = control_stream;
-            order.author_owner_grant = owner_grant.clone();
-            order.seq = control_seq;
-            order.previous_control_hash = control_previous;
-            order.dependencies = control_frontier
-                .iter()
-                .filter(|head| {
-                    head.coord
-                        .stream_key()
-                        .is_some_and(|key| key.stream_id != control_stream)
-                })
-                .map(|head| head.coord.clone())
-                .collect();
-            active_epoch.roster = roster_state.clone();
-            active_epoch.metadata = metadata_state;
-            active_epoch.common.access_root = access_root;
-            active_epoch.covered_control_heads = control_frontier;
-            if let (
-                Some((entry, _, _)),
-                super::circle::MergeCircleOwnerAuthorityRef::Roster {
-                    roster, created_at, ..
-                },
-            ) = (&prepared_roster, author_authority)
-            {
-                *roster = roster_state;
-                *created_at = entry.coord();
-            }
-            draft.control.value.signature =
-                keys::sign_hex(identity_signer, &draft.control.value.canonical_bytes()).1;
-            draft.control.coord = draft.control.value.coord();
-            draft.control.bytes = serde_json::to_vec(&draft.control.value)
-                .expect("Circle control serialization cannot fail");
-
-            for (access, proof) in draft.access.iter_mut().zip(proofs) {
-                access.envelope.control_hash = draft.control.coord.control_hash();
-                access.envelope.leaf_hash = access.leaf.leaf_hash;
-                access.envelope.value_hash = ObjectHash::digest(
-                    &serde_json::to_vec(&access.leaf.value)
-                        .expect("Circle access leaf serialization cannot fail"),
-                );
-                access.envelope.proof = proof;
-                access.envelope.signature =
-                    keys::sign_hex(identity_signer, &access.envelope.canonical_bytes()).1;
-            }
-
-            let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
-                circle_id: draft.circle_id,
-                control: &draft.control.coord,
-            });
-            let control_prepared = prepare_circle_object(
-                storage,
-                &control_context,
-                &control_prefix,
-                ".json",
-                draft.control.bytes.clone(),
-            )
-            .await?;
-            prepared.insert("control".to_string(), control_prepared.clone());
-            let control_activation_id = match &control_activation {
-                Some(activation) => activation.activation_id(),
-                None => {
-                    let reference = prior_control.as_ref().expect("prior control head");
-                    let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                        circle_id: draft.circle_id,
-                        control: &reference.coord,
-                        head_hash: reference.head_hash,
-                    });
-                    let bytes = load_exact_slot_bytes(
-                        storage,
-                        &control_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await?;
-                    let head: super::circle::CircleControlHead = serde_json::from_slice(&bytes)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle control head: {error}"
-                            ))
-                        })?;
-                    head.successor.activation
-                }
-            };
-            let control_stream_key = draft.control.coord.stream_key().ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Merge Circle control has a Serial coordinate".to_string(),
-                )
-            })?;
-            let control_next_slot = storage
-                .allocate_protocol_slot(
-                    &control_context,
-                    &circle_control_head_prefix(
-                        draft.circle_id,
-                        &control_stream_key,
-                        control_seq.checked_add(1).ok_or_else(|| {
-                            CircleOperationError::InvalidState(
-                                "Circle control sequence overflow".to_string(),
-                            )
-                        })?,
-                    ),
-                    ".json",
-                )
-                .await
-                .map_err(super::store_objects::StoreObjectError::from)?;
-            let control_head = super::circle::CircleControlHead::signed(
-                &draft.control.value,
-                control_prepared.reference().clone(),
-                SuccessorLink {
-                    activation: control_activation_id,
-                    predecessor: prior_control.as_ref().map(|head| head.object.clone()),
-                    next_slot: control_next_slot,
-                },
-                device_signer,
-            );
-            let control_head_prefix =
-                circle_control_head_prefix(draft.circle_id, &control_stream_key, control_seq);
-            let control_head_prepared = prepare_circle_object_at(
-                storage,
-                &control_context,
-                control_slot,
-                &control_head_prefix,
-                serde_json::to_vec(&control_head)
-                    .expect("Circle control head serialization cannot fail"),
-            )?;
-            prepared.insert("control-head".to_string(), control_head_prepared.clone());
-            if let Some(activation) = control_activation {
-                stream_activations.push(activation);
-            }
-
-            CircleTransitionPolicyObjects::MergeConcurrent {
-                roster_entry: prepared_roster.as_ref().map(|(entry, _, _)| entry.clone()),
-                roster_head: prepared_roster.map(|(_, head, _)| head),
-                metadata_head,
-                control_head,
-            }
-        }
-    };
-
-    if matches!(draft.policy, CircleTransitionDraftPolicy::Serial) {
+        draft.metadata.stream_id = metadata_stream;
+        draft.metadata.seq = metadata_seq;
+        draft.metadata.previous_hash = metadata_previous;
+        draft.metadata.dependencies = metadata_heads
+            .iter()
+            .map(|head| head.coord.clone())
+            .collect();
+        draft.metadata.signature =
+            keys::sign_hex(identity_signer, &draft.metadata.canonical_bytes()).1;
         let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
             circle_id: draft.circle_id,
             coord: &draft.metadata.coord(),
         });
-        let metadata = prepare_circle_object(
+        let metadata_prepared = prepare_circle_object(
             storage,
             &metadata_context,
             &metadata_prefix,
@@ -1098,19 +641,279 @@ async fn prepare_circle_activation_objects(
             serde_json::to_vec(&draft.metadata).expect("Circle metadata serialization cannot fail"),
         )
         .await?;
-        prepared.insert("metadata".to_string(), metadata.clone());
+        prepared.insert("metadata".to_string(), metadata_prepared.clone());
         metadata_entries.insert(
             draft.metadata.coord(),
             CircleMetadataObjectRef {
                 key_fingerprint: draft.metadata.key_fingerprint,
-                object: metadata.reference().clone(),
+                object: metadata_prepared.reference().clone(),
             },
         );
+        let metadata_activation_id = match &metadata_activation {
+            Some(activation) => activation.activation_id(),
+            None => {
+                let reference = prior_metadata.as_ref().expect("prior metadata head");
+                let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+                    circle_id: draft.circle_id,
+                    head: reference,
+                });
+                let bytes =
+                    load_exact_slot_bytes(storage, &metadata_context, &reference.object, &prefix)
+                        .await?;
+                let head: super::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle metadata head: {error}"
+                        ))
+                    })?;
+                head.successor.activation
+            }
+        };
+        let metadata_stream_key = draft.metadata.coord().stream_key();
+        let metadata_next_slot = storage
+            .allocate_protocol_slot(
+                &metadata_context,
+                &circle_metadata_head_prefix(
+                    draft.circle_id,
+                    &metadata_stream_key,
+                    metadata_seq.checked_add(1).ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle metadata sequence overflow".to_string(),
+                        )
+                    })?,
+                ),
+                ".json",
+            )
+            .await
+            .map_err(super::store_objects::StoreObjectError::from)?;
+        let metadata_head = super::circle::CircleMetadataHead::signed(
+            &draft.metadata,
+            metadata_prepared.reference().clone(),
+            SuccessorLink {
+                activation: metadata_activation_id,
+                predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
+                next_slot: metadata_next_slot,
+            },
+            device_signer,
+        );
+        let metadata_head_prefix =
+            circle_metadata_head_prefix(draft.circle_id, &metadata_stream_key, metadata_seq);
+        let metadata_head_prepared = prepare_circle_object_at(
+            storage,
+            &metadata_context,
+            metadata_slot,
+            &metadata_head_prefix,
+            serde_json::to_vec(&metadata_head)
+                .expect("Circle metadata head serialization cannot fail"),
+        )?;
+        let metadata_head_ref = CircleMetadataHeadRef::from_stored_head(
+            &metadata_head,
+            metadata_head_prepared.reference().clone(),
+        );
+        prepared.insert("metadata-head".to_string(), metadata_head_prepared);
+        metadata_heads.retain(|head| head.coord.stream_id != metadata_stream);
+        metadata_heads.push(metadata_head_ref);
+        metadata_heads.sort_by_key(|head| head.coord.stream_key());
+        if let Some(activation) = metadata_activation {
+            stream_activations.push(activation);
+        }
+
+        let selected = if selects_authored_metadata
+            || draft
+                .control
+                .value
+                .value
+                .active_epoch
+                .metadata
+                .heads
+                .is_empty()
+        {
+            draft.metadata.coord()
+        } else {
+            draft
+                .control
+                .value
+                .value
+                .active_epoch
+                .metadata
+                .selected
+                .clone()
+        };
+        let metadata_state = super::circle::MergeCircleMetadataStateRef {
+            heads: metadata_heads.clone(),
+            selected: selected.clone(),
+            state_hash: if selected == draft.metadata.coord() {
+                draft.metadata.metadata_hash()
+            } else {
+                draft.control.value.value.active_epoch.metadata.state_hash
+            },
+        };
+
+        for access in &mut draft.access {
+            if let CircleAccessDisposition::Active { roster, .. } =
+                &mut access.leaf.value.disposition
+            {
+                *roster = roster_state.clone();
+            }
+            access.leaf.value.signature =
+                keys::sign_hex(identity_signer, &access.leaf.value.canonical_bytes()).1;
+            let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] =
+                hex::decode(&access.leaf.value.recipient_pubkey)
+                    .map_err(|_| {
+                        CircleOperationError::InvalidState(
+                            "Circle access recipient key is malformed".to_string(),
+                        )
+                    })?
+                    .try_into()
+                    .map_err(|_| {
+                        CircleOperationError::InvalidState(
+                            "Circle access recipient key has the wrong length".to_string(),
+                        )
+                    })?;
+            let recipient_x25519 =
+                keys::ed25519_to_x25519_public_key(&recipient_ed25519).map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "convert Circle access recipient key: {error}"
+                    ))
+                })?;
+            let plaintext = serde_json::to_vec(&access.leaf.value)
+                .expect("Circle access serialization cannot fail");
+            access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
+            access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
+        }
+        let leaf_hashes = draft
+            .access
+            .iter()
+            .map(|access| access.leaf.leaf_hash)
+            .collect::<Vec<_>>();
+        let (access_root, proofs) = super::circle::merkle_root_and_proofs(&leaf_hashes);
+
+        let mut control_frontier = draft
+            .control
+            .value
+            .value
+            .active_epoch
+            .covered_control_heads
+            .clone();
+        if let Some(previous) = previous_control {
+            let head_hash = previous.head_hash();
+            let head_object = previous.head_object();
+            control_frontier
+                .retain(|head| head.coord.stream_key() != previous.control().stream_key());
+            control_frontier.push(super::circle::MergeCircleControlHeadRef {
+                coord: previous.control().clone(),
+                head_hash,
+                object: head_object.clone(),
+            });
+        }
+        control_frontier.sort_by_key(|head| head.coord.stream_key());
+        let prior_control = control_frontier
+            .iter()
+            .find(|head| head.coord.stream_key().stream_id == control_stream)
+            .cloned();
+        let (control_slot, control_seq, control_previous, control_activation) =
+            if let Some(reference) = &prior_control {
+                let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+                    circle_id: draft.circle_id,
+                    control: &reference.coord,
+                    head_hash: reference.head_hash,
+                });
+                let bytes =
+                    load_exact_slot_bytes(storage, &control_context, &reference.object, &prefix)
+                        .await?;
+                let head: super::circle::CircleControlHead = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle control head: {error}"
+                        ))
+                    })?;
+                (
+                    head.successor.next_slot.clone(),
+                    head.control.seq.checked_add(1).ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle control sequence overflow".to_string(),
+                        )
+                    })?,
+                    Some(head.control.control_hash()),
+                    None,
+                )
+            } else {
+                let stream_key = super::circle::CircleAuthorStreamKey {
+                    author_pubkey: draft.control.value.author_pubkey.clone(),
+                    device_id: author_registration.device_id.to_string(),
+                    stream_id: control_stream,
+                    author_owner_grant: owner_grant.clone(),
+                };
+                let prefix = circle_control_head_prefix(draft.circle_id, &stream_key, 1);
+                let slot = storage
+                    .allocate_protocol_slot(&control_context, &prefix, ".json")
+                    .await
+                    .map_err(super::store_objects::StoreObjectError::from)?;
+                let activation = StreamActivation::grant_authorized(
+                    store_root_hash,
+                    author_registration.clone(),
+                    owner_grant.clone(),
+                    GrantStreamAnchor::CircleControl {
+                        circle_id: draft.circle_id,
+                        first_slot: slot.clone(),
+                    },
+                );
+                (slot, 1, None, Some(activation))
+            };
+
+        let super::circle::CircleControlValue {
+            order,
+            active_epoch,
+            author_authority,
+            membership_authority: _,
+        } = &mut draft.control.value.value;
+        order.device_id = author_registration.device_id.to_string();
+        order.stream_id = control_stream;
+        order.author_owner_grant = owner_grant.clone();
+        order.seq = control_seq;
+        order.previous_control_hash = control_previous;
+        order.dependencies = control_frontier
+            .iter()
+            .filter(|head| head.coord.stream_key().stream_id != control_stream)
+            .map(|head| head.coord.clone())
+            .collect();
+        active_epoch.roster = roster_state.clone();
+        active_epoch.metadata = metadata_state;
+        active_epoch.common.access_root = access_root;
+        active_epoch.covered_control_heads = control_frontier;
+        if let (
+            Some((entry, _, _)),
+            super::circle::MergeCircleOwnerAuthorityRef::Roster {
+                roster, created_at, ..
+            },
+        ) = (&prepared_roster, author_authority)
+        {
+            *roster = roster_state;
+            *created_at = entry.coord();
+        }
+        draft.control.value.signature =
+            keys::sign_hex(identity_signer, &draft.control.value.canonical_bytes()).1;
+        draft.control.coord = draft.control.value.coord();
+        draft.control.bytes = serde_json::to_vec(&draft.control.value)
+            .expect("Circle control serialization cannot fail");
+
+        for (access, proof) in draft.access.iter_mut().zip(proofs) {
+            access.envelope.control_hash = draft.control.coord.control_hash();
+            access.envelope.leaf_hash = access.leaf.leaf_hash;
+            access.envelope.value_hash = ObjectHash::digest(
+                &serde_json::to_vec(&access.leaf.value)
+                    .expect("Circle access leaf serialization cannot fail"),
+            );
+            access.envelope.proof = proof;
+            access.envelope.signature =
+                keys::sign_hex(identity_signer, &access.envelope.canonical_bytes()).1;
+        }
+
         let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
             circle_id: draft.circle_id,
             control: &draft.control.coord,
         });
-        let control = prepare_circle_object(
+        let control_prepared = prepare_circle_object(
             storage,
             &control_context,
             &control_prefix,
@@ -1118,8 +921,77 @@ async fn prepare_circle_activation_objects(
             draft.control.bytes.clone(),
         )
         .await?;
-        prepared.insert("control".to_string(), control);
-    }
+        prepared.insert("control".to_string(), control_prepared.clone());
+        let control_activation_id = match &control_activation {
+            Some(activation) => activation.activation_id(),
+            None => {
+                let reference = prior_control.as_ref().expect("prior control head");
+                let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+                    circle_id: draft.circle_id,
+                    control: &reference.coord,
+                    head_hash: reference.head_hash,
+                });
+                let bytes =
+                    load_exact_slot_bytes(storage, &control_context, &reference.object, &prefix)
+                        .await?;
+                let head: super::circle::CircleControlHead = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse predecessor Circle control head: {error}"
+                        ))
+                    })?;
+                head.successor.activation
+            }
+        };
+        let control_stream_key = draft.control.coord.stream_key();
+        let control_next_slot = storage
+            .allocate_protocol_slot(
+                &control_context,
+                &circle_control_head_prefix(
+                    draft.circle_id,
+                    &control_stream_key,
+                    control_seq.checked_add(1).ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle control sequence overflow".to_string(),
+                        )
+                    })?,
+                ),
+                ".json",
+            )
+            .await
+            .map_err(super::store_objects::StoreObjectError::from)?;
+        let control_head = super::circle::CircleControlHead::signed(
+            &draft.control.value,
+            control_prepared.reference().clone(),
+            SuccessorLink {
+                activation: control_activation_id,
+                predecessor: prior_control.as_ref().map(|head| head.object.clone()),
+                next_slot: control_next_slot,
+            },
+            device_signer,
+        );
+        let control_head_prefix =
+            circle_control_head_prefix(draft.circle_id, &control_stream_key, control_seq);
+        let control_head_prepared = prepare_circle_object_at(
+            storage,
+            &control_context,
+            control_slot,
+            &control_head_prefix,
+            serde_json::to_vec(&control_head)
+                .expect("Circle control head serialization cannot fail"),
+        )?;
+        prepared.insert("control-head".to_string(), control_head_prepared.clone());
+        if let Some(activation) = control_activation {
+            stream_activations.push(activation);
+        }
+
+        CircleTransitionPolicyObjects {
+            roster_entry: prepared_roster.as_ref().map(|(entry, _, _)| entry.clone()),
+            roster_head: prepared_roster.map(|(_, head, _)| head),
+            metadata_head,
+            control_head,
+        }
+    };
 
     let mut access_objects = Vec::with_capacity(draft.access.len());
     for (index, access) in draft.access.iter().enumerate() {
@@ -1259,7 +1131,6 @@ impl From<crate::database::DbError> for CircleOperationError {
 pub(crate) async fn create_circle(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     metadata_stamp: &str,
     name: &str,
@@ -1269,7 +1140,6 @@ pub(crate) async fn create_circle(
     let journal = Box::pin(prepare_circle_operation(
         db,
         storage,
-        coordination,
         device_id,
         metadata_stamp,
         name,
@@ -1279,21 +1149,13 @@ pub(crate) async fn create_circle(
     let circle_id = journal.circle_id();
     let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    Box::pin(publish_circle_operation(
-        db,
-        storage,
-        coordination,
-        &operation_id,
-        signer,
-    ))
-    .await?;
+    Box::pin(publish_circle_operation(db, storage, &operation_id, signer)).await?;
     Ok(circle_id)
 }
 
 pub(crate) async fn rename_circle(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     metadata_stamp: &str,
     circle_id: CircleId,
@@ -1330,7 +1192,6 @@ pub(crate) async fn rename_circle(
     let journal = Box::pin(prepare_circle_operation_request(
         db,
         storage,
-        coordination,
         device_id,
         metadata_stamp,
         CircleOperationRequest::Rename(Box::new(CircleRenameRequest {
@@ -1349,14 +1210,7 @@ pub(crate) async fn rename_circle(
     }
     let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    Box::pin(publish_circle_operation(
-        db,
-        storage,
-        coordination,
-        &operation_id,
-        signer,
-    ))
-    .await
+    Box::pin(publish_circle_operation(db, storage, &operation_id, signer)).await
 }
 
 struct CircleRenameRequest {
@@ -1401,7 +1255,6 @@ impl CircleOperationRequest {
 pub(crate) async fn resume_circle_operations(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
     while let Some(journal) = db.oldest_pending_circle_operation().await? {
@@ -1414,7 +1267,6 @@ pub(crate) async fn resume_circle_operations(
         match Box::pin(publish_circle_operation(
             db,
             storage,
-            coordination,
             &journal.operation_id,
             identity,
         ))
@@ -1430,7 +1282,6 @@ pub(crate) async fn resume_circle_operations(
 async fn prepare_circle_operation(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     metadata_stamp: &str,
     name: &str,
@@ -1439,7 +1290,6 @@ async fn prepare_circle_operation(
     Box::pin(prepare_circle_operation_request(
         db,
         storage,
-        coordination,
         device_id,
         metadata_stamp,
         CircleOperationRequest::Create {
@@ -1453,7 +1303,6 @@ async fn prepare_circle_operation(
 async fn prepare_circle_operation_request(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     device_id: &str,
     metadata_stamp: &str,
     request: CircleOperationRequest,
@@ -1473,400 +1322,228 @@ async fn prepare_circle_operation_request(
     let history = request.history();
     let intent = request.intent();
     let name = request.name();
-    let (creation, commit, commit_ref, policy, prepared_objects) = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let current =
-                super::membership_ops::load_and_persist_owner_anchor(storage, &root, &founder, db)
-                    .await
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let heads = current.head_refs().to_vec();
-            let resolutions = current.resolution_refs().to_vec();
-            let exact = super::membership_ops::load_anchored_chain_at_exact_heads(
-                storage,
-                &root,
-                &founder,
-                &heads,
-                &resolutions,
-            )
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let members = exact.current_members();
-            let state_hash = match exact.status() {
-                super::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
-                super::membership::MembershipStatus::Conflict(_) => {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle creation requires resolved Store membership".to_string(),
-                    ));
-                }
-            };
-            let membership_authority =
-                exact.write_grant_authority(&author_pubkey).ok_or_else(|| {
-                    CircleOperationError::InvalidState(
-                        "circle creator is not a current Store writer".to_string(),
-                    )
-                })?;
-            let base = db.latest_local_store_position().await?;
-            let seq = base
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence() + 1);
-            let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
-                root.store_root_hash,
-                &author_registration,
-                super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-            );
-            let dependencies = super::store_commit::CommitFrontier::from_refs(
-                crate::WritePolicy::MergeConcurrent,
-                db.materialized_frontier().await?,
-            )
-            .and_then(|frontier| frontier.merge_commits().cloned())
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let coord = StoreCommitCoord::MergeConcurrent {
-                stream_id,
-                sequence: seq,
-            };
-            let order = StoreCommitOrder::MergeConcurrent {
-                seq,
-                predecessor: base.clone(),
-                dependencies,
-            };
-            let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-            let membership_state = StoreMembershipStateRef::merge_concurrent(
-                heads,
-                resolutions,
-                resolved_devices.recovery.clone(),
-                state_hash,
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let candidate_family =
-                CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-            let creation = match &request {
-                CircleOperationRequest::Create { .. } => CircleTransitionDraft::founder(
-                    store_root_hash,
-                    candidate_family,
-                    &circle_device_id,
-                    name,
-                    metadata_stamp,
-                    membership_state.clone(),
-                    Some(membership_authority.clone()),
-                    members,
-                    db.id_provider(),
-                    signer,
-                )?,
-                CircleOperationRequest::Rename(request) => {
-                    if request.circle_id != request.current.control.value.circle_id {
-                        return Err(CircleOperationError::InvalidState(
-                            "Circle rename request differs from its current control".to_string(),
-                        ));
-                    }
-                    let keyring = match &request.current.access.disposition {
-                        CircleAccessDisposition::Active { keyring, .. } => keyring,
-                        CircleAccessDisposition::Inactive => {
-                            return Err(CircleOperationError::InvalidState(
-                                "Circle rename requires active local access".to_string(),
-                            ));
-                        }
-                    };
-                    CircleTransitionDraft::rename(
-                        candidate_family,
-                        &circle_device_id,
-                        name,
-                        metadata_stamp,
-                        membership_state.clone(),
-                        Some(membership_authority.clone()),
-                        members,
-                        &request.current.control,
-                        &request.current.roster,
-                        &request.current.metadata,
-                        keyring,
-                        db.id_provider(),
-                        signer,
-                    )?
-                }
-            };
-            let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
-                Box::pin(prepare_circle_activation_objects(
-                    storage,
-                    &root,
-                    creation,
-                    &history,
-                    candidate_family,
-                    &author_registration,
-                    &author,
-                    signer,
-                    &device_signer,
-                ))
-                .await?;
-            let circle_reference = creation.control_ref(objects, control_head_object);
-            let commit = signed_circle_commit(
-                store_root_hash,
-                write_id.clone(),
-                coord.clone(),
-                author_registration.clone(),
-                &author,
-                order,
-                membership_state,
-                device_state,
-                StoreOperationMembershipAuthority::MergeConcurrent {
-                    predecessor: membership_authority,
-                },
-                circle_reference,
-                stream_activations,
-                &device_signer,
-            )?;
-            let commit_context = ProtocolObjectContext::signed_plaintext(
-                store_root_hash,
-                ProtocolObjectDomain::StoreCommit,
-            );
-            let commit_prefix = commit_semantic_prefix(
-                commit.candidate_family(),
-                &stream_id.to_string(),
-                seq,
-                commit.commit_hash(),
-            );
-            let commit_prepared = prepare_circle_object(
-                storage,
-                &commit_context,
-                &commit_prefix,
-                ".json",
-                commit.to_bytes(),
-            )
-            .await?;
-            let commit_ref = StoreBatchCommitRef::from_commit(
-                &commit,
-                coord,
-                commit_prepared.reference().clone(),
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let history_summary =
-                super::store_engine::merge::pull::prepare_merge_history_successor(
-                    db,
-                    &root,
-                    &commit,
-                    &commit_ref,
-                    &exact,
-                    &author,
-                    None,
-                    resolved_devices,
-                    super::store_engine::merge::pull::MergeHistorySuccessorEvidence::none(),
-                )
+    let (creation, commit, commit_ref, policy, prepared_objects) = {
+        let current =
+            super::membership_ops::load_and_persist_owner_anchor(storage, &root, &founder, db)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            prepared_objects.insert("store-commit".to_string(), commit_prepared);
-            let head_context = ProtocolObjectContext::signed_plaintext(
-                store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            );
-            let device_id = author_registration.device_id.to_string();
-            let head_prefix = head_slot_prefix(&device_id, seq);
-            let next_head_slot = storage
-                .allocate_protocol_slot(
-                    &head_context,
-                    &head_slot_prefix(&device_id, seq + 1),
-                    ".json",
-                )
-                .await
-                .map_err(super::store_objects::StoreObjectError::from)?;
-            let head = StoreDeviceHead::signed(
-                store_root_hash,
-                author_registration.clone(),
-                commit_ref.clone(),
-                history_summary.summary.digest(),
-                SuccessorLink {
-                    activation: author
-                        .store_announcement_activation(&author_registration)
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-                        .activation_id(),
-                    predecessor: history_summary
-                        .predecessor_head
-                        .map(|reference| reference.object),
-                    next_slot: next_head_slot,
-                },
-                &device_signer,
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let head_prepared = storage
-                .prepare_protocol_object(
-                    &head_context,
-                    history_summary.head_slot,
-                    &head_prefix,
-                    head.to_bytes(),
-                )
-                .map_err(super::store_objects::StoreObjectError::from)?;
-            prepared_objects.insert("store-head".to_string(), head_prepared);
-            (
-                creation,
-                commit,
-                commit_ref,
-                CircleOperationPolicy::MergeConcurrent {
-                    head,
-                    history_summary: history_summary.summary,
-                },
-                prepared_objects,
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let coordination = coordination.ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Serial circle creation requires coordination storage".to_string(),
-                )
-            })?;
-            let snapshot =
-                super::store_engine::serial::publication::current_serial_authorization_snapshot(
-                    db,
-                    storage,
-                    coordination,
-                )
-                .await?;
-            if !snapshot.authorization.membership.can_write(&author_pubkey) {
+        let heads = current.head_refs().to_vec();
+        let resolutions = current.resolution_refs().to_vec();
+        let exact = super::membership_ops::load_anchored_chain_at_exact_heads(
+            storage,
+            &root,
+            &founder,
+            &heads,
+            &resolutions,
+        )
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let members = exact.current_members();
+        let state_hash = match exact.status() {
+            super::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
+            super::membership::MembershipStatus::Conflict(_) => {
                 return Err(CircleOperationError::InvalidState(
-                    "circle creator is not a current Store writer".to_string(),
+                    "circle creation requires resolved Store membership".to_string(),
                 ));
             }
-            let base = snapshot.base;
-            let members = snapshot.authorization.membership.current_members();
-            let seq = base
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence() + 1);
-            let coord = StoreCommitCoord::Serial { sequence: seq };
-            let predecessor = match base.clone() {
-                Some(reference) => StoreSerialPredecessor::Commit(reference),
-                None => StoreSerialPredecessor::Genesis {
-                    root: root.clone(),
-                    founder_registration: author_registration.clone(),
-                },
-            };
-            let order = StoreCommitOrder::Serial {
-                seq,
-                predecessor: predecessor.clone(),
-            };
-            let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
-            let membership_state = StoreMembershipStateRef::serial(
-                predecessor,
-                resolved_devices.recovery,
-                &snapshot.authorization,
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let candidate_family =
-                CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-            let creation = match &request {
-                CircleOperationRequest::Create { .. } => CircleTransitionDraft::founder(
-                    store_root_hash,
+        };
+        let membership_authority =
+            exact.write_grant_authority(&author_pubkey).ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "circle creator is not a current Store writer".to_string(),
+                )
+            })?;
+        let base = db.latest_local_store_position().await?;
+        let seq = base
+            .as_ref()
+            .map_or(1, |reference| reference.coord.sequence() + 1);
+        let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &author_registration,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
+        let dependencies =
+            super::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let coord = StoreCommitCoord {
+            stream_id,
+            sequence: seq,
+        };
+        let order = StoreCommitOrder {
+            seq,
+            predecessor: base.clone(),
+            dependencies: dependencies.0,
+        };
+        let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
+        let membership_state = StoreMembershipStateRef::from_parts(
+            heads,
+            resolutions,
+            resolved_devices.recovery.clone(),
+            state_hash,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let candidate_family =
+            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+        let creation = match &request {
+            CircleOperationRequest::Create { .. } => CircleTransitionDraft::founder(
+                store_root_hash,
+                candidate_family,
+                &circle_device_id,
+                name,
+                metadata_stamp,
+                membership_state.clone(),
+                membership_authority.clone(),
+                members,
+                db.id_provider(),
+                signer,
+            )?,
+            CircleOperationRequest::Rename(request) => {
+                if request.circle_id != request.current.control.value.circle_id {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle rename request differs from its current control".to_string(),
+                    ));
+                }
+                let keyring = match &request.current.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle rename requires active local access".to_string(),
+                        ));
+                    }
+                };
+                CircleTransitionDraft::rename(
                     candidate_family,
                     &circle_device_id,
                     name,
                     metadata_stamp,
                     membership_state.clone(),
-                    None,
+                    membership_authority.clone(),
                     members,
+                    &request.current.control,
+                    &request.current.roster,
+                    &request.current.metadata,
+                    keyring,
                     db.id_provider(),
                     signer,
-                )?,
-                CircleOperationRequest::Rename(request) => {
-                    if request.circle_id != request.current.control.value.circle_id {
-                        return Err(CircleOperationError::InvalidState(
-                            "Circle rename request differs from its current control".to_string(),
-                        ));
-                    }
-                    let keyring = match &request.current.access.disposition {
-                        CircleAccessDisposition::Active { keyring, .. } => keyring,
-                        CircleAccessDisposition::Inactive => {
-                            return Err(CircleOperationError::InvalidState(
-                                "Circle rename requires active local access".to_string(),
-                            ));
-                        }
-                    };
-                    CircleTransitionDraft::rename(
-                        candidate_family,
-                        &circle_device_id,
-                        name,
-                        metadata_stamp,
-                        membership_state.clone(),
-                        None,
-                        members,
-                        &request.current.control,
-                        &request.current.roster,
-                        &request.current.metadata,
-                        keyring,
-                        db.id_provider(),
-                        signer,
-                    )?
-                }
-            };
-            let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
-                Box::pin(prepare_circle_activation_objects(
-                    storage,
-                    &root,
-                    creation,
-                    &history,
-                    candidate_family,
-                    &author_registration,
-                    &author,
-                    signer,
-                    &device_signer,
-                ))
-                .await?;
-            let circle_reference = creation.control_ref(objects, control_head_object);
-            let commit = signed_circle_commit(
-                store_root_hash,
-                write_id,
-                coord.clone(),
-                author_registration.clone(),
-                &author,
-                order,
-                membership_state,
-                device_state,
-                StoreOperationMembershipAuthority::Serial,
-                circle_reference,
-                stream_activations,
-                &device_signer,
-            )?;
-            let commit_context = ProtocolObjectContext::signed_plaintext(
-                store_root_hash,
-                ProtocolObjectDomain::StoreCommit,
-            );
-            let commit_prefix = commit_semantic_prefix(
-                commit.candidate_family(),
-                SERIAL_STREAM_ID,
-                seq,
-                commit.commit_hash(),
-            );
-            let commit_prepared = prepare_circle_object(
+                )?
+            }
+        };
+        let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
+            Box::pin(prepare_circle_activation_objects(
                 storage,
-                &commit_context,
-                &commit_prefix,
-                ".json",
-                commit.to_bytes(),
-            )
-            .await?;
-            let commit_ref = StoreBatchCommitRef::from_commit(
-                &commit,
-                coord,
-                commit_prepared.reference().clone(),
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            prepared_objects.insert("store-commit".to_string(), commit_prepared);
-            let head = StoreSerialHead::signed(
-                store_root_hash,
-                StoreSerialHeadState::Commit {
-                    author_registration: author_registration.clone(),
-                    commit: commit_ref.clone(),
-                },
-                &device_signer,
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            (
+                &root,
                 creation,
-                commit,
-                commit_ref,
-                CircleOperationPolicy::Serial {
-                    head,
-                    base,
-                    base_head: snapshot.base_head,
-                    authorization: snapshot.authorization,
-                },
-                prepared_objects,
+                &history,
+                candidate_family,
+                &author_registration,
+                &author,
+                signer,
+                &device_signer,
+            ))
+            .await?;
+        let circle_reference = creation.control_ref(objects, control_head_object);
+        let commit = signed_circle_commit(
+            store_root_hash,
+            write_id.clone(),
+            coord.clone(),
+            author_registration.clone(),
+            &author,
+            order,
+            membership_state,
+            device_state,
+            StoreOperationMembershipAuthority {
+                predecessor: membership_authority,
+            },
+            circle_reference,
+            stream_activations,
+            &device_signer,
+        )?;
+        let commit_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let commit_prefix = commit_semantic_prefix(
+            commit.candidate_family(),
+            &stream_id.to_string(),
+            seq,
+            commit.commit_hash(),
+        );
+        let commit_prepared = prepare_circle_object(
+            storage,
+            &commit_context,
+            &commit_prefix,
+            ".json",
+            commit.to_bytes(),
+        )
+        .await?;
+        let commit_ref =
+            StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let history_summary = super::store_engine::engine::pull::prepare_merge_history_successor(
+            db,
+            &root,
+            &commit,
+            &commit_ref,
+            &exact,
+            &author,
+            None,
+            resolved_devices,
+            super::store_engine::engine::pull::MergeHistorySuccessorEvidence::none(),
+        )
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        prepared_objects.insert("store-commit".to_string(), commit_prepared);
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let device_id = author_registration.device_id.to_string();
+        let head_prefix = head_slot_prefix(&device_id, seq);
+        let next_head_slot = storage
+            .allocate_protocol_slot(
+                &head_context,
+                &head_slot_prefix(&device_id, seq + 1),
+                ".json",
             )
-        }
+            .await
+            .map_err(super::store_objects::StoreObjectError::from)?;
+        let head = StoreDeviceHead::signed(
+            store_root_hash,
+            author_registration.clone(),
+            commit_ref.clone(),
+            history_summary.summary.digest(),
+            SuccessorLink {
+                activation: author
+                    .store_announcement_activation(&author_registration)
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                    .activation_id(),
+                predecessor: history_summary
+                    .predecessor_head
+                    .map(|reference| reference.object),
+                next_slot: next_head_slot,
+            },
+            &device_signer,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let head_prepared = storage
+            .prepare_protocol_object(
+                &head_context,
+                history_summary.head_slot,
+                &head_prefix,
+                head.to_bytes(),
+            )
+            .map_err(super::store_objects::StoreObjectError::from)?;
+        prepared_objects.insert("store-head".to_string(), head_prepared);
+        (
+            creation,
+            commit,
+            commit_ref,
+            CircleOperationPolicy {
+                head,
+                history_summary: history_summary.summary,
+            },
+            prepared_objects,
+        )
     };
     Ok(CircleOperationJournal {
         operation_id,
@@ -1887,7 +1564,6 @@ async fn prepare_circle_operation_request(
 async fn publish_circle_operation(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     operation_id: &CircleOperationId,
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
@@ -1942,20 +1618,18 @@ async fn publish_circle_operation(
                 .to_string(),
         ));
     }
-    if commit.policy() == crate::WritePolicy::MergeConcurrent
-        && !has_current_merge_authority(db, storage, &commit, &author).await?
-    {
+    if !has_current_merge_authority(db, storage, &commit, &author).await? {
         let reason = "circle operation author is not a current Store writer under its exact grant"
             .to_string();
         db.block_circle_operation(operation_id, reason.clone())
             .await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
     }
-    if let CircleOperationPolicy::MergeConcurrent {
-        head,
-        history_summary,
-    } = &journal.operation().policy
     {
+        let CircleOperationPolicy {
+            head,
+            history_summary,
+        } = &journal.operation().policy;
         let root = db
             .local_store_root_ref()
             .await?
@@ -1975,7 +1649,7 @@ async fn publish_circle_operation(
                 )
             })?;
         let (_, state_after) =
-            super::store_engine::merge::pull::retained_merge_device_state_for_order(
+            super::store_engine::engine::pull::retained_merge_device_state_for_order(
                 db,
                 storage,
                 &root,
@@ -2022,94 +1696,89 @@ async fn publish_circle_operation(
         &serde_json::to_vec(&creation.metadata).expect("circle metadata serialization cannot fail"),
     )
     .await?;
-    if let CircleTransitionPolicyObjects::MergeConcurrent {
+    let CircleTransitionPolicyObjects {
         roster_entry,
         roster_head,
         metadata_head,
         ..
-    } = &creation.policy_objects
-    {
-        append_step(
-            db,
-            storage,
-            &mut journal,
-            "metadata-head",
-            &ProtocolObjectContext::circle(
+    } = &creation.policy_objects;
+    append_step(
+        db,
+        storage,
+        &mut journal,
+        "metadata-head",
+        &ProtocolObjectContext::circle(
+            store_root_hash,
+            ProtocolObjectDomain::CircleMetadata,
+            circle_encryption.clone(),
+        ),
+        &circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+            circle_id: creation.circle_id,
+            head: reference
+                .objects()
+                .metadata_heads
+                .iter()
+                .find(|head| head.coord == metadata_head.coord())
+                .ok_or_else(|| {
+                    CircleOperationError::Journal(
+                        "prepared metadata head is absent from its signed object graph".to_string(),
+                    )
+                })?,
+        }),
+        &serde_json::to_vec(metadata_head).expect("circle metadata head serialization cannot fail"),
+    )
+    .await?;
+    match (roster_entry, roster_head) {
+        (Some(roster_entry), Some(roster_head)) => {
+            let roster_context = ProtocolObjectContext::circle(
                 store_root_hash,
-                ProtocolObjectDomain::CircleMetadata,
+                ProtocolObjectDomain::CircleRoster,
                 circle_encryption.clone(),
-            ),
-            &circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                circle_id: creation.circle_id,
-                head: reference
-                    .objects()
-                    .metadata_heads
-                    .iter()
-                    .find(|head| head.coord == metadata_head.coord())
-                    .ok_or_else(|| {
-                        CircleOperationError::Journal(
-                            "prepared metadata head is absent from its signed object graph"
-                                .to_string(),
-                        )
-                    })?,
-            }),
-            &serde_json::to_vec(metadata_head)
-                .expect("circle metadata head serialization cannot fail"),
-        )
-        .await?;
-        match (roster_entry, roster_head) {
-            (Some(roster_entry), Some(roster_head)) => {
-                let roster_context = ProtocolObjectContext::circle(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleRoster,
-                    circle_encryption.clone(),
-                );
-                append_step(
-                    db,
-                    storage,
-                    &mut journal,
-                    "roster-entry",
-                    &roster_context,
-                    &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
-                        circle_id: creation.circle_id,
-                        coord: &roster_entry.coord(),
-                    }),
-                    &serde_json::to_vec(roster_entry)
-                        .expect("circle roster entry serialization cannot fail"),
-                )
-                .await?;
-                append_step(
-                    db,
-                    storage,
-                    &mut journal,
-                    "roster-head",
-                    &roster_context,
-                    &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                        circle_id: creation.circle_id,
-                        head: reference
-                            .objects()
-                            .roster_heads
-                            .iter()
-                            .find(|head| head.coord == roster_head.entry_coord())
-                            .ok_or_else(|| {
-                                CircleOperationError::Journal(
-                                    "prepared roster head is absent from its signed object graph"
-                                        .to_string(),
-                                )
-                            })?,
-                    }),
-                    &serde_json::to_vec(roster_head)
-                        .expect("circle roster head serialization cannot fail"),
-                )
-                .await?;
-            }
-            (None, None) => {}
-            _ => {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle transition must carry both an authored roster entry and head"
-                        .to_string(),
-                ));
-            }
+            );
+            append_step(
+                db,
+                storage,
+                &mut journal,
+                "roster-entry",
+                &roster_context,
+                &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
+                    circle_id: creation.circle_id,
+                    coord: &roster_entry.coord(),
+                }),
+                &serde_json::to_vec(roster_entry)
+                    .expect("circle roster entry serialization cannot fail"),
+            )
+            .await?;
+            append_step(
+                db,
+                storage,
+                &mut journal,
+                "roster-head",
+                &roster_context,
+                &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
+                    circle_id: creation.circle_id,
+                    head: reference
+                        .objects()
+                        .roster_heads
+                        .iter()
+                        .find(|head| head.coord == roster_head.entry_coord())
+                        .ok_or_else(|| {
+                            CircleOperationError::Journal(
+                                "prepared roster head is absent from its signed object graph"
+                                    .to_string(),
+                            )
+                        })?,
+                }),
+                &serde_json::to_vec(roster_head)
+                    .expect("circle roster head serialization cannot fail"),
+            )
+            .await?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CircleOperationError::InvalidState(
+                "Circle transition must carry both an authored roster entry and head".to_string(),
+            ));
         }
     }
     for (index, access) in creation.access.iter().enumerate() {
@@ -2150,28 +1819,24 @@ async fn publish_circle_operation(
         &creation.control.bytes,
     )
     .await?;
-    if let CircleTransitionPolicyObjects::MergeConcurrent { control_head, .. } =
-        &creation.policy_objects
-    {
-        append_step(
-            db,
-            storage,
-            &mut journal,
-            "control-head",
-            &ProtocolObjectContext::store_encrypted(
-                store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            &circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-                circle_id: creation.circle_id,
-                control: &control_head.control,
-                head_hash: control_head.head_hash(),
-            }),
-            &serde_json::to_vec(control_head)
-                .expect("circle control head serialization cannot fail"),
-        )
-        .await?;
-    }
+    let control_head = &creation.policy_objects.control_head;
+    append_step(
+        db,
+        storage,
+        &mut journal,
+        "control-head",
+        &ProtocolObjectContext::store_encrypted(
+            store_root_hash,
+            ProtocolObjectDomain::CircleControl,
+        ),
+        &circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+            circle_id: creation.circle_id,
+            control: &control_head.control,
+            head_hash: control_head.head_hash(),
+        }),
+        &serde_json::to_vec(control_head).expect("circle control head serialization cannot fail"),
+    )
+    .await?;
     for (index, access) in creation.access.iter().enumerate() {
         append_step(
             db,
@@ -2202,12 +1867,6 @@ async fn publish_circle_operation(
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
-    let membership_authority = match &journal.operation().policy {
-        CircleOperationPolicy::MergeConcurrent { .. } => CircleMembershipAuthority::MergeConcurrent,
-        CircleOperationPolicy::Serial { authorization, .. } => {
-            CircleMembershipAuthority::Serial(authorization.clone())
-        }
-    };
     let verified = load_circle_activations(
         db,
         storage,
@@ -2217,7 +1876,6 @@ async fn publish_circle_operation(
         &author,
         identity,
         &founder,
-        &membership_authority,
     )
     .await?;
     let expected = expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
@@ -2226,99 +1884,45 @@ async fn publish_circle_operation(
             "stored verified Circle activation differs from its durable journal".to_string(),
         ));
     }
-    let policy = journal.operation().policy.clone();
-    match policy {
-        CircleOperationPolicy::MergeConcurrent { head, .. } => {
-            let commit_bytes = journal.operation().commit_bytes.clone();
-            let commit_hash = journal.operation().commit_ref.commit_hash;
-            let StoreCommitCoord::MergeConcurrent { stream_id, .. } =
-                journal.operation().commit_ref.coord
-            else {
-                return Err(CircleOperationError::InvalidState(
-                    "Merge Circle policy carries a Serial commit ref".to_string(),
-                ));
-            };
-            append_step(
-                db,
-                storage,
-                &mut journal,
-                "store-commit",
-                &ProtocolObjectContext::signed_plaintext(
-                    store_root_hash,
-                    ProtocolObjectDomain::StoreCommit,
-                ),
-                &commit_semantic_prefix(
-                    commit.candidate_family(),
-                    &stream_id.to_string(),
-                    commit.seq(),
-                    commit_hash,
-                ),
-                &commit_bytes,
-            )
-            .await?;
-            append_step(
-                db,
-                storage,
-                &mut journal,
-                "store-head",
-                &ProtocolObjectContext::signed_plaintext(
-                    store_root_hash,
-                    ProtocolObjectDomain::StoreHead,
-                ),
-                &head_slot_prefix(
-                    &head.author_registration.device_id.to_string(),
-                    commit.seq(),
-                ),
-                &head.to_bytes(),
-            )
-            .await?;
-        }
-        CircleOperationPolicy::Serial {
-            head,
-            base: _,
-            base_head,
-            ..
-        } => {
-            let coordination = coordination.ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Serial circle activation requires coordination storage".to_string(),
-                )
-            })?;
-            if let Err(error) =
-                super::store_engine::serial::publication::activate_serial_commit_head(
-                    db,
-                    storage,
-                    coordination,
-                    &base_head,
-                    &commit,
-                    journal
-                        .operation()
-                        .prepared_objects
-                        .get("store-commit")
-                        .ok_or_else(|| {
-                            CircleOperationError::Journal(
-                                "Circle operation lacks its prepared Store commit".to_string(),
-                            )
-                        })?,
-                    &journal.operation().commit_ref,
-                    &head,
-                )
-                .await
-            {
-                if matches!(
-                    error,
-                    super::store_outbound::StoreOutboundError::SerialControlConflict { .. }
-                ) {
-                    let reason = error.to_string();
-                    db.block_circle_operation(operation_id, reason.clone())
-                        .await?;
-                    return Err(CircleOperationError::Blocked { circle_id, reason });
-                }
-                return Err(error.into());
-            }
-            db.mark_candidate_commit_uploaded(journal.operation().commit_ref.clone())
-                .await?;
-        }
+    {
+        let head = journal.operation().policy.head.clone();
+        let commit_bytes = journal.operation().commit_bytes.clone();
+        let commit_hash = journal.operation().commit_ref.commit_hash;
+        let stream_id = journal.operation().commit_ref.coord.stream_id;
+        append_step(
+            db,
+            storage,
+            &mut journal,
+            "store-commit",
+            &ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                commit.seq(),
+                commit_hash,
+            ),
+            &commit_bytes,
+        )
+        .await?;
+        append_step(
+            db,
+            storage,
+            &mut journal,
+            "store-head",
+            &ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            ),
+            &head_slot_prefix(
+                &head.author_registration.device_id.to_string(),
+                commit.seq(),
+            ),
+            &head.to_bytes(),
+        )
+        .await?;
     }
     db.activate_circle_operation(journal, verified).await?;
     Ok(())
@@ -2435,78 +2039,25 @@ async fn append_step(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
     use crate::database::DbError;
     use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
-    use crate::sync::cloud_storage::{
-        BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
-    };
+    use crate::sync::circle::CircleTransitionDraftPolicy;
+    use crate::sync::cloud_storage::{CloudCipher, CloudCipherAccess};
     use crate::sync::membership::MemberRole;
-    use crate::sync::storage::{
-        CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
-        ProtocolObjectDomain, ReplaceHeadError, VersionToken, VersionedObject,
-    };
-    use crate::sync::store_commit::{serial_head_key, StoreControl};
+    use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::test_helpers::{
-        create_exact_test_store, host_exec, install_active_device_fixture, open_serial_test_db,
-        open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
+        install_active_device_fixture, open_test_db, temp_store_dir, test_migrations,
+        test_synced_tables, TestCustody, TestStore,
     };
-
-    fn merge_storage(
-        home: &InMemoryCloudHome,
-        signer: &UserKeypair,
-        name: &str,
-    ) -> CloudSyncStorage {
-        CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            name,
-            signer.clone(),
-        )
-        .expect("test cloud storage supports immutable copies")
-    }
-
-    fn serial_storage(
-        home: &InMemoryCloudHome,
-        signer: &UserKeypair,
-        name: &str,
-    ) -> CloudSyncStorage {
-        merge_storage(home, signer, name).with_test_serial_coordination(Arc::new(home.clone()))
-    }
 
     async fn local_device_id(db: &Database) -> String {
         db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("read local Store device id")
             .expect("local Store device is active")
-    }
-
-    async fn prepare_serial_test_wrap(
-        storage: &CloudSyncStorage,
-        root: &crate::sync::store_commit::StoreRootRef,
-        owner: &UserKeypair,
-        recipient_pubkey: &str,
-        generation: u64,
-        sealed: &[u8],
-    ) -> super::super::wrapped_store_key::PreparedWrappedStoreKey {
-        super::super::wrapped_store_key::prepare_wrapped_store_key(
-            storage,
-            root.store_root_hash,
-            recipient_pubkey,
-            super::super::wrapped_store_key::WrappedStoreKey::signed(
-                &root.store_root_id.to_string(),
-                recipient_pubkey,
-                generation,
-                sealed.to_vec(),
-                owner,
-            ),
-        )
-        .await
-        .expect("prepare authenticated Serial test wrap")
     }
 
     async fn create_test_store_in_its_own_task(
@@ -2523,24 +2074,6 @@ mod tests {
             .expect("create exact Circle test Store")
     }
 
-    async fn create_exact_serial_store_in_its_own_task(
-        db: &Database,
-        storage: CloudSyncStorage,
-        name: &str,
-        signer: &UserKeypair,
-    ) -> (CloudSyncStorage, crate::sync::store_commit::StoreRootRef) {
-        let db = db.clone();
-        let name = name.to_string();
-        let signer = signer.clone();
-        tokio::spawn(async move {
-            let root = create_exact_test_store(&db, &storage, &name, &signer).await?;
-            Ok::<_, String>((storage, root))
-        })
-        .await
-        .expect("join Serial Circle test Store creation")
-        .expect("create exact Serial Circle test Store")
-    }
-
     async fn assert_exact_object_absent(home: &InMemoryCloudHome, reference: &ExactObjectRef) {
         let storage = Arc::new(home.clone())
             .exact_slot_storage()
@@ -2553,50 +2086,6 @@ mod tests {
             matches!(error, crate::storage::cloud::CloudHomeError::NotFound(_)),
             "{error}"
         );
-    }
-
-    struct HeadChangesAfterAuthorization<'a> {
-        inner: &'a dyn CoordinationStorage,
-        authorization_head: Vec<u8>,
-        reads: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl CoordinationStorage for HeadChangesAfterAuthorization<'_> {
-        async fn provider_binding(
-            &self,
-        ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError> {
-            self.inner.provider_binding().await
-        }
-
-        async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-            let mut current = self.inner.read_head(key).await?;
-            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
-                current.bytes.clone_from(&self.authorization_head);
-            }
-            Ok(current)
-        }
-
-        async fn create_head(
-            &self,
-            key: &str,
-            bytes: &[u8],
-        ) -> Result<VersionedObject, CreateHeadError> {
-            self.inner.create_head(key, bytes).await
-        }
-
-        async fn replace_head(
-            &self,
-            key: &str,
-            expected: &VersionToken,
-            bytes: &[u8],
-        ) -> Result<VersionedObject, ReplaceHeadError> {
-            self.inner.replace_head(key, expected, bytes).await
-        }
-
-        async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-            self.inner.delete_head(key).await
-        }
     }
 
     async fn persist_merge_operation(
@@ -2613,7 +2102,6 @@ mod tests {
         let journal = prepare_circle_operation(
             db,
             &store.storage,
-            None,
             &device_id,
             "0000000001000-0000-creator",
             "Household",
@@ -2643,7 +2131,7 @@ mod tests {
         let reference = journal
             .operation()
             .creation
-            .control_ref(objects, old_reference.head_object().cloned());
+            .control_ref(objects, Some(old_reference.head_object().clone()));
         resign_merge_journal_with_reference(db, storage, signer, journal, reference, |_| {}).await;
     }
 
@@ -2684,9 +2172,7 @@ mod tests {
         .expect("re-sign Circle commit with substituted exact graph");
         mutate_commit(&mut commit);
         commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = coord.clone() else {
-            panic!("fixture must use MergeConcurrent")
-        };
+        let StoreCommitCoord { stream_id, .. } = coord.clone();
         let commit_prepared = prepare_circle_object(
             storage,
             &ProtocolObjectContext::signed_plaintext(
@@ -2707,13 +2193,9 @@ mod tests {
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .expect("bind substituted Circle commit");
-        let CircleOperationPolicy::MergeConcurrent {
-            head: old_head,
-            history_summary,
-        } = &journal.operation().policy
-        else {
-            panic!("fixture must carry a Merge Store head")
-        };
+        let policy = &journal.operation().policy;
+        let old_head = &policy.head;
+        let history_summary = &policy.history_summary;
         let history_summary = history_summary.clone();
         let head = StoreDeviceHead::signed(
             commit.store_root_hash,
@@ -2755,107 +2237,10 @@ mod tests {
         operation
             .prepared_objects
             .insert("store-head".to_string(), head_prepared);
-        operation.policy = CircleOperationPolicy::MergeConcurrent {
+        operation.policy = CircleOperationPolicy {
             head,
             history_summary,
         };
-        operation.uploaded.clear();
-    }
-
-    async fn resign_serial_journal_with_objects(
-        db: &Database,
-        storage: &dyn SyncStorage,
-        signer: &UserKeypair,
-        journal: &mut CircleOperationJournal,
-        mutate: impl FnOnce(&mut CircleActivationObjects),
-    ) {
-        let old_commit = journal.commit().expect("parse prepared Circle commit");
-        let [old_reference] = old_commit.circle_controls() else {
-            panic!("Circle operation must carry one control")
-        };
-        let mut objects = old_reference.objects().clone();
-        mutate(&mut objects);
-        let reference = journal
-            .operation()
-            .creation
-            .control_ref(objects, old_reference.head_object().cloned());
-        let author = db
-            .activated_store_device_registration(old_commit.author_registration.clone())
-            .await
-            .expect("load Circle commit author");
-        let device_signer = author
-            .device_signer(signer)
-            .expect("derive Circle device signer");
-        let coord = journal.operation().commit_ref.coord.clone();
-        assert!(matches!(coord, StoreCommitCoord::Serial { .. }));
-        let commit = signed_circle_commit(
-            old_commit.store_root_hash,
-            old_commit.write_id.clone(),
-            coord.clone(),
-            old_commit.author_registration.clone(),
-            &author,
-            old_commit.order.clone(),
-            old_commit.membership_state.clone(),
-            old_commit.device_state.clone(),
-            old_commit
-                .operations_membership_authority()
-                .expect("prepared Circle commit carries validated operations"),
-            reference,
-            old_commit.stream_activations().to_vec(),
-            &device_signer,
-        )
-        .expect("re-sign Serial Circle commit with substituted exact graph");
-        let commit_prepared = prepare_circle_object(
-            storage,
-            &ProtocolObjectContext::signed_plaintext(
-                commit.store_root_hash,
-                ProtocolObjectDomain::StoreCommit,
-            ),
-            &commit_semantic_prefix(
-                commit.candidate_family(),
-                SERIAL_STREAM_ID,
-                commit.seq(),
-                commit.commit_hash(),
-            ),
-            ".json",
-            commit.to_bytes(),
-        )
-        .await
-        .expect("prepare substituted Serial Circle commit");
-        let commit_ref =
-            StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-                .expect("bind substituted Serial Circle commit");
-        let CircleOperationPolicy::Serial {
-            base,
-            base_head,
-            authorization,
-            ..
-        } = &journal.operation().policy
-        else {
-            panic!("fixture must carry a Serial Store head")
-        };
-        let head = StoreSerialHead::signed(
-            commit.store_root_hash,
-            StoreSerialHeadState::Commit {
-                author_registration: commit.author_registration.clone(),
-                commit: commit_ref.clone(),
-            },
-            &device_signer,
-        )
-        .expect("sign substituted Serial Circle Store head");
-        let policy = CircleOperationPolicy::Serial {
-            head,
-            base: base.clone(),
-            base_head: base_head.clone(),
-            authorization: authorization.clone(),
-        };
-        let operation = journal.operation_mut();
-        operation.commit_bytes = commit.to_bytes();
-        operation.commit_ref = commit_ref;
-        operation
-            .prepared_objects
-            .insert("store-commit".to_string(), commit_prepared);
-        operation.policy = policy;
         operation.uploaded.clear();
     }
 
@@ -2930,7 +2315,6 @@ mod tests {
         let second = prepare_circle_operation(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000002000-0000-creator",
             "Second household",
@@ -2971,10 +2355,9 @@ mod tests {
             "absent-circle-operation".to_string(),
         ));
 
-        let error =
-            publish_circle_operation(&db, &store.storage, None, &absent_operation_id, &signer)
-                .await
-                .expect_err("publication requires the exact durable operation id");
+        let error = publish_circle_operation(&db, &store.storage, &absent_operation_id, &signer)
+            .await
+            .expect_err("publication requires the exact durable operation id");
 
         assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
         assert_eq!(
@@ -3019,14 +2402,7 @@ mod tests {
             .collect::<Vec<_>>();
         let (access_root, proofs) =
             super::super::circle_control::merkle_root_and_proofs(&leaf_hashes);
-        match &mut creation.control.value.value {
-            super::super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } => {
-                active_epoch.common.access_root = access_root;
-            }
-            super::super::circle::CircleControlValue::Serial { active_epoch, .. } => {
-                active_epoch.common.access_root = access_root;
-            }
-        }
+        creation.control.value.value.active_epoch.common.access_root = access_root;
         creation.control.value.signature =
             keys::sign_hex(owner, &creation.control.value.canonical_bytes()).1;
         creation.control.coord = creation.control.value.coord();
@@ -3044,13 +2420,8 @@ mod tests {
     }
 
     fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitionDraft {
-        let policy = match &creation.policy_objects {
-            CircleTransitionPolicyObjects::MergeConcurrent { roster_entry, .. } => {
-                CircleTransitionDraftPolicy::MergeConcurrent {
-                    roster_entry: roster_entry.clone(),
-                }
-            }
-            CircleTransitionPolicyObjects::Serial => CircleTransitionDraftPolicy::Serial,
+        let policy = CircleTransitionDraftPolicy {
+            roster_entry: creation.policy_objects.roster_entry.clone(),
         };
         CircleTransitionDraft {
             circle_id: creation.circle_id,
@@ -3132,7 +2503,7 @@ mod tests {
                         store.home.fail_exact_create_before_call(call);
                     }
 
-                    let first = resume_circle_operations(&db, &store.storage, None, &signer).await;
+                    let first = resume_circle_operations(&db, &store.storage, &signer).await;
                     if after_visible_write {
                         first.expect("lost exact-create response is settled by exact readback");
                     } else {
@@ -3148,7 +2519,7 @@ mod tests {
                         assert_eq!(persisted.state(), CircleOperationState::Pending);
                         assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
 
-                        resume_circle_operations(&db, &store.storage, None, &signer)
+                        resume_circle_operations(&db, &store.storage, &signer)
                             .await
                             .expect("resume exact circle operation");
                     }
@@ -3189,8 +2560,7 @@ mod tests {
             &path,
             test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             &test_migrations(),
         )
@@ -3205,8 +2575,7 @@ mod tests {
             &path,
             test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             &test_migrations(),
         )
@@ -3229,7 +2598,7 @@ mod tests {
         assert_exact_operation(&expected, &persisted);
         assert_eq!(persisted.state(), CircleOperationState::Pending);
 
-        resume_circle_operations(&reopened, &store.storage, None, &signer)
+        resume_circle_operations(&reopened, &store.storage, &signer)
             .await
             .expect("resume reopened circle operation");
         assert_eq!(activation_count(&reopened, expected.circle_id()).await, 1);
@@ -3243,15 +2612,14 @@ mod tests {
             &path,
             test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             &test_migrations(),
         )
         .expect("open circle database");
         let (store, signer, founder) = persist_merge_operation(&db, "circle-rename-restart").await;
         let circle_id = founder.circle_id();
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect("activate founder transition");
         let device_id = local_device_id(&db).await;
@@ -3260,7 +2628,6 @@ mod tests {
         let error = rename_circle(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000002000-0000-creator",
             circle_id,
@@ -3302,8 +2669,7 @@ mod tests {
             &path,
             test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             &test_migrations(),
         )
@@ -3315,7 +2681,7 @@ mod tests {
             .expect("rename survives restart");
         assert_exact_operation(&expected, &persisted);
 
-        resume_circle_operations(&reopened, &store.storage, None, &signer)
+        resume_circle_operations(&reopened, &store.storage, &signer)
             .await
             .expect("resume reopened rename");
         assert_eq!(activation_count(&reopened, circle_id).await, 2);
@@ -3338,114 +2704,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_serial_circle_operation_reopens_with_exact_policy_state() {
-        let temp = tempfile::tempdir().expect("create database directory");
-        let path = temp.path().join("serial-circle-restart.sqlite3");
-        let founder = UserKeypair::generate();
-        let home = InMemoryCloudHome::new();
-        let storage = serial_storage(&home, &founder, "serial-circle-restart");
-        let (db, _stamper) = Database::open(
-            &path,
-            test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::Serial,
-            "founder-device".to_string(),
-            &test_migrations(),
-        )
-        .expect("open Serial Circle database");
-        let (storage, _root) = create_exact_serial_store_in_its_own_task(
-            &db,
-            storage,
-            "serial-circle-restart",
-            &founder,
-        )
-        .await;
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-        let expected = prepare_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &device_id,
-            "0000000001000-0000-founder",
-            "Household",
-            &founder,
-        )
-        .await
-        .expect("prepare Serial Circle operation");
-        assert!(matches!(
-            expected.operation().policy,
-            CircleOperationPolicy::Serial { .. }
-        ));
-        db.insert_circle_operation(expected.clone())
-            .await
-            .expect("persist Serial Circle operation");
-        std::thread::spawn(move || drop(db))
-            .join()
-            .expect("close Serial Circle database");
-
-        let (reopened, _stamper) = Database::open(
-            &path,
-            test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::Serial,
-            "founder-device".to_string(),
-            &test_migrations(),
-        )
-        .expect("reopen Serial Circle database");
-        let persisted = reopened
-            .circle_operation(&expected.operation_id)
-            .await
-            .expect("read reopened Serial Circle operation")
-            .expect("Serial Circle operation survives restart");
-        assert_exact_operation(&expected, &persisted);
-
-        resume_circle_operations(&reopened, &storage, Some(coordination), &founder)
-            .await
-            .expect("resume reopened Serial Circle operation");
-        assert_eq!(activation_count(&reopened, expected.circle_id()).await, 1);
-    }
-
-    #[tokio::test]
-    async fn persisted_merge_circle_operation_rejects_serial_policy_state() {
-        let db = open_test_db();
-        let (_store, _signer, journal) =
-            persist_merge_operation(&db, "circle-merge-serial-state").await;
-        let mut payload = serde_json::to_value(&journal).expect("serialize Merge journal");
-        let policy = payload
-            .get_mut("progress")
-            .and_then(|progress| progress.get_mut("ready"))
-            .and_then(|operation| operation.get_mut("policy"))
-            .and_then(|policy| policy.get_mut("merge_concurrent"))
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("Merge policy object");
-        policy.insert("base".to_string(), serde_json::Value::Null);
-        policy.insert(
-            "base_head".to_string(),
-            serde_json::json!({ "bytes": [115, 101, 114, 105, 97, 108], "version": "bad" }),
-        );
-        let payload = serde_json::to_vec(&payload).expect("serialize invalid journal");
-        let circle_id = journal.circle_id();
-        let stored_circle_id = circle_id.to_string();
-        db.call(move |conn| {
-            conn.execute(
-                "UPDATE circle_operations SET payload = ?2 WHERE circle_id = ?1",
-                rusqlite::params![stored_circle_id, payload],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-        .expect("install invalid durable payload");
-
-        db.circle_operation(&journal.operation_id)
-            .await
-            .expect_err("Merge operation must reject Serial-only policy state");
-    }
-
-    #[tokio::test]
     async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
         for corrupt in [false, true] {
             let temp = tempfile::tempdir().expect("create database directory");
@@ -3458,8 +2716,7 @@ mod tests {
                 &path,
                 test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
+                crate::blob::TransferLimits::one_at_a_time(),
                 "creator".to_string(),
                 &test_migrations(),
             )
@@ -3467,7 +2724,7 @@ mod tests {
             let (store, signer, expected) =
                 persist_merge_operation(&db, if corrupt { "corrupt" } else { "missing" }).await;
             store.home.fail_exact_create_before_call(2);
-            resume_circle_operations(&db, &store.storage, None, &signer)
+            resume_circle_operations(&db, &store.storage, &signer)
                 .await
                 .expect_err("second exact create failure interrupts publication");
             let persisted = db
@@ -3498,13 +2755,12 @@ mod tests {
                 &path,
                 test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
+                crate::blob::TransferLimits::one_at_a_time(),
                 "creator".to_string(),
                 &test_migrations(),
             )
             .expect("reopen circle database");
-            resume_circle_operations(&reopened, &store.storage, None, &signer)
+            resume_circle_operations(&reopened, &store.storage, &signer)
                 .await
                 .expect_err("durable upload marker must not bypass readback");
             assert_eq!(activation_count(&reopened, expected.circle_id()).await, 0);
@@ -3625,7 +2881,7 @@ mod tests {
         db.update_circle_operation(journal.clone())
             .await
             .expect("persist substituted journal plaintext");
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("local activation must reject substituted journal plaintext");
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
@@ -3663,7 +2919,7 @@ mod tests {
             .await
             .expect("persist substituted journal object");
 
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("local publication must reject objects outside the signed graph");
 
@@ -3712,7 +2968,7 @@ mod tests {
             .await
             .expect("persist substituted signed Circle graph");
 
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("local activation must verify every signed exact Circle edge");
 
@@ -3788,18 +3044,15 @@ mod tests {
                 .expect("Merge operation carries a Store head")
                 .reference()
                 .clone();
-            let StoreCommitCoord::MergeConcurrent {
+            let StoreCommitCoord {
                 stream_id,
                 sequence,
-            } = journal.operation().commit_ref.coord
-            else {
-                panic!("Circle fixture uses a Merge Store position")
-            };
+            } = journal.operation().commit_ref.coord;
             db.update_circle_operation(journal.clone())
                 .await
                 .expect("persist Circle journal with substituted stream authority");
 
-            resume_circle_operations(&db, &store.storage, None, &signer)
+            resume_circle_operations(&db, &store.storage, &signer)
                 .await
                 .expect_err("Circle stream activation must name its signed Circle and grant");
             assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
@@ -3822,7 +3075,6 @@ mod tests {
             &db,
             &store.storage,
             super::super::store_commit::CommitFrontier::from_refs(
-                crate::WritePolicy::MergeConcurrent,
                 db.materialized_frontier()
                     .await
                     .expect("read current Store frontier"),
@@ -3867,18 +3119,15 @@ mod tests {
             .expect("Merge operation carries a Store head")
             .reference()
             .clone();
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = journal.operation().commit_ref.coord
-        else {
-            panic!("Circle fixture uses a Merge Store position")
-        };
+        } = journal.operation().commit_ref.coord;
         db.update_circle_operation(journal.clone())
             .await
             .expect("persist Circle journal with unexpected acknowledgement");
 
-        let error = resume_circle_operations(&db, &store.storage, None, &signer)
+        let error = resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("Circle journal must contain no operation besides its control");
         assert!(error.to_string().contains("control-only batch"), "{error}");
@@ -3898,7 +3147,7 @@ mod tests {
         let (store, signer, founder) =
             persist_merge_operation(&db, "circle-unreserved-predecessor").await;
         let circle_id = founder.circle_id();
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect("publish founder Circle");
         let device_id = local_device_id(&db).await;
@@ -3906,7 +3155,6 @@ mod tests {
         rename_circle(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000002000-0000-creator",
             circle_id,
@@ -3945,11 +3193,7 @@ mod tests {
             .slot()
             .clone();
         let creation = &mut journal.operation_mut().creation;
-        let CircleTransitionPolicyObjects::MergeConcurrent { control_head, .. } =
-            &mut creation.policy_objects
-        else {
-            panic!("rename fixture must use MergeConcurrent")
-        };
+        let CircleTransitionPolicyObjects { control_head, .. } = &mut creation.policy_objects;
         control_head.successor.predecessor = Some(super::super::storage::ExactObjectRef::new(
             crate::storage::cloud::ObjectSlot::logical(
                 "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
@@ -4007,7 +3251,7 @@ mod tests {
             .await
             .expect("persist forged successor journal");
 
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("common verifier must reject an unreserved Circle predecessor");
         assert_eq!(activation_count(&db, circle_id).await, 1);
@@ -4047,7 +3291,7 @@ mod tests {
             .await
             .expect("persist substituted Store head slot");
 
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect_err("local publication must reject an unreserved Store head slot");
 
@@ -4145,7 +3389,7 @@ mod tests {
         let circle_reference = journal
             .operation()
             .creation
-            .control_ref(objects, original_control.head_object().cloned());
+            .control_ref(objects, Some(original_control.head_object().clone()));
         let stream_activations = old_commit.stream_activations().to_vec();
         let commit = signed_circle_commit(
             old_commit.store_root_hash,
@@ -4164,9 +3408,7 @@ mod tests {
             &device_signer,
         )
         .expect("sign commit naming invented access refs");
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = commit_coord.clone() else {
-            panic!("invented access test requires a MergeConcurrent commit")
-        };
+        let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
         let commit_prepared = prepare_circle_object(
             &store.storage,
             &ProtocolObjectContext::signed_plaintext(
@@ -4203,7 +3445,6 @@ mod tests {
             &author,
             &signer,
             &keys::public_key_hex(&signer),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("invented access references must fail activation");
@@ -4214,13 +3455,7 @@ mod tests {
             "{error}"
         );
 
-        let CircleOperationPolicy::MergeConcurrent {
-            head: original_head,
-            ..
-        } = &journal.operation().policy
-        else {
-            panic!("invented access test requires a MergeConcurrent head")
-        };
+        let original_head = &journal.operation().policy.head;
         let forged_head = StoreDeviceHead::signed(
             commit.store_root_hash,
             commit.author_registration.clone(),
@@ -4258,7 +3493,7 @@ mod tests {
 
         let (_store_temp, store_dir) = temp_store_dir();
         let engine =
-            super::super::store_engine::StoreEngine::authorize_borrowed(&store.storage, None, &db)
+            super::super::store_engine::StoreEngine::authorize_borrowed(&store.storage, &db)
                 .await
                 .expect("authorize Merge engine for pull");
         let pull = engine
@@ -4308,7 +3543,6 @@ mod tests {
         let journal = prepare_circle_operation(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000001000-0000-founder",
             "Household",
@@ -4365,9 +3599,7 @@ mod tests {
             &device_signer,
         )
         .expect("sign promoted access commit");
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = commit_coord.clone() else {
-            panic!("promoted access test requires a MergeConcurrent commit")
-        };
+        let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
         let commit_prepared = prepare_circle_object(
             &store.storage,
             &ProtocolObjectContext::signed_plaintext(
@@ -4404,7 +3636,6 @@ mod tests {
             &author,
             &peer,
             &keys::public_key_hex(&founder),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("Active access must name a resolved Circle member");
@@ -4427,7 +3658,6 @@ mod tests {
         let mut journal = prepare_circle_operation(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000001000-0000-founder",
             "Partial access graph",
@@ -4486,7 +3716,6 @@ mod tests {
         let journal = prepare_circle_operation(
             &db,
             &store.storage,
-            None,
             &device_id,
             "0000000001000-0000-founder",
             "Household",
@@ -4499,7 +3728,7 @@ mod tests {
         db.insert_circle_operation(journal.clone())
             .await
             .expect("persist founder Circle operation");
-        resume_circle_operations(&db, &store.storage, None, &founder)
+        resume_circle_operations(&db, &store.storage, &founder)
             .await
             .expect("publish founder Circle");
         let author = db
@@ -4515,7 +3744,6 @@ mod tests {
             &author,
             &peer,
             &keys::public_key_hex(&founder),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("inactive Circle member verifies the public activation graph");
@@ -4558,7 +3786,6 @@ mod tests {
             &baseline_author,
             &baseline_signer,
             &keys::public_key_hex(&baseline_signer),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("baseline exact Circle activation verifies remotely");
@@ -4567,14 +3794,13 @@ mod tests {
         let (store, signer, founder_journal) =
             persist_merge_operation(&db, "circle-remote-metadata-roster").await;
         let circle_id = founder_journal.circle_id();
-        resume_circle_operations(&db, &store.storage, None, &signer)
+        resume_circle_operations(&db, &store.storage, &signer)
             .await
             .expect("publish exact founder Circle");
         store.home.fail_exact_create_before_call(1);
         rename_circle(
             &db,
             &store.storage,
-            None,
             &local_device_id(&db).await,
             "0000000002000-0000-creator",
             circle_id,
@@ -4600,11 +3826,7 @@ mod tests {
         let commit_coord = journal.operation().commit_ref.coord.clone();
         let mut draft = draft_from_transition(&journal.operation().creation);
         let store_root_hash = draft.control.value.store_root_hash;
-        let super::super::circle::CircleMaterializedRoster::MergeConcurrent(roster) =
-            &mut draft.roster
-        else {
-            panic!("Merge rename must carry a Merge roster")
-        };
+        let roster = &mut draft.roster;
         roster.state_hash = ObjectHash::digest(b"different historical roster state");
         let candidate_family = old_commit.candidate_family();
         let author = db
@@ -4651,9 +3873,7 @@ mod tests {
             &device_signer,
         )
         .expect("sign forged metadata activation commit");
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = commit_coord.clone() else {
-            panic!("forged metadata test requires a MergeConcurrent commit")
-        };
+        let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
         let commit_prepared = prepare_circle_object(
             &store.storage,
             &ProtocolObjectContext::signed_plaintext(
@@ -4690,7 +3910,6 @@ mod tests {
             &author,
             &signer,
             &keys::public_key_hex(&signer),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect_err("metadata cannot borrow authority from a different roster state");
@@ -4739,7 +3958,6 @@ mod tests {
         let journal = prepare_circle_operation(
             &successor_db,
             &store.storage,
-            None,
             &successor_device_id,
             "0000000001003-0000-successor",
             "Revoked Circle",
@@ -4795,7 +4013,6 @@ mod tests {
         let later = prepare_circle_operation(
             &successor_db,
             &store.storage,
-            None,
             &successor_device_id,
             "0000000001004-0000-successor",
             "Later Circle",
@@ -4808,7 +4025,7 @@ mod tests {
             .await
             .expect("persist still-authorized operation");
 
-        resume_circle_operations(&successor_db, &store.storage, None, &successor)
+        resume_circle_operations(&successor_db, &store.storage, &successor)
             .await
             .expect("revoked journal is blocked without interrupting the resume loop");
 
@@ -4840,539 +4057,6 @@ mod tests {
         assert_eq!(
             activation_count(&successor_db, journal.circle_id()).await,
             0
-        );
-    }
-
-    #[tokio::test]
-    async fn serial_circle_cannot_activate_from_authorization_before_a_removal_head() {
-        let founder = UserKeypair::generate();
-        let successor = UserKeypair::generate();
-        let db = open_serial_test_db();
-        let store = TestStore::create(&db, "circle-serial-authority-race", founder.clone())
-            .await
-            .expect("create exact Serial Circle test Store");
-        let storage = &store.storage;
-        let root = store.root.clone();
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-
-        let authorization =
-            super::super::store_engine::serial::publication::current_serial_authorization(
-                &db,
-                storage,
-                coordination,
-            )
-            .await
-            .expect("founder authorization");
-        let successor_pubkey = keys::public_key_hex(&successor);
-        let successor_wrap = prepare_serial_test_wrap(
-            storage,
-            &root,
-            &founder,
-            &successor_pubkey,
-            1,
-            b"circle Serial successor wrap",
-        )
-        .await;
-        let add_successor = authorization
-            .membership
-            .signed_set_member_with_wrapped_key(
-                &founder,
-                successor_pubkey.clone(),
-                None,
-                MemberRole::Member,
-                successor_wrap.reference.clone(),
-                "0000000000001-0000-founder".to_string(),
-            )
-            .expect("add successor member");
-        super::super::store_outbound::activate_test_serial_control_candidate(
-            &db,
-            storage,
-            coordination,
-            &device_id,
-            &founder,
-            StoreControl::SerialMembership {
-                entry: add_successor,
-            },
-            vec![successor_wrap],
-        )
-        .await
-        .expect("activate successor addition");
-        let successor_db = open_serial_test_db();
-        install_active_device_fixture(
-            &store,
-            &db,
-            &successor_db,
-            &successor,
-            "0000000000500-0000-successor",
-        )
-        .await
-        .expect("activate successor device");
-        crate::sync::test_helpers::promote_active_member_fixture(
-            &store,
-            &db,
-            &successor_db,
-            &founder,
-            &successor,
-            &crate::encryption::EncryptionService::from_key([42; 32]),
-        )
-        .await
-        .expect("promote active successor Owner");
-        let authorization_head = coordination
-            .read_head(serial_head_key())
-            .await
-            .expect("read authorization head")
-            .bytes;
-
-        let authorization =
-            super::super::store_engine::serial::publication::current_serial_authorization(
-                &db,
-                storage,
-                coordination,
-            )
-            .await
-            .expect("authorization before removal");
-        let remove_founder = authorization
-            .membership
-            .signed_remove_member(
-                &founder,
-                keys::public_key_hex(&founder),
-                "0000000000002-0000-founder".to_string(),
-            )
-            .expect("remove founder");
-        let removal_wrap = prepare_serial_test_wrap(
-            storage,
-            &root,
-            &founder,
-            &successor_pubkey,
-            2,
-            b"circle Serial founder removal wrap",
-        )
-        .await;
-        super::super::store_outbound::activate_test_serial_control_candidate(
-            &db,
-            storage,
-            coordination,
-            &device_id,
-            &founder,
-            StoreControl::SerialMembershipAndKeyRotation {
-                entry: remove_founder,
-                generation: 2,
-                wrapped_keys: vec![removal_wrap.reference.clone()],
-            },
-            vec![removal_wrap],
-        )
-        .await
-        .expect("activate founder removal");
-
-        let changed = HeadChangesAfterAuthorization {
-            inner: coordination,
-            authorization_head,
-            reads: AtomicUsize::new(0),
-        };
-        let journal = prepare_circle_operation(
-            &db,
-            storage,
-            Some(&changed),
-            &device_id,
-            "0000000001000-0000-founder",
-            "Removed founder circle",
-            &founder,
-        )
-        .await
-        .expect("reproduce mismatched authorization and base snapshot");
-        db.insert_circle_operation(journal.clone())
-            .await
-            .expect("persist raced operation");
-
-        let error = publish_circle_operation(
-            &db,
-            storage,
-            Some(coordination),
-            &journal.operation_id,
-            &founder,
-        )
-        .await
-        .expect_err("a removed writer must not activate a Circle commit");
-
-        assert!(matches!(error, CircleOperationError::Blocked { .. }));
-        assert!(db
-            .get_circles(&keys::public_key_hex(&founder))
-            .await
-            .expect("read founder circles")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn serial_circle_rejects_different_head_bytes_at_the_same_commit_position_before_upload()
-    {
-        let home = InMemoryCloudHome::new();
-        let founder = UserKeypair::generate();
-        let successor = UserKeypair::generate();
-        let storage = serial_storage(&home, &founder, "circle-serial-head-bytes");
-        let db = open_serial_test_db();
-        let (storage, root) = create_exact_serial_store_in_its_own_task(
-            &db,
-            storage,
-            "circle-serial-head-bytes",
-            &founder,
-        )
-        .await;
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-        let authorization =
-            super::super::store_engine::serial::publication::current_serial_authorization(
-                &db,
-                &storage,
-                coordination,
-            )
-            .await
-            .expect("founder authorization");
-        let successor_pubkey = keys::public_key_hex(&successor);
-        let wrap = prepare_serial_test_wrap(
-            &storage,
-            &root,
-            &founder,
-            &successor_pubkey,
-            1,
-            b"circle Serial head-bytes wrap",
-        )
-        .await;
-        let entry = authorization
-            .membership
-            .signed_set_member_with_wrapped_key(
-                &founder,
-                successor_pubkey,
-                None,
-                MemberRole::Member,
-                wrap.reference.clone(),
-                "0000000000001-0000-founder".to_string(),
-            )
-            .expect("sign membership entry");
-        super::super::store_outbound::activate_test_serial_control_candidate(
-            &db,
-            &storage,
-            coordination,
-            &device_id,
-            &founder,
-            StoreControl::SerialMembership { entry },
-            vec![wrap],
-        )
-        .await
-        .expect("activate serial control");
-
-        let journal = prepare_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &device_id,
-            "0000000001000-0000-founder",
-            "Same-position conflict",
-            &founder,
-        )
-        .await
-        .expect("prepare Circle operation at the first exact head");
-        let CircleOperationPolicy::Serial {
-            base: Some(base), ..
-        } = &journal.operation().policy
-        else {
-            panic!("expected Serial Circle operation with a base")
-        };
-        let (_, author_registration, _author, device_signer) =
-            super::super::store_outbound::load_local_store_authority(&db, &device_id, &founder)
-                .await
-                .expect("load exact Serial founder authority");
-        let mut competing_commit = base.clone();
-        competing_commit.object = super::super::storage::ExactObjectRef::new(
-            base.object.slot().clone(),
-            base.object.stored_size(),
-            ObjectHash::digest(b"different exact commit object"),
-        );
-        let competing = StoreSerialHead::signed(
-            root.store_root_hash,
-            StoreSerialHeadState::Commit {
-                author_registration,
-                commit: competing_commit,
-            },
-            &device_signer,
-        )
-        .expect("sign different exact commit reference at the same coordinate");
-        let current = coordination
-            .read_head(serial_head_key())
-            .await
-            .expect("read first head");
-        coordination
-            .replace_head(serial_head_key(), &current.version, &competing.to_bytes())
-            .await
-            .expect("install different same-position head");
-        db.insert_circle_operation(journal.clone())
-            .await
-            .expect("persist Circle operation");
-
-        let error = publish_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &journal.operation_id,
-            &founder,
-        )
-        .await
-        .expect_err("same-position head substitution must block activation");
-
-        assert!(matches!(error, CircleOperationError::Blocked { .. }));
-        assert!(home
-            .get(journal.operation().commit_ref.object.slot().logical_key())
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn serial_circle_rejects_a_substituted_exact_graph_before_advancing_the_head() {
-        let home = InMemoryCloudHome::new();
-        let founder = UserKeypair::generate();
-        let storage = serial_storage(&home, &founder, "circle-serial-substituted-graph");
-        let db = open_serial_test_db();
-        let (storage, _root) = create_exact_serial_store_in_its_own_task(
-            &db,
-            storage,
-            "circle-serial-substituted-graph",
-            &founder,
-        )
-        .await;
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-        let mut journal = prepare_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &device_id,
-            "0000000001000-0000-founder",
-            "Substituted graph",
-            &founder,
-        )
-        .await
-        .expect("prepare Serial Circle operation");
-        resign_serial_journal_with_objects(&db, &storage, &founder, &mut journal, |objects| {
-            let metadata_coord = objects
-                .metadata_entries
-                .keys()
-                .next()
-                .cloned()
-                .expect("founder graph carries metadata");
-            let metadata = objects
-                .metadata_entries
-                .get_mut(&metadata_coord)
-                .expect("load exact metadata edge");
-            std::mem::swap(&mut metadata.object, &mut objects.control);
-        })
-        .await;
-        let store_commit = journal.operation().commit_ref.object.clone();
-        let head_before = coordination
-            .read_head(serial_head_key())
-            .await
-            .expect("read Serial head before rejected Circle operation");
-        db.insert_circle_operation(journal.clone())
-            .await
-            .expect("persist substituted Serial Circle graph");
-
-        publish_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &journal.operation_id,
-            &founder,
-        )
-        .await
-        .expect_err("Serial Circle activation must reject substituted exact graph");
-
-        assert_eq!(
-            coordination
-                .read_head(serial_head_key())
-                .await
-                .expect("read Serial head after rejected Circle operation"),
-            head_before
-        );
-        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
-        assert_exact_object_absent(&home, &store_commit).await;
-    }
-
-    #[tokio::test]
-    async fn serial_circle_matching_head_without_its_commit_does_not_activate_or_reappend() {
-        let home = InMemoryCloudHome::new();
-        let founder = UserKeypair::generate();
-        let storage = serial_storage(&home, &founder, "circle-serial-missing-commit");
-        let db = open_serial_test_db();
-        let (storage, _root) = create_exact_serial_store_in_its_own_task(
-            &db,
-            storage,
-            "circle-serial-missing-commit",
-            &founder,
-        )
-        .await;
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-        let journal = prepare_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &device_id,
-            "0000000001000-0000-founder",
-            "Missing commit",
-            &founder,
-        )
-        .await
-        .expect("prepare Circle operation");
-        let CircleOperationPolicy::Serial { head, .. } = &journal.operation().policy else {
-            panic!("expected Serial Circle head")
-        };
-        let current_head = coordination
-            .read_head(serial_head_key())
-            .await
-            .expect("read current Serial head");
-        coordination
-            .replace_head(serial_head_key(), &current_head.version, &head.to_bytes())
-            .await
-            .expect("publish head without its exact commit");
-        db.insert_circle_operation(journal.clone())
-            .await
-            .expect("persist Circle operation");
-
-        publish_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &journal.operation_id,
-            &founder,
-        )
-        .await
-        .expect_err("an activated head cannot repair or trust an absent commit");
-
-        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
-        assert!(db
-            .circle_operation(&journal.operation_id)
-            .await
-            .expect("read Circle journal")
-            .is_some());
-        assert!(home
-            .get(journal.operation().commit_ref.object.slot().logical_key())
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn stale_serial_head_blocks_the_exact_operation_without_activation() {
-        let home = InMemoryCloudHome::new();
-        let signer = UserKeypair::generate();
-        let storage = serial_storage(&home, &signer, "circle-stale-serial");
-        let db = open_serial_test_db();
-        let (storage, _root) =
-            create_exact_serial_store_in_its_own_task(&db, storage, "circle-stale-serial", &signer)
-                .await;
-        let device_id = local_device_id(&db).await;
-        let coordination = storage.serial_coordination().expect("Serial coordination");
-        let expected = prepare_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &device_id,
-            "0000000001000-0000-creator",
-            "Household",
-            &signer,
-        )
-        .await
-        .expect("prepare Serial circle operation");
-        db.insert_circle_operation(expected.clone())
-            .await
-            .expect("persist Serial circle operation");
-
-        host_exec(
-            &db,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('serial-competitor', 'Competing write', NULL, 1, \
-                     '0000000001001-0000-creator', '2026-01-01')",
-        )
-        .await;
-        let (_store_temp, store_dir) = temp_store_dir();
-        assert!(
-            super::super::store_engine::serial::publication::prepare_serial_store_branch(
-                &db,
-                &storage,
-                coordination,
-                &device_id,
-                &signer,
-                &store_dir
-            )
-            .await
-            .expect("prepare competing Serial Store write")
-        );
-        super::super::store_engine::serial::publication::drain_store_writes(
-            &db,
-            &storage,
-            coordination,
-        )
-        .await
-        .expect("activate competing Serial Store write");
-        let competing = db
-            .latest_local_store_position()
-            .await
-            .expect("read competing Serial position")
-            .expect("competing Serial write is materialized");
-
-        let error = publish_circle_operation(
-            &db,
-            &storage,
-            Some(coordination),
-            &expected.operation_id,
-            &signer,
-        )
-        .await
-        .expect_err("stale Serial base must lose head activation");
-        assert!(
-            matches!(error, CircleOperationError::Blocked { .. }),
-            "{error}"
-        );
-        let blocked = db
-            .circle_operation(&expected.operation_id)
-            .await
-            .expect("read blocked Serial operation")
-            .expect("blocked Serial operation remains durable");
-        assert_exact_operation(&expected, &blocked);
-        assert!(matches!(
-            blocked.state(),
-            CircleOperationState::Blocked { .. }
-        ));
-        let operations = db
-            .get_circle_operations()
-            .await
-            .expect("read blocked circle operations");
-        assert_eq!(operations.len(), 1);
-        assert!(matches!(
-            operations[0].state,
-            crate::sync::circle::CircleOperationState::Blocked { .. }
-        ));
-        assert!(db
-            .get_circles(&keys::public_key_hex(&signer))
-            .await
-            .expect("read inactive circles")
-            .is_empty());
-        assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
-        assert_eq!(
-            db.materialized_frontier().await.expect("read frontier"),
-            BTreeMap::from([(SERIAL_STREAM_ID.to_string(), competing)])
-        );
-
-        resume_circle_operations(&db, &storage, Some(coordination), &signer)
-            .await
-            .expect("blocked circle operation remains inert during resume");
-        assert!(db
-            .circle_operation(&expected.operation_id)
-            .await
-            .expect("read blocked circle operation after resume")
-            .is_some());
-        assert_eq!(
-            db.get_circle_operations()
-                .await
-                .expect("read circle operations after resume")
-                .len(),
-            1
         );
     }
 
@@ -5419,7 +4103,6 @@ mod tests {
         let journal = prepare_circle_operation(
             &db,
             &store.storage,
-            None,
             &local_device_id(&db).await,
             "0000000001000-0000-founder",
             "Household",
@@ -5447,7 +4130,6 @@ mod tests {
             &author,
             &founder,
             &keys::public_key_hex(&founder),
-            &CircleMembershipAuthority::MergeConcurrent,
         )
         .await
         .expect("verify retained Circle activation fixture");

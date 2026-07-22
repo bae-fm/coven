@@ -265,27 +265,13 @@ impl DeviceJoinAttempt {
     }
 
     fn validate_shape(&self) -> Result<(), StoreProtocolError> {
-        let registration_policy = match &self.expected_registration.store_commits {
-            StoreCommitAnchor::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            StoreCommitAnchor::Serial => WritePolicy::Serial,
-        };
         validate_store_history_cut(&self.bootstrap_cut)?;
-        if !matches!(
-            (registration_policy, &self.bootstrap_cut),
-            (
-                WritePolicy::MergeConcurrent,
-                StoreHistoryCut::MergeConcurrent(_)
-            ) | (WritePolicy::Serial, StoreHistoryCut::Serial(_))
-        ) {
-            return Err(StoreProtocolError::JoinAttemptMismatch);
-        }
         if self.expected_registration.store_root != self.store_root
             || self.expected_registration.device_id
                 != StoreDeviceId::derive(&self.store_root, &self.expected_registration.origin)
             || self.attempt_slot == self.registration_slot
             || self.attempt_slot == self.outcome_slot
             || self.registration_slot == self.outcome_slot
-            || self.membership.write_policy() != registration_policy
             || self.provider_admin_grant
                 != self.provider_approval.request.offer.provider_admin.grant_id
             || self.provider_approval.request.offer.store_root != self.store_root

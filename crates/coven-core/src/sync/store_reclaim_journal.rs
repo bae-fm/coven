@@ -8,7 +8,7 @@ use super::remote_object::{
 use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
-use super::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHeadRef};
+use super::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
 use super::store_outbound::{PreparedStoreOperationCommit, StoreOutboundError};
 use super::store_reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
@@ -226,58 +226,31 @@ async fn create_and_verify(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ReclaimCommitActivation {
-    MergeConcurrent {
-        commit: StoreBatchCommitRef,
-        head: StoreDeviceHeadRef,
-    },
-    Serial {
-        commit: StoreBatchCommitRef,
-    },
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReclaimCommitActivation {
+    pub(crate) commit: StoreBatchCommitRef,
+    pub(crate) head: StoreDeviceHeadRef,
 }
 
 impl ReclaimCommitActivation {
-    pub(crate) fn merge_concurrent(
+    pub(crate) fn new(
         commit: StoreBatchCommitRef,
         head: StoreDeviceHeadRef,
     ) -> Result<Self, StoreReclaimJournalError> {
-        let activation = Self::MergeConcurrent { commit, head };
-        activation.validate()?;
-        Ok(activation)
-    }
-
-    pub(crate) fn serial(commit: StoreBatchCommitRef) -> Result<Self, StoreReclaimJournalError> {
-        let activation = Self::Serial { commit };
+        let activation = Self { commit, head };
         activation.validate()?;
         Ok(activation)
     }
 
     pub(crate) fn commit(&self) -> &StoreBatchCommitRef {
-        match self {
-            Self::MergeConcurrent { commit, .. } | Self::Serial { commit } => commit,
-        }
+        &self.commit
     }
 
     pub(crate) fn validate(&self) -> Result<(), StoreReclaimJournalError> {
-        match self {
-            Self::MergeConcurrent { commit, head } => {
-                if !matches!(commit.coord, StoreCommitCoord::MergeConcurrent { .. })
-                    || commit.object == head.object
-                {
-                    return Err(StoreReclaimJournalError::Invalid(
-                        "Merge reclaim activation has invalid commit and head identities"
-                            .to_string(),
-                    ));
-                }
-            }
-            Self::Serial { commit } => {
-                if !matches!(commit.coord, StoreCommitCoord::Serial { .. }) {
-                    return Err(StoreReclaimJournalError::Invalid(
-                        "Serial reclaim activation names a Merge commit".to_string(),
-                    ));
-                }
-            }
+        if self.commit.object == self.head.object {
+            return Err(StoreReclaimJournalError::Invalid(
+                "reclaim activation has aliased commit and head identities".to_string(),
+            ));
         }
         Ok(())
     }
@@ -376,8 +349,6 @@ impl ReclaimedStorePackage {
             if &receipt.authorization != authorization
                 || receipt.object == authorization.target().object
                 || receipt_activation.commit() == authorization_activation.commit()
-                || receipt_activation.commit().coord.policy()
-                    != authorization_activation.commit().coord.policy()
             {
                 return Err(StoreReclaimJournalError::Invalid(
                     "reclaim receipt does not close its exact authorization history".to_string(),
@@ -394,9 +365,7 @@ fn validate_reclaim_identity(
 ) -> Result<(), StoreReclaimJournalError> {
     authorization_activation.validate()?;
     let target_activation = authorization.target_activation();
-    if target_activation == authorization_activation.commit()
-        || target_activation.coord.policy() != authorization_activation.commit().coord.policy()
-    {
+    if target_activation == authorization_activation.commit() {
         return Err(StoreReclaimJournalError::Invalid(
             "reclaim authorization does not follow its target in one Store history".to_string(),
         ));

@@ -23,22 +23,7 @@ pub(crate) async fn commit_position_covers(
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, CommitCoverageError> {
-    let same_stream = match (&covering.coord, &covered.coord) {
-        (
-            super::store_commit::StoreCommitCoord::MergeConcurrent {
-                stream_id: covering,
-                ..
-            },
-            super::store_commit::StoreCommitCoord::MergeConcurrent {
-                stream_id: covered, ..
-            },
-        ) => covering == covered,
-        (
-            super::store_commit::StoreCommitCoord::Serial { .. },
-            super::store_commit::StoreCommitCoord::Serial { .. },
-        ) => true,
-        _ => false,
-    };
+    let same_stream = covering.coord.stream_id == covered.coord.stream_id;
     if !same_stream || covering.coord.sequence() < covered.coord.sequence() {
         return Ok(false);
     }
@@ -72,17 +57,7 @@ pub(crate) async fn history_cut_covers(
     cut: &StoreHistoryCut,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
-    let covering = match (cut, &covered.coord) {
-        (
-            StoreHistoryCut::MergeConcurrent(frontier),
-            StoreCommitCoord::MergeConcurrent { stream_id, .. },
-        ) => frontier.get(stream_id),
-        (
-            StoreHistoryCut::Serial(StoreSerialPredecessor::Commit(reference)),
-            StoreCommitCoord::Serial { .. },
-        ) => Some(reference),
-        _ => None,
-    };
+    let covering = cut.0.get(&covered.coord.stream_id);
     match covering {
         Some(covering) => commit_position_covers(storage, root, covering, covered)
             .await
@@ -127,10 +102,8 @@ pub(crate) async fn load_provider_access_activation(
 }
 
 pub(crate) struct LoadedDeviceJoinAttemptEvidence {
-    pub(crate) write_policy: crate::WritePolicy,
     pub(crate) attempt: VerifiedObject<DeviceJoinAttempt>,
     pub(crate) provider_access_activation: StoreBatchCommit,
-    pub(crate) provider_administrator: StoreDeviceRegistration,
 }
 
 pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
@@ -180,10 +153,8 @@ pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
             ));
         }
         Ok(LoadedDeviceJoinAttemptEvidence {
-            write_policy: verified_root.value.descriptor.write_policy,
             attempt,
             provider_access_activation,
-            provider_administrator: administrator,
         })
     })
 }

@@ -509,7 +509,7 @@ mod tests {
             object: exact_object(&format!("{label}/membership-head"), b"membership head"),
         };
         (
-            StoreMembershipStateRef::merge_concurrent(
+            StoreMembershipStateRef::from_parts(
                 vec![head],
                 Vec::new(),
                 Vec::new(),
@@ -518,74 +518,6 @@ mod tests {
             .expect("valid merge-concurrent membership reference"),
             super::super::membership::MembershipGrantCreationAuthority::Entry(founder_coord),
         )
-    }
-
-    fn serial_membership_ref(
-        owner: &UserKeypair,
-        members: &[(String, super::super::membership::MemberRole)],
-        label: &str,
-    ) -> StoreMembershipStateRef {
-        let root_bytes = format!("{label} root").into_bytes();
-        let root = super::super::store_commit::StoreRootRef {
-            store_root_id: ObjectHash::digest(format!("{label} identity").as_bytes()),
-            store_root_hash: ObjectHash::digest(&root_bytes),
-            object: exact_object(&format!("{label}/root"), &root_bytes),
-        };
-        let origin = super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: super::super::store_commit::StoreCreationId::from_nonce(label),
-        };
-        let founder_registration = super::super::store_commit::StoreDeviceRegistrationRef {
-            device_id: super::super::store_commit::StoreDeviceId::derive(&root, &origin),
-            registration_hash: ObjectHash::digest(format!("{label} registration").as_bytes()),
-            object: exact_object(
-                &format!("{label}/registration"),
-                format!("{label} registration").as_bytes(),
-            ),
-        };
-        let founder = test_founder_entry(
-            label,
-            owner,
-            super::super::store_commit::GrantStreamAnchor::StoreMembership {
-                first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/membership/1.json"
-                ))
-                .unwrap(),
-            },
-        );
-        let mut membership = super::super::membership::SerialMembershipState::from_founder(
-            root.store_root_id,
-            &founder,
-        )
-        .expect("found Serial membership");
-        for (index, (pubkey, role)) in members.iter().enumerate() {
-            if pubkey == &keys::public_key_hex(owner) {
-                continue;
-            }
-            let entry = membership
-                .signed_set_member(
-                    owner,
-                    pubkey.clone(),
-                    None,
-                    role.clone(),
-                    format!("member-{index}"),
-                )
-                .expect("sign Serial member");
-            membership = membership.apply(&entry).expect("apply Serial member");
-        }
-        let authorization =
-            super::super::membership::SerialAuthorizationState::from_test_membership(
-                &founder, membership,
-            )
-            .expect("test Serial authorization");
-        StoreMembershipStateRef::serial(
-            super::super::store_commit::SerialStorePosition::Genesis {
-                root,
-                founder_registration,
-            },
-            Vec::new(),
-            &authorization,
-        )
-        .expect("valid Serial membership reference")
     }
 
     struct MergeDeviceAuthority {
@@ -621,10 +553,8 @@ mod tests {
                     access_key_id_hash: ObjectHash::digest(label.as_bytes()),
                 },
             },
-            super::super::store_commit::StoreCommitAnchor::MergeConcurrent {
-                announcements: super::super::store_commit::DeviceStreamAnchor::StoreAnnouncements {
-                    first_slot: slot("announcements"),
-                },
+            super::super::store_commit::DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: slot("announcements"),
             },
             super::super::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: slot("acknowledgements"),
@@ -703,7 +633,7 @@ mod tests {
             metadata_heads: Vec::new(),
             access: Vec::new(),
         };
-        super::super::store_commit::CircleControlRef::MergeConcurrent {
+        super::super::store_commit::CircleControlRef {
             circle_id: control.value.circle_id,
             control: control.coord.clone(),
             head_hash: head.head_hash(),
@@ -730,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn founder_payload_is_complete_and_acyclic_for_both_store_policies() {
+    fn founder_payload_is_complete_and_acyclic() {
         let owner = crate::keys::UserKeypair::generate();
         let peer = crate::keys::UserKeypair::generate();
         let owner_pubkey = crate::keys::public_key_hex(&owner);
@@ -746,96 +676,78 @@ mod tests {
             ),
         ];
 
-        let (merge_membership, merge_authority) =
+        let (membership, membership_authority) =
             merge_membership_ref(&owner, &members, "founder-circle-merge");
-        for (membership, membership_authority) in [
-            (merge_membership, Some(merge_authority)),
-            (
-                serial_membership_ref(&owner, &members, "founder-circle-serial"),
-                None,
-            ),
-        ] {
-            let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
-            let candidate_family = candidate_family("founder-circle");
-            let creation = CircleTransitionDraft::founder(
-                ObjectHash::digest(b"store-root"),
-                candidate_family,
-                "device-a",
-                "Household",
-                "0000000001000-0000-device-a",
-                membership,
-                membership_authority,
-                members.clone(),
-                &ids,
-                &owner,
-            )
-            .expect("construct founder circle");
+        let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
+        let candidate_family = candidate_family("founder-circle");
+        let creation = CircleTransitionDraft::founder(
+            ObjectHash::digest(b"store-root"),
+            candidate_family,
+            "device-a",
+            "Household",
+            "0000000001000-0000-device-a",
+            membership,
+            membership_authority,
+            members.clone(),
+            &ids,
+            &owner,
+        )
+        .expect("construct founder circle");
 
-            assert!(creation.control.verify());
-            assert!(creation.metadata.verify());
-            assert!(creation.roster.verify());
-            assert_eq!(creation.access.len(), 2);
-            for access in &creation.access {
-                assert!(access.leaf.verify(&creation.control, candidate_family));
-                assert!(access.envelope.verify(&creation.control, candidate_family));
-                assert!(access.leaf.verify_envelope(
-                    &creation.control,
-                    &access.envelope,
-                    candidate_family
-                ));
-                assert!(!access.leaf.bytes.windows(64).any(|window| {
-                    window == creation.control.coord.control_hash().to_string().as_bytes()
-                }));
-            }
-            assert!(matches!(
-                creation
-                    .access
-                    .iter()
-                    .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
-                    .unwrap()
-                    .leaf
-                    .value
-                    .disposition,
-                CircleAccessDisposition::Active { .. }
+        assert!(creation.control.verify());
+        assert!(creation.metadata.verify());
+        assert!(creation.roster.verify());
+        assert_eq!(creation.access.len(), 2);
+        for access in &creation.access {
+            assert!(access.leaf.verify(&creation.control, candidate_family));
+            assert!(access.envelope.verify(&creation.control, candidate_family));
+            assert!(access.leaf.verify_envelope(
+                &creation.control,
+                &access.envelope,
+                candidate_family
             ));
-            assert!(matches!(
-                creation
-                    .access
-                    .iter()
-                    .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
-                    .unwrap()
-                    .leaf
-                    .value
-                    .disposition,
-                CircleAccessDisposition::Inactive
-            ));
-
-            if matches!(
-                creation.control.value.value,
-                CircleControlValue::MergeConcurrent { .. }
-            ) {
-                let mut seized = creation.control.value.clone();
-                seized.circle_id = CircleId::from_bytes([0x5a; 16]);
-                seized.signature = keys::sign_hex(&owner, &seized.canonical_bytes()).1;
-                assert!(
-                    !seized.verify(),
-                    "a founder control must not choose an arbitrary Circle ID"
-                );
-
-                let mut discontinuous = creation.control.value.clone();
-                let CircleControlValue::MergeConcurrent { order, .. } = &mut discontinuous.value
-                else {
-                    unreachable!()
-                };
-                order.seq = 2;
-                discontinuous.signature =
-                    keys::sign_hex(&owner, &discontinuous.canonical_bytes()).1;
-                assert!(
-                    !discontinuous.verify(),
-                    "a control without a predecessor must be genesis"
-                );
-            }
+            assert!(!access.leaf.bytes.windows(64).any(|window| {
+                window == creation.control.coord.control_hash().to_string().as_bytes()
+            }));
         }
+        assert!(matches!(
+            creation
+                .access
+                .iter()
+                .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
+                .unwrap()
+                .leaf
+                .value
+                .disposition,
+            CircleAccessDisposition::Active { .. }
+        ));
+        assert!(matches!(
+            creation
+                .access
+                .iter()
+                .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
+                .unwrap()
+                .leaf
+                .value
+                .disposition,
+            CircleAccessDisposition::Inactive
+        ));
+
+        let mut seized = creation.control.value.clone();
+        seized.circle_id = CircleId::from_bytes([0x5a; 16]);
+        seized.signature = keys::sign_hex(&owner, &seized.canonical_bytes()).1;
+        assert!(
+            !seized.verify(),
+            "a founder control must not choose an arbitrary Circle ID"
+        );
+
+        let mut discontinuous = creation.control.value.clone();
+        discontinuous.value.order.seq = 2;
+        discontinuous.signature = keys::sign_hex(&owner, &discontinuous.canonical_bytes()).1;
+        assert!(
+            !discontinuous.verify(),
+            "a control without a predecessor must be genesis"
+        );
     }
 
     #[test]
@@ -864,7 +776,7 @@ mod tests {
             "Household",
             "0000000001000-0000-device-a",
             membership,
-            Some(authority),
+            authority,
             members.clone(),
             &ids,
             &owner,
@@ -919,7 +831,7 @@ mod tests {
 
         let mut wrong_membership_leaf = creation.access[0].leaf.value.clone();
         wrong_membership_leaf.store_membership =
-            serial_membership_ref(&owner, &members, "wrong-membership-leaf");
+            merge_membership_ref(&owner, &members, "wrong-membership-leaf").0;
         wrong_membership_leaf.signature =
             keys::sign_hex(&owner, &wrong_membership_leaf.canonical_bytes()).1;
         let recipient_key =
@@ -965,17 +877,6 @@ mod tests {
             value: wrong_keyring_leaf,
         };
         assert!(!wrong_keyring_leaf.verify(&creation.control, candidate_family));
-
-        let mut wrong_policy_control =
-            serde_json::to_value(&creation.control.value).expect("serialize Merge control");
-        let value = wrong_policy_control["value"]
-            .as_object_mut()
-            .expect("control value is a tagged object");
-        let merge = value
-            .remove("merge_concurrent")
-            .expect("Merge control has Merge value");
-        value.insert("serial".to_string(), merge);
-        assert!(serde_json::from_value::<CircleControl>(wrong_policy_control).is_err());
     }
 
     #[test]
@@ -1074,7 +975,7 @@ mod tests {
         let device = merge_device_authority(&author, store_root_hash, "multi-owner-device");
         let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
         let operation_id = crate::WriteId::from_generated("multi-owner-control-commit".to_string());
-        let order = super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+        let order = super::super::store_commit::StoreCommitOrder {
             seq: 1,
             predecessor: None,
             dependencies: BTreeMap::new(),
@@ -1092,16 +993,14 @@ mod tests {
             "Household",
             "0000000001000-0000-device-a",
             membership.clone(),
-            Some(membership_authority.clone()),
+            membership_authority.clone(),
             members,
             &ids,
             &author,
         )
         .expect("construct founder circle");
         let mut control = creation.control.value.clone();
-        let CircleControlValue::MergeConcurrent { active_epoch, .. } = &mut control.value else {
-            panic!("Merge creation must carry Merge control")
-        };
+        let CircleControlValue { active_epoch, .. } = &mut control.value;
         active_epoch.common.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
         active_epoch.common.owners.sort();
         assert_ne!(active_epoch.common.owners[0], control.author_pubkey);
@@ -1112,7 +1011,7 @@ mod tests {
             value: control,
         };
         let reference = merge_control_reference(&control, &device, "multi-owner");
-        let first_coord = super::super::store_commit::StoreCommitCoord::MergeConcurrent {
+        let first_coord = super::super::store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 1,
         };
@@ -1124,14 +1023,16 @@ mod tests {
             &device.registration,
             order,
             membership.clone(),
-            super::super::store_commit::StoreDeviceStateRef::MergeConcurrent {
-                frontier: super::super::store_commit::CommitFrontier::MergeConcurrent(
-                    BTreeMap::new(),
-                ),
-                recovery: Vec::new(),
-                state_hash: ObjectHash::digest(b"multi-owner initial device state"),
-            },
-            super::super::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
+            super::super::store_commit::StoreDeviceStateRef::from_resolved(
+                super::super::store_commit::CommitFrontier(BTreeMap::new()),
+                &super::super::store_commit::ResolvedStoreDeviceState {
+                    devices: BTreeMap::new(),
+                    recovery: Vec::new(),
+                    state_hash: ObjectHash::digest(b"multi-owner initial device state"),
+                },
+            )
+            .expect("bind initial device state"),
+            super::super::store_commit::StoreOperationMembershipAuthority {
                 predecessor: membership_authority.clone(),
             },
             super::super::store_commit::StoreCommitOperationsInput {
@@ -1246,10 +1147,7 @@ mod tests {
         assert_eq!(publication_fingerprint, control.value.key_fingerprint());
 
         let mut second_value = control.value.clone();
-        let CircleControlValue::MergeConcurrent { active_epoch, .. } = &mut second_value.value
-        else {
-            panic!("Merge creation must carry Merge control")
-        };
+        let CircleControlValue { active_epoch, .. } = &mut second_value.value;
         active_epoch.common.access_root = ObjectHash::digest(b"different founder access root");
         second_value.signature = keys::sign_hex(&author, &second_value.canonical_bytes()).1;
         let second_control = PreparedCircleControl {
@@ -1258,7 +1156,7 @@ mod tests {
             value: second_value,
         };
         let second_reference = merge_control_reference(&second_control, &device, "second-founder");
-        let second_coord = super::super::store_commit::StoreCommitCoord::MergeConcurrent {
+        let second_coord = super::super::store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 2,
         };
@@ -1268,25 +1166,26 @@ mod tests {
             second_coord.clone(),
             device.reference,
             &device.registration,
-            super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+            super::super::store_commit::StoreCommitOrder {
                 seq: 2,
                 predecessor: Some(commit_ref.clone()),
                 dependencies: BTreeMap::new(),
             },
             membership,
-            super::super::store_commit::StoreDeviceStateRef::MergeConcurrent {
-                frontier: super::super::store_commit::CommitFrontier::MergeConcurrent(
-                    BTreeMap::from([(device.stream_id, commit_ref.clone())]),
-                ),
-                recovery: Vec::new(),
-                state_hash: ObjectHash::digest(b"multi-owner second device state"),
-            },
-            super::super::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
-                predecessor: control
-                    .value
-                    .membership_authority()
-                    .cloned()
-                    .expect("MergeConcurrent Circle control carries membership authority"),
+            super::super::store_commit::StoreDeviceStateRef::from_resolved(
+                super::super::store_commit::CommitFrontier(BTreeMap::from([(
+                    device.stream_id,
+                    commit_ref.clone(),
+                )])),
+                &super::super::store_commit::ResolvedStoreDeviceState {
+                    devices: BTreeMap::new(),
+                    recovery: Vec::new(),
+                    state_hash: ObjectHash::digest(b"multi-owner second device state"),
+                },
+            )
+            .expect("bind second device state"),
+            super::super::store_commit::StoreOperationMembershipAuthority {
+                predecessor: control.value.membership_authority().clone(),
             },
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,

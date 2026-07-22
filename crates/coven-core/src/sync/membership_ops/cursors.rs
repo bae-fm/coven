@@ -195,7 +195,7 @@ pub(crate) async fn load_and_persist_owner_anchor(
         founder_registration_bytes,
         founder_genesis,
         owner_pubkey.to_string(),
-        crate::database::InitialStoreMembershipAuthority::MergeConcurrent {
+        crate::database::InitialStoreMembershipAuthority {
             head_refs: chain.head_refs().to_vec(),
         },
     )

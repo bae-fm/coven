@@ -70,31 +70,17 @@ impl<'de> Deserialize<'de> for ObjectHash {
     }
 }
 
-/// Closed coordinate of one Store commit under the Store's signed policy.
+/// Closed coordinate of one Store commit in its author stream.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreCommitCoord {
-    MergeConcurrent {
-        stream_id: AuthorStreamId,
-        sequence: u64,
-    },
-    Serial {
-        sequence: u64,
-    },
+#[serde(deny_unknown_fields)]
+pub struct StoreCommitCoord {
+    pub stream_id: AuthorStreamId,
+    pub sequence: u64,
 }
 
 impl StoreCommitCoord {
     pub fn sequence(&self) -> u64 {
-        match self {
-            Self::MergeConcurrent { sequence, .. } | Self::Serial { sequence } => *sequence,
-        }
-    }
-
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => WritePolicy::Serial,
-        }
+        self.sequence
     }
 
     pub fn validate(&self) -> Result<(), StoreProtocolError> {
@@ -132,49 +118,15 @@ impl CandidateFamilyId {
             store_root_hash: ObjectHash,
             author_registration: &'a StoreDeviceRegistrationRef,
             write_id: &'a WriteId,
-            policy: WritePolicy,
             sequence: u64,
-            predecessor: CandidateFamilyPredecessor<'a>,
+            predecessor: Option<&'a StoreBatchCommitRef>,
         }
-
-        #[derive(Serialize)]
-        #[serde(rename_all = "snake_case")]
-        enum CandidateFamilyPredecessor<'a> {
-            Merge(Option<&'a StoreBatchCommitRef>),
-            SerialGenesis {
-                root: &'a StoreRootRef,
-                founder_registration: &'a StoreDeviceRegistrationRef,
-            },
-            SerialCommit(&'a StoreBatchCommitRef),
-        }
-
-        let predecessor = match order {
-            StoreCommitOrder::MergeConcurrent { predecessor, .. } => {
-                CandidateFamilyPredecessor::Merge(predecessor.as_ref())
-            }
-            StoreCommitOrder::Serial {
-                predecessor:
-                    StoreSerialPredecessor::Genesis {
-                        root,
-                        founder_registration,
-                    },
-                ..
-            } => CandidateFamilyPredecessor::SerialGenesis {
-                root,
-                founder_registration,
-            },
-            StoreCommitOrder::Serial {
-                predecessor: StoreSerialPredecessor::Commit(predecessor),
-                ..
-            } => CandidateFamilyPredecessor::SerialCommit(predecessor),
-        };
         let fields = Fields {
             store_root_hash,
             author_registration,
             write_id,
-            policy: order.policy(),
             sequence: order.seq(),
-            predecessor,
+            predecessor: order.predecessor.as_ref(),
         };
         Self(ObjectHash::digest(&domain_json(
             CANDIDATE_FAMILY_DOMAIN,
@@ -208,11 +160,7 @@ impl StoreBatchCommitDeletionTarget {
         author: &StoreDeviceRegistration,
     ) -> Result<StoreBatchCommit, StoreProtocolError> {
         let commit = self.verify_exact_candidate(expected_store_root_hash, author)?;
-        if matches!(
-            &commit.body,
-            StoreCommitBody::SerialRecoveryActivation { .. }
-                | StoreCommitBody::AbandonCandidates { .. }
-        ) {
+        if matches!(&commit.body, StoreCommitBody::AbandonCandidates { .. }) {
             return Err(StoreProtocolError::Malformed(
                 "retained authority cannot be a candidate cleanup target".to_string(),
             ));
@@ -261,7 +209,7 @@ impl StoreBatchCommitRef {
         coord: StoreCommitCoord,
         object: ExactObjectRef,
     ) -> Result<Self, StoreProtocolError> {
-        if coord.policy() != commit.policy() || coord.sequence() != commit.seq() {
+        if coord.sequence() != commit.seq() {
             return Err(StoreProtocolError::Malformed(
                 "Store commit reference coordinate differs from the signed commit".to_string(),
             ));
@@ -276,10 +224,7 @@ impl StoreBatchCommitRef {
     }
 
     pub fn verify_commit(&self, commit: &StoreBatchCommit) -> Result<(), StoreProtocolError> {
-        if self.coord.policy() != commit.policy()
-            || self.coord.sequence() != commit.seq()
-            || self.commit_hash != commit.commit_hash()
-        {
+        if self.coord.sequence() != commit.seq() || self.commit_hash != commit.commit_hash() {
             return Err(StoreProtocolError::Malformed(
                 "exact Store commit reference differs from the signed commit".to_string(),
             ));
@@ -585,60 +530,31 @@ pub struct SuccessorLink {
     pub next_slot: ObjectSlot,
 }
 
-/// Exact materialized cut, shaped by the Store's signed write policy.
+/// Exact materialized cut across author streams.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CommitFrontier {
-    MergeConcurrent(BTreeMap<AuthorStreamId, StoreBatchCommitRef>),
-    Serial(Option<StoreBatchCommitRef>),
-}
+#[serde(transparent)]
+pub struct CommitFrontier(pub BTreeMap<AuthorStreamId, StoreBatchCommitRef>);
 
-/// Exact Store history cut, including the signed Serial genesis authority.
+/// Exact Store history cut across author streams.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreHistoryCut {
-    MergeConcurrent(BTreeMap<AuthorStreamId, StoreBatchCommitRef>),
-    Serial(StoreSerialPredecessor),
-}
+#[serde(transparent)]
+pub struct StoreHistoryCut(pub BTreeMap<AuthorStreamId, StoreBatchCommitRef>);
 
 impl StoreHistoryCut {
-    pub fn merge_concurrent(commits: BTreeMap<AuthorStreamId, StoreBatchCommitRef>) -> Self {
-        Self::MergeConcurrent(commits)
-    }
-
-    pub fn serial(predecessor: StoreSerialPredecessor) -> Self {
-        Self::Serial(predecessor)
-    }
-
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent(_) => WritePolicy::MergeConcurrent,
-            Self::Serial(_) => WritePolicy::Serial,
-        }
+    pub fn from_commits(commits: BTreeMap<AuthorStreamId, StoreBatchCommitRef>) -> Self {
+        Self(commits)
     }
 
     pub fn position_count(&self) -> usize {
-        match self {
-            Self::MergeConcurrent(commits) => commits.len(),
-            Self::Serial(_) => 1,
-        }
+        self.0.len()
     }
 
-    pub fn serial_predecessor(&self) -> Option<&StoreSerialPredecessor> {
-        match self {
-            Self::Serial(predecessor) => Some(predecessor),
-            Self::MergeConcurrent(_) => None,
-        }
+    pub fn commits(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
+        &self.0
     }
 
     pub fn frontier(&self) -> CommitFrontier {
-        match self {
-            Self::MergeConcurrent(commits) => CommitFrontier::MergeConcurrent(commits.clone()),
-            Self::Serial(StoreSerialPredecessor::Genesis { .. }) => CommitFrontier::Serial(None),
-            Self::Serial(StoreSerialPredecessor::Commit(commit)) => {
-                CommitFrontier::Serial(Some(commit.clone()))
-            }
-        }
+        CommitFrontier(self.0.clone())
     }
 
     pub(crate) fn join(self, other: Self) -> Result<Self, StoreProtocolError> {
@@ -648,212 +564,84 @@ impl StoreHistoryCut {
 
 impl CommitFrontier {
     pub fn from_refs(
-        policy: WritePolicy,
-        mut commits: BTreeMap<String, StoreBatchCommitRef>,
+        commits: BTreeMap<String, StoreBatchCommitRef>,
     ) -> Result<Self, StoreProtocolError> {
-        match policy {
-            WritePolicy::MergeConcurrent => commits
-                .into_iter()
-                .map(|(stream_id, commit)| {
-                    let stream_id = stream_id.parse().map_err(StoreProtocolError::Malformed)?;
-                    Ok((stream_id, commit))
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()
-                .map(Self::MergeConcurrent),
-            WritePolicy::Serial => {
-                let commit = commits.remove(SERIAL_STREAM_ID);
-                if !commits.is_empty() {
-                    return Err(StoreProtocolError::Malformed(format!(
-                        "Serial frontier contains non-serial streams: {:?}",
-                        commits.keys().collect::<Vec<_>>()
-                    )));
-                }
-                if commit.as_ref().is_some_and(|reference| {
-                    !matches!(reference.coord, StoreCommitCoord::Serial { .. })
-                }) {
-                    return Err(StoreProtocolError::Malformed(
-                        "Serial frontier contains a Merge commit".to_string(),
-                    ));
-                }
-                Ok(Self::Serial(commit))
-            }
-        }
+        commits
+            .into_iter()
+            .map(|(stream_id, commit)| {
+                let stream_id = stream_id.parse().map_err(StoreProtocolError::Malformed)?;
+                Ok((stream_id, commit))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map(Self)
     }
 
     pub fn into_refs(self) -> BTreeMap<String, StoreBatchCommitRef> {
-        match self {
-            Self::MergeConcurrent(commits) => commits
-                .into_iter()
-                .map(|(stream_id, commit)| (stream_id.to_string(), commit))
-                .collect(),
-            Self::Serial(Some(commit)) => BTreeMap::from([(SERIAL_STREAM_ID.to_string(), commit)]),
-            Self::Serial(None) => BTreeMap::new(),
-        }
+        self.0
+            .into_iter()
+            .map(|(stream_id, commit)| (stream_id.to_string(), commit))
+            .collect()
     }
 
     pub fn position_count(&self) -> usize {
-        match self {
-            Self::MergeConcurrent(positions) => positions.len(),
-            Self::Serial(Some(_)) => 1,
-            Self::Serial(None) => 0,
-        }
-    }
-
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent(_) => WritePolicy::MergeConcurrent,
-            Self::Serial(_) => WritePolicy::Serial,
-        }
+        self.0.len()
     }
 
     pub fn covers(&self, covered: &Self) -> bool {
-        match (self, covered) {
-            (Self::MergeConcurrent(current), Self::MergeConcurrent(covered)) => {
-                covered.iter().all(|(stream, covered_ref)| {
-                    current.get(stream).is_some_and(|current_ref| {
-                        current_ref.coord.sequence() > covered_ref.coord.sequence()
-                            || current_ref.coord.sequence() == covered_ref.coord.sequence()
-                                && current_ref == covered_ref
-                    })
-                })
-            }
-            (Self::Serial(current), Self::Serial(covered)) => match (current, covered) {
-                (_, None) => true,
-                (Some(current), Some(covered)) => {
-                    current.coord.sequence() > covered.coord.sequence()
-                        || current.coord.sequence() == covered.coord.sequence()
-                            && current == covered
-                }
-                (None, Some(_)) => false,
-            },
-            _ => false,
-        }
+        covered.0.iter().all(|(stream, covered_ref)| {
+            self.0.get(stream).is_some_and(|current_ref| {
+                current_ref.coord.sequence() > covered_ref.coord.sequence()
+                    || current_ref.coord.sequence() == covered_ref.coord.sequence()
+                        && current_ref == covered_ref
+            })
+        })
     }
 
-    pub fn merge_commits(
-        &self,
-    ) -> Result<&BTreeMap<AuthorStreamId, StoreBatchCommitRef>, StoreProtocolError> {
-        match self {
-            Self::MergeConcurrent(commits) => Ok(commits),
-            Self::Serial(_) => Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            }),
-        }
-    }
-
-    pub fn serial_commit(&self) -> Result<Option<&StoreBatchCommitRef>, StoreProtocolError> {
-        match self {
-            Self::Serial(position) => Ok(position.as_ref()),
-            Self::MergeConcurrent(_) => Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::Serial,
-                actual: WritePolicy::MergeConcurrent,
-            }),
-        }
+    pub fn commits(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
+        &self.0
     }
 }
 
 /// Predecessor and dependency order authenticated by one Store commit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreCommitOrder {
-    MergeConcurrent {
-        seq: u64,
-        predecessor: Option<StoreBatchCommitRef>,
-        dependencies: BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
-    },
-    Serial {
-        seq: u64,
-        predecessor: SerialStorePosition,
-    },
+#[serde(deny_unknown_fields)]
+pub struct StoreCommitOrder {
+    pub seq: u64,
+    pub predecessor: Option<StoreBatchCommitRef>,
+    pub dependencies: BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SerialStorePosition {
-    Genesis {
-        root: StoreRootRef,
-        founder_registration: StoreDeviceRegistrationRef,
-    },
-    Commit(StoreBatchCommitRef),
-}
-
-pub type StoreSerialPredecessor = SerialStorePosition;
 
 impl StoreCommitOrder {
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => WritePolicy::Serial,
-        }
-    }
-
     pub fn seq(&self) -> u64 {
-        match self {
-            Self::MergeConcurrent { seq, .. } | Self::Serial { seq, .. } => *seq,
-        }
+        self.seq
     }
 
     pub fn predecessor(&self) -> Option<&StoreBatchCommitRef> {
-        match self {
-            Self::MergeConcurrent { predecessor, .. } => predecessor.as_ref(),
-            Self::Serial {
-                predecessor: StoreSerialPredecessor::Commit(predecessor),
-                ..
-            } => Some(predecessor),
-            Self::Serial {
-                predecessor: StoreSerialPredecessor::Genesis { .. },
-                ..
-            } => None,
-        }
+        self.predecessor.as_ref()
     }
 
-    pub fn dependencies(&self) -> Option<&BTreeMap<AuthorStreamId, StoreBatchCommitRef>> {
-        match self {
-            Self::MergeConcurrent { dependencies, .. } => Some(dependencies),
-            Self::Serial { .. } => None,
-        }
+    pub fn dependencies(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
+        &self.dependencies
     }
 
     pub fn stream_id<'a>(&self, device_id: &'a str) -> &'a str {
-        match self {
-            Self::MergeConcurrent { .. } => device_id,
-            Self::Serial { .. } => SERIAL_STREAM_ID,
-        }
+        device_id
     }
 
     pub fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreProtocolError> {
-        match self {
-            Self::MergeConcurrent {
-                predecessor,
-                dependencies,
-                ..
-            } => {
-                let mut cut = dependencies.clone();
-                if let Some(predecessor) = predecessor {
-                    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord
-                    else {
-                        return Err(StoreProtocolError::JoinAttemptMismatch);
-                    };
-                    if cut
-                        .insert(stream_id, predecessor.clone())
-                        .is_some_and(|existing| existing != *predecessor)
-                    {
-                        return Err(StoreProtocolError::JoinAttemptMismatch);
-                    }
-                }
-                Ok(StoreHistoryCut::MergeConcurrent(cut))
+        let mut cut = self.dependencies.clone();
+        if let Some(predecessor) = &self.predecessor {
+            if cut
+                .insert(predecessor.coord.stream_id, predecessor.clone())
+                .is_some_and(|existing| existing != *predecessor)
+            {
+                return Err(StoreProtocolError::JoinAttemptMismatch);
             }
-            Self::Serial { predecessor, .. } => Ok(StoreHistoryCut::Serial(predecessor.clone())),
         }
+        Ok(StoreHistoryCut(cut))
     }
 }
 
-pub const SERIAL_STREAM_ID: &str = "serial";
-
 pub(super) fn commit_stream_id(coord: &StoreCommitCoord) -> String {
-    match coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    }
+    coord.stream_id.to_string()
 }

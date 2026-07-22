@@ -22,7 +22,7 @@ async fn merge_fixture(store_id: &str) -> MergeFixture {
     let owner_pubkey = pubkey_hex(&owner);
     let store = TestStore::create(&db, store_id, owner.clone())
         .await
-        .expect("create exact MergeConcurrent Store");
+        .expect("create exact Store");
     MergeFixture {
         store,
         db,
@@ -371,7 +371,7 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
         &fixture.store.root,
         &fixture.owner_pubkey,
         current.head_refs(),
-        &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
     )
     .await
     .expect("project direct membership to the empty Store prefix");
@@ -418,7 +418,7 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
         &fixture.store.root,
         &fixture.owner_pubkey,
         candidate.head_refs(),
-        &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
     )
     .await
     .expect("project membership before the Owner promotion Store control");
@@ -512,7 +512,7 @@ async fn invite_carries_the_founder_and_exact_root() {
     assert_eq!(invite.store_root, fixture.store.root);
     assert!(matches!(
         invite.membership_floor,
-        crate::join_code::MembershipFloor::MergeConcurrent(ref floor) if !floor.is_empty()
+        crate::join_code::MembershipFloor(ref floor) if !floor.is_empty()
     ));
 }
 
@@ -873,7 +873,7 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
     };
     let statuses = membership_projection_statuses(
         &graph,
-        &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix::default(),
         &BTreeMap::new(),
     )
     .expect("project deep predecessor path");

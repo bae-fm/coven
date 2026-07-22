@@ -23,9 +23,7 @@ pub(crate) use crate::database::remote_object_records::load_protocol_inert_objec
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
 pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
-pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
-pub(crate) use crate::database::store_device_state::store_serial_predecessor_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
@@ -53,10 +51,9 @@ use crate::sync::circle_activation::{VerifiedCircleActivations, VerifiedStreamAc
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{
-    AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef, SerialAuthorizationState,
-    SerialMembershipState, StoreMembershipConflictResolutionRef,
+    AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
+    StoreMembershipConflictResolutionRef,
 };
-use crate::sync::provider::ProviderAdminState;
 use crate::sync::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
@@ -67,7 +64,7 @@ use crate::sync::retained_replay::{
 };
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
-use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionedObject};
+use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
     CirclePackageRef, CommitFrontier, ObjectHash, ResolvedStoreDeviceState,
@@ -75,9 +72,8 @@ use crate::sync::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, StoreSnapshotRef, StreamActivationId,
-    VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSnapshotRef,
+    StreamActivationId, VerifiedStoreDeviceOperations,
 };
 use crate::sync::store_device_exclusion::{
     DurableStoreDeviceExclusionOperation, StoreDeviceExclusionCompletion,
@@ -88,10 +84,9 @@ use crate::sync::store_reclaim_journal::{
     StoreReclaimJournalError,
 };
 use crate::write::{
-    AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
-    WriteReceipt, WriteResolution, WriteStatus,
+    AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteResolution,
+    WriteStatus,
 };
-use crate::WritePolicy;
 
 mod blob_bindings;
 mod blob_records;
@@ -122,7 +117,6 @@ mod provider_probes;
 mod remote_object_records;
 mod retained_merge_replay;
 mod schema_contract;
-mod serial_authorization;
 mod snapshot_objects;
 mod snapshot_publication;
 mod snapshot_records;
@@ -147,19 +141,16 @@ mod write_publication_records;
 pub(crate) use blob_records::previous_row_blob_for_write_on;
 use circle_operation_records::*;
 use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
-pub(crate) use merge_candidate_records::parse_prepared_serial_candidate;
 use merge_candidate_records::*;
 pub(crate) use operation_models::{
     DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
     LocalDeviceRegistrationState, MembershipMutationActivation, PreparedSnapshotBlob,
-    PublishedStoreSnapshot, TerminalMembershipMutation,
+    PublishedStoreSnapshot,
 };
 use operation_models::{LocalDeviceRegistrationJournalRow, PreparedLocalDeviceRegistrationRow};
 #[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
-use prepared_audience_objects::{
-    validate_prepared_audience_blob_bindings, validate_prepared_audience_blob_graph,
-};
+use prepared_audience_objects::validate_prepared_audience_blob_graph;
 pub(crate) use prepared_audience_objects::{
     BlobActivation, MakeRemoteIntentState, PreparedAudienceBlob, PreparedAudienceObjects,
     PreparedAudiencePackage, PreparedRemoteObject, StoredBlobReferenceState,
@@ -178,48 +169,33 @@ use store_authority_records::{
 pub(crate) use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
 };
-pub use write_models::SerialBranchDiscardState;
 pub(crate) use write_models::{
-    AuthorExclusionActivationLocator, BlockedMergeCandidate, CanonicalProtocolObject,
-    CompletePreparedStoreWriteOutcome, ExactProtocolObject, InitialStoreMembershipAuthority,
-    MergeAbandonmentState, MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
-    PreparedMergeAbandonmentCandidates, PreparedProtocolObject, PreparedSerialCandidateAbandonment,
-    PreparedSerialStoreBranch, PreparedSerialStoreWriteCommit, PreparedStoreWrite,
-    PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
-    SerialStoreBranchPreparationWork, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
-    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
-    TerminalCandidateCleanupVerification, UnresolvedSerialBranch,
-};
-pub(crate) use write_publication_records::{
-    parse_prepared_serial_write_state, PreparedWriteMaterialization,
+    AuthorExclusionActivationLocator, BlockedMergeCandidate, CompletePreparedStoreWriteOutcome,
+    ExactProtocolObject, InitialStoreMembershipAuthority, MergeAbandonmentState,
+    MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
+    PreparedMergeAbandonmentCandidates, PreparedProtocolObject, PreparedStoreWrite,
+    PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase,
+    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteRemoteBlob, StoreWriteRouting,
+    TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
 };
 pub(crate) use write_publication_records::{
     CandidateCleanupObject, LocalRetirementMaterialization, MergeCandidateAbandonmentPreparation,
-    OwnedVerifiedMergeMaterialization, RetainedPackageApplication,
-    SerialCandidateAbandonmentPreparation, SerialStoreWritePreparation,
-    SerialStoreWritePreparationEntry, StoreWritePreparation, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects,
+    OwnedVerifiedMergeMaterialization, PreparedWriteMaterialization, RetainedPackageApplication,
+    StoreWritePreparation, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
 use write_publication_records::{
-    DurableSerialCandidateAbandonment, MaterializedCommitRetention, MergeAbandonmentOutcome,
-    MergeRetractionCleanupInput, PreparedMergeCandidate, PreparedSerialCandidate,
+    MergeAbandonmentOutcome, MergeRetractionCleanupInput, PreparedMergeCandidate,
     PreparedStoreWriteState, RetainedAudiencePackage, RetainedCommitActivationInput,
     RetainedMergeMaterializationInput, RetainedMergeMaterializationKey,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 const HOST_DEVICE_ID_STATE_KEY: &str = "host_device_id";
-pub const WRITE_POLICY_STATE_KEY: &str = "write_policy";
 pub(crate) const SYNC_ROUTING_CONTRACT_STATE_KEY: &str = "sync_routing_contract";
 pub const SYNC_ROUTING_HASH_STATE_KEY: &str = "sync_routing_hash";
 pub(crate) const COVEN_SCHEMA_MANIFEST_STATE_KEY: &str = "coven_schema_manifest";
 pub(crate) const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
 pub(crate) const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
-pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
-pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
-pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
-pub const SERIAL_WRAPPED_KEYS_STATE_KEY: &str = "serial_wrapped_keys";
-pub(crate) const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
 pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
@@ -289,7 +265,6 @@ pub enum OpenError {
 
 #[derive(Clone)]
 struct DatabaseState {
-    write_policy: WritePolicy,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
@@ -344,10 +319,6 @@ pub enum DatabaseTestPoint {
     StoreWriteCommitUploaded { write_id: WriteId },
     StoreWriteHeadReadBack { write_id: WriteId },
     StoreDeviceExclusionCandidateStaged,
-    SerialStoreHeadActivated,
-    SerialStoreMaterialized,
-    SerialRemovalBeforeAdoption,
-    SerialMembershipTerminalized,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -485,7 +456,6 @@ struct DatabaseCore {
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::blob::TransferLimits,
-    write_policy: WritePolicy,
 }
 
 pub(crate) struct VerifiedSnapshotBootstrapInstall {
@@ -528,7 +498,6 @@ impl VerifiedSnapshotBootstrapInstall {
             || stability.snapshot != snapshot.reference
             || stability.metadata != snapshot.meta
             || snapshot.meta.successor.next_slot != snapshot.successor_slot
-            || snapshot.meta.coverage.policy() != store_root.value.descriptor.write_policy
         {
             return Err(DbError::Message(
                 "bootstrap snapshot differs from its verified stability authority".to_string(),
@@ -545,7 +514,6 @@ impl VerifiedSnapshotBootstrapInstall {
     fn install_on(
         &self,
         conn: &Connection,
-        write_policy: WritePolicy,
         schema_version: u32,
         routing_hash: ObjectHash,
     ) -> Result<(), DbError> {
@@ -596,7 +564,6 @@ impl VerifiedSnapshotBootstrapInstall {
         }
         install_snapshot_replay_baseline_on(
             conn,
-            write_policy,
             schema_version,
             routing_hash,
             self.stability.clone(),

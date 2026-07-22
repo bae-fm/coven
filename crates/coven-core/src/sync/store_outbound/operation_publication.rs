@@ -1,41 +1,12 @@
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(crate) enum StoreOperationPublicationMode<'a> {
-    MergeConcurrent,
-    Serial {
-        coordination: &'a dyn CoordinationStorage,
-    },
-}
-
-impl<'a> StoreOperationPublicationMode<'a> {
-    pub(crate) fn from_dependencies(
-        policy: crate::WritePolicy,
-        coordination: Option<&'a dyn CoordinationStorage>,
-    ) -> Result<Self, StoreOutboundError> {
-        match (policy, coordination) {
-            (crate::WritePolicy::MergeConcurrent, None) => Ok(Self::MergeConcurrent),
-            (crate::WritePolicy::Serial, Some(coordination)) => Ok(Self::Serial { coordination }),
-            (crate::WritePolicy::MergeConcurrent, Some(_)) => {
-                Err(StoreOutboundError::InvalidOutbound(
-                    "Merge Store operation publication received Serial coordination".to_string(),
-                ))
-            }
-            (crate::WritePolicy::Serial, None) => {
-                Err(StoreOutboundError::MissingSerialCoordination)
-            }
-        }
-    }
-}
-
 pub(crate) async fn publish_prepared_store_operation(
     db: &Database,
     storage: &dyn SyncStorage,
-    mode: StoreOperationPublicationMode<'_>,
     prepared: Box<PreparedStoreOperationCommit>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     Box::pin(publish_prepared_store_operation_with_membership_completion(
-        db, storage, mode, prepared, None, None,
+        db, storage, prepared, None, None,
     ))
     .await
 }
@@ -56,84 +27,27 @@ pub(crate) fn publish_prepared_store_membership_operation<'a>(
     Box::pin(publish_prepared_store_operation_with_membership_completion(
         db,
         storage,
-        StoreOperationPublicationMode::MergeConcurrent,
         prepared,
         Some(membership_objects),
         Some(completion),
     ))
 }
 
-pub(crate) async fn publish_prepared_serial_membership_operation(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    prepared: Box<PreparedStoreOperationCommit>,
-    completion: StoreMembershipJournalCompletion,
-) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    Box::pin(publish_prepared_store_operation_with_membership_completion(
-        db,
-        storage,
-        StoreOperationPublicationMode::Serial { coordination },
-        prepared,
-        None,
-        Some(completion),
-    ))
-    .await
-}
-
 async fn publish_prepared_store_operation_with_membership_completion(
     db: &Database,
     storage: &dyn SyncStorage,
-    mode: StoreOperationPublicationMode<'_>,
     prepared: Box<PreparedStoreOperationCommit>,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    match (mode, *prepared) {
-        (
-            StoreOperationPublicationMode::Serial { coordination },
-            PreparedStoreOperationCommit::Serial(candidate),
-        ) => {
-            if membership_objects.is_some() {
-                return Err(StoreOutboundError::InvalidOutbound(
-                    "Serial membership publication received Merge membership objects".to_string(),
-                ));
-            }
-            crate::sync::store_engine::serial::operations::publish_prepared(
-                db,
-                storage,
-                coordination,
-                Box::new(candidate),
-                membership_completion,
-            )
-            .await
-        }
-        (
-            StoreOperationPublicationMode::MergeConcurrent,
-            PreparedStoreOperationCommit::MergeConcurrent(candidate),
-        ) => {
-            crate::sync::store_engine::merge::operations::publish_prepared(
-                db,
-                storage,
-                Box::new(candidate),
-                membership_objects,
-                membership_completion,
-            )
-            .await
-        }
-        (
-            StoreOperationPublicationMode::MergeConcurrent,
-            PreparedStoreOperationCommit::Serial(_),
-        ) => Err(StoreOutboundError::InvalidOutbound(
-            "Merge publication received a Serial Store candidate".to_string(),
-        )),
-        (
-            StoreOperationPublicationMode::Serial { .. },
-            PreparedStoreOperationCommit::MergeConcurrent(_),
-        ) => Err(StoreOutboundError::InvalidOutbound(
-            "Serial publication received a Merge Store candidate".to_string(),
-        )),
-    }
+    crate::sync::store_engine::engine::operations::publish_prepared(
+        db,
+        storage,
+        prepared,
+        membership_objects,
+        membership_completion,
+    )
+    .await
 }
 
 pub(crate) struct PreparedStoreOperationActivation {
@@ -278,13 +192,6 @@ pub(crate) fn retained_store_operation_objects(
         .into_iter()
         .chain(
             commit
-                .control()
-                .into_iter()
-                .flat_map(StoreControl::introduced_wrapped_keys)
-                .map(|reference| reference.object.clone()),
-        )
-        .chain(
-            commit
                 .device_exclusion_proposals()
                 .iter()
                 .map(|reference| reference.object.clone()),
@@ -325,12 +232,11 @@ pub(crate) fn retained_store_operation_objects(
 pub(crate) async fn activate_store_operation_commit(
     db: &Database,
     storage: &dyn SyncStorage,
-    mode: StoreOperationPublicationMode<'_>,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreOutboundError> {
     let prepared = prepare_store_operation_candidate(db, storage, plan, batch).await?;
-    match publish_prepared_store_operation(db, storage, mode, Box::new(prepared)).await? {
+    match publish_prepared_store_operation(db, storage, Box::new(prepared)).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {
             Err(StoreOutboundError::InvalidOutbound(format!(
@@ -348,63 +254,4 @@ pub(crate) async fn activate_store_operation_commit(
             ))
         }
     }
-}
-
-#[cfg(test)]
-pub(crate) async fn activate_test_serial_control_candidate(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    device_id: &str,
-    signer: &UserKeypair,
-    control: StoreControl,
-    wraps: Vec<super::wrapped_store_key::PreparedWrappedStoreKey>,
-) -> Result<PreparedStoreOperationCommit, StoreOutboundError> {
-    let plan = prepare_store_operation_commit(
-        db,
-        storage,
-        StoreOperationPreparation::Serial { coordination },
-        device_id,
-        signer,
-    )
-    .await?;
-    let candidate =
-        prepare_store_operation_candidate(db, storage, plan, StoreOperationBatch::Control(control))
-            .await?;
-    let remotes = candidate.membership_control_remote_objects(&wraps)?;
-    let plan_bytes = serde_json::to_vec(&candidate).map_err(|error| {
-        StoreOutboundError::InvalidOutbound(format!(
-            "serialize test Serial control candidate: {error}"
-        ))
-    })?;
-    let intent_hash = db
-        .stage_membership_candidate_mutation(
-            plan_bytes,
-            b"test_serial_control".to_vec(),
-            remotes,
-            None,
-        )
-        .await?;
-    let root = required_store_root(db).await?;
-    super::membership_ops::publish_serial_membership_wraps(db, storage, &root, &candidate, &wraps)
-        .await
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    match publish_prepared_store_operation(
-        db,
-        storage,
-        StoreOperationPublicationMode::Serial { coordination },
-        Box::new(candidate.clone()),
-    )
-    .await?
-    {
-        StoreOperationPublicationOutcome::Activated(reference)
-            if reference == candidate.reference => {}
-        outcome => {
-            return Err(StoreOutboundError::InvalidOutbound(format!(
-                "test Serial control candidate did not activate: {outcome:?}"
-            )))
-        }
-    }
-    db.complete_membership_mutation(intent_hash).await?;
-    Ok(candidate)
 }

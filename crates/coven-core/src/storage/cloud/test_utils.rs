@@ -14,9 +14,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError,
-    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
-    CloudHomeError, CloudVersionedHead, ExactSlotStorage, ObjectSlot, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
+    CloudHomeError, ExactSlotStorage, ObjectSlot, PartSink, UploadProgress,
 };
 
 #[derive(Clone)]
@@ -58,7 +57,6 @@ pub struct InMemoryCloudHome {
     provider_binding: crate::sync::storage::ResolvedProviderBinding,
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     exact_slot_allocations: Arc<AtomicUsize>,
-    head_versions: Arc<Mutex<HashMap<String, u64>>>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
@@ -77,10 +75,6 @@ pub struct InMemoryCloudHome {
     exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     exact_delete_count: Arc<AtomicUsize>,
     fail_exact_delete_on: Arc<AtomicUsize>,
-    fail_head_cleanup: Arc<AtomicBool>,
-    head_mutation_count: Arc<AtomicUsize>,
-    fail_head_after_mutation: Arc<AtomicBool>,
-    head_after_mutation_override: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl InMemoryCloudHome {
@@ -105,7 +99,6 @@ impl InMemoryCloudHome {
             },
             writes: Arc::new(Mutex::new(HashMap::new())),
             exact_slot_allocations: Arc::new(AtomicUsize::new(0)),
-            head_versions: Arc::new(Mutex::new(HashMap::new())),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
@@ -124,10 +117,6 @@ impl InMemoryCloudHome {
             exact_stream_read_barrier: Arc::new(Mutex::new(None)),
             exact_delete_count: Arc::new(AtomicUsize::new(0)),
             fail_exact_delete_on: Arc::new(AtomicUsize::new(0)),
-            fail_head_cleanup: Arc::new(AtomicBool::new(false)),
-            head_mutation_count: Arc::new(AtomicUsize::new(0)),
-            fail_head_after_mutation: Arc::new(AtomicBool::new(false)),
-            head_after_mutation_override: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -259,22 +248,6 @@ impl InMemoryCloudHome {
         self.fail_exact_delete_on.store(call, Ordering::SeqCst);
     }
 
-    pub fn fail_coordination_probe_cleanup(&self) {
-        self.fail_head_cleanup.store(true, Ordering::SeqCst);
-    }
-
-    pub fn head_mutation_count(&self) -> usize {
-        self.head_mutation_count.load(Ordering::SeqCst)
-    }
-
-    pub fn fail_next_head_mutation_after_visibility(&self) {
-        self.fail_head_after_mutation.store(true, Ordering::SeqCst);
-    }
-
-    pub fn replace_after_next_head_mutation(&self, replacement: Vec<u8>) {
-        *self.head_after_mutation_override.lock().unwrap() = Some(replacement);
-    }
-
     /// Drop `key`'s bytes out of band — as if the object vanished from the
     /// bucket on its own, without a `delete` (which `deletes_seen` would
     /// record). Drives missing-blob read failures.
@@ -340,116 +313,6 @@ impl InMemoryCloudHome {
 impl Default for InMemoryCloudHome {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[async_trait]
-impl CloudHeadStorage for InMemoryCloudHome {
-    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
-        let writes = self.writes.lock().unwrap();
-        let versions = self.head_versions.lock().unwrap();
-        let bytes = writes
-            .get(key)
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        let version = versions.get(key).copied().ok_or_else(|| {
-            CloudHomeError::Configuration(format!(
-                "coordination head {key:?} has bytes without a version"
-            ))
-        })?;
-        Ok(CloudVersionedHead {
-            bytes,
-            version: CloudHeadVersion::from_provider(version.to_string())?,
-        })
-    }
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
-        let mut writes = self.writes.lock().unwrap();
-        let mut versions = self.head_versions.lock().unwrap();
-        if writes.contains_key(key) {
-            return Err(CloudHeadCreateError::AlreadyExists);
-        }
-        let version = 1_u64;
-        writes.insert(key.to_string(), bytes.clone());
-        versions.insert(key.to_string(), version);
-        self.head_mutation_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(replacement) = self.head_after_mutation_override.lock().unwrap().take() {
-            writes.insert(key.to_string(), replacement);
-            versions.insert(key.to_string(), version + 1);
-            self.head_mutation_count.fetch_add(1, Ordering::SeqCst);
-            return Err(CloudHeadCreateError::Storage(CloudHomeError::Transport(
-                "injected competing head after visible create".to_string(),
-            )));
-        }
-        if self.fail_head_after_mutation.swap(false, Ordering::SeqCst) {
-            return Err(CloudHeadCreateError::Storage(CloudHomeError::Transport(
-                "injected lost response after visible create".to_string(),
-            )));
-        }
-        Ok(CloudVersionedHead {
-            bytes,
-            version: CloudHeadVersion::from_provider(version.to_string())?,
-        })
-    }
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &CloudHeadVersion,
-        bytes: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
-        let mut writes = self.writes.lock().unwrap();
-        let mut versions = self.head_versions.lock().unwrap();
-        let current = versions
-            .get(key)
-            .copied()
-            .ok_or(CloudHeadReplaceError::VersionMismatch)?;
-        if current.to_string() != expected.as_provider() || !writes.contains_key(key) {
-            return Err(CloudHeadReplaceError::VersionMismatch);
-        }
-        let version = current.checked_add(1).ok_or_else(|| {
-            CloudHeadReplaceError::Storage(CloudHomeError::Configuration(
-                "coordination head version exhausted".to_string(),
-            ))
-        })?;
-        writes.insert(key.to_string(), bytes.clone());
-        versions.insert(key.to_string(), version);
-        self.head_mutation_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(replacement) = self.head_after_mutation_override.lock().unwrap().take() {
-            writes.insert(key.to_string(), replacement);
-            versions.insert(key.to_string(), version + 1);
-            self.head_mutation_count.fetch_add(1, Ordering::SeqCst);
-            return Err(CloudHeadReplaceError::Storage(CloudHomeError::Transport(
-                "injected competing head after visible replace".to_string(),
-            )));
-        }
-        if self.fail_head_after_mutation.swap(false, Ordering::SeqCst) {
-            return Err(CloudHeadReplaceError::Storage(CloudHomeError::Transport(
-                "injected lost response after visible replace".to_string(),
-            )));
-        }
-        Ok(CloudVersionedHead {
-            bytes,
-            version: CloudHeadVersion::from_provider(version.to_string())?,
-        })
-    }
-
-    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
-        if self.fail_head_cleanup.swap(false, Ordering::SeqCst) {
-            return Err(CloudHomeError::Transport(
-                "InMemoryCloudHome: armed coordination cleanup failure".to_string(),
-            ));
-        }
-        let mut writes = self.writes.lock().unwrap();
-        let mut versions = self.head_versions.lock().unwrap();
-        writes.remove(key);
-        versions.remove(key);
-        self.deletes.lock().unwrap().push(key.to_string());
-        Ok(())
     }
 }
 

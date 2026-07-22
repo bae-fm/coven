@@ -170,7 +170,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             crate::WriteStatus::Published(position)
                 if matches!(
                     position.as_ref(),
-                    crate::PublishedPosition::MergeConcurrent { device_id, commit }
+                    crate::PublishedPosition { device_id, commit }
                         if device_id == &fixture.device_id
                             && commit.coord.sequence() == 1
                             && commit.commit_hash == fixture.commit_ref.commit_hash
@@ -281,7 +281,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     );
     fixture.home.fail_exact_delete_on_call(2);
     assert!(
-        super::super::super::store_engine::merge::pull::cleanup_merge_candidate(
+        super::super::super::store_engine::engine::pull::cleanup_merge_candidate(
             &fixture.db,
             &fixture.storage,
             fixture.write_id.clone(),
@@ -294,7 +294,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         &fixture.home,
         &fixture.commit_ref.object
     ));
-    super::super::super::store_engine::merge::pull::cleanup_merge_candidate(
+    super::super::super::store_engine::engine::pull::cleanup_merge_candidate(
         &fixture.db,
         &fixture.storage,
         fixture.write_id.clone(),
@@ -813,7 +813,7 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
         crate::WriteStatus::Published(position)
             if matches!(
                 position.as_ref(),
-                crate::PublishedPosition::MergeConcurrent { commit, .. }
+                crate::PublishedPosition { commit, .. }
                     if commit.coord.sequence() == 1
                         && commit.commit_hash == fixture.commit_ref.commit_hash
             )
@@ -886,7 +886,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         crate::WriteStatus::Published(position)
             if matches!(
                 position.as_ref(),
-                crate::PublishedPosition::MergeConcurrent { commit, .. }
+                crate::PublishedPosition { commit, .. }
                     if commit.coord.sequence() == 1
                         && commit.commit_hash == fixture.commit_ref.commit_hash
             )
@@ -906,8 +906,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
+                crate::blob::TransferLimits::one_at_a_time(),
                 "dev-writer".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
             )
@@ -1214,127 +1213,4 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     .await
     .expect("prepare write after discarded blocked writes"));
     assert_eq!(drain_store_writes(&db, &storage).await.unwrap(), 1);
-}
-
-#[tokio::test]
-async fn retrying_one_blocked_serial_write_revalidates_the_whole_ordered_branch() {
-    let (_home, storage, db, keypair, root, blocked) = serial_fixture("serial-blocked-retry").await;
-    remove_exact_store_root(&db).await;
-    let (_store_temp, store_dir) = temp_store_dir();
-    assert!(prepare_serial_store_write(
-        &db,
-        &storage,
-        storage.serial_coordination().unwrap(),
-        &local_device_id(&db).await,
-        &keypair,
-        &store_dir
-    )
-    .await
-    .is_err());
-    assert_eq!(db.blocked_writes().await.unwrap().len(), 2);
-
-    reinstall_exact_store_root(&db, &storage, &root).await;
-    host_exec(
-        &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('serial-retry-later', 'later', NULL, 1, \
-                 '0000000001002-0000-writer', '2026-01-01')",
-    )
-    .await;
-    let branch = db.pending_writes().await.unwrap();
-    assert_eq!(branch.len(), 3);
-    assert_eq!(branch[2].status, crate::WriteStatus::Pending);
-
-    assert_eq!(
-        db.retry_blocked_write(&blocked[1].write_id).await.unwrap(),
-        blocked
-            .iter()
-            .map(|write| write.write_id.clone())
-            .collect::<Vec<_>>()
-    );
-    remove_exact_store_root(&db).await;
-    assert!(prepare_serial_store_write(
-        &db,
-        &storage,
-        storage.serial_coordination().unwrap(),
-        &local_device_id(&db).await,
-        &keypair,
-        &store_dir
-    )
-    .await
-    .is_err());
-    assert_eq!(db.blocked_writes().await.unwrap().len(), 3);
-    reinstall_exact_store_root(&db, &storage, &root).await;
-    assert_eq!(
-        db.retry_blocked_write(&branch[2].write_id).await.unwrap(),
-        branch
-            .iter()
-            .map(|write| write.write_id.clone())
-            .collect::<Vec<_>>()
-    );
-    assert!(prepare_serial_store_write(
-        &db,
-        &storage,
-        storage.serial_coordination().unwrap(),
-        &local_device_id(&db).await,
-        &keypair,
-        &store_dir
-    )
-    .await
-    .expect("revalidate repaired Serial branch"));
-    for write in branch {
-        assert_eq!(
-            db.write_status(&write.write_id).await.unwrap(),
-            crate::WriteStatus::Publishing
-        );
-    }
-}
-
-#[tokio::test]
-async fn discarding_a_blocked_serial_branch_allows_a_new_branch_to_publish() {
-    let (_home, storage, db, keypair, root, blocked) =
-        serial_fixture("serial-blocked-discard").await;
-    remove_exact_store_root(&db).await;
-    let (_store_temp, store_dir) = temp_store_dir();
-    assert!(prepare_serial_store_write(
-        &db,
-        &storage,
-        storage.serial_coordination().unwrap(),
-        &local_device_id(&db).await,
-        &keypair,
-        &store_dir
-    )
-    .await
-    .is_err());
-    assert_eq!(
-        db.discard_blocked_write(&blocked[0].write_id)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-    reinstall_exact_store_root(&db, &storage, &root).await;
-    host_exec(
-        &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('after-serial-discard', 'after', NULL, 1, \
-                 '0000000001002-0000-writer', '2026-01-01')",
-    )
-    .await;
-    assert!(prepare_serial_store_write(
-        &db,
-        &storage,
-        storage.serial_coordination().unwrap(),
-        &local_device_id(&db).await,
-        &keypair,
-        &store_dir
-    )
-    .await
-    .expect("prepare new branch after discarded Serial branch"));
-    assert_eq!(
-        drain_serial_store_writes(&db, &storage, storage.serial_coordination().unwrap(),)
-            .await
-            .unwrap(),
-        1
-    );
 }

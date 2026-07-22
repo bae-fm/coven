@@ -149,8 +149,7 @@ pub use sync::session::{BlobDecl, RowIdentity, SyncedTable};
 
 // Config.
 pub use config::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, CustomS3Serial,
-    HomeStorage,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, HomeStorage,
 };
 
 // Keys / oauth / keyring bootstrap. The keyring service name has a setter and the
@@ -185,11 +184,10 @@ pub use sync::device_join::{
     prepare_device_provider_access_request, prepare_device_registration_request,
     publish_device_provider_challenge, revoke_device_provider_admission_writes,
     revoke_joining_device_writes, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
-    DeviceJoinAuthorization, DeviceJoinCancellation, DeviceJoinCleanupActivation,
-    DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt, DeviceJoinError,
-    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinProducer,
-    DeviceJoinProducerWriteRevocation, DeviceJoinRole, DeviceJoinStatus,
-    DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
+    DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
+    DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinRole,
+    DeviceJoinStatus, DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
@@ -220,16 +218,14 @@ pub use clock::{FixedClock, SteppingClock};
 pub use id_provider::SequentialIdProvider;
 pub use id_provider::{IdProvider, IdRef, UuidProvider};
 pub use write::{
-    AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition,
-    SerializationConflict, WriteBlock, WriteId, WritePolicy, WriteReceipt, WriteResolution,
-    WriteRetractionWitness, WriteStatus,
+    AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,
+    WriteResolution, WriteRetractionWitness, WriteStatus,
 };
 
 // Managed local blob store: the host constructs it; coven never does.
 pub use storage::cloud::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
-    CloudHeadReplaceError, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudVersionedHead, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, PartSink, UploadProgress,
 };
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
@@ -243,7 +239,6 @@ pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
 pub use sync::store_commit::{
     CommitFrontier, ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder,
-    StoreSerialPredecessor,
 };
 
 // In-memory cloud home for host integration tests.

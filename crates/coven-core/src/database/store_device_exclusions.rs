@@ -131,15 +131,9 @@ impl Database {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let next_candidate = next.candidate().expect("validated candidate state");
-            match (candidate.merge_head_ref(), next_candidate.merge_head_ref()) {
-                (Some(current), Some(replacement)) if current != replacement => {
-                    let (winner, prepared) =
-                        next_candidate.merge_publication().ok_or_else(|| {
-                            DbError::Message(
-                                "replacement Merge exclusion candidate has no signed head"
-                                    .to_string(),
-                            )
-                        })?;
+            match (candidate.head_ref(), next_candidate.head_ref()) {
+                (current, replacement) if current != replacement => {
+                    let (winner, prepared) = next_candidate.publication();
                     replace_prepared_merge_head_remote_on(
                         &tx,
                         &current.object,
@@ -148,12 +142,7 @@ impl Database {
                         &candidate.reference,
                     )?;
                 }
-                (None, None) | (Some(_), Some(_)) => {}
-                _ => {
-                    return Err(DbError::Message(
-                        "replacement exclusion candidate changes Store write policy".to_string(),
-                    ));
-                }
+                _ => {}
             }
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
@@ -196,10 +185,7 @@ impl Database {
                 let candidate = expected
                     .candidate()
                     .expect("candidate-prepared exclusion has a candidate");
-                let stream = match &candidate.reference.coord {
-                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-                };
+                let stream = candidate.reference.coord.stream_id.to_string();
                 if Self::materialized_commit_ref_on(
                     &tx,
                     &stream,
@@ -316,19 +302,17 @@ impl Database {
                     "uploaded exclusion authority became a deletion target".to_string(),
                 ));
             }
-            if let Some(head) = candidate.merge_head_ref() {
-                if begin_remote_candidate_nonactivation_on(
-                    &tx,
-                    remote_object_id(&head.object),
-                    nonactivation.clone(),
-                )?
-                .is_some()
-                {
-                    return Err(DbError::Message(
-                        "Store-device exclusion activation head became a deletion target"
-                            .to_string(),
-                    ));
-                }
+            let head = candidate.head_ref();
+            if begin_remote_candidate_nonactivation_on(
+                &tx,
+                remote_object_id(&head.object),
+                nonactivation.clone(),
+            )?
+            .is_some()
+            {
+                return Err(DbError::Message(
+                    "Store-device exclusion activation head became a deletion target".to_string(),
+                ));
             }
             if begin_remote_candidate_nonactivation_on(
                 &tx,
@@ -421,18 +405,17 @@ impl Database {
                     "reusable exclusion outcome became a deletion target".to_string(),
                 ));
             }
-            if let Some(head) = losing_candidate.merge_head_ref() {
-                if begin_remote_candidate_nonactivation_on(
-                    &tx,
-                    remote_object_id(&head.object),
-                    nonactivation.clone(),
-                )?
-                .is_some()
-                {
-                    return Err(DbError::Message(
-                        "losing exclusion activation head became a deletion target".to_string(),
-                    ));
-                }
+            let head = losing_candidate.head_ref();
+            if begin_remote_candidate_nonactivation_on(
+                &tx,
+                remote_object_id(&head.object),
+                nonactivation.clone(),
+            )?
+            .is_some()
+            {
+                return Err(DbError::Message(
+                    "losing exclusion activation head became a deletion target".to_string(),
+                ));
             }
             if begin_remote_candidate_nonactivation_on(
                 &tx,
@@ -550,23 +533,22 @@ impl Database {
                 ));
             }
             let mut removable = vec![commit_id];
-            if let Some(head) = losing.candidate.merge_head_ref() {
-                let head_id = remote_object_id(&head.object);
-                let remote = load_remote_object_on(&tx, head_id)?;
-                if !remote
-                    .candidate_cleanup_complete(&losing.candidate.reference)
+            let head = losing.candidate.head_ref();
+            let head_id = remote_object_id(&head.object);
+            let remote = load_remote_object_on(&tx, head_id)?;
+            if !remote
+                .candidate_cleanup_complete(&losing.candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                || remote
+                    .candidate_nonactivation_proof(&losing.candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
-                    || remote
-                        .candidate_nonactivation_proof(&losing.candidate.reference)
-                        .map_err(|error| DbError::Message(error.to_string()))?
-                        != Some(&losing.proof)
-                {
-                    return Err(DbError::Message(
-                        "replaced exclusion head lacks complete nonactivation evidence".to_string(),
-                    ));
-                }
-                removable.push(head_id);
+                    != Some(&losing.proof)
+            {
+                return Err(DbError::Message(
+                    "replaced exclusion head lacks complete nonactivation evidence".to_string(),
+                ));
             }
+            removable.push(head_id);
             for object_id in removable {
                 if tx
                     .execute(
@@ -640,23 +622,22 @@ impl Database {
                 ));
             }
             let mut removable = vec![commit_id];
-            if let Some(head) = candidate.merge_head_ref() {
-                let head_id = remote_object_id(&head.object);
-                let head_remote = load_remote_object_on(&tx, head_id)?;
-                if !head_remote
-                    .candidate_cleanup_complete(&candidate.reference)
+            let head = candidate.head_ref();
+            let head_id = remote_object_id(&head.object);
+            let head_remote = load_remote_object_on(&tx, head_id)?;
+            if !head_remote
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                || head_remote
+                    .candidate_nonactivation_proof(&candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
-                    || head_remote
-                        .candidate_nonactivation_proof(&candidate.reference)
-                        .map_err(|error| DbError::Message(error.to_string()))?
-                        != Some(&proof)
-                {
-                    return Err(DbError::Message(
-                        "losing exclusion head lacks complete nonactivation evidence".to_string(),
-                    ));
-                }
-                removable.push(head_id);
+                    != Some(&proof)
+            {
+                return Err(DbError::Message(
+                    "losing exclusion head lacks complete nonactivation evidence".to_string(),
+                ));
             }
+            removable.push(head_id);
             for object_id in removable {
                 if tx
                     .execute(

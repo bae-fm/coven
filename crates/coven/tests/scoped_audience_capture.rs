@@ -1,6 +1,5 @@
 use coven::{
     Config, Coven, KeyCustody, MasterKeyring, Migration, RowIdentity, StoreDir, SyncedTable,
-    WritePolicy,
 };
 
 const CIRCLE_LABEL: &str = "circle-a";
@@ -16,16 +15,10 @@ fn seed_store_root(conn: &rusqlite::Connection) {
     coven_core::sync::test_helpers::install_test_store_root_authority(conn, "scoped-routing-root");
 }
 
-fn seed_active_circle(
-    conn: &rusqlite::Connection,
-    label: &str,
-    policy: WritePolicy,
-) -> (String, String) {
-    if policy == WritePolicy::MergeConcurrent {
-        seed_store_root(conn);
-    }
+fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {
+    seed_store_root(conn);
     let (circle_id, control) =
-        coven_core::sync::test_helpers::install_test_active_circle(conn, label, policy);
+        coven_core::sync::test_helpers::install_test_active_circle(conn, label);
     (
         circle_id.to_string(),
         serde_json::to_string(&control).expect("serialize active Circle control"),
@@ -63,7 +56,6 @@ struct ReparentRollbackState {
 fn reparent_rollback_state(
     conn: &rusqlite::Connection,
     transaction_id: &str,
-    policy: WritePolicy,
 ) -> rusqlite::Result<ReparentRollbackState> {
     let (account, requirement) = conn.query_row(
         "SELECT account_id, requirement_id FROM transactions WHERE id = ?1",
@@ -81,30 +73,25 @@ fn reparent_rollback_state(
     let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
         row.get::<_, i64>(0)
     })?;
-    let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
-        let routes = conn
-            .prepare(
-                "SELECT routing_id, table_name, row_id FROM _coven_row_routes
+    let routes = conn
+        .prepare(
+            "SELECT routing_id, table_name, row_id FROM _coven_row_routes
                  ORDER BY routing_id",
-            )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mirror = conn
-            .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        (routes, mirror)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mirror = conn
+        .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ReparentRollbackState {
         account,
         requirement,
@@ -129,7 +116,6 @@ struct ScopedAncestorRollbackState {
 
 fn scoped_ancestor_rollback_state(
     conn: &rusqlite::Connection,
-    policy: WritePolicy,
 ) -> rusqlite::Result<ScopedAncestorRollbackState> {
     let folders = conn
         .prepare("SELECT id, name, _updated_at FROM folders ORDER BY id")?
@@ -168,30 +154,25 @@ fn scoped_ancestor_rollback_state(
     let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
         row.get::<_, i64>(0)
     })?;
-    let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
-        let routes = conn
-            .prepare(
-                "SELECT table_name, row_id, routing_id FROM _coven_row_routes
+    let routes = conn
+        .prepare(
+            "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  ORDER BY table_name, row_id",
-            )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mirror = conn
-            .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        (routes, mirror)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mirror = conn
+        .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ScopedAncestorRollbackState {
         folders,
         documents,
@@ -215,7 +196,6 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     );
     let handle = Coven::builder(config)
         .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")
         ])
@@ -233,8 +213,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
         .expect("open scoped Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, control_coord) =
-        seed_active_circle(&authority, CIRCLE_LABEL, WritePolicy::MergeConcurrent);
+    let (circle_id, control_coord) = seed_active_circle(&authority, CIRCLE_LABEL);
     let store_account_route = routing_id(&authority, "accounts", "store-account");
     let circle_account_route = routing_id(&authority, "accounts", "circle-account");
     let local_account_route = routing_id(&authority, "accounts", "local-account");
@@ -413,7 +392,6 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     );
     let handle = Coven::builder(config)
         .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("transactions", RowIdentity::SharedKey),
@@ -438,8 +416,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .expect("open scoped Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) =
-        seed_active_circle(&authority, CIRCLE_LABEL, WritePolicy::MergeConcurrent);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
     let store_account_route = routing_id(&authority, "accounts", "store-account");
     let store_transaction_route = routing_id(&authority, "transactions", "store-transaction");
     drop(authority);
@@ -701,7 +678,6 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
     );
     let handle = Coven::builder(config)
         .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")
         ])
@@ -721,16 +697,8 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
     let unknown_circle = coven_core::sync::circle::CircleId::from_bytes([3; 16]).to_string();
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
     seed_store_root(&authority);
-    let (inactive_circle, _) = coven_core::sync::test_helpers::install_test_inactive_circle(
-        &authority,
-        "inactive-circle",
-        WritePolicy::MergeConcurrent,
-    );
-    let (mismatched_circle, _) = coven_core::sync::test_helpers::install_test_active_circle(
-        &authority,
-        "mismatched-circle",
-        WritePolicy::Serial,
-    );
+    let (inactive_circle, _) =
+        coven_core::sync::test_helpers::install_test_inactive_circle(&authority, "inactive-circle");
     drop(authority);
 
     for (id, audience, expected_error) in [
@@ -748,11 +716,6 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
             "inactive-circle",
             inactive_circle.to_string(),
             "active local access records",
-        ),
-        (
-            "policy-mismatch",
-            mismatched_circle.to_string(),
-            "control uses Serial, expected Store policy MergeConcurrent",
         ),
     ] {
         let attempted_id = id.to_string();
@@ -815,7 +778,6 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
     );
     let handle = Coven::builder(config)
         .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("transactions", RowIdentity::SharedKey),
@@ -840,8 +802,7 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         .expect("open scoped Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) =
-        seed_active_circle(&authority, CIRCLE_LABEL, WritePolicy::MergeConcurrent);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
     let local_move_account_route = routing_id(&authority, "accounts", "local-move-account");
     let local_move_transaction_route =
         routing_id(&authority, "transactions", "local-move-transaction");
@@ -1305,437 +1266,6 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
 }
 
 #[tokio::test]
-async fn serial_routes_from_captured_audiences_without_merge_metadata() {
-    let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "serial-scoped-transitions".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Serial scoped transitions".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .write_policy(WritePolicy::Serial)
-        .synced_tables(vec![
-            SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey),
-        ])
-        .migrations(vec![Migration::sql(
-            1,
-            "accounts-and-transactions",
-            "CREATE TABLE accounts (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                audience TEXT,
-                _updated_at TEXT NOT NULL
-             ) STRICT;
-             CREATE TABLE transactions (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                memo TEXT NOT NULL,
-                _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )])
-        .open()
-        .expect("open Serial scoped Store");
-
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL, WritePolicy::Serial);
-    drop(authority);
-
-    let seed_circle_id = circle_id.clone();
-    let inserted = handle
-        .sql(move |sql| {
-            for (account, transaction, audience) in [
-                ("serial-moving-account", "serial-moving-child", None),
-                (
-                    "serial-deleted-account",
-                    "serial-deleted-child",
-                    Some(seed_circle_id.as_str()),
-                ),
-                ("serial-local-account", "serial-local-child", Some("local")),
-            ] {
-                sql.execute(
-                    "INSERT INTO accounts (id, name, audience, _updated_at)
-                     VALUES (?1, 'Serial', ?2, ?3)",
-                    (account, audience, sql.stamp()),
-                )?;
-                sql.execute(
-                    "INSERT INTO transactions (id, account_id, memo, _updated_at)
-                     VALUES (?1, ?2, 'Inherited', ?3)",
-                    (transaction, account, sql.stamp()),
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .expect("insert Store, Circle, and Local Serial subtrees");
-    let insert_write_id = inserted.write_id.to_string();
-    let (insert_partitions, routing_table_count) = handle
-        .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([insert_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let routing_tables = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name IN ('_coven_audience', '_coven_row_routes')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((partitions, routing_tables))
-        })
-        .await
-        .expect("read Serial insert partitions");
-    assert_eq!(routing_table_count, 0, "Serial has no Merge routing tables");
-    assert_eq!(insert_partitions.len(), 3);
-    let local_insert = insert_partitions
-        .iter()
-        .find(|(audience, _)| audience == "local")
-        .expect("durable Serial Local partition");
-    let local_insert =
-        coven_core::changeset::walk(&local_insert.1).expect("walk Serial Local partition");
-    for (table, row_id) in [
-        ("accounts", "serial-local-account"),
-        ("transactions", "serial-local-child"),
-    ] {
-        assert!(has_change(
-            &local_insert,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            row_id
-        ));
-    }
-
-    let before_failure = handle
-        .sql_read(|conn| {
-            let audience = conn.query_row(
-                "SELECT audience FROM accounts WHERE id = 'serial-moving-account'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )?;
-            let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let partitions =
-                conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-            Ok((audience, writes, partitions))
-        })
-        .await
-        .expect("read Serial state before injected failure");
-    let fault = rusqlite::Connection::open(store_dir.db_path()).expect("open fault injector");
-    fault
-        .execute_batch(
-            "CREATE TRIGGER fail_serial_partition_insert
-             BEFORE INSERT ON store_write_partitions
-             BEGIN
-                 SELECT RAISE(ABORT, 'forced Serial partition failure');
-             END;",
-        )
-        .expect("install Serial partition failure");
-    let failed_circle_id = circle_id.clone();
-    let failed = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = ?1, _updated_at = ?2
-                 WHERE id = 'serial-moving-account'",
-                (&failed_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await;
-    assert!(
-        failed.is_err(),
-        "injected Serial journal failure must surface"
-    );
-    let after_failure = handle
-        .sql_read(|conn| {
-            let audience = conn.query_row(
-                "SELECT audience FROM accounts WHERE id = 'serial-moving-account'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )?;
-            let child_count = conn.query_row(
-                "SELECT count(*) FROM transactions WHERE id = 'serial-moving-child'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let partitions =
-                conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-            let routing_tables = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name IN ('_coven_audience', '_coven_row_routes')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((audience, child_count, writes, partitions, routing_tables))
-        })
-        .await
-        .expect("read rolled-back Serial move");
-    assert_eq!(after_failure.0, before_failure.0);
-    assert_eq!(after_failure.1, 1);
-    assert_eq!(after_failure.2, before_failure.1);
-    assert_eq!(after_failure.3, before_failure.2);
-    assert_eq!(after_failure.4, 0);
-    fault
-        .execute_batch("DROP TRIGGER fail_serial_partition_insert;")
-        .expect("remove Serial partition failure");
-    drop(fault);
-
-    let destination_circle_id = circle_id.clone();
-    let to_circle = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = ?1, _updated_at = ?2
-                 WHERE id = 'serial-moving-account'",
-                (&destination_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Serial Store subtree to Circle");
-    let to_circle_write_id = to_circle.write_id.to_string();
-    let to_circle_partitions = handle
-        .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([to_circle_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(partitions)
-        })
-        .await
-        .expect("read Serial Store-to-Circle partitions");
-    assert_eq!(to_circle_partitions.len(), 2);
-    let to_circle_partition = |audience: &str| {
-        to_circle_partitions
-            .iter()
-            .find(|(candidate, _)| candidate == audience)
-            .unwrap_or_else(|| panic!("missing {audience} Serial Store-to-Circle partition"))
-    };
-    let store_source =
-        coven_core::changeset::walk(&to_circle_partition("store").1).expect("walk Store source");
-    let circle_destination = coven_core::changeset::walk(&to_circle_partition(&circle_id).1)
-        .expect("walk Circle destination");
-    for (table, row_id) in [
-        ("accounts", "serial-moving-account"),
-        ("transactions", "serial-moving-child"),
-    ] {
-        assert!(has_change(
-            &store_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            row_id
-        ));
-        assert!(has_change(
-            &circle_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            row_id
-        ));
-    }
-
-    let to_local = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = 'local', _updated_at = ?1
-                 WHERE id = 'serial-moving-account'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Serial Circle subtree to Local");
-    let to_local_write_id = to_local.write_id.to_string();
-    let (to_local_partitions, local_audience) = handle
-        .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([to_local_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let audience = conn.query_row(
-                "SELECT audience FROM accounts WHERE id = 'serial-moving-account'",
-                [],
-                |row| row.get::<_, String>(0),
-            )?;
-            Ok((partitions, audience))
-        })
-        .await
-        .expect("read Serial Circle-to-Local transition");
-    assert_eq!(local_audience, "local");
-    assert_eq!(to_local_partitions.len(), 2);
-    let to_local_partition = |audience: &str| {
-        to_local_partitions
-            .iter()
-            .find(|(candidate, _)| candidate == audience)
-            .unwrap_or_else(|| panic!("missing {audience} Serial Circle-to-Local partition"))
-    };
-    let circle_source =
-        coven_core::changeset::walk(&to_local_partition(&circle_id).1).expect("walk Circle source");
-    let local_destination = coven_core::changeset::walk(&to_local_partition("local").1)
-        .expect("walk Local destination");
-    for (table, row_id) in [
-        ("accounts", "serial-moving-account"),
-        ("transactions", "serial-moving-child"),
-    ] {
-        assert!(has_change(
-            &circle_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            row_id
-        ));
-        assert!(has_change(
-            &local_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            row_id
-        ));
-    }
-
-    let to_store = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = NULL, _updated_at = ?1
-                 WHERE id = 'serial-moving-account'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Serial Local subtree to Store");
-    let to_store_write_id = to_store.write_id.to_string();
-    let (to_store_partitions, store_audience) = handle
-        .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([to_store_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let audience = conn.query_row(
-                "SELECT audience FROM accounts WHERE id = 'serial-moving-account'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )?;
-            Ok((partitions, audience))
-        })
-        .await
-        .expect("read Serial Local-to-Store transition");
-    assert_eq!(store_audience, None);
-    assert_eq!(to_store_partitions.len(), 2);
-    let to_store_partition = |audience: &str| {
-        to_store_partitions
-            .iter()
-            .find(|(candidate, _)| candidate == audience)
-            .unwrap_or_else(|| panic!("missing {audience} Serial Local-to-Store partition"))
-    };
-    let local_source =
-        coven_core::changeset::walk(&to_store_partition("local").1).expect("walk Local source");
-    let store_destination = coven_core::changeset::walk(&to_store_partition("store").1)
-        .expect("walk Store destination");
-    for (table, row_id) in [
-        ("accounts", "serial-moving-account"),
-        ("transactions", "serial-moving-child"),
-    ] {
-        assert!(has_change(
-            &store_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            row_id
-        ));
-        assert!(has_change(
-            &local_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            row_id
-        ));
-    }
-
-    let deleted = handle
-        .sql(|sql| {
-            sql.execute(
-                "DELETE FROM accounts WHERE id = 'serial-deleted-account'",
-                [],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("delete Serial Circle subtree");
-    let delete_write_id = deleted.write_id.to_string();
-    let (delete_partitions, deleted_rows, routing_tables) = handle
-        .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([delete_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let deleted_rows = conn.query_row(
-                "SELECT
-                    (SELECT count(*) FROM accounts WHERE id = 'serial-deleted-account') +
-                    (SELECT count(*) FROM transactions WHERE id = 'serial-deleted-child')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let routing_tables = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name IN ('_coven_audience', '_coven_row_routes')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((partitions, deleted_rows, routing_tables))
-        })
-        .await
-        .expect("read Serial Circle delete");
-    assert_eq!(delete_partitions.len(), 1);
-    assert_eq!(delete_partitions[0].0, circle_id);
-    let circle_delete =
-        coven_core::changeset::walk(&delete_partitions[0].1).expect("walk Serial Circle delete");
-    for (table, row_id) in [
-        ("accounts", "serial-deleted-account"),
-        ("transactions", "serial-deleted-child"),
-    ] {
-        assert!(has_change(
-            &circle_delete,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            row_id
-        ));
-    }
-    assert_eq!((deleted_rows, routing_tables), (0, 0));
-}
-
-#[tokio::test]
 async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
@@ -1747,7 +1277,6 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
     );
     let handle = Coven::builder(config)
         .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).remote_root(),
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
@@ -1780,8 +1309,7 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
         .expect("open scoped sibling Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) =
-        seed_active_circle(&authority, CIRCLE_LABEL, WritePolicy::MergeConcurrent);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
     drop(authority);
 
     handle
@@ -1852,17 +1380,17 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
     }
 }
 
-async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: WritePolicy) {
+async fn every_outgoing_synced_fk_matches_its_child_audience() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
-        format!("{policy:?}-cross-audience-fk"),
+        "cross-audience-fk".to_string(),
         "capture-device".to_string(),
         store_dir.clone(),
         "Cross-audience relationship".to_string(),
     );
-    let mut builder = Coven::builder(config)
-        .write_policy(policy)
+    let builder = Coven::builder(config)
+        .key_custody(KeyCustody::InMemory(routing_keyring()))
         .synced_tables(vec![
             SyncedTable::new("homes", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("targets", RowIdentity::SharedKey).scoped_by("audience"),
@@ -1888,14 +1416,11 @@ async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: Writ
                 _updated_at TEXT NOT NULL
              ) STRICT;",
         )]);
-    if policy == WritePolicy::MergeConcurrent {
-        builder = builder.key_custody(KeyCustody::InMemory(routing_keyring()));
-    }
     let handle = builder.open().expect("open cross-audience Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL, policy);
-    let (other_circle_id, _other_control) = seed_active_circle(&authority, "circle-b", policy);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
+    let (other_circle_id, _other_control) = seed_active_circle(&authority, "circle-b");
     drop(authority);
 
     let seeded_circle_id = circle_id.clone();
@@ -1963,10 +1488,7 @@ async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: Writ
         })
         .await
         .expect("read allowed relationships");
-    let expected_audiences = match policy {
-        WritePolicy::MergeConcurrent => vec![circle_id.clone(), "store".to_string()],
-        WritePolicy::Serial => vec![circle_id],
-    };
+    let expected_audiences = vec![circle_id, "store".to_string()];
     assert_eq!(allowed_state, (2, expected_audiences));
 
     for (id, home, target, description) in [
@@ -1998,18 +1520,13 @@ async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: Writ
                     conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
                         row.get::<_, i64>(0)
                     })?;
-                let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
-                    (
-                        conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
-                        conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
-                    )
-                } else {
-                    (0, 0)
-                };
+                let routes =
+                    conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let mirror = conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
                 Ok((writes, partitions, routes, mirror))
             })
             .await
@@ -2049,18 +1566,13 @@ async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: Writ
                     conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
                         row.get::<_, i64>(0)
                     })?;
-                let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
-                    (
-                        conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
-                        conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
-                    )
-                } else {
-                    (0, 0)
-                };
+                let routes =
+                    conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let mirror = conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
                 Ok((host_rows, writes, partitions, routes, mirror))
             })
             .await
@@ -2074,26 +1586,21 @@ async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: Writ
 }
 
 #[tokio::test]
-async fn merge_validates_every_outgoing_synced_fk_audience() {
-    assert_every_outgoing_synced_fk_matches_its_child_audience(WritePolicy::MergeConcurrent).await;
+async fn validates_every_outgoing_synced_fk_audience() {
+    every_outgoing_synced_fk_matches_its_child_audience().await;
 }
 
-#[tokio::test]
-async fn serial_validates_every_outgoing_synced_fk_audience() {
-    assert_every_outgoing_synced_fk_matches_its_child_audience(WritePolicy::Serial).await;
-}
-
-async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) {
+async fn inherited_reparenting_materializes_subtree() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
-        format!("{policy:?}-inherited-reparent"),
+        "inherited-reparent".to_string(),
         "capture-device".to_string(),
         store_dir.clone(),
         "Inherited reparent".to_string(),
     );
-    let mut builder = Coven::builder(config)
-        .write_policy(policy)
+    let builder = Coven::builder(config)
+        .key_custody(KeyCustody::InMemory(routing_keyring()))
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("requirements", RowIdentity::SharedKey).scoped_by("audience"),
@@ -2125,14 +1632,11 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
                 _updated_at TEXT NOT NULL
              ) STRICT;",
         )]);
-    if policy == WritePolicy::MergeConcurrent {
-        builder = builder.key_custody(KeyCustody::InMemory(routing_keyring()));
-    }
     let handle = builder.open().expect("open inherited reparent Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL, policy);
-    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b", policy);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
+    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b");
     drop(authority);
 
     let seeded_circle_id = circle_id.clone();
@@ -2207,9 +1711,6 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
 
     let before_routes = handle
         .sql_read(move |conn| {
-            if policy == WritePolicy::Serial {
-                return Ok(Vec::new());
-            }
             conn.prepare(
                 "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  WHERE table_name IN ('transactions', 'line_items')
@@ -2240,7 +1741,7 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
         .await
         .expect("reparent Store child to Circle B");
     let write_id = moved.write_id.to_string();
-    let (partitions, after_routes, routing_tables) = handle
+    let (partitions, after_routes) = handle
         .sql_read(move |conn| {
             let partitions = conn
                 .prepare(
@@ -2251,8 +1752,8 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
                     Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let after_routes = if policy == WritePolicy::MergeConcurrent {
-                conn.prepare(
+            let after_routes = conn
+                .prepare(
                     "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
@@ -2264,18 +1765,8 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
                         row.get::<_, String>(2)?,
                     ))
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            };
-            let routing_tables = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name IN ('_coven_audience', '_coven_row_routes')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((partitions, after_routes, routing_tables))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((partitions, after_routes))
         })
         .await
         .expect("read inherited reparent result");
@@ -2451,13 +1942,7 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
     }
 
     let invalid_before = handle
-        .sql_read(move |conn| {
-            Ok(reparent_rollback_state(
-                conn,
-                "invalid-target-transaction",
-                policy,
-            )?)
-        })
+        .sql_read(move |conn| Ok(reparent_rollback_state(conn, "invalid-target-transaction")?))
         .await
         .expect("read state before invalid reparent");
     let invalid_error = handle
@@ -2479,13 +1964,7 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
         "invalid reparent surfaced the wrong error: {invalid_error}"
     );
     let invalid_after = handle
-        .sql_read(move |conn| {
-            Ok(reparent_rollback_state(
-                conn,
-                "invalid-target-transaction",
-                policy,
-            )?)
-        })
+        .sql_read(move |conn| Ok(reparent_rollback_state(conn, "invalid-target-transaction")?))
         .await
         .expect("read state after invalid reparent");
     assert_eq!(invalid_after, invalid_before);
@@ -2495,7 +1974,6 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
             Ok(reparent_rollback_state(
                 conn,
                 "journal-failure-transaction",
-                policy,
             )?)
         })
         .await
@@ -2530,7 +2008,6 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
             Ok(reparent_rollback_state(
                 conn,
                 "journal-failure-transaction",
-                policy,
             )?)
         })
         .await
@@ -2543,67 +2020,43 @@ async fn assert_inherited_reparenting_materializes_subtree(policy: WritePolicy) 
 
     let final_routes = handle
         .sql_read(move |conn| {
-            if policy == WritePolicy::Serial {
-                return Ok((Vec::new(), 0));
-            }
-            let routes = conn
-                .prepare(
-                    "SELECT table_name, row_id, routing_id FROM _coven_row_routes
+            conn.prepare(
+                "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
-                )?
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let routing_tables = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name IN ('_coven_audience', '_coven_row_routes')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((routes, routing_tables))
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
         })
         .await
         .expect("read routes after inherited reparent matrix");
-    match policy {
-        WritePolicy::MergeConcurrent => {
-            assert_eq!(after_routes, before_routes);
-            assert_eq!(final_routes.0, before_routes);
-        }
-        WritePolicy::Serial => {
-            assert_eq!(routing_tables, 0);
-            assert_eq!(final_routes.1, 0);
-        }
-    }
+    assert_eq!(after_routes, before_routes);
+    assert_eq!(final_routes, before_routes);
 }
 
 #[tokio::test]
-async fn merge_reparenting_an_inherited_row_materializes_its_subtree() {
-    assert_inherited_reparenting_materializes_subtree(WritePolicy::MergeConcurrent).await;
+async fn reparenting_an_inherited_row_materializes_its_subtree() {
+    inherited_reparenting_materializes_subtree().await;
 }
 
-#[tokio::test]
-async fn serial_reparenting_an_inherited_row_materializes_its_subtree() {
-    assert_inherited_reparenting_materializes_subtree(WritePolicy::Serial).await;
-}
-
-async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePolicy) {
+async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
-        format!("{policy:?}-scoped-ancestor"),
+        "scoped-ancestor".to_string(),
         "capture-device".to_string(),
         store_dir.clone(),
         "Scoped descendant ancestor".to_string(),
     );
-    let mut builder = Coven::builder(config)
-        .write_policy(policy)
+    let builder = Coven::builder(config)
+        .key_custody(KeyCustody::InMemory(routing_keyring()))
         .synced_tables(vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
@@ -2629,14 +2082,11 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
                 _updated_at TEXT NOT NULL
              ) STRICT;",
         )]);
-    if policy == WritePolicy::MergeConcurrent {
-        builder = builder.key_custody(KeyCustody::InMemory(routing_keyring()));
-    }
     let handle = builder.open().expect("open scoped ancestor Store");
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL, policy);
-    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b", policy);
+    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
+    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b");
     drop(authority);
 
     let seeded = handle
@@ -2907,7 +2357,7 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
     }
 
     let rollback_before = handle
-        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn, policy)?))
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn)?))
         .await
         .expect("read state before ancestor retraction failure");
     let fault = rusqlite::Connection::open(store_dir.db_path()).expect("open fault injector");
@@ -2935,7 +2385,7 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
         .to_string()
         .contains("forced scoped ancestor journal failure"));
     let rollback_after = handle
-        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn, policy)?))
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn)?))
         .await
         .expect("read state after ancestor retraction failure");
     assert_eq!(rollback_after, rollback_before);
@@ -3122,11 +2572,6 @@ async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePo
 }
 
 #[tokio::test]
-async fn merge_non_local_scoped_descendant_keeps_store_ancestor() {
-    assert_non_local_scoped_descendant_keeps_store_ancestor(WritePolicy::MergeConcurrent).await;
-}
-
-#[tokio::test]
-async fn serial_non_local_scoped_descendant_keeps_store_ancestor() {
-    assert_non_local_scoped_descendant_keeps_store_ancestor(WritePolicy::Serial).await;
+async fn scoped_descendant_keeps_store_ancestor() {
+    non_local_scoped_descendant_keeps_store_ancestor().await;
 }

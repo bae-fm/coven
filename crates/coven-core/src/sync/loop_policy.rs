@@ -153,7 +153,7 @@ mod tests {
                 coordinate: HeldStoreCoordinate::Commit {
                     device_id: format!("dev-{i}"),
                     commit: StoreBatchCommitRef {
-                        coord: StoreCommitCoord::MergeConcurrent {
+                        coord: StoreCommitCoord {
                             stream_id: AuthorStreamId::from_digest(ObjectHash::digest(
                                 format!("stream-{i}").as_bytes(),
                             )),

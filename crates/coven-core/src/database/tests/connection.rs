@@ -16,8 +16,7 @@ async fn slow_db_call_does_not_block_the_executor() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "liveness".to_string(),
         &[],
     )
@@ -67,8 +66,7 @@ async fn dropping_last_handle_in_async_context_does_not_stall_but_job_still_land
         &db_path,
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "drop-async".to_string(),
         &[],
     )

@@ -11,8 +11,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "prepared-audience-objects".to_string(),
         &[],
     )
@@ -20,7 +19,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let write_id = WriteId::from_generated("write-1".to_string());
     let stored_write_id = write_id.clone();
     db.call(move |conn| {
-        let base = serde_json::to_string(&StoreWriteBase::MergeConcurrent {
+        let base = serde_json::to_string(&StoreWriteBase {
             dependencies: BTreeMap::new(),
         })
         .expect("serialize base");
@@ -68,9 +67,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .expect("build package");
     let semantic = package.to_bytes();
     let stored_package = b"stored package representation".to_vec();
-    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = test_commit_coord() else {
-        unreachable!("database test commit is MergeConcurrent")
-    };
+    let StoreCommitCoord { stream_id, .. } = test_commit_coord();
     let package_slot = crate::storage::cloud::ObjectSlot::logical(format!(
         "{}.pkg",
         crate::sync::store_commit::package_semantic_prefix(

@@ -245,13 +245,6 @@ impl GrantStreamAnchor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreCommitAnchor {
-    MergeConcurrent { announcements: DeviceStreamAnchor },
-    Serial,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceRegistration {
     pub version: u32,
@@ -261,7 +254,7 @@ pub struct StoreDeviceRegistration {
     pub device_signing_pubkey: String,
     pub origin: StoreDeviceRegistrationOrigin,
     pub provider: ProviderDeviceBinding,
-    pub store_commits: StoreCommitAnchor,
+    pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
     pub snapshots: DeviceStreamAnchor,
     pub identity_signature: String,
@@ -276,7 +269,7 @@ struct RegistrationSignedFields<'a> {
     device_signing_pubkey: &'a str,
     origin: &'a StoreDeviceRegistrationOrigin,
     provider: &'a ProviderDeviceBinding,
-    store_commits: &'a StoreCommitAnchor,
+    store_commits: &'a DeviceStreamAnchor,
     acknowledgements: &'a DeviceStreamAnchor,
     snapshots: &'a DeviceStreamAnchor,
 }
@@ -299,13 +292,7 @@ impl StoreDeviceRegistration {
         &self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StreamActivation, StoreProtocolError> {
-        let StoreCommitAnchor::MergeConcurrent { announcements } = &self.store_commits else {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            });
-        };
-        self.device_stream_activation(reference, announcements)
+        self.device_stream_activation(reference, &self.store_commits)
     }
 
     pub fn store_acknowledgement_activation(
@@ -326,7 +313,7 @@ impl StoreDeviceRegistration {
         store_root: StoreRootRef,
         origin: StoreDeviceRegistrationOrigin,
         provider: ProviderDeviceBinding,
-        store_commits: StoreCommitAnchor,
+        store_commits: DeviceStreamAnchor,
         acknowledgements: DeviceStreamAnchor,
         snapshots: DeviceStreamAnchor,
         identity_signer: &UserKeypair,
@@ -450,7 +437,7 @@ fn derive_device_signer(
 }
 
 fn validate_registration_anchors(
-    commits: &StoreCommitAnchor,
+    commits: &DeviceStreamAnchor,
     acknowledgements: &DeviceStreamAnchor,
     snapshots: &DeviceStreamAnchor,
 ) -> Result<(), StoreProtocolError> {
@@ -458,12 +445,7 @@ fn validate_registration_anchors(
         acknowledgements,
         DeviceStreamAnchor::StoreAcknowledgements { .. }
     ) || !matches!(snapshots, DeviceStreamAnchor::StoreSnapshots { .. })
-        || !matches!(
-            commits,
-            StoreCommitAnchor::MergeConcurrent {
-                announcements: DeviceStreamAnchor::StoreAnnouncements { .. }
-            }
-        ) && !matches!(commits, StoreCommitAnchor::Serial)
+        || !matches!(commits, DeviceStreamAnchor::StoreAnnouncements { .. })
     {
         return Err(StoreProtocolError::Malformed(
             "Store device registration contains mismatched permanent stream anchors".to_string(),

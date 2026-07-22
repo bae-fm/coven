@@ -69,18 +69,13 @@ pub(crate) struct PreparedStorePayload {
     pub membership_authority: StoreOperationMembershipAuthority,
 }
 
-pub(crate) enum StorePayloadMembership<'a> {
-    MergeConcurrent(&'a MembershipChain),
-    Serial,
-}
-
 /// Upload the blobs referenced by exact staged package bytes and persist every
 /// fact needed to retry their publication without re-deriving it from later rows.
 pub(crate) async fn prepare_store_payload(
     blob_facts: &StoreWriteBlobFacts,
     keypair: &UserKeypair,
     store_dir: &StoreDir,
-    membership: StorePayloadMembership<'_>,
+    membership: &MembershipChain,
 ) -> Result<PreparedStorePayload, SyncCycleError> {
     let mut drops = std::collections::BTreeMap::new();
     for fact in &blob_facts.blobs {
@@ -171,28 +166,25 @@ pub(crate) fn bind_local_cleanup(
     Ok(StoreBatchLocalCleanup { drops })
 }
 
-/// The exact membership grant authority that authorizes a MergeConcurrent
+/// The exact membership grant authority that authorizes a
 /// writer. Embedded in the outgoing changeset so a puller can resolve a
 /// membership-propagation gap. Read off the cycle's once-loaded chain, so it
 /// judges the same membership state as the rest of the cycle rather than
 /// re-listing (the very disagreement that once had a puller skip the write it was
 /// meant to accept).
 fn resolve_write_authority(
-    membership: StorePayloadMembership<'_>,
+    membership: &MembershipChain,
     keypair: &UserKeypair,
 ) -> Result<StoreOperationMembershipAuthority, SyncCycleError> {
     let our_pubkey = hex::encode(keypair.public_key());
-    match membership {
-        StorePayloadMembership::MergeConcurrent(chain) => chain
-            .write_grant_authority(&our_pubkey)
-            .map(|predecessor| StoreOperationMembershipAuthority::MergeConcurrent { predecessor })
-            .ok_or_else(|| {
-                SyncCycleError::Gate(format!(
-                    "MergeConcurrent Store writer {our_pubkey} has no active membership grant"
-                ))
-            }),
-        StorePayloadMembership::Serial => Ok(StoreOperationMembershipAuthority::Serial),
-    }
+    membership
+        .write_grant_authority(&our_pubkey)
+        .map(|predecessor| StoreOperationMembershipAuthority { predecessor })
+        .ok_or_else(|| {
+            SyncCycleError::Gate(format!(
+                "Store writer {our_pubkey} has no active membership grant"
+            ))
+        })
 }
 
 pub async fn apply_deferred_local_blob_drop(

@@ -178,7 +178,6 @@ impl Database {
         tx: &rusqlite::Transaction<'_>,
         captured: &[u8],
         gates: &Gates,
-        write_policy: WritePolicy,
         routing: StoreWriteRouting<'_>,
     ) -> Result<Vec<gate::AudiencePartition>, DbError> {
         match routing {
@@ -192,61 +191,40 @@ impl Database {
                     .map_err(|error| {
                         DbError::Message(format!("capture scoped routing changes: {error}"))
                     })?;
-                gate::partition_outbound(tx, captured, &routing_changeset, gates, write_policy)
+                gate::partition_outbound(tx, captured, &routing_changeset, gates).map_err(|error| {
+                    DbError::Message(format!("partition scoped host transaction: {error}"))
+                })
+            }
+            StoreWriteRouting::Unscoped => {
+                gate::partition_outbound(tx, captured, &gate::RoutingChanges::empty(), gates)
                     .map_err(|error| {
-                        DbError::Message(format!("partition scoped host transaction: {error}"))
+                        DbError::Message(format!("partition gated host transaction: {error}"))
                     })
             }
-            StoreWriteRouting::SerialScoped => gate::partition_outbound(
-                tx,
-                captured,
-                &gate::RoutingChanges::empty(),
-                gates,
-                write_policy,
-            )
-            .map_err(|error| {
-                DbError::Message(format!("partition scoped host transaction: {error}"))
-            }),
-            StoreWriteRouting::Unscoped => gate::partition_outbound(
-                tx,
-                captured,
-                &gate::RoutingChanges::empty(),
-                gates,
-                write_policy,
-            )
-            .map_err(|error| {
-                DbError::Message(format!("partition gated host transaction: {error}"))
-            }),
         }
     }
 
     fn store_write_routing<'a>(
         gates: &Gates,
-        write_policy: WritePolicy,
         routing_encryption: Option<&'a EncryptionService>,
     ) -> Result<StoreWriteRouting<'a>, DbError> {
         if !gates.has_scoped_graph() {
             return Ok(StoreWriteRouting::Unscoped);
         }
-        match write_policy {
-            WritePolicy::MergeConcurrent => routing_encryption
-                .map(StoreWriteRouting::MergeScoped)
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "Merge scoped write requires the Store generation-1 routing key"
-                            .to_string(),
-                    )
-                }),
-            WritePolicy::Serial => Ok(StoreWriteRouting::SerialScoped),
-        }
+        routing_encryption
+            .map(StoreWriteRouting::MergeScoped)
+            .ok_or_else(|| {
+                DbError::Message(
+                    "scoped write requires the Store generation-1 routing key".to_string(),
+                )
+            })
     }
 
     pub(crate) fn validate_store_write_routing(
         gates: &Gates,
-        write_policy: WritePolicy,
         routing_encryption: Option<&EncryptionService>,
     ) -> Result<(), DbError> {
-        Self::store_write_routing(gates, write_policy, routing_encryption).map(drop)
+        Self::store_write_routing(gates, routing_encryption).map(drop)
     }
 
     pub(crate) fn insert_store_write_on(
@@ -387,7 +365,6 @@ impl Database {
         synced_tables: &[SyncedTable],
         gates: &Gates,
         blob_decls: &BlobDecls,
-        write_policy: WritePolicy,
         routing_encryption: Option<&EncryptionService>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
@@ -396,55 +373,23 @@ impl Database {
         E: From<DbError>,
     {
         (|| {
-            let routing = Self::store_write_routing(gates, write_policy, routing_encryption)
-                .map_err(E::from)?;
+            let routing = Self::store_write_routing(gates, routing_encryption).map_err(E::from)?;
             let changes_before = conn.total_changes();
             let tx = conn
                 .unchecked_transaction()
                 .map_err(DbError::from)
                 .map_err(E::from)?;
             let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
-            let partitions =
-                Self::partition_captured_write_on(&tx, &captured, gates, write_policy, routing)
-                    .map_err(E::from)?;
+            let partitions = Self::partition_captured_write_on(&tx, &captured, gates, routing)
+                .map_err(E::from)?;
             let blob_facts = Self::capture_partition_blob_facts_on(&tx, &partitions, blob_decls)
                 .map_err(E::from)?;
             let rows_changed = conn.total_changes().saturating_sub(changes_before);
             let local_stream_id = local_merge_stream_id_on(&tx).map_err(E::from)?;
             let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
-            let base = match write_policy {
-                WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
-                    dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())
-                        .map_err(E::from)?,
-                },
-                WritePolicy::Serial => {
-                    let existing: Option<String> = tx
-                        .query_row(
-                            "SELECT base FROM store_writes
-                             WHERE status != '\"local_only\"'
-                               AND json_extract(status, '$.published') IS NULL
-                               AND json_extract(status, '$.resolved') IS NULL
-                               AND json_type(base, '$.serial') IS NOT NULL
-                             ORDER BY ordinal LIMIT 1",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DbError::from)
-                        .map_err(E::from)?;
-                    match existing {
-                        Some(existing) => serde_json::from_str(&existing)
-                            .map_err(|error| {
-                                DbError::Message(format!("pending serial branch base: {error}"))
-                            })
-                            .map_err(E::from)?,
-                        None => StoreWriteBase::Serial {
-                            branch_id: PendingBranchId::from_first_write(write_id.clone()),
-                            base: Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)
-                                .map_err(E::from)?,
-                        },
-                    }
-                }
+            let base = StoreWriteBase {
+                dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())
+                    .map_err(E::from)?,
             };
             let status = Self::insert_store_write_on(
                 &tx,
@@ -456,16 +401,11 @@ impl Database {
                 rows_changed,
             )
             .map_err(E::from)?;
-            let pending_branch_id = match (&status, &base) {
-                (WriteStatus::LocalOnly, _) | (_, StoreWriteBase::MergeConcurrent { .. }) => None,
-                (_, StoreWriteBase::Serial { branch_id, .. }) => Some(branch_id.clone()),
-            };
             tx.commit().map_err(DbError::from).map_err(E::from)?;
             Ok(WriteReceipt {
                 value,
                 write_id,
                 status,
-                pending_branch_id,
             })
         })()
     }
@@ -473,7 +413,6 @@ impl Database {
     pub fn run_internal_store_write_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
-        write_policy: WritePolicy,
         routing_encryption: Option<&EncryptionService>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
@@ -492,7 +431,6 @@ impl Database {
             synced_tables,
             &gates,
             &blob_decls,
-            write_policy,
             routing_encryption,
             write_id,
             f,
@@ -501,7 +439,6 @@ impl Database {
     }
 
     pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        let write_policy = self.write_policy();
         self.call(move |conn| {
             let stored = conn
                 .query_row(
@@ -533,8 +470,7 @@ impl Database {
             let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored else {
                 return Ok(None);
             };
-            let partitions =
-                Self::store_write_partitions_on(conn, &write_id, &changeset, write_policy)?;
+            let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
             Ok(Some(PreparedStoreWrite {
                 write_id: WriteId::from_generated(write_id),
                 changeset,
@@ -554,7 +490,6 @@ impl Database {
         conn: &Connection,
         write_id: &str,
         stored_store_changeset: &[u8],
-        write_policy: WritePolicy,
     ) -> Result<PreparedStoreWritePartitions, DbError> {
         let mut statement = conn
             .prepare(
@@ -633,17 +568,6 @@ impl Database {
                         "pending write {write_id} Circle {circle_id} control coordinate: {error}"
                     ))
                 })?;
-            let control_policy = match control.coordinate() {
-                crate::sync::circle::CircleControlCoord::MergeConcurrent { .. } => {
-                    WritePolicy::MergeConcurrent
-                }
-                crate::sync::circle::CircleControlCoord::Serial { .. } => WritePolicy::Serial,
-            };
-            if control_policy != write_policy {
-                return Err(DbError::Message(format!(
-                    "pending write {write_id} Circle {circle_id} control uses {control_policy:?}, database uses {write_policy:?}"
-                )));
-            }
             circles.push(gate::AudiencePartition {
                 audience: crate::sync::circle::Audience::Circle(circle_id),
                 control: Some(control),

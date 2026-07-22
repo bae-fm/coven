@@ -24,8 +24,7 @@ use crate::sync::provider::{
     StoreMemberProviderAccessGrantRef,
 };
 use crate::sync::storage::{
-    CoordinationStorage, ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding,
-    StoreProviderBinding, SyncStorage,
+    ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding, SyncStorage,
 };
 use crate::sync::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
@@ -314,12 +313,6 @@ impl DeviceProviderAdmissionApproval {
             || self.access_grant.grant_ref.grant_hash != self.access_grant.grant.grant_hash()
             || self.access_grant.grant.administrator_grant != offer.provider_admin.grant_id
             || self.access_grant.grant.administrator != offer.provider_admin.administrator
-            || !self
-                .access_grant
-                .activation
-                .coord
-                .policy()
-                .eq(&store_root.value.descriptor.write_policy)
         {
             return Err(DeviceJoinError::ApprovalMismatch);
         }
@@ -1656,145 +1649,61 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
     ) -> Result<ProviderAccessWithdrawal, DeviceJoinError>;
 }
 
-#[derive(Clone, Debug)]
-pub enum DeviceJoinAuthorization {
-    MergeConcurrent(MembershipChain),
-    Serial(crate::sync::membership::SerialAuthorizationState),
-}
-
-impl DeviceJoinAuthorization {
-    fn policy(&self) -> crate::WritePolicy {
-        match self {
-            Self::MergeConcurrent(_) => crate::WritePolicy::MergeConcurrent,
-            Self::Serial(_) => crate::WritePolicy::Serial,
-        }
-    }
-
-    fn current_members(&self) -> Vec<(String, crate::sync::membership::MemberRole)> {
-        match self {
-            Self::MergeConcurrent(membership) => membership.current_members(),
-            Self::Serial(authorization) => authorization.membership.current_members(),
-        }
-    }
-
-    pub(crate) fn active_owner_grant(&self, pubkey: &str) -> Option<MembershipGrantId> {
-        match self {
-            Self::MergeConcurrent(membership) => membership.active_owner_grant(pubkey),
-            Self::Serial(authorization) => authorization.membership.active_owner_grant(pubkey),
-        }
-    }
-
-    fn is_owner_now(&self, pubkey: &str) -> bool {
-        match self {
-            Self::MergeConcurrent(membership) => membership.is_owner_now(pubkey),
-            Self::Serial(authorization) => authorization.membership.is_owner(pubkey),
-        }
-    }
-
-    fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
-        match self {
-            Self::MergeConcurrent(membership) => membership.current_member_provider_email(pubkey),
-            Self::Serial(authorization) => authorization
-                .membership
-                .current_member_provider_email(pubkey),
-        }
-    }
-
-    pub(crate) fn merge_chain(&self) -> Option<&MembershipChain> {
-        match self {
-            Self::MergeConcurrent(membership) => Some(membership),
-            Self::Serial(_) => None,
-        }
-    }
-
-    fn resolved_provider_admin(
-        &self,
-        grant_id: &ProviderAdminGrantId,
-    ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
-        let state = match self {
-            Self::MergeConcurrent(membership) => {
-                let crate::sync::membership::MembershipStatus::Resolved(resolved) =
-                    membership.status()
-                else {
-                    return Err(DeviceJoinError::MembershipConflict);
-                };
-                resolved.provider_admin.combined_state()
-            }
-            Self::Serial(authorization) => &authorization.provider_admin,
-        };
-        state
-            .records()
-            .get(grant_id)
-            .filter(|record| state.authorizes(grant_id, &record.administrator))
-            .cloned()
-            .ok_or(DeviceJoinError::ProviderAdministratorRequired)
-    }
+fn resolved_provider_admin(
+    membership: &MembershipChain,
+    grant_id: &ProviderAdminGrantId,
+) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
+    let crate::sync::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+        return Err(DeviceJoinError::MembershipConflict);
+    };
+    let state = resolved.provider_admin.combined_state();
+    state
+        .records()
+        .get(grant_id)
+        .filter(|record| state.authorizes(grant_id, &record.administrator))
+        .cloned()
+        .ok_or(DeviceJoinError::ProviderAdministratorRequired)
 }
 
 pub async fn load_current_device_join_authorization(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-) -> Result<DeviceJoinAuthorization, DeviceJoinError> {
-    match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let membership = crate::sync::pull::load_cycle_membership(storage, db)
-                .await
-                .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-            let chain = membership
-                .chain
-                .ok_or(DeviceJoinError::MembershipConflict)?;
-            Ok(DeviceJoinAuthorization::MergeConcurrent(chain))
-        }
-        crate::WritePolicy::Serial => {
-            let coordination = coordination.ok_or(DeviceJoinError::MembershipConflict)?;
-            Ok(DeviceJoinAuthorization::Serial(
-                crate::sync::store_engine::serial::publication::current_serial_authorization(
-                    db,
-                    storage,
-                    coordination,
-                )
-                .await?,
-            ))
-        }
-    }
+) -> Result<MembershipChain, DeviceJoinError> {
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+    membership.chain.ok_or(DeviceJoinError::MembershipConflict)
 }
 
-async fn require_authorization_policy(
+async fn load_local_store_root(
     db: &Database,
     storage: &dyn SyncStorage,
-    authorization: &DeviceJoinAuthorization,
 ) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, DeviceJoinError> {
     let root = db
         .local_store_root_ref()
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, &root).await?;
-    if root_value.value.descriptor.write_policy != authorization.policy()
-        || db.write_policy() != root_value.value.descriptor.write_policy
-    {
-        return Err(DeviceJoinError::OfferMismatch);
-    }
-    Ok(root_value)
+    crate::sync::store_objects::load_store_protocol_root(storage, &root)
+        .await
+        .map_err(DeviceJoinError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn begin_device_join(
     db: &Database,
     storage: &dyn SyncStorage,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     member_pubkey: &str,
     provider_admin_grant: ProviderAdminGrantId,
 ) -> Result<DeviceJoinOffer, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     validate_member_for_join(member_pubkey, &authorization.current_members())?;
     let owner_pubkey = keys::public_key_hex(identity_signer);
     let owner_grant = authorization
         .active_owner_grant(&owner_pubkey)
         .ok_or(DeviceJoinError::OwnerAuthorityRequired)?;
-    let provider_admin = authorization.resolved_provider_admin(&provider_admin_grant)?;
+    let provider_admin = resolved_provider_admin(authorization, &provider_admin_grant)?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1858,12 +1767,10 @@ pub async fn begin_device_join(
 pub async fn abandon_device_join(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     offer: DeviceJoinOffer,
 ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     let current = load_store_journal(db, offer.attempt_id, DeviceJoinRole::Owner)
         .await?
         .ok_or(DeviceJoinError::JournalConflict)?;
@@ -1945,11 +1852,7 @@ pub async fn abandon_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -1957,10 +1860,6 @@ pub async fn abandon_device_join(
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Abandonment(abandonment_ref.clone()),
     )
@@ -2051,7 +1950,6 @@ async fn prepare_new_access_request(
 pub fn prepare_device_registration_request<'a>(
     pending: &'a DeviceJoinJournalDatabase,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn CoordinationStorage>,
     peer_exact: Option<&'a dyn ExactSlotStorage>,
     identity_signer: &'a UserKeypair,
     approval: DeviceProviderAdmissionApproval,
@@ -2097,7 +1995,6 @@ pub fn prepare_device_registration_request<'a>(
         approval.verify(&root_value, &owner, &administrator)?;
         crate::sync::store_engine::verify_accepted_provider_access_activation(
             storage,
-            coordination,
             &approval.request.offer.store_root,
             &approval.access_grant,
             &approval.request.offer.provider_admin,
@@ -2161,28 +2058,19 @@ pub fn prepare_device_registration_request<'a>(
                 ".json",
             )
             .await?;
-        let store_commits = match root_value.value.descriptor.write_policy {
-            crate::WritePolicy::MergeConcurrent => {
-                let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
-                    approval.request.offer.store_root.store_root_hash,
-                    ProtocolObjectDomain::StoreHead,
-                );
-                let first_slot = storage
-                    .allocate_protocol_slot(
-                        &context,
-                        &crate::sync::store_commit::head_slot_prefix(&device_id.to_string(), 1),
-                        ".json",
-                    )
-                    .await?;
-                crate::sync::store_commit::StoreCommitAnchor::MergeConcurrent {
-                    announcements:
-                        crate::sync::store_commit::DeviceStreamAnchor::StoreAnnouncements {
-                            first_slot,
-                        },
-                }
-            }
-            crate::WritePolicy::Serial => crate::sync::store_commit::StoreCommitAnchor::Serial,
-        };
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+            approval.request.offer.store_root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let first_slot = storage
+            .allocate_protocol_slot(
+                &context,
+                &crate::sync::store_commit::head_slot_prefix(&device_id.to_string(), 1),
+                ".json",
+            )
+            .await?;
+        let store_commits =
+            crate::sync::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot };
         let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
@@ -2227,7 +2115,6 @@ pub fn prepare_device_registration_request<'a>(
         let (registration, _) = crate::sync::store_registration::prepare_registration_for_origin(
             storage,
             identity_signer,
-            root_value.value.descriptor.write_policy,
             approval.request.offer.store_root.clone(),
             origin,
             registration_slot.clone(),
@@ -2268,12 +2155,11 @@ pub fn prepare_device_registration_request<'a>(
 pub async fn accept_device_registration_request(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     request: DeviceRegistrationRequest,
 ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
-    let root_value = require_authorization_policy(db, storage, authorization).await?;
+    let root_value = load_local_store_root(db, storage).await?;
     request.verify()?;
     let offer = &request.approval.request.offer;
     let owner = Box::pin(db.activated_store_device_registration(offer.owner_registration.clone()))
@@ -2289,7 +2175,6 @@ pub async fn accept_device_registration_request(
         .verify(&root_value, &owner, &administrator)?;
     crate::sync::store_engine::verify_accepted_provider_access_activation(
         storage,
-        coordination,
         &offer.store_root,
         &request.approval.access_grant,
         &offer.provider_admin,
@@ -2328,11 +2213,7 @@ pub async fn accept_device_registration_request(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -2398,10 +2279,6 @@ pub async fn accept_device_registration_request(
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Attempt(attempt_ref.clone()),
     )
@@ -2870,12 +2747,10 @@ pub async fn complete_device_provider_admission(
 pub async fn cancel_device_join(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
 ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     let current = load_store_journal(db, attempt_ref.attempt_id, DeviceJoinRole::Owner)
         .await?
         .ok_or(DeviceJoinError::JournalConflict)?;
@@ -3008,11 +2883,7 @@ pub async fn cancel_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -3020,10 +2891,6 @@ pub async fn cancel_device_join(
     let outcome_activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
@@ -3053,9 +2920,8 @@ pub async fn cancel_device_join(
 pub fn prepare_device_join_cleanup<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn CoordinationStorage>,
     executor_exact: &'a dyn ExactSlotStorage,
-    authorization: &'a DeviceJoinAuthorization,
+    authorization: &'a MembershipChain,
     identity_signer: &'a UserKeypair,
     cancellation: DeviceJoinCancellation,
     administrator_terminal: ProviderAdminJoinTerminal,
@@ -3066,7 +2932,6 @@ pub fn prepare_device_join_cleanup<'a>(
     Box::pin(prepare_device_join_cleanup_inner(
         db,
         storage,
-        coordination,
         executor_exact,
         authorization,
         identity_signer,
@@ -3080,15 +2945,13 @@ pub fn prepare_device_join_cleanup<'a>(
 async fn prepare_device_join_cleanup_inner(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     executor_exact: &dyn ExactSlotStorage,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: Box<DeviceJoinCancellation>,
     administrator_terminal: Box<ProviderAdminJoinTerminal>,
     joiner_terminal: Box<JoinerJoinTerminal>,
 ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
     let current = load_store_journal(db, attempt_ref.attempt_id, DeviceJoinRole::Owner)
@@ -3177,7 +3040,8 @@ async fn prepare_device_join_cleanup_inner(
     if local_root != root || !authorization.is_owner_now(&executor.author_pubkey) {
         return Err(DeviceJoinError::OwnerAuthorityRequired);
     }
-    let effective_executor = authorization.resolved_provider_admin(
+    let effective_executor = resolved_provider_admin(
+        authorization,
         &attempt
             .provider_approval
             .request
@@ -3203,11 +3067,7 @@ async fn prepare_device_join_cleanup_inner(
             let plan = crate::sync::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-                    db.write_policy(),
-                    coordination,
-                    authorization.merge_chain(),
-                )?,
+                crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
                 &local_device_id,
                 identity_signer,
             )
@@ -3657,14 +3517,13 @@ pub async fn close_joining_device(
 async fn sign_device_join_producer_write_revocation(
     db: &Database,
     storage: &dyn SyncStorage,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
     producer: DeviceJoinProducer,
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
     let root = db
@@ -3708,7 +3567,7 @@ async fn sign_device_join_producer_write_revocation(
     ) {
         return Err(DeviceJoinError::AttemptMismatch);
     }
-    let executor_admin = authorization.resolved_provider_admin(&executor_grant)?;
+    let executor_admin = resolved_provider_admin(authorization, &executor_grant)?;
     let executor = db
         .activated_store_device_registration(executor_admin.administrator.clone())
         .await
@@ -3794,7 +3653,7 @@ async fn sign_device_join_producer_write_revocation(
 pub async fn revoke_device_provider_admission_writes(
     db: &Database,
     storage: &dyn SyncStorage,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
@@ -3853,7 +3712,7 @@ pub async fn revoke_device_provider_admission_writes(
 pub async fn revoke_joining_device_writes(
     db: &Database,
     storage: &dyn SyncStorage,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
@@ -3896,13 +3755,11 @@ pub async fn revoke_joining_device_writes(
 pub async fn activate_device_join_cleanup(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     attempt_id: DeviceJoinAttemptId,
     receipt: DeviceJoinCleanupReceipt,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::Owner)
         .await?
         .ok_or(DeviceJoinError::JournalConflict)?;
@@ -3930,11 +3787,7 @@ pub async fn activate_device_join_cleanup(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -3968,10 +3821,6 @@ pub async fn activate_device_join_cleanup(
     let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::CleanupReceipt(receipt.receipt.clone()),
     )
@@ -4613,12 +4462,10 @@ pub async fn observe_device_join_abandonment(
 pub async fn finalize_device_join(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     completion: DeviceProviderAdmissionCompletion,
 ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-    require_authorization_policy(db, storage, authorization).await?;
     let attempt_ref = completion.readiness.proof.attempt.clone();
     let attempt_id = attempt_ref.attempt_id;
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::Owner)
@@ -4814,11 +4661,7 @@ pub async fn finalize_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -4826,10 +4669,6 @@ pub async fn finalize_device_join(
     let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
@@ -5077,21 +4916,20 @@ pub fn observe_device_join_activation(
 pub async fn authorize_device_provider_access(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
-    authorization: &DeviceJoinAuthorization,
+    authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     request: DeviceProviderAccessRequest,
 ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-    let root_value = require_authorization_policy(db, storage, authorization).await?;
+    let root_value = load_local_store_root(db, storage).await?;
     let owner = db
         .activated_store_device_registration(request.offer.owner_registration.clone())
         .await
         .map_err(database_error)?;
     request.verify(&owner)?;
     let provider_admin =
-        authorization.resolved_provider_admin(&request.offer.provider_admin.grant_id)?;
+        resolved_provider_admin(authorization, &request.offer.provider_admin.grant_id)?;
     if provider_admin != *request.offer.provider_admin {
         return Err(DeviceJoinError::OfferMismatch);
     }
@@ -5209,11 +5047,7 @@ pub async fn authorize_device_provider_access(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        crate::sync::store_outbound::StoreOperationPreparation::new(authorization),
         &local_device_id,
         identity_signer,
     )
@@ -5221,10 +5055,6 @@ pub async fn authorize_device_provider_access(
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::ProviderAccessGrant(grant_ref.clone()),
     )

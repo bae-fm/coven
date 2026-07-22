@@ -126,7 +126,6 @@ pub fn test_founder_provider_admin(
         },
         capability: ProviderCapabilityProof {
             exact_slots: ExactSlotProbeReceipt::from_transcript(transcript, &store, &device),
-            serial_coordination: None,
         },
     }
 }
@@ -139,8 +138,8 @@ pub fn install_test_store_root_authority(
     use crate::storage::cloud::ObjectSlot;
     use crate::sync::storage::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
     use crate::sync::store_commit::{
-        GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
-        StoreMembershipGenesis, StoreProtocolRoot, STORE_PROTOCOL_VERSION,
+        GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId, StoreProtocolRoot,
+        STORE_PROTOCOL_VERSION,
     };
 
     let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
@@ -179,7 +178,6 @@ pub fn install_test_store_root_authority(
         },
         schema_version: 1,
         sync_routing_hash,
-        write_policy: crate::WritePolicy::MergeConcurrent,
         founder_pubkey: crate::keys::public_key_hex(&signer),
         founder_grant: test_membership_grant_id(&format!("{label} founder grant")),
         root_slot: root_slot.clone(),
@@ -188,11 +186,9 @@ pub fn install_test_store_root_authority(
         ))
         .expect("valid test founder registration slot"),
         founder_provider_admin: test_founder_provider_admin(label),
-        membership: StoreMembershipGenesis::MergeConcurrent {
-            founder_membership: GrantStreamAnchor::StoreMembership {
-                first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
-                    .expect("valid test founder membership slot"),
-            },
+        founder_membership: GrantStreamAnchor::StoreMembership {
+            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
+                .expect("valid test founder membership slot"),
         },
         founder_recovery: GrantStreamAnchor::OwnerRecovery {
             first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/recovery/1.json"))
@@ -222,12 +218,11 @@ pub fn install_test_store_root_authority(
 pub fn install_test_active_circle(
     conn: &Connection,
     label: &str,
-    policy: crate::WritePolicy,
 ) -> (
     crate::sync::circle::CircleId,
     crate::sync::circle::CircleControlCoord,
 ) {
-    install_test_circle_current_state(conn, label, policy, true)
+    install_test_circle_current_state(conn, label, true)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -246,19 +241,17 @@ pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
 pub fn install_test_inactive_circle(
     conn: &Connection,
     label: &str,
-    policy: crate::WritePolicy,
 ) -> (
     crate::sync::circle::CircleId,
     crate::sync::circle::CircleControlCoord,
 ) {
-    install_test_circle_current_state(conn, label, policy, false)
+    install_test_circle_current_state(conn, label, false)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 fn install_test_circle_current_state(
     conn: &Connection,
     label: &str,
-    policy: crate::WritePolicy,
     active: bool,
 ) -> (
     crate::sync::circle::CircleId,
@@ -269,22 +262,21 @@ fn install_test_circle_current_state(
     use crate::storage::cloud::ObjectSlot;
     use crate::sync::circle::{
         CircleMetadataHead, CircleRole, CircleRosterHead, CircleTransitionDraft,
-        CircleTransitionDraftPolicy, CircleTransitionPolicyObjects, PreparedCircleTransition,
-        StoreMembershipStateRef,
+        CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
     };
     use crate::sync::circle_activation::{
         CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
     };
     use crate::sync::membership::{
         MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
-        MembershipStatus, SerialAuthorizationState, SerialMembershipState,
+        MembershipStatus,
     };
     use crate::sync::storage::ExactObjectRef;
     use crate::sync::store_commit::{
         CandidateFamilyId, CircleActivationObjects, CircleMetadataObjectRef, DeviceStreamAnchor,
-        GrantStreamAnchor, ObjectHash, SerialStorePosition, StoreCommitAnchor, StoreCreationId,
-        StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
-        StoreRootRef, StreamActivation, SuccessorLink,
+        GrantStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
+        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
+        SuccessorLink,
     };
 
     fn exact_object(label: &str, bytes: &[u8]) -> ExactObjectRef {
@@ -325,16 +317,9 @@ fn install_test_circle_current_state(
             *ObjectHash::digest(label.as_bytes()).as_bytes(),
         ),
     };
-    let store_commits = match policy {
-        crate::WritePolicy::MergeConcurrent => StoreCommitAnchor::MergeConcurrent {
-            announcements: DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/announcements/1.json"
-                ))
-                .expect("valid test Store announcement slot"),
-            },
-        },
-        crate::WritePolicy::Serial => StoreCommitAnchor::Serial,
+    let store_commits = DeviceStreamAnchor::StoreAnnouncements {
+        first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/announcements/1.json"))
+            .expect("valid test Store announcement slot"),
     };
     let registration = StoreDeviceRegistration::signed(
         root.clone(),
@@ -374,50 +359,24 @@ fn install_test_circle_current_state(
     };
     let founder = founder_entry(label, &owner, membership_anchor);
     let founder_coord = founder.coord();
-    let (membership, membership_authority) = match policy {
-        crate::WritePolicy::MergeConcurrent => {
-            let chain = MembershipChain::from_entries(vec![founder.clone()])
-                .expect("found test Merge membership");
-            let MembershipStatus::Resolved(resolved) = chain.status() else {
-                panic!("founder membership must resolve")
-            };
-            let head = MembershipHeadRef {
-                coord: founder_coord.clone(),
-                head_hash: ObjectHash::digest(format!("{label} membership head").as_bytes()),
-                object: exact_object(&format!("{label}/membership-head"), b"test membership head"),
-            };
-            (
-                StoreMembershipStateRef::merge_concurrent(
-                    vec![head],
-                    Vec::new(),
-                    Vec::new(),
-                    resolved.state_hash,
-                )
-                .expect("valid test Merge membership reference"),
-                Some(MembershipGrantCreationAuthority::Entry(founder_coord)),
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let membership_state =
-                SerialMembershipState::from_founder(root.store_root_id, &founder)
-                    .expect("found test Serial membership");
-            let authorization =
-                SerialAuthorizationState::from_test_membership(&founder, membership_state)
-                    .expect("build test Serial authorization");
-            (
-                StoreMembershipStateRef::serial(
-                    SerialStorePosition::Genesis {
-                        root: root.clone(),
-                        founder_registration: author_registration.clone(),
-                    },
-                    Vec::new(),
-                    &authorization,
-                )
-                .expect("valid test Serial membership reference"),
-                None,
-            )
-        }
+    let chain =
+        MembershipChain::from_entries(vec![founder.clone()]).expect("found test membership");
+    let MembershipStatus::Resolved(resolved) = chain.status() else {
+        panic!("founder membership must resolve")
     };
+    let head = MembershipHeadRef {
+        coord: founder_coord.clone(),
+        head_hash: ObjectHash::digest(format!("{label} membership head").as_bytes()),
+        object: exact_object(&format!("{label}/membership-head"), b"test membership head"),
+    };
+    let membership = StoreMembershipStateRef::from_parts(
+        vec![head],
+        Vec::new(),
+        Vec::new(),
+        resolved.state_hash,
+    )
+    .expect("valid test membership reference");
+    let membership_authority = MembershipGrantCreationAuthority::Entry(founder_coord);
     let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(
         format!("{label} candidate family").as_bytes(),
     ));
@@ -448,135 +407,134 @@ fn install_test_circle_current_state(
         },
     )]);
     let mut metadata_heads = Vec::new();
-    let (policy_objects, head_object) = match &draft.policy {
-        CircleTransitionDraftPolicy::MergeConcurrent { roster_entry } => {
-            let roster_entry = roster_entry
-                .clone()
-                .expect("founder Merge Circle contains a roster entry");
-            let roster_bytes =
-                serde_json::to_vec(&roster_entry).expect("serialize test Circle roster entry");
-            let roster_object = exact_object(&format!("{label}/roster-entry"), &roster_bytes);
-            roster_entries.insert(roster_entry.coord(), roster_object.clone());
+    let (policy_objects, head_object) = {
+        let roster_entry = draft
+            .policy
+            .roster_entry
+            .clone()
+            .expect("founder Circle contains a roster entry");
+        let roster_bytes =
+            serde_json::to_vec(&roster_entry).expect("serialize test Circle roster entry");
+        let roster_object = exact_object(&format!("{label}/roster-entry"), &roster_bytes);
+        roster_entries.insert(roster_entry.coord(), roster_object.clone());
 
-            let roster_head_slot =
-                ObjectSlot::logical(format!("store-v1/test/{label}/circle-roster-head/1.json"))
-                    .expect("valid test Circle roster-head slot");
-            let roster_activation = StreamActivation::grant_authorized(
-                store_root_hash,
-                author_registration.clone(),
-                roster_entry.author_owner_grant.clone(),
-                GrantStreamAnchor::CircleRoster {
-                    circle_id: draft.circle_id,
-                    first_slot: roster_head_slot.clone(),
-                },
-            );
-            let roster_head = CircleRosterHead::signed(
-                &roster_entry,
-                roster_object,
-                SuccessorLink {
-                    activation: roster_activation.activation_id(),
-                    predecessor: None,
-                    next_slot: ObjectSlot::logical(format!(
-                        "store-v1/test/{label}/circle-roster-head/2.json"
-                    ))
-                    .expect("valid next test Circle roster-head slot"),
-                },
-                &device_signer,
-            );
-            let roster_head_bytes =
-                serde_json::to_vec(&roster_head).expect("serialize test Circle roster head");
-            let roster_head_object = ExactObjectRef::new(
-                roster_head_slot,
-                roster_head_bytes.len() as u64,
-                ObjectHash::digest(&roster_head_bytes),
-            );
-            roster_heads.push(crate::sync::circle::CircleRosterHeadRef::from_stored_head(
-                &roster_head,
-                roster_head_object,
-            ));
+        let roster_head_slot =
+            ObjectSlot::logical(format!("store-v1/test/{label}/circle-roster-head/1.json"))
+                .expect("valid test Circle roster-head slot");
+        let roster_activation = StreamActivation::grant_authorized(
+            store_root_hash,
+            author_registration.clone(),
+            roster_entry.author_owner_grant.clone(),
+            GrantStreamAnchor::CircleRoster {
+                circle_id: draft.circle_id,
+                first_slot: roster_head_slot.clone(),
+            },
+        );
+        let roster_head = CircleRosterHead::signed(
+            &roster_entry,
+            roster_object,
+            SuccessorLink {
+                activation: roster_activation.activation_id(),
+                predecessor: None,
+                next_slot: ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/circle-roster-head/2.json"
+                ))
+                .expect("valid next test Circle roster-head slot"),
+            },
+            &device_signer,
+        );
+        let roster_head_bytes =
+            serde_json::to_vec(&roster_head).expect("serialize test Circle roster head");
+        let roster_head_object = ExactObjectRef::new(
+            roster_head_slot,
+            roster_head_bytes.len() as u64,
+            ObjectHash::digest(&roster_head_bytes),
+        );
+        roster_heads.push(crate::sync::circle::CircleRosterHeadRef::from_stored_head(
+            &roster_head,
+            roster_head_object,
+        ));
 
-            let metadata_head_slot =
-                ObjectSlot::logical(format!("store-v1/test/{label}/circle-metadata-head/1.json"))
-                    .expect("valid test Circle metadata-head slot");
-            let metadata_activation = StreamActivation::grant_authorized(
-                store_root_hash,
-                author_registration.clone(),
-                draft.metadata.author_owner_grant.clone(),
-                GrantStreamAnchor::CircleMetadata {
-                    circle_id: draft.circle_id,
-                    first_slot: metadata_head_slot.clone(),
-                },
-            );
-            let metadata_head = CircleMetadataHead::signed(
-                &draft.metadata,
-                metadata_object,
-                SuccessorLink {
-                    activation: metadata_activation.activation_id(),
-                    predecessor: None,
-                    next_slot: ObjectSlot::logical(format!(
-                        "store-v1/test/{label}/circle-metadata-head/2.json"
-                    ))
-                    .expect("valid next test Circle metadata-head slot"),
-                },
-                &device_signer,
-            );
-            let metadata_head_bytes =
-                serde_json::to_vec(&metadata_head).expect("serialize test Circle metadata head");
-            let metadata_head_object = ExactObjectRef::new(
-                metadata_head_slot,
-                metadata_head_bytes.len() as u64,
-                ObjectHash::digest(&metadata_head_bytes),
-            );
-            metadata_heads.push(
-                crate::sync::circle::CircleMetadataHeadRef::from_stored_head(
-                    &metadata_head,
-                    metadata_head_object,
-                ),
-            );
+        let metadata_head_slot =
+            ObjectSlot::logical(format!("store-v1/test/{label}/circle-metadata-head/1.json"))
+                .expect("valid test Circle metadata-head slot");
+        let metadata_activation = StreamActivation::grant_authorized(
+            store_root_hash,
+            author_registration.clone(),
+            draft.metadata.author_owner_grant.clone(),
+            GrantStreamAnchor::CircleMetadata {
+                circle_id: draft.circle_id,
+                first_slot: metadata_head_slot.clone(),
+            },
+        );
+        let metadata_head = CircleMetadataHead::signed(
+            &draft.metadata,
+            metadata_object,
+            SuccessorLink {
+                activation: metadata_activation.activation_id(),
+                predecessor: None,
+                next_slot: ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/circle-metadata-head/2.json"
+                ))
+                .expect("valid next test Circle metadata-head slot"),
+            },
+            &device_signer,
+        );
+        let metadata_head_bytes =
+            serde_json::to_vec(&metadata_head).expect("serialize test Circle metadata head");
+        let metadata_head_object = ExactObjectRef::new(
+            metadata_head_slot,
+            metadata_head_bytes.len() as u64,
+            ObjectHash::digest(&metadata_head_bytes),
+        );
+        metadata_heads.push(
+            crate::sync::circle::CircleMetadataHeadRef::from_stored_head(
+                &metadata_head,
+                metadata_head_object,
+            ),
+        );
 
-            let control_head_slot =
-                ObjectSlot::logical(format!("store-v1/test/{label}/circle-control-head/1.json"))
-                    .expect("valid test Circle control-head slot");
-            let control_activation = StreamActivation::grant_authorized(
-                store_root_hash,
-                author_registration.clone(),
-                draft.metadata.author_owner_grant.clone(),
-                GrantStreamAnchor::CircleControl {
-                    circle_id: draft.circle_id,
-                    first_slot: control_head_slot.clone(),
-                },
-            );
-            let control_head = crate::sync::circle::CircleControlHead::signed(
-                &draft.control.value,
-                control_object.clone(),
-                SuccessorLink {
-                    activation: control_activation.activation_id(),
-                    predecessor: None,
-                    next_slot: ObjectSlot::logical(format!(
-                        "store-v1/test/{label}/circle-control-head/2.json"
-                    ))
-                    .expect("valid next test Circle control-head slot"),
-                },
-                &device_signer,
-            );
-            let control_head_bytes =
-                serde_json::to_vec(&control_head).expect("serialize test Circle control head");
-            let control_head_object = ExactObjectRef::new(
-                control_head_slot,
-                control_head_bytes.len() as u64,
-                ObjectHash::digest(&control_head_bytes),
-            );
-            (
-                CircleTransitionPolicyObjects::MergeConcurrent {
-                    roster_entry: Some(roster_entry),
-                    roster_head: Some(roster_head),
-                    metadata_head,
-                    control_head,
-                },
-                Some(control_head_object),
-            )
-        }
-        CircleTransitionDraftPolicy::Serial => (CircleTransitionPolicyObjects::Serial, None),
+        let control_head_slot =
+            ObjectSlot::logical(format!("store-v1/test/{label}/circle-control-head/1.json"))
+                .expect("valid test Circle control-head slot");
+        let control_activation = StreamActivation::grant_authorized(
+            store_root_hash,
+            author_registration.clone(),
+            draft.metadata.author_owner_grant.clone(),
+            GrantStreamAnchor::CircleControl {
+                circle_id: draft.circle_id,
+                first_slot: control_head_slot.clone(),
+            },
+        );
+        let control_head = crate::sync::circle::CircleControlHead::signed(
+            &draft.control.value,
+            control_object.clone(),
+            SuccessorLink {
+                activation: control_activation.activation_id(),
+                predecessor: None,
+                next_slot: ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/circle-control-head/2.json"
+                ))
+                .expect("valid next test Circle control-head slot"),
+            },
+            &device_signer,
+        );
+        let control_head_bytes =
+            serde_json::to_vec(&control_head).expect("serialize test Circle control head");
+        let control_head_object = ExactObjectRef::new(
+            control_head_slot,
+            control_head_bytes.len() as u64,
+            ObjectHash::digest(&control_head_bytes),
+        );
+        (
+            CircleTransitionPolicyObjects {
+                roster_entry: Some(roster_entry),
+                roster_head: Some(roster_head),
+                metadata_head,
+                control_head,
+            },
+            Some(control_head_object),
+        )
     };
     let creation = PreparedCircleTransition {
         circle_id: draft.circle_id,
@@ -707,82 +665,6 @@ pub fn test_row_routing_id(
     let key = crate::sync::circle::derive_row_routing_key(&encryption, root_hash)
         .expect("test keyring has one generation-one key");
     crate::sync::circle::row_routing_id(&key, table, row_id)
-}
-
-#[cfg(test)]
-pub(crate) fn test_serial_founder_provider_admin(
-    label: &str,
-) -> crate::sync::provider::FounderProviderAdminGrant {
-    use crate::sync::provider::{
-        ProbeCreateAttempt, ProbeCreateOutcome, ProbePayloadLabel, ProbeReplaceAttempt,
-        ProbeReplaceOutcome, ProviderProbeId, SerialCoordinationProbeReceipt,
-        SerialCoordinationProbeTranscript,
-    };
-    use crate::sync::storage::{
-        ProviderDeviceBinding, ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
-    };
-    use crate::sync::store_commit::ObjectHash;
-
-    let mut grant = test_founder_provider_admin(label);
-    let probe_id = ProviderProbeId::from_bytes(
-        *ObjectHash::digest(format!("{label} serial probe").as_bytes()).as_bytes(),
-    );
-    let create_first =
-        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialCreateFirst);
-    let create_second =
-        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialCreateSecond);
-    let replace_first =
-        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceFirst);
-    let replace_second =
-        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceSecond);
-    let store = StoreProviderBinding::S3 {
-        endpoint: S3EndpointBinding::Custom {
-            origin: "https://test.invalid".to_string(),
-        },
-        region: "test-region".to_string(),
-        bucket: format!("{label}-bucket"),
-        key_prefix: None,
-    };
-    let device = ProviderDeviceBinding {
-        principal: ProviderPrincipalId::CustomS3Credential {
-            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
-        },
-    };
-    let transcript = SerialCoordinationProbeTranscript {
-        probe_id,
-        logical_key: format!("store-v1/test/{label}/provider-probe/serial"),
-        create_attempts: [
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&create_first),
-                outcome: ProbeCreateOutcome::Created,
-            },
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&create_second),
-                outcome: ProbeCreateOutcome::RejectedOccupied,
-            },
-        ],
-        created_bytes_hash: ObjectHash::digest(&create_first),
-        created_version_hash: ObjectHash::digest(b"created version"),
-        replace_attempts: [
-            ProbeReplaceAttempt {
-                payload_hash: ObjectHash::digest(&replace_first),
-                outcome: ProbeReplaceOutcome::Replaced,
-            },
-            ProbeReplaceAttempt {
-                payload_hash: ObjectHash::digest(&replace_second),
-                outcome: ProbeReplaceOutcome::RejectedVersionMismatch,
-            },
-        ],
-        replaced_bytes_hash: ObjectHash::digest(&replace_first),
-        replaced_version_hash: ObjectHash::digest(b"replaced version"),
-        authoritative_read_bytes_hash: ObjectHash::digest(&replace_first),
-        authoritative_read_version_hash: ObjectHash::digest(b"replaced version"),
-        delete_verified_absent: true,
-    };
-    grant.capability.serial_coordination = Some(SerialCoordinationProbeReceipt::from_transcript(
-        transcript, &store, &device,
-    ));
-    grant
 }
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
@@ -919,7 +801,7 @@ pub fn read_test_db(namespace: &str) -> Database {
 }
 
 /// Like [`read_test_db`] but with a chosen `max_concurrent_downloads`, so a pin test
-/// can drive the download loop concurrently. Uploads stay serial (not exercised here).
+/// can drive the download loop concurrently. Uploads run one at a time (not exercised here).
 pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Database {
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         namespace,
@@ -935,7 +817,6 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
         tables,
         crate::blob::BLOB_TOMBSTONE_GRACE,
         limits,
-        crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
         &test_migrations(),
     )
@@ -1096,20 +977,6 @@ pub fn open_test_db() -> Database {
     open_test_db_with(test_synced_tables())
 }
 
-pub fn open_serial_test_db() -> Database {
-    let (db, _stamper) = Database::open(
-        std::path::Path::new(":memory:"),
-        test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::Serial,
-        "test-device".to_string(),
-        &test_migrations(),
-    )
-    .expect("open Serial test database");
-    db
-}
-
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
 pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>) -> Database {
@@ -1118,8 +985,7 @@ pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>)
         std::path::Path::new(":memory:"),
         tables,
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         &migrations,
     )
@@ -1149,8 +1015,7 @@ pub fn open_test_db_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         hlc,
         &migrations,
     )
@@ -1170,16 +1035,10 @@ pub async fn host_exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
-    let write_policy = db.write_policy();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
-            conn,
-            &tables,
-            write_policy,
-            None,
-            write_id,
-            |tx| tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from),
-        )
+        Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
+            tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
+        })
     })
     .await
     .unwrap_or_else(|e| panic!("exec failed: {e}"));
@@ -1409,7 +1268,7 @@ pub async fn publish_snapshot_fixture(
     db_image: Vec<u8>,
     coverage: crate::sync::store_commit::CommitFrontier,
     keypair: &UserKeypair,
-    membership: Option<&crate::sync::membership::MembershipChain>,
+    membership: &crate::sync::membership::MembershipChain,
     db: &Database,
 ) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
     crate::sync::store_snapshot::push_store_snapshot(
@@ -1449,39 +1308,6 @@ pub async fn publish_merge_store_ack_fixture(
     .map_err(|error| error.to_string())?;
     let published = Box::pin(
         crate::sync::store_engine::drain_merge_acknowledgements_for_test(db, storage, signer),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    if published != 1 {
-        return Err(format!(
-            "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
-        ));
-    }
-    Ok(())
-}
-
-pub async fn publish_serial_store_ack_fixture(
-    db: &Database,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
-    frontier: crate::sync::store_commit::CommitFrontier,
-    signer: &UserKeypair,
-) -> Result<(), String> {
-    Box::pin(
-        crate::sync::store_engine::stage_serial_acknowledgement_for_test(
-            db,
-            storage,
-            storage,
-            frontier,
-            "2026-07-16T00:00:01Z".to_string(),
-            signer,
-        ),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let published = Box::pin(
-        crate::sync::store_engine::drain_serial_acknowledgements_for_test(
-            db, storage, storage, signer,
-        ),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -1535,21 +1361,11 @@ pub fn install_active_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     let future = async move {
-        let coordination = match observer_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => None,
-            crate::WritePolicy::Serial => Some(
-                store
-                    .storage
-                    .serial_coordination()
-                    .map_err(|error| error.to_string())?,
-            ),
-        };
         let authorization = Box::new(
             Box::pin(
                 crate::sync::device_join::load_current_device_join_authorization(
                     observer_db,
                     &store.storage,
-                    coordination,
                 ),
             )
             .await
@@ -1568,19 +1384,11 @@ pub fn install_active_device_fixture<'a>(
             )
             .await
             .map_err(|error| error.to_string())?;
-        let provider_admin = match authorization.as_ref() {
-            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(membership) => {
-                let crate::sync::membership::MembershipStatus::Resolved(resolved) =
-                    membership.status()
-                else {
-                    return Err("provider administrator membership is unresolved".to_string());
-                };
-                resolved.provider_admin.combined_state()
-            }
-            crate::sync::device_join::DeviceJoinAuthorization::Serial(authorization) => {
-                &authorization.provider_admin
-            }
+        let crate::sync::membership::MembershipStatus::Resolved(resolved) = authorization.status()
+        else {
+            return Err("provider administrator membership is unresolved".to_string());
         };
+        let provider_admin = resolved.provider_admin.combined_state();
         let provider_admin_grant = provider_admin
             .active()
             .into_iter()
@@ -1623,7 +1431,6 @@ pub fn install_active_device_fixture<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 observer_db,
                 &store.storage,
-                coordination,
                 None,
                 None,
                 &authorization,
@@ -1638,7 +1445,6 @@ pub fn install_active_device_fixture<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &store.storage,
-                    coordination,
                     None,
                     identity,
                     *approval,
@@ -1652,7 +1458,6 @@ pub fn install_active_device_fixture<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     observer_db,
                     &store.storage,
-                    coordination,
                     &authorization,
                     &store.signer,
                     *registration_request,
@@ -1671,35 +1476,15 @@ pub fn install_active_device_fixture<'a>(
             .await
             .map_err(|error| error.to_string())?,
         );
-        let membership = match local_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => Some(Box::pin(store.open_into(local_db)).await?),
-            crate::WritePolicy::Serial => {
-                let root = crate::sync::store_protocol_root::open_store(
-                    local_db,
-                    &store.storage,
-                    &store.root,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                crate::sync::cycle::ensure_serial_founder_authorization(
-                    &store.storage,
-                    local_db,
-                    &store.root,
-                    &root,
-                )
-                .await?;
-                None
-            }
-        };
+        let membership = Box::pin(store.open_into(local_db)).await?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let bootstrap_pull = Box::pin(crate::sync::store_engine::pull_store_commits(
             local_db,
             local_db.synced_tables(),
             &store.storage,
-            coordination,
             store.root.store_root_hash,
             &bootstrap_store_dir,
-            membership.as_ref(),
+            &membership,
             Some(identity),
         ))
         .await
@@ -1739,7 +1524,6 @@ pub fn install_active_device_fixture<'a>(
             Box::pin(crate::sync::device_join::finalize_device_join(
                 observer_db,
                 &store.storage,
-                coordination,
                 &authorization,
                 &store.signer,
                 *completion,
@@ -1768,15 +1552,6 @@ pub async fn promote_active_member_fixture(
     member: &UserKeypair,
     encryption: &crate::encryption::EncryptionService,
 ) -> Result<crate::sync::circle_control::StoreMembershipStateRef, String> {
-    let coordination = match owner_db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => None,
-        crate::WritePolicy::Serial => Some(
-            store
-                .storage
-                .serial_coordination()
-                .map_err(|error| error.to_string())?,
-        ),
-    };
     let owner_device_id = owner_db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1797,7 +1572,6 @@ pub async fn promote_active_member_fixture(
     let request = Box::pin(crate::sync::owner_promotion::begin_owner_promotion(
         owner_db,
         &store.storage,
-        coordination,
         &owner_device_id,
         owner,
         member_registration,
@@ -1807,7 +1581,6 @@ pub async fn promote_active_member_fixture(
     let acceptance = Box::pin(crate::sync::owner_promotion::accept_owner_promotion(
         member_db,
         &store.storage,
-        coordination,
         &member_device_id,
         member,
         request,
@@ -1817,7 +1590,6 @@ pub async fn promote_active_member_fixture(
     let finalized = Box::pin(crate::sync::owner_promotion::finalize_owner_promotion(
         owner_db,
         &store.storage,
-        coordination,
         &owner_device_id,
         owner,
         encryption,
@@ -1825,24 +1597,19 @@ pub async fn promote_active_member_fixture(
     ))
     .await
     .map_err(|error| format!("finalize Owner promotion: {error}"))?;
-    let membership = match member_db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            crate::sync::pull::load_cycle_membership(&store.storage, member_db)
-                .await
-                .map_err(|error| error.to_string())?
-                .chain
-        }
-        crate::WritePolicy::Serial => None,
-    };
+    let membership = crate::sync::pull::load_cycle_membership(&store.storage, member_db)
+        .await
+        .map_err(|error| error.to_string())?
+        .chain
+        .ok_or_else(|| "promoted member has no membership chain".to_string())?;
     let (_temp, store_dir) = temp_store_dir();
     let pull = Box::pin(crate::sync::store_engine::pull_store_commits(
         member_db,
         member_db.synced_tables(),
         &store.storage,
-        coordination,
         store.root.store_root_hash,
         &store_dir,
-        membership.as_ref(),
+        &membership,
         Some(member),
     ))
     .await
@@ -1900,11 +1667,7 @@ pub fn install_cross_principal_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
     Box::pin(async move {
-        let authorization = Box::new(
-            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                Box::pin(store.open_into(observer_db)).await?,
-            ),
-        );
+        let authorization = Box::new(Box::pin(store.open_into(observer_db)).await?);
         let crate::sync::storage::StoreProviderBinding::Dropbox { namespace_id } =
             &store.protocol_root.descriptor.provider
         else {
@@ -1934,8 +1697,7 @@ pub fn install_cross_principal_device_fixture<'a>(
             "cross-principal-test-store",
             identity.clone(),
         )
-        .map_err(|error| error.to_string())?
-        .with_test_serial_coordination(peer_home.clone());
+        .map_err(|error| error.to_string())?;
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1979,7 +1741,6 @@ pub fn install_cross_principal_device_fixture<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 observer_db,
                 &store.storage,
-                None,
                 Some(store.home.as_ref()),
                 Some(&access_administrator),
                 &authorization,
@@ -2000,7 +1761,6 @@ pub fn install_cross_principal_device_fixture<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
-                    None,
                     Some(peer_home.as_ref()),
                     identity,
                     *approval,
@@ -2014,7 +1774,6 @@ pub fn install_cross_principal_device_fixture<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     observer_db,
                     &store.storage,
-                    None,
                     &authorization,
                     &store.signer,
                     *registration_request,
@@ -2075,7 +1834,6 @@ pub fn install_cross_principal_device_fixture<'a>(
             Box::pin(crate::sync::device_join::finalize_device_join(
                 observer_db,
                 &store.storage,
-                None,
                 &authorization,
                 &store.signer,
                 *completion,
@@ -2176,8 +1934,7 @@ impl TestStore {
             store_id,
             signer.clone(),
         )
-        .map_err(|error| error.to_string())?
-        .with_test_serial_coordination(home.clone());
+        .map_err(|error| error.to_string())?;
         let root = Box::pin(create_exact_test_store(db, &storage, store_id, &signer)).await?;
         let protocol_root = Box::pin(crate::sync::store_objects::load_store_protocol_root(
             &storage, &root,
@@ -2377,7 +2134,7 @@ impl TestStore {
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
+        let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
             &db,
             &self.storage,
             &device_id,
@@ -2391,7 +2148,7 @@ impl TestStore {
         if !prepared {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        crate::sync::store_engine::merge::publication::drain_store_writes(&db, &self.storage)
+        crate::sync::store_engine::engine::publication::drain_store_writes(&db, &self.storage)
             .await
             .map_err(|error| error.to_string())?;
         db.latest_local_store_position()
@@ -2492,7 +2249,7 @@ impl TestStore {
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
+        let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
             db,
             &self.storage,
             &device_id,
@@ -2504,7 +2261,7 @@ impl TestStore {
         .await
         .map_err(|error| error.to_string())?;
         let published =
-            crate::sync::store_engine::merge::publication::drain_store_writes(db, &self.storage)
+            crate::sync::store_engine::engine::publication::drain_store_writes(db, &self.storage)
                 .await
                 .map_err(|error| error.to_string())?;
         if published > 0 {
@@ -2537,10 +2294,9 @@ pub async fn pull_into_result(
         db,
         db.synced_tables(),
         &store.storage,
-        None,
         store.root.store_root_hash,
         store_dir,
-        Some(&membership),
+        &membership,
         None,
     ))
     .await?;

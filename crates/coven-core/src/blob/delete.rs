@@ -47,7 +47,7 @@ use crate::db::{OutboxEntry, OutboxOperation};
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome};
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
-use crate::sync::membership::{MembershipChain, SerialMembershipState};
+use crate::sync::membership::MembershipChain;
 use crate::sync::membership_ops::{
     authorize_loaded_membership_author, MembershipAuthorRequirement,
 };
@@ -476,7 +476,6 @@ pub async fn gc_tombstones(
     store_id: &str,
     self_pubkey: &str,
     membership_chain: Option<&MembershipChain>,
-    serial_membership: Option<&SerialMembershipState>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
@@ -490,14 +489,7 @@ pub async fn gc_tombstones(
     // prefix; an owner additionally sweeps every other member's prefix (owners
     // retain bucket-wide delete, which a provider ACL can grant). This is what lets
     // the ACL express "members write/delete their own prefix, owners anywhere".
-    let is_owner = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            membership_chain.is_some_and(|chain| chain.is_owner_now(self_pubkey))
-        }
-        crate::WritePolicy::Serial => serial_membership
-            .ok_or_else(|| "Serial tombstone GC has no Serial membership state".to_string())?
-            .is_owner(self_pubkey),
-    };
+    let is_owner = membership_chain.is_some_and(|chain| chain.is_owner_now(self_pubkey));
 
     let now = clock.now();
     let mut deleted = 0;
@@ -564,18 +556,12 @@ pub async fn gc_tombstones(
         // of a wiped/refounded chain, fails here and is skipped. Only a
         // pre-initialization caller can supply no chain and rely on the verified
         // signature alone.
-        let authorization = match db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => authorize_loaded_membership_author(
-                membership_chain,
-                &tombstone.author_pubkey,
-                MembershipAuthorRequirement::WriteCapable,
-            )
-            .map_err(|error| error.to_string()),
-            crate::WritePolicy::Serial => serial_membership
-                .is_some_and(|membership| membership.can_write(&tombstone.author_pubkey))
-                .then_some(())
-                .ok_or_else(|| "author is not a current Serial writer".to_string()),
-        };
+        let authorization = authorize_loaded_membership_author(
+            membership_chain,
+            &tombstone.author_pubkey,
+            MembershipAuthorRequirement::WriteCapable,
+        )
+        .map_err(|error| error.to_string());
         if let Err(error) = authorization {
             warn!("skipping tombstone {key}: {error}");
             continue;

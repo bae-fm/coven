@@ -1,6 +1,5 @@
 use super::batch_commit::{candidate_manifest, validate_stream_activations};
 use super::operation_refs::validate_device_join_attempt_decision_refs;
-use super::validation::validate_operation_membership_authority;
 use super::*;
 use crate::sync::membership::founder_entry;
 
@@ -25,6 +24,17 @@ fn slot(key: String) -> ObjectSlot {
 
 fn exact(key: String, bytes: &[u8]) -> ExactObjectRef {
     ExactObjectRef::new(slot(key), bytes.len() as u64, ObjectHash::digest(bytes))
+}
+
+fn test_circle_control_coord(fixture: &Fixture, control_hash: ObjectHash) -> CircleControlCoord {
+    CircleControlCoord {
+        device_id: fixture.registration.device_id.to_string(),
+        stream_id: fixture.commit_ref.coord.stream_id,
+        author_pubkey: keys::public_key_hex(&fixture.signer),
+        author_owner_grant: fixture.root.descriptor.founder_grant.clone(),
+        seq: 1,
+        control_hash,
+    }
 }
 
 fn circle_activation(
@@ -59,7 +69,9 @@ fn joined_registration(
                 access_key_id_hash: ObjectHash::digest(label.as_bytes()),
             },
         },
-        StoreCommitAnchor::Serial,
+        DeviceStreamAnchor::StoreAnnouncements {
+            first_slot: slot(format!("store-v1/tests/{label}/announcements/1.json")),
+        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot(format!("store-v1/tests/{label}/acks/1.json")),
         },
@@ -101,7 +113,11 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
         candidate_ref,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        OwnerPromotionFinalization::Serial,
+        OwnerPromotionFinalization {
+            author_stream: fixture.commit_ref.coord.stream_id,
+            seq: 2,
+            previous_hash: Some(fixture.commit.commit_hash()),
+        },
         &fixture.signer,
     )
     .expect("sign promotion request");
@@ -110,10 +126,33 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
         .expect("verify promotion request");
     let acceptance = OwnerPromotionAcceptance::signed(
         request.clone(),
-        OwnerPromotionRequestActivation::Serial {
+        OwnerPromotionRequestActivation {
             commit: fixture.commit_ref.clone(),
+            head: StoreDeviceHeadRef {
+                head_hash: ObjectHash::digest(b"promotion activation head"),
+                object: exact(
+                    "store-v1/tests/promotion-activation-head.json".to_string(),
+                    b"promotion activation head",
+                ),
+            },
         },
-        OwnerPromotionAnchors::Serial {
+        OwnerPromotionAnchors {
+            membership: GrantStreamAnchor::StoreMembership {
+                first_slot: slot(format!(
+                    "{}.json",
+                    membership_head_slot_prefix(
+                        &request.member_pubkey,
+                        &request.intended_owner_grant,
+                        StreamActivation::grant_authorized_stream_id(
+                            request.store_root_hash,
+                            &request.member_registration,
+                            &request.intended_owner_grant,
+                            StreamAnchorDomain::StoreMembership,
+                        ),
+                        1,
+                    )
+                )),
+            },
             recovery: GrantStreamAnchor::OwnerRecovery {
                 first_slot: slot(format!(
                     "{}.json",
@@ -134,10 +173,33 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
         .expect("verify promotion acceptance");
     assert!(OwnerPromotionAcceptance::signed(
         request.clone(),
-        OwnerPromotionRequestActivation::Serial {
+        OwnerPromotionRequestActivation {
             commit: fixture.commit_ref.clone(),
+            head: StoreDeviceHeadRef {
+                head_hash: ObjectHash::digest(b"promotion activation head"),
+                object: exact(
+                    "store-v1/tests/promotion-activation-head.json".to_string(),
+                    b"promotion activation head",
+                ),
+            },
         },
-        OwnerPromotionAnchors::Serial {
+        OwnerPromotionAnchors {
+            membership: GrantStreamAnchor::StoreMembership {
+                first_slot: slot(format!(
+                    "{}.json",
+                    membership_head_slot_prefix(
+                        &request.member_pubkey,
+                        &request.intended_owner_grant,
+                        StreamActivation::grant_authorized_stream_id(
+                            request.store_root_hash,
+                            &request.member_registration,
+                            &request.intended_owner_grant,
+                            StreamAnchorDomain::StoreMembership,
+                        ),
+                        1,
+                    )
+                )),
+            },
             recovery: GrantStreamAnchor::OwnerRecovery {
                 first_slot: slot(
                     "store-v1/recovery/another-owner/another-grant/1.json".to_string(),
@@ -260,15 +322,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
         },
         slot("store-v1/circles/validation/control.json".to_string()),
     );
-    assert!(validate_stream_activations(
-        fixture.root_ref.store_root_hash,
-        &fixture.registration_ref,
-        WritePolicy::Serial,
-        None,
-        std::slice::from_ref(&control),
-    )
-    .is_err());
-
     let mut wrong_root = control.clone();
     let StreamActivation::GrantAuthorized {
         store_root_hash, ..
@@ -280,7 +333,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &[wrong_root],
     )
@@ -298,7 +350,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &[wrong_registration],
     )
@@ -315,7 +366,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &[non_circle],
     )
@@ -337,7 +387,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &unsorted,
     )
@@ -345,7 +394,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &[control.clone(), control.clone()],
     )
@@ -366,7 +414,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &duplicate_stream,
     )
@@ -399,7 +446,6 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
     assert!(validate_stream_activations(
         fixture.root_ref.store_root_hash,
         &fixture.registration_ref,
-        WritePolicy::MergeConcurrent,
         None,
         &duplicate_slot,
     )
@@ -410,7 +456,7 @@ fn fixture() -> Fixture {
     let signer = UserKeypair::generate();
     let founder_grant =
         crate::sync::test_helpers::test_membership_grant_id("store-a founder grant");
-    let provider_admin = crate::sync::test_helpers::test_serial_founder_provider_admin("store-a");
+    let provider_admin = crate::sync::test_helpers::test_founder_provider_admin("store-a");
     let founder_recovery = GrantStreamAnchor::OwnerRecovery {
         first_slot: slot("store-v1/recovery/founder/1.json".to_string()),
     };
@@ -428,13 +474,14 @@ fn fixture() -> Fixture {
             },
             schema_version: 3,
             sync_routing_hash: routing_hash(),
-            write_policy: WritePolicy::Serial,
             founder_pubkey: keys::public_key_hex(&signer),
             founder_grant: founder_grant.clone(),
             root_slot: slot(format!("{}.json", store_protocol_root_logical_key())),
             founder_registration: slot("store-v1/device-registrations/founder.json".to_string()),
             founder_provider_admin: provider_admin.clone(),
-            membership: StoreMembershipGenesis::Serial,
+            founder_membership: GrantStreamAnchor::StoreMembership {
+                first_slot: slot("store-v1/membership/founder/1.json".to_string()),
+            },
             founder_recovery: founder_recovery.clone(),
         },
         &signer,
@@ -470,7 +517,9 @@ fn fixture() -> Fixture {
                 access_key_id_hash: ObjectHash::digest(b"test access key"),
             },
         },
-        StoreCommitAnchor::Serial,
+        DeviceStreamAnchor::StoreAnnouncements {
+            first_slot: slot("store-v1/announcements/founder/1.json".to_string()),
+        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("store-v1/acks/founder/1.json".to_string()),
         },
@@ -491,10 +540,6 @@ fn fixture() -> Fixture {
             &registration_bytes,
         ),
     );
-    let predecessor = StoreSerialPredecessor::Genesis {
-        root: root_ref.clone(),
-        founder_registration: registration_ref.clone(),
-    };
     let resolved_devices = ResolvedStoreDeviceState::founder(
         &root_ref,
         registration_ref.clone(),
@@ -503,29 +548,42 @@ fn fixture() -> Fixture {
         &founder_recovery,
     )
     .expect("founder device state");
-    let device_state = StoreDeviceStateRef::serial(predecessor.clone(), &resolved_devices)
-        .expect("founder device state ref");
-    let membership = crate::sync::membership::SerialMembershipState::from_founder(
-        root_ref.store_root_id,
-        &founder,
-    )
-    .expect("founder membership");
-    let authorization = crate::sync::membership::SerialAuthorizationState::from_test_membership(
-        &founder, membership,
-    )
-    .expect("founder authorization");
-    let membership_state = StoreMembershipStateRef::serial(
-        predecessor.clone(),
+    let device_state =
+        StoreDeviceStateRef::from_resolved(CommitFrontier(BTreeMap::new()), &resolved_devices)
+            .expect("founder device state ref");
+    let membership = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
+        .expect("founder membership");
+    let crate::sync::membership::MembershipStatus::Resolved(resolved_membership) =
+        membership.status()
+    else {
+        panic!("founder membership resolves")
+    };
+    let membership_head = crate::sync::membership::MembershipHeadRef {
+        coord: founder.coord(),
+        head_hash: ObjectHash::digest(b"founder membership head"),
+        object: exact(
+            "store-v1/membership/founder/head.json".to_string(),
+            b"founder membership head",
+        ),
+    };
+    let membership_state = StoreMembershipStateRef::from_parts(
+        vec![membership_head],
+        Vec::new(),
         resolved_devices.recovery.clone(),
-        &authorization,
+        resolved_membership.state_hash,
     )
     .expect("founder membership ref");
     let package = b"package".to_vec();
     let write_id = WriteId::from_generated("canonical-write".to_string());
-    let order = StoreCommitOrder::Serial {
+    let order = StoreCommitOrder {
         seq: 1,
-        predecessor,
+        predecessor: None,
+        dependencies: BTreeMap::new(),
     };
+    let stream_id = registration
+        .store_announcement_activation(&registration_ref)
+        .expect("derive founder Store announcement activation")
+        .author_stream_id();
     let candidate_family = CandidateFamilyId::derive(
         root_ref.store_root_hash,
         &registration_ref,
@@ -537,7 +595,7 @@ fn fixture() -> Fixture {
             "{}.pkg",
             package_semantic_prefix(
                 candidate_family,
-                SERIAL_STREAM_ID,
+                &stream_id.to_string(),
                 1,
                 ObjectHash::digest(&package),
             )
@@ -548,13 +606,20 @@ fn fixture() -> Fixture {
     let commit = StoreBatchCommit::signed(
         root_ref.store_root_hash,
         write_id,
-        StoreCommitCoord::Serial { sequence: 1 },
+        StoreCommitCoord {
+            stream_id,
+            sequence: 1,
+        },
         registration_ref.clone(),
         &registration,
         order,
         membership_state,
         device_state,
-        StoreOperationMembershipAuthority::Serial,
+        StoreOperationMembershipAuthority {
+            predecessor: crate::sync::membership::MembershipGrantCreationAuthority::Entry(
+                founder.coord(),
+            ),
+        },
         StorePackageInput {
             candidate_family,
             schema_version: 3,
@@ -567,13 +632,16 @@ fn fixture() -> Fixture {
     let commit_bytes = commit.to_bytes();
     let commit_ref = StoreBatchCommitRef::from_commit(
         &commit,
-        StoreCommitCoord::Serial { sequence: 1 },
+        StoreCommitCoord {
+            stream_id,
+            sequence: 1,
+        },
         exact(
             format!(
                 "{}.json",
                 commit_semantic_prefix(
                     commit.candidate_family(),
-                    SERIAL_STREAM_ID,
+                    &stream_id.to_string(),
                     1,
                     commit.commit_hash(),
                 )
@@ -592,46 +660,6 @@ fn fixture() -> Fixture {
         commit_ref,
         package,
     }
-}
-
-#[test]
-fn operations_authority_validation_requires_merge_and_forbids_serial_authority() {
-    let fixture = fixture();
-    let authority = MembershipGrantCreationAuthority::Entry(MembershipCoord {
-        author_pubkey: keys::public_key_hex(&fixture.signer),
-        author_owner_grant: fixture.root.descriptor.founder_grant,
-        stream_id: AuthorStreamId::from_bytes([7; 32]),
-        seq: 1,
-        entry_hash: ObjectHash::digest(b"operations authority"),
-    });
-
-    assert!(validate_operation_membership_authority(WritePolicy::MergeConcurrent, None).is_err());
-    assert!(
-        validate_operation_membership_authority(WritePolicy::Serial, Some(&authority)).is_err()
-    );
-}
-
-#[test]
-fn serial_operations_reject_a_merge_membership_authority_at_parse() {
-    let fixture = fixture();
-    let mut commit = fixture.commit;
-    commit.membership_authority = Some(MembershipGrantCreationAuthority::Entry(MembershipCoord {
-        author_pubkey: keys::public_key_hex(&fixture.signer),
-        author_owner_grant: fixture.root.descriptor.founder_grant,
-        stream_id: AuthorStreamId::from_bytes([7; 32]),
-        seq: 1,
-        entry_hash: ObjectHash::digest(b"Serial commit Merge authority"),
-    }));
-    let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
-
-    assert!(StoreBatchCommit::parse_at(
-        &commit.to_bytes(),
-        fixture.root_ref.store_root_hash,
-        &fixture.commit_ref.coord,
-        &fixture.registration,
-    )
-    .is_err());
 }
 
 #[test]
@@ -705,7 +733,10 @@ fn commit_rejects_package_signature_and_coordinate_tamper() {
     assert!(matches!(
         fixture.commit.verify_at(
             fixture.root_ref.store_root_hash,
-            &StoreCommitCoord::Serial { sequence: 2 },
+            &StoreCommitCoord {
+                stream_id: fixture.commit_ref.coord.stream_id,
+                sequence: 2,
+            },
             &fixture.registration,
         ),
         Err(StoreProtocolError::RelocatedSlot { .. })
@@ -773,10 +804,8 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
             outcome_slot: outcome_slot.clone(),
         },
         provider_admin.provider.clone(),
-        StoreCommitAnchor::MergeConcurrent {
-            announcements: DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: slot("store-v1/heads/joiner/1.json".to_string()),
-            },
+        DeviceStreamAnchor::StoreAnnouncements {
+            first_slot: slot("store-v1/heads/joiner/1.json".to_string()),
         },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("store-v1/acks/joiner/1.json".to_string()),
@@ -795,14 +824,14 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
             ObjectHash::digest(&registration.to_bytes()),
         ),
     );
-    let membership = StoreMembershipStateRef::merge_concurrent(
+    let membership = StoreMembershipStateRef::from_parts(
         Vec::new(),
         Vec::new(),
         Vec::new(),
         ObjectHash::digest(b"membership"),
     )
     .unwrap();
-    let attempt_cut = StoreHistoryCut::MergeConcurrent(BTreeMap::new());
+    let attempt_cut = StoreHistoryCut(BTreeMap::new());
     let owner_device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
     let offer = crate::sync::device_join::DeviceJoinOffer::signed(
         attempt_id,
@@ -895,7 +924,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(b"other stream"));
     let other_commit_hash = ObjectHash::digest(b"other commit");
     let other_commit = StoreBatchCommitRef {
-        coord: StoreCommitCoord::MergeConcurrent {
+        coord: StoreCommitCoord {
             stream_id,
             sequence: 1,
         },
@@ -916,12 +945,19 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         ),
     };
     let other_frontier = BTreeMap::from([(stream_id, other_commit)]);
-    let other_cut = StoreHistoryCut::MergeConcurrent(other_frontier.clone());
-    let other_device_state = StoreDeviceStateRef::MergeConcurrent {
-        frontier: CommitFrontier::MergeConcurrent(other_frontier),
-        recovery: Vec::new(),
-        state_hash: ObjectHash::digest(b"other device state"),
-    };
+    let other_cut = StoreHistoryCut(other_frontier.clone());
+    let mut other_resolved_devices = ResolvedStoreDeviceState::founder(
+        &fixture.root_ref,
+        registration_ref.clone(),
+        &fixture.root.descriptor.founder_pubkey,
+        fixture.root.descriptor.founder_grant.clone(),
+        &fixture.root.descriptor.founder_recovery,
+    )
+    .expect("derive other device state");
+    other_resolved_devices.state_hash = ObjectHash::digest(b"other device state");
+    let other_device_state =
+        StoreDeviceStateRef::from_resolved(CommitFrontier(other_frontier), &other_resolved_devices)
+            .expect("bind other device state frontier");
     let device_signer = registration.device_signer(&joiner).unwrap();
     let ack = StoreAck::signed(
         fixture.root_ref.store_root_hash,
@@ -930,7 +966,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         other_cut.clone(),
         other_device_state,
         None,
-        StoreAckExclusionState::MergeConcurrent {
+        StoreAckExclusionState {
             proposal_freezes: Vec::new(),
         },
         "2026-07-16T00:00:00Z".to_string(),
@@ -967,59 +1003,38 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     ));
 }
 
-#[test]
-fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
-    let signer = UserKeypair::generate();
-    let store_root_hash = ObjectHash::digest(b"ack semantic hash Store root");
-    let root_ref = StoreRootRef {
-        store_root_id: ObjectHash::digest(b"ack semantic hash Store id"),
-        store_root_hash,
-        object: exact(store_protocol_root_logical_key().to_string(), b"Store root"),
-    };
-    let origin = StoreDeviceRegistrationOrigin::Founder {
-        creation_id: StoreCreationId::from_nonce("ack semantic hash founder"),
-    };
-    let registration_ref = StoreDeviceRegistrationRef {
-        device_id: StoreDeviceId::derive(&root_ref, &origin),
-        registration_hash: ObjectHash::digest(b"ack semantic hash registration"),
-        object: exact(
-            "store-v1/device-registrations/founder.json".to_string(),
-            b"registration",
-        ),
-    };
-    let store_cut = StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
-        root: root_ref.clone(),
-        founder_registration: registration_ref.clone(),
-    });
-    let device_state = StoreDeviceStateRef::Serial {
-        position: store_cut.serial_predecessor().unwrap().clone(),
-        recovery: Vec::new(),
-        state_hash: ObjectHash::digest(b"ack semantic hash device state"),
-    };
-    let ack = StoreAck::signed(
-        store_root_hash,
-        registration_ref.clone(),
+fn signed_test_ack(fixture: &Fixture, last_sync: &str) -> StoreAck {
+    StoreAck::signed(
+        fixture.root_ref.store_root_hash,
+        fixture.registration_ref.clone(),
         1,
-        store_cut,
-        device_state,
+        StoreHistoryCut(BTreeMap::new()),
+        fixture.commit.device_state.clone(),
         None,
-        StoreAckExclusionState::Serial,
-        "2026-07-16T00:00:00Z".to_string(),
+        StoreAckExclusionState {
+            proposal_freezes: Vec::new(),
+        },
+        last_sync.to_string(),
         SuccessorLink {
-            activation: StreamActivation::device_authorized(
-                store_root_hash,
-                registration_ref.clone(),
-                DeviceStreamAnchor::StoreAcknowledgements {
-                    first_slot: slot("store-v1/acks/founder/1.json".to_string()),
-                },
-            )
-            .activation_id(),
+            activation: fixture
+                .registration
+                .store_acknowledgement_activation(&fixture.registration_ref)
+                .expect("derive acknowledgement activation")
+                .activation_id(),
             predecessor: None,
             next_slot: slot("store-v1/acks/founder/2.json".to_string()),
         },
-        &signer,
+        &fixture
+            .registration
+            .device_signer(&fixture.signer)
+            .expect("derive device signer"),
     )
-    .unwrap();
+    .expect("sign Store acknowledgement")
+}
+
+#[test]
+fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
+    let ack = signed_test_ack(&fixture(), "2026-07-16T00:00:00Z");
     let bytes = ack.to_bytes();
     let semantic_hash = StoreAck::semantic_hash_from_bytes(&bytes).unwrap();
 
@@ -1029,57 +1044,7 @@ fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
 
 #[test]
 fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_ref() {
-    let signer = UserKeypair::generate();
-    let store_root_hash = ObjectHash::digest(b"ack wire shape Store root");
-    let root_ref = StoreRootRef {
-        store_root_id: ObjectHash::digest(b"ack wire shape Store id"),
-        store_root_hash,
-        object: exact(store_protocol_root_logical_key().to_string(), b"Store root"),
-    };
-    let origin = StoreDeviceRegistrationOrigin::Founder {
-        creation_id: StoreCreationId::from_nonce("ack wire shape founder"),
-    };
-    let registration_ref = StoreDeviceRegistrationRef {
-        device_id: StoreDeviceId::derive(&root_ref, &origin),
-        registration_hash: ObjectHash::digest(b"ack wire shape registration"),
-        object: exact(
-            "store-v1/device-registrations/founder.json".to_string(),
-            b"registration",
-        ),
-    };
-    let store_cut = StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
-        root: root_ref.clone(),
-        founder_registration: registration_ref.clone(),
-    });
-    let device_state = StoreDeviceStateRef::Serial {
-        position: store_cut.serial_predecessor().unwrap().clone(),
-        recovery: Vec::new(),
-        state_hash: ObjectHash::digest(b"ack wire shape device state"),
-    };
-    let ack = StoreAck::signed(
-        store_root_hash,
-        registration_ref.clone(),
-        1,
-        store_cut,
-        device_state,
-        None,
-        StoreAckExclusionState::Serial,
-        "2026-07-18T00:00:00Z".to_string(),
-        SuccessorLink {
-            activation: StreamActivation::device_authorized(
-                store_root_hash,
-                registration_ref,
-                DeviceStreamAnchor::StoreAcknowledgements {
-                    first_slot: slot("store-v1/acks/founder/1.json".to_string()),
-                },
-            )
-            .activation_id(),
-            predecessor: None,
-            next_slot: slot("store-v1/acks/founder/2.json".to_string()),
-        },
-        &signer,
-    )
-    .unwrap();
+    let ack = signed_test_ack(&fixture(), "2026-07-18T00:00:00Z");
     let value = serde_json::to_value(ack).unwrap();
 
     assert!(value.get("registration").is_some());
@@ -1096,28 +1061,19 @@ fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_re
 fn store_protocol_root_authenticates_the_creation_descriptor() {
     let fixture = fixture();
     let bytes = fixture.root.to_bytes();
-    let parsed = StoreProtocolRoot::parse_expected(
-        &bytes,
-        &fixture.root_ref,
-        WritePolicy::Serial,
-        routing_hash(),
-    )
-    .expect("parse exact Store protocol root");
+    let parsed = StoreProtocolRoot::parse_expected(&bytes, &fixture.root_ref, routing_hash())
+        .expect("parse exact Store protocol root");
     assert_eq!(parsed, fixture.root);
 }
 
 #[test]
-fn store_protocol_root_signs_the_required_write_policy() {
+fn store_protocol_root_signs_the_sync_routing_contract() {
     let fixture = fixture();
     let value = serde_json::to_value(fixture.root).expect("serialize Store root");
 
     let descriptor = value
         .get("descriptor")
         .expect("Store root carries its creation descriptor");
-    assert_eq!(
-        descriptor.get("write_policy"),
-        Some(&serde_json::json!("serial"))
-    );
     assert!(
         descriptor.get("sync_routing_hash").is_some(),
         "the signed Store root must bind the sync-routing contract"
@@ -1214,7 +1170,7 @@ fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanu
             "{}.pkg",
             package_semantic_prefix(
                 family,
-                SERIAL_STREAM_ID,
+                &fixture.commit_ref.coord.stream_id.to_string(),
                 sequence,
                 ObjectHash::digest(package),
             )
@@ -1231,7 +1187,10 @@ fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanu
         order,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        StoreOperationMembershipAuthority::Serial,
+        fixture
+            .commit
+            .operations_membership_authority()
+            .expect("fixture carries membership authority"),
         StorePackageInput {
             candidate_family: family,
             schema_version: 3,
@@ -1250,7 +1209,7 @@ fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanu
                     "{}.json",
                     commit_semantic_prefix(
                         commit.candidate_family(),
-                        SERIAL_STREAM_ID,
+                        &fixture.commit_ref.coord.stream_id.to_string(),
                         commit.seq(),
                         commit.commit_hash(),
                     )
@@ -1385,7 +1344,7 @@ fn candidate_abandonment_rejects_retained_authority_target() {
                     "{}.json",
                     commit_semantic_prefix(
                         inner.candidate_family(),
-                        SERIAL_STREAM_ID,
+                        &fixture.commit_ref.coord.stream_id.to_string(),
                         inner.seq(),
                         inner.commit_hash(),
                     )
@@ -1504,7 +1463,7 @@ fn closed_store_package_fixture(
             "{}.pkg",
             package_semantic_prefix(
                 family,
-                SERIAL_STREAM_ID,
+                &fixture.commit_ref.coord.stream_id.to_string(),
                 sequence,
                 ObjectHash::digest(&semantic),
             )
@@ -1521,7 +1480,10 @@ fn closed_store_package_fixture(
         order,
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        StoreOperationMembershipAuthority::Serial,
+        fixture
+            .commit
+            .operations_membership_authority()
+            .expect("fixture carries membership authority"),
         StorePackageInput {
             candidate_family: family,
             schema_version: 3,
@@ -1538,7 +1500,12 @@ fn closed_store_package_fixture(
         exact(
             format!(
                 "{}.json",
-                commit_semantic_prefix(family, SERIAL_STREAM_ID, sequence, commit.commit_hash(),)
+                commit_semantic_prefix(
+                    family,
+                    &fixture.commit_ref.coord.stream_id.to_string(),
+                    sequence,
+                    commit.commit_hash(),
+                )
             ),
             &commit_bytes,
         ),
@@ -1585,11 +1552,10 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
         super::super::remote_object::CandidateExclusiveObjectDomain::CirclePackage {
             reference: CirclePackageRef {
                 circle_id: CircleId::from_bytes([9; 16]),
-                control: CircleControlCoord::Serial {
-                    author_pubkey: keys::public_key_hex(&fixture.signer),
-                    generation: 1,
-                    control_hash: ObjectHash::digest(b"substituted control"),
-                },
+                control: test_circle_control_coord(
+                    &fixture,
+                    ObjectHash::digest(b"substituted control"),
+                ),
                 package,
                 key_fingerprint: KeyFingerprint::from_bytes([7; 8]),
             },
@@ -1614,11 +1580,10 @@ fn candidate_manifest_rejects_one_exact_object_reached_twice() {
         .expect("fixture commit carries a Store package");
     operations.circle_packages.push(CirclePackageRef {
         circle_id: CircleId::from_bytes([8; 16]),
-        control: CircleControlCoord::Serial {
-            author_pubkey: keys::public_key_hex(&fixture.signer),
-            generation: 1,
-            control_hash: ObjectHash::digest(b"duplicate exact object control"),
-        },
+        control: test_circle_control_coord(
+            &fixture,
+            ObjectHash::digest(b"duplicate exact object control"),
+        ),
         package,
         key_fingerprint: KeyFingerprint::from_bytes([9; 8]),
     });
@@ -1690,19 +1655,20 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
             ),
         },
     };
-    let control = CircleControlCoord::Serial {
-        author_pubkey: owner_pubkey.clone(),
-        generation: 1,
-        control_hash,
-    };
+    let control = test_circle_control_coord(&fixture, control_hash);
     let mut operations = fixture
         .commit
         .operations()
         .expect("fixture commit carries operations")
         .clone();
-    operations.circle_controls.push(CircleControlRef::Serial {
+    operations.circle_controls.push(CircleControlRef {
         circle_id,
         control,
+        head_hash: ObjectHash::digest(b"duplicate Circle access head"),
+        head_object: exact(
+            "circle-control-head.json".to_string(),
+            b"duplicate Circle access head",
+        ),
         objects: CircleActivationObjects {
             control: exact("circle-control.json".to_string(), b"control"),
             roster_entries: BTreeMap::new(),

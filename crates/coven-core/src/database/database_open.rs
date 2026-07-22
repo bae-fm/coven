@@ -5,21 +5,6 @@ pub(super) enum CovenMetadataOpen {
     VerifiedSnapshot(Box<VerifiedSnapshotBootstrapInstall>),
 }
 
-fn serialized_write_policy(write_policy: WritePolicy) -> Result<String, DbError> {
-    serde_json::to_string(&write_policy)
-        .map_err(|error| DbError::Message(format!("serialize Store write policy: {error}")))
-}
-
-fn initialize_write_policy(conn: &Connection, write_policy: WritePolicy) -> Result<(), DbError> {
-    let serialized = serialized_write_policy(write_policy)?;
-    conn.execute(
-        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
-        (WRITE_POLICY_STATE_KEY, serialized),
-    )
-    .map_err(DbError::from)?;
-    Ok(())
-}
-
 fn protocol_state_exists(conn: &Connection) -> Result<bool, DbError> {
     conn.query_row(
         "SELECT EXISTS(\
@@ -55,7 +40,6 @@ fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
 
 fn initialize_coven_metadata_on(
     conn: &Connection,
-    write_policy: WritePolicy,
     sync_routing_contract: &SyncRoutingContract,
     install_routing_schema: bool,
 ) -> Result<(), DbError> {
@@ -64,7 +48,6 @@ fn initialize_coven_metadata_on(
         crate::db::apply_coven_routing_schema(conn).map_err(DbError::from)?;
     }
     let schema_manifest = validate_live_coven_schema(conn, install_routing_schema)?;
-    initialize_write_policy(conn, write_policy)?;
     let contract_json =
         String::from_utf8(sync_routing_contract.bytes().to_vec()).map_err(|error| {
             DbError::Message(format!("encode sync-routing contract metadata: {error}"))
@@ -137,16 +120,12 @@ pub(super) fn validate_initialized_coven_schema(
     Ok(())
 }
 
-pub(super) fn load_coven_metadata(
-    conn: &Connection,
-    write_policy: WritePolicy,
-) -> Result<SyncRoutingContract, DbError> {
+pub(super) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContract, DbError> {
     if !has_coven_initialization_marker(conn)? {
         return Err(DbError::Message(
             "Store database is missing required Coven initialization metadata".to_string(),
         ));
     }
-    validate_write_policy(conn, write_policy)?;
     let contract_bytes = conn
         .query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",
@@ -204,36 +183,12 @@ fn validate_sync_routing_contract(
     Ok(())
 }
 
-fn validate_write_policy(conn: &Connection, requested: WritePolicy) -> Result<(), DbError> {
-    let stored = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [WRITE_POLICY_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .ok_or_else(|| {
-            DbError::Message("Store database is missing required write_policy metadata".to_string())
-        })?;
-    let stored: WritePolicy = serde_json::from_str(&stored).map_err(|error| {
-        DbError::Message(format!("Store write_policy metadata is invalid: {error}"))
-    })?;
-    if stored != requested {
-        return Err(DbError::Message(format!(
-            "Store write policy is {stored:?}, but open requested {requested:?}"
-        )));
-    }
-    Ok(())
-}
-
 impl DatabaseCore {
     pub(super) fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen,
@@ -261,13 +216,10 @@ impl DatabaseCore {
             }
         };
         let pinned_routing_contract = initialized
-            .then(|| load_coven_metadata(&conn, write_policy))
+            .then(|| load_coven_metadata(&conn))
             .transpose()?;
         if let Some(pinned) = &pinned_routing_contract {
-            validate_initialized_coven_schema(
-                &conn,
-                write_policy == WritePolicy::MergeConcurrent && pinned.has_scoped_graph(),
-            )?;
+            validate_initialized_coven_schema(&conn, pinned.has_scoped_graph())?;
         }
         let (schema_version, sync_routing_contract, gates, blob_decls) = {
             let tx = conn.transaction().map_err(DbError::from)?;
@@ -282,17 +234,9 @@ impl DatabaseCore {
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 if let Some(pinned) = &pinned_routing_contract {
                     validate_sync_routing_contract(pinned, &resolved)?;
-                    validate_initialized_coven_schema(
-                        &tx,
-                        write_policy == WritePolicy::MergeConcurrent && resolved.has_scoped_graph(),
-                    )?;
+                    validate_initialized_coven_schema(&tx, resolved.has_scoped_graph())?;
                 } else {
-                    initialize_coven_metadata_on(
-                        &tx,
-                        write_policy,
-                        &resolved,
-                        write_policy == WritePolicy::MergeConcurrent && resolved.has_scoped_graph(),
-                    )?;
+                    initialize_coven_metadata_on(&tx, &resolved, resolved.has_scoped_graph())?;
                 }
                 pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
                 let gates = Gates::from_tables(&tx, &synced_tables)
@@ -300,7 +244,7 @@ impl DatabaseCore {
                 let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
-                    install.install_on(&tx, write_policy, schema_version, resolved.hash())?;
+                    install.install_on(&tx, schema_version, resolved.hash())?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();
@@ -349,7 +293,6 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
         };
         let state = core.state();
 
@@ -367,7 +310,6 @@ impl DatabaseCore {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState), OpenError> {
@@ -387,12 +329,8 @@ impl DatabaseCore {
         // still present the synced-table contract, so a wrong schema fails loud at
         // open rather than mid-read.
         validate_host_synced_tables(&conn, &synced_tables)?;
-        let pinned_routing_contract = load_coven_metadata(&conn, write_policy)?;
-        validate_initialized_coven_schema(
-            &conn,
-            write_policy == WritePolicy::MergeConcurrent
-                && pinned_routing_contract.has_scoped_graph(),
-        )?;
+        let pinned_routing_contract = load_coven_metadata(&conn)?;
+        validate_initialized_coven_schema(&conn, pinned_routing_contract.has_scoped_graph())?;
         validate_host_device_id_on(&conn, hlc.device_id())?;
         let sync_routing_contract = SyncRoutingContract::from_connection(&conn, &synced_tables)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -421,7 +359,6 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
         };
         let state = core.state();
         Ok((core, state))
@@ -429,7 +366,6 @@ impl DatabaseCore {
 
     fn state(&self) -> DatabaseState {
         DatabaseState {
-            write_policy: self.write_policy,
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,

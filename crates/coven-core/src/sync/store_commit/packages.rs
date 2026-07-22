@@ -76,53 +76,34 @@ pub struct CircleActivationObjects {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CircleControlRef {
-    MergeConcurrent {
-        circle_id: CircleId,
-        control: CircleControlCoord,
-        head_hash: ObjectHash,
-        head_object: ExactObjectRef,
-        objects: CircleActivationObjects,
-    },
-    Serial {
-        circle_id: CircleId,
-        control: CircleControlCoord,
-        objects: CircleActivationObjects,
-    },
+#[serde(deny_unknown_fields)]
+pub struct CircleControlRef {
+    pub circle_id: CircleId,
+    pub control: CircleControlCoord,
+    pub head_hash: ObjectHash,
+    pub head_object: ExactObjectRef,
+    pub objects: CircleActivationObjects,
 }
 
 impl CircleControlRef {
     pub fn circle_id(&self) -> CircleId {
-        match self {
-            Self::MergeConcurrent { circle_id, .. } | Self::Serial { circle_id, .. } => *circle_id,
-        }
+        self.circle_id
     }
 
     pub fn control(&self) -> &CircleControlCoord {
-        match self {
-            Self::MergeConcurrent { control, .. } | Self::Serial { control, .. } => control,
-        }
+        &self.control
     }
 
-    pub fn head_hash(&self) -> Option<ObjectHash> {
-        match self {
-            Self::MergeConcurrent { head_hash, .. } => Some(*head_hash),
-            Self::Serial { .. } => None,
-        }
+    pub fn head_hash(&self) -> ObjectHash {
+        self.head_hash
     }
 
-    pub fn head_object(&self) -> Option<&ExactObjectRef> {
-        match self {
-            Self::MergeConcurrent { head_object, .. } => Some(head_object),
-            Self::Serial { .. } => None,
-        }
+    pub fn head_object(&self) -> &ExactObjectRef {
+        &self.head_object
     }
 
     pub fn objects(&self) -> &CircleActivationObjects {
-        match self {
-            Self::MergeConcurrent { objects, .. } | Self::Serial { objects, .. } => objects,
-        }
+        &self.objects
     }
 }
 
@@ -179,30 +160,9 @@ pub struct StorePackageInput<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreControl {
-    MergeMembership {
-        transition: crate::sync::membership::MergeMembershipHeadTransition,
-    },
-    SerialMembership {
-        entry: crate::sync::membership::SerialMembershipEntry,
-    },
-    SerialMembershipAndKeyRotation {
-        entry: crate::sync::membership::SerialMembershipEntry,
-        generation: u64,
-        wrapped_keys: Vec<crate::sync::wrapped_store_key::WrappedStoreKeyRef>,
-    },
-    ProviderAdmin {
-        change: crate::sync::provider::ProviderAdminChange,
-    },
-}
-
-/// Exact Recovery activation carried by the first Serial commit authored by
-/// the replacement device.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SerialRecoveryActivation {
-    pub registration: ActivatedStoreDeviceRegistrationRef,
+pub struct StoreControl {
+    pub transition: crate::sync::membership::MergeMembershipHeadTransition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -228,23 +188,11 @@ impl fmt::Display for OwnerPromotionId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum OwnerPromotionFinalization {
-    MergeConcurrent {
-        author_stream: AuthorStreamId,
-        seq: u64,
-        previous_hash: Option<ObjectHash>,
-    },
-    Serial,
-}
-
-impl OwnerPromotionFinalization {
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial => WritePolicy::Serial,
-        }
-    }
+#[serde(deny_unknown_fields)]
+pub struct OwnerPromotionFinalization {
+    pub author_stream: AuthorStreamId,
+    pub seq: u64,
+    pub previous_hash: Option<ObjectHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,18 +284,13 @@ impl OwnerPromotionRequest {
         if promoter.store_root != *root
             || promoter.author_pubkey == self.member_pubkey
             || self.member_pubkey.is_empty()
-            || self.predecessor_membership.write_policy() != self.finalization.policy()
-            || self.predecessor_devices.write_policy() != self.finalization.policy()
             || self.intended_owner_grant
                 != derive_owner_promotion_grant(
                     self.store_root_hash,
                     self.promotion_id,
                     &self.member_pubkey,
                 )
-            || matches!(
-                self.finalization,
-                OwnerPromotionFinalization::MergeConcurrent { seq: 0, .. }
-            )
+            || self.finalization.seq == 0
         {
             return Err(StoreProtocolError::OwnerPromotionMismatch);
         }
@@ -402,56 +345,28 @@ pub fn derive_owner_promotion_grant(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum OwnerPromotionRequestActivation {
-    MergeConcurrent {
-        commit: StoreBatchCommitRef,
-        head: StoreDeviceHeadRef,
-    },
-    Serial {
-        commit: StoreBatchCommitRef,
-    },
+#[serde(deny_unknown_fields)]
+pub struct OwnerPromotionRequestActivation {
+    pub commit: StoreBatchCommitRef,
+    pub head: StoreDeviceHeadRef,
 }
 
 impl OwnerPromotionRequestActivation {
     pub fn commit(&self) -> &StoreBatchCommitRef {
-        match self {
-            Self::MergeConcurrent { commit, .. } | Self::Serial { commit } => commit,
-        }
-    }
-
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => WritePolicy::Serial,
-        }
+        &self.commit
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum OwnerPromotionAnchors {
-    MergeConcurrent {
-        membership: GrantStreamAnchor,
-        recovery: GrantStreamAnchor,
-    },
-    Serial {
-        recovery: GrantStreamAnchor,
-    },
+#[serde(deny_unknown_fields)]
+pub struct OwnerPromotionAnchors {
+    pub membership: GrantStreamAnchor,
+    pub recovery: GrantStreamAnchor,
 }
 
 impl OwnerPromotionAnchors {
-    pub fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => WritePolicy::Serial,
-        }
-    }
-
     pub fn recovery(&self) -> &GrantStreamAnchor {
-        match self {
-            Self::MergeConcurrent { recovery, .. } | Self::Serial { recovery } => recovery,
-        }
+        &self.recovery
     }
 }
 
@@ -500,7 +415,6 @@ pub enum OwnerPromotionStatus {
 pub enum OwnerPromotionStaleReason {
     MergeFinalizationPointOccupied { winner: MembershipHeadRef },
     MergeActivationRejected,
-    SerialHeadAdvanced { current: SerialStorePosition },
 }
 
 impl OwnerPromotionAcceptance {
@@ -544,9 +458,6 @@ impl OwnerPromotionAcceptance {
             .verify_registration(candidate)?;
         if candidate.store_root.store_root_hash != self.request.store_root_hash
             || candidate.author_pubkey != self.request.member_pubkey
-            || self.activation.policy() != self.request.finalization.policy()
-            || self.anchors.policy() != self.request.finalization.policy()
-            || self.activation.commit().coord.policy() != self.request.finalization.policy()
             || !matches!(
                 self.anchors.recovery(),
                 GrantStreamAnchor::OwnerRecovery { .. }
@@ -554,62 +465,46 @@ impl OwnerPromotionAcceptance {
         {
             return Err(StoreProtocolError::OwnerPromotionMismatch);
         }
-        match &self.anchors {
-            OwnerPromotionAnchors::MergeConcurrent {
-                membership,
-                recovery,
-            } => {
-                if !matches!(membership, GrantStreamAnchor::StoreMembership { .. }) {
-                    return Err(StoreProtocolError::OwnerPromotionMismatch);
-                }
-                let membership_stream = StreamActivation::grant_authorized_stream_id(
-                    self.request.store_root_hash,
-                    &self.request.member_registration,
-                    &self.request.intended_owner_grant,
-                    StreamAnchorDomain::StoreMembership,
-                );
-                let membership_key = format!(
-                    "{}.json",
-                    membership_head_slot_prefix(
-                        &self.request.member_pubkey,
-                        &self.request.intended_owner_grant,
-                        membership_stream,
-                        1,
-                    )
-                );
-                let recovery_key = format!(
-                    "{}.json",
-                    owner_recovery_semantic_prefix(
-                        &self.request.member_pubkey,
-                        self.request.intended_owner_grant.clone(),
-                        1,
-                    )
-                );
-                if membership.first_slot().logical_key() != membership_key
-                    || recovery.first_slot().logical_key() != recovery_key
-                    || matches!(
-                        (membership.first_slot().physical(), recovery.first_slot().physical()),
-                        (
-                            crate::storage::cloud::PhysicalObjectLocator::Opaque(left),
-                            crate::storage::cloud::PhysicalObjectLocator::Opaque(right),
-                        ) if left == right
-                    )
-                {
-                    return Err(StoreProtocolError::OwnerPromotionMismatch);
-                }
+        {
+            let membership = &self.anchors.membership;
+            let recovery = &self.anchors.recovery;
+            if !matches!(membership, GrantStreamAnchor::StoreMembership { .. }) {
+                return Err(StoreProtocolError::OwnerPromotionMismatch);
             }
-            OwnerPromotionAnchors::Serial { recovery } => {
-                let recovery_key = format!(
-                    "{}.json",
-                    owner_recovery_semantic_prefix(
-                        &self.request.member_pubkey,
-                        self.request.intended_owner_grant.clone(),
-                        1,
-                    )
-                );
-                if recovery.first_slot().logical_key() != recovery_key {
-                    return Err(StoreProtocolError::OwnerPromotionMismatch);
-                }
+            let membership_stream = StreamActivation::grant_authorized_stream_id(
+                self.request.store_root_hash,
+                &self.request.member_registration,
+                &self.request.intended_owner_grant,
+                StreamAnchorDomain::StoreMembership,
+            );
+            let membership_key = format!(
+                "{}.json",
+                membership_head_slot_prefix(
+                    &self.request.member_pubkey,
+                    &self.request.intended_owner_grant,
+                    membership_stream,
+                    1,
+                )
+            );
+            let recovery_key = format!(
+                "{}.json",
+                owner_recovery_semantic_prefix(
+                    &self.request.member_pubkey,
+                    self.request.intended_owner_grant.clone(),
+                    1,
+                )
+            );
+            if membership.first_slot().logical_key() != membership_key
+                || recovery.first_slot().logical_key() != recovery_key
+                || matches!(
+                    (membership.first_slot().physical(), recovery.first_slot().physical()),
+                    (
+                        crate::storage::cloud::PhysicalObjectLocator::Opaque(left),
+                        crate::storage::cloud::PhysicalObjectLocator::Opaque(right),
+                    ) if left == right
+                )
+            {
+                return Err(StoreProtocolError::OwnerPromotionMismatch);
             }
         }
         Ok(())
@@ -685,14 +580,10 @@ impl OwnerConflictResolutionAcceptance {
             || registration.provider != self.provider
             || !matches!(
                 registration.store_commits,
-                StoreCommitAnchor::MergeConcurrent { .. }
+                DeviceStreamAnchor::StoreAnnouncements { .. }
             )
             || !matches!(self.membership, GrantStreamAnchor::StoreMembership { .. })
             || !matches!(self.recovery, GrantStreamAnchor::OwnerRecovery { .. })
-            || !matches!(
-                self.device_state,
-                StoreDeviceStateRef::MergeConcurrent { .. }
-            )
         {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
@@ -712,57 +603,6 @@ impl OwnerConflictResolutionAcceptance {
                 &self.device_state,
             ),
         )
-    }
-}
-
-impl StoreControl {
-    pub fn serial_membership_entry(
-        &self,
-    ) -> Option<&crate::sync::membership::SerialMembershipEntry> {
-        match self {
-            Self::SerialMembership { entry }
-            | Self::SerialMembershipAndKeyRotation { entry, .. } => Some(entry),
-            Self::MergeMembership { .. } | Self::ProviderAdmin { .. } => None,
-        }
-    }
-
-    pub fn merge_membership_transition(
-        &self,
-    ) -> Option<&crate::sync::membership::MergeMembershipHeadTransition> {
-        match self {
-            Self::MergeMembership { transition } => Some(transition),
-            Self::SerialMembership { .. }
-            | Self::SerialMembershipAndKeyRotation { .. }
-            | Self::ProviderAdmin { .. } => None,
-        }
-    }
-
-    pub fn key_generation(&self) -> Option<u64> {
-        match self {
-            Self::MergeMembership { .. } | Self::SerialMembership { .. } => None,
-            Self::SerialMembershipAndKeyRotation { generation, .. } => Some(*generation),
-            Self::ProviderAdmin { .. } => None,
-        }
-    }
-
-    pub(crate) fn introduced_wrapped_keys(
-        &self,
-    ) -> Vec<&crate::sync::wrapped_store_key::WrappedStoreKeyRef> {
-        match self {
-            Self::MergeMembership { .. } => Vec::new(),
-            Self::SerialMembership { entry } => match &entry.change {
-                crate::sync::membership::SerialMembershipChange::SetMember {
-                    wrapped_key, ..
-                } => {
-                    vec![wrapped_key]
-                }
-                crate::sync::membership::SerialMembershipChange::RemoveMember { .. } => Vec::new(),
-            },
-            Self::SerialMembershipAndKeyRotation { wrapped_keys, .. } => {
-                wrapped_keys.iter().collect()
-            }
-            Self::ProviderAdmin { .. } => Vec::new(),
-        }
     }
 }
 
@@ -826,10 +666,6 @@ impl StoreCommitOperations {
         self.acknowledgement.is_none() && self.has_no_other_operations()
     }
 
-    pub(crate) fn is_acknowledgement_only(&self) -> bool {
-        self.acknowledgement.is_some() && self.has_no_other_operations()
-    }
-
     pub(crate) fn is_circle_control_activation_only(&self) -> bool {
         self.acknowledgement.is_none()
             && self.control.is_none()
@@ -876,9 +712,6 @@ pub enum StoreCommitBody {
     SelfRetirement {
         retirement: StoreDeviceSelfRetirementRef,
     },
-    SerialRecoveryActivation {
-        activation: SerialRecoveryActivation,
-    },
     OwnerPromotionRequest {
         request: Box<OwnerPromotionRequest>,
     },
@@ -906,25 +739,12 @@ pub struct StoreCommitOperationsInput<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreOperationMembershipAuthority {
-    MergeConcurrent {
-        predecessor: MembershipGrantCreationAuthority,
-    },
-    Serial,
+pub struct StoreOperationMembershipAuthority {
+    pub predecessor: MembershipGrantCreationAuthority,
 }
 
 impl StoreOperationMembershipAuthority {
-    pub(super) fn policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial => WritePolicy::Serial,
-        }
-    }
-
-    pub(super) fn into_commit_authority(self) -> Option<MembershipGrantCreationAuthority> {
-        match self {
-            Self::MergeConcurrent { predecessor } => Some(predecessor),
-            Self::Serial => None,
-        }
+    pub(super) fn into_commit_authority(self) -> MembershipGrantCreationAuthority {
+        self.predecessor
     }
 }

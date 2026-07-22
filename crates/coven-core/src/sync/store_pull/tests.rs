@@ -1,14 +1,10 @@
 use super::*;
-use crate::sync::store_commit::{
-    serial_head_key, DeviceStreamAnchor, OwnerRecoveryNodeRef, StoreCommitAnchor,
-};
-use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, StoreSerialHeadState};
-use crate::sync::store_engine::merge::pull::{
+use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
+use crate::sync::store_engine::engine::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, readiness,
     verified_merge_membership_prefix, verify_merge_history_refs, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
-use crate::sync::store_engine::serial::pull::load_serial_cycle_authorization;
 
 async fn one_retained_checkpoint() -> (
     Database,
@@ -43,7 +39,7 @@ async fn one_retained_checkpoint() -> (
         .expect("checkpoint device id exists");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(
-        super::super::store_engine::merge::preparation::prepare_store_write(
+        super::super::store_engine::engine::preparation::prepare_store_write(
             &db,
             &store.storage,
             &device_id,
@@ -56,7 +52,7 @@ async fn one_retained_checkpoint() -> (
         .expect("prepare checkpoint commit")
     );
     assert_eq!(
-        super::super::store_engine::merge::publication::drain_store_writes(&db, &store.storage)
+        super::super::store_engine::engine::publication::drain_store_writes(&db, &store.storage)
             .await
             .expect("publish checkpoint commit"),
         1,
@@ -117,7 +113,6 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
     let (db, store, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
@@ -222,145 +217,6 @@ fn recovery_cursor_requires_the_exact_origin_activation_pair() {
 }
 
 #[tokio::test]
-async fn cycle_authorization_rejects_an_absent_serial_coordination_head() {
-    let db = crate::sync::test_helpers::open_serial_test_db();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &db,
-        "absent-serial-cycle-head",
-        crate::keys::UserKeypair::generate(),
-    )
-    .await
-    .expect("create Serial Store");
-    store.home.remove(serial_head_key());
-
-    let result = load_serial_cycle_authorization(
-        &store.storage,
-        store
-            .storage
-            .serial_coordination()
-            .expect("Serial coordination"),
-        &store.root,
-    )
-    .await;
-
-    assert!(matches!(
-        result,
-        Err(StorePullError::Serial(reason)) if reason == "global head is absent"
-    ));
-}
-
-#[tokio::test]
-async fn cycle_authorization_rejects_a_nonfounder_serial_genesis_head() {
-    let db = crate::sync::test_helpers::open_serial_test_db();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &db,
-        "nonfounder-serial-genesis-head",
-        crate::keys::UserKeypair::generate(),
-    )
-    .await
-    .expect("create Serial Store");
-    let (_, founder_registration, _) = store
-        .founder_device_authority()
-        .await
-        .expect("load founder Store device");
-    let other_identity = crate::keys::UserKeypair::generate();
-    let other_origin = StoreDeviceRegistrationOrigin::Join {
-        attempt_id: super::super::store_commit::DeviceJoinAttemptId::from_hash(ObjectHash::digest(
-            b"non-founder genesis registration",
-        )),
-        attempt_slot: crate::storage::cloud::ObjectSlot::logical(
-            "store-v1/test/non-founder-genesis/attempt.json".to_string(),
-        )
-        .expect("construct attempt slot"),
-        outcome_slot: crate::storage::cloud::ObjectSlot::logical(
-            "store-v1/test/non-founder-genesis/outcome.json".to_string(),
-        )
-        .expect("construct outcome slot"),
-    };
-    let other = StoreDeviceRegistration::signed(
-        store.root.clone(),
-        other_origin,
-        founder_registration.provider,
-        StoreCommitAnchor::Serial,
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(
-                "store-v1/test/non-founder-genesis/ack/1.json".to_string(),
-            )
-            .expect("construct acknowledgement slot"),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(
-                "store-v1/test/non-founder-genesis/snapshot/1.json".to_string(),
-            )
-            .expect("construct snapshot slot"),
-        },
-        &other_identity,
-    )
-    .expect("sign another Store registration");
-    let other_signer = other
-        .device_signer(&other_identity)
-        .expect("derive another device signer");
-    let registration_prefix =
-        super::super::store_commit::registration_semantic_prefix(&other.device_id.to_string());
-    let registration_context = ProtocolObjectContext::signed_plaintext(
-        store.root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceRegistration,
-    );
-    let registration_slot = store
-        .storage
-        .allocate_protocol_slot(&registration_context, &registration_prefix, ".json")
-        .await
-        .expect("allocate another registration slot");
-    let prepared = store
-        .storage
-        .prepare_protocol_object(
-            &registration_context,
-            registration_slot,
-            &registration_prefix,
-            other.to_bytes(),
-        )
-        .expect("prepare another registration");
-    let registration_object =
-        super::super::store_objects::create_exact_object(&store.storage, &prepared)
-            .await
-            .expect("publish another registration");
-    let other_registration =
-        StoreDeviceRegistrationRef::from_registration(&other, registration_object);
-    let forged = StoreSerialHead::signed(
-        store.root.store_root_hash,
-        StoreSerialHeadState::Genesis {
-            root: store.root.clone(),
-            founder_registration: other_registration,
-        },
-        &other_signer,
-    )
-    .expect("sign non-founder genesis head");
-    let coordination = store
-        .storage
-        .serial_coordination()
-        .expect("Serial coordination");
-    let current = coordination
-        .read_head(serial_head_key())
-        .await
-        .expect("read current Serial head");
-    coordination
-        .replace_head(serial_head_key(), &current.version, &forged.to_bytes())
-        .await
-        .expect("replace Serial head with non-founder genesis");
-
-    let result = load_serial_cycle_authorization(&store.storage, coordination, &store.root).await;
-
-    match result {
-        Err(StorePullError::Serial(reason)) => assert_eq!(
-            reason,
-            "Serial genesis head does not name the exact Store founder"
-        ),
-        Err(error) => panic!("unexpected error: {error:?}"),
-        Ok(_) => panic!("non-founder Serial genesis head was accepted"),
-    }
-}
-
-#[tokio::test]
 async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let founder = crate::sync::test_helpers::user_keypair_from_seed([42; 32]);
     let founder_db = crate::sync::test_helpers::open_test_db();
@@ -418,10 +274,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &candidate_db,
         candidate_db.synced_tables(),
         &store.storage,
-        None,
         store.root.store_root_hash,
         &candidate_store_dir,
-        candidate_membership.chain.as_ref(),
+        candidate_membership
+            .chain
+            .as_ref()
+            .expect("candidate membership chain exists"),
         Some(&candidate),
     ))
     .await
@@ -462,8 +320,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let (earlier_value, _) = load_commit_with_author(&store.storage, &store.root, &earlier_control)
         .await
         .expect("load traversal-earlier control");
-    let Some(super::super::store_commit::StoreControl::MergeMembership { transition }) =
-        earlier_value.control()
+    let Some(super::super::store_commit::StoreControl { transition }) = earlier_value.control()
     else {
         panic!("earlier Owner position is not a Merge membership control");
     };
@@ -508,7 +365,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("later Owner device is activated");
     let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(
-        super::super::store_engine::merge::preparation::prepare_store_write(
+        super::super::store_engine::engine::preparation::prepare_store_write(
             later_db,
             &store.storage,
             &later_device_id,
@@ -523,7 +380,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("prepare later concurrent write")
     );
-    super::super::store_engine::merge::publication::drain_store_writes(later_db, &store.storage)
+    super::super::store_engine::engine::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");
     let later_commit = later_db
@@ -537,11 +394,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later concurrent commit");
     let later_predecessors = commit_predecessor_references(&later_value);
     assert!(!later_predecessors.contains(&earlier_control));
-    let super::super::circle_control::StoreMembershipStateRef::MergeConcurrent(signed_membership) =
-        &later_value.membership_state
-    else {
-        panic!("later commit carries Serial membership state");
-    };
+    let signed_membership = &later_value.membership_state;
     assert!(!signed_membership
         .heads
         .iter()
@@ -609,13 +462,10 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     .value;
     let stream_id = commit_stream_id(&first.coord);
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
-    let coverage = CommitFrontier::from_refs(crate::WritePolicy::MergeConcurrent, frontier.clone())
-        .expect("build exact frontier");
-    let CommitFrontier::MergeConcurrent(device_cut) = coverage.clone() else {
-        panic!("Merge test frontier changed policy")
-    };
+    let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
+    let device_cut = coverage.commits().clone();
     let (_, device_state) = source
-        .store_device_state_for_history_cut(&StoreHistoryCut::MergeConcurrent(device_cut))
+        .store_device_state_for_history_cut(&StoreHistoryCut(device_cut))
         .await
         .expect("load exact device state");
     let target = crate::sync::test_helpers::open_test_db();

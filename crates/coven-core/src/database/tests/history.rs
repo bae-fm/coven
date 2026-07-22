@@ -2,11 +2,8 @@ use super::super::*;
 
 use super::fixtures::*;
 
-async fn assert_store_creation_installs_generation_zero_replay_baseline(write_policy: WritePolicy) {
-    let db = match write_policy {
-        WritePolicy::MergeConcurrent => crate::sync::test_helpers::open_test_db(),
-        WritePolicy::Serial => crate::sync::test_helpers::open_serial_test_db(),
-    };
+async fn assert_store_creation_installs_generation_zero_replay_baseline() {
+    let db = crate::sync::test_helpers::open_test_db();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
         "retained-replay-genesis",
@@ -20,7 +17,6 @@ async fn assert_store_creation_installs_generation_zero_replay_baseline(write_po
         .expect("load retained replay baseline")
         .expect("Store creation installs retained replay baseline");
 
-    assert_eq!(baseline.write_policy, write_policy);
     assert_eq!(baseline.schema_version, db.schema_version());
     assert_eq!(baseline.routing_hash, db.sync_routing_hash());
     match &baseline.authority {
@@ -31,15 +27,12 @@ async fn assert_store_creation_installs_generation_zero_replay_baseline(write_po
             panic!("Store creation installed a snapshot replay baseline")
         }
     }
-    assert_eq!(baseline.exact_cut.policy(), write_policy);
     baseline.validate_image().expect("validate replay image");
 }
 
 #[tokio::test]
 async fn store_creation_installs_generation_zero_replay_baseline() {
-    assert_store_creation_installs_generation_zero_replay_baseline(WritePolicy::MergeConcurrent)
-        .await;
-    assert_store_creation_installs_generation_zero_replay_baseline(WritePolicy::Serial).await;
+    assert_store_creation_installs_generation_zero_replay_baseline().await;
 }
 
 #[test]
@@ -65,7 +58,7 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
     let high = exclusion("high");
     let low = exclusion("low");
     let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
-        coord: StoreCommitCoord::MergeConcurrent {
+        coord: StoreCommitCoord {
             stream_id: stream,
             sequence,
         },
@@ -110,7 +103,7 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
 fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
     let stream = crate::sync::causal_grants::AuthorStreamId::from_bytes([19; 32]);
     let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
-        coord: StoreCommitCoord::MergeConcurrent {
+        coord: StoreCommitCoord {
             stream_id: stream,
             sequence,
         },

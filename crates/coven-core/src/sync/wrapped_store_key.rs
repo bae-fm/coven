@@ -7,11 +7,11 @@ use crate::sync::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     SyncStorage,
 };
-use crate::sync::store_commit::{ObjectHash, StoreControl, StoreRootRef};
+use crate::sync::store_commit::ObjectHash;
 
 /// A Store encryption keyring sealed to one member and signed by an Owner.
 ///
-/// Membership or Serial commit authority names the immutable exact object
+/// Membership authority names the immutable exact object
 /// through [`WrappedStoreKeyRef`]. The sealed box authenticates no sender, so
 /// the Owner signature additionally binds the Store, recipient, generation,
 /// author, and sealed bytes. The reader verifies both the exact reference and
@@ -288,32 +288,6 @@ pub async fn load_wrapped_store_key(
         .map_err(|error| StorageError::Parse(format!("parse wrapped Store key: {error}")))?;
     reference.validate_value(&value, &bytes)?;
     Ok(value)
-}
-
-pub(crate) async fn validate_control_wrapped_keys(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    control: Option<&StoreControl>,
-) -> Result<(), StorageError> {
-    let Some(control) = control else {
-        return Ok(());
-    };
-    let store_id = root.store_root_id.to_string();
-    for reference in control.introduced_wrapped_keys() {
-        let wrapped = load_wrapped_store_key(storage, root.store_root_hash, reference).await?;
-        wrapped
-            .verify_and_unwrap(
-                &store_id,
-                &reference.recipient_pubkey,
-                std::iter::once(reference.owner_pubkey.as_str()),
-            )
-            .map_err(|error| {
-                StorageError::InvalidContent(format!(
-                    "membership control wrapped Store key is not authentic: {error}"
-                ))
-            })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

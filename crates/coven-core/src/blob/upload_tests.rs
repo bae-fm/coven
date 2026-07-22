@@ -16,9 +16,8 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage,
-    CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudVersionedHead,
-    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
+    RevokeOutcome, UploadProgress,
 };
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -105,34 +104,6 @@ impl InstrumentedHome {
         let mut keys = self.keys.lock().unwrap().clone();
         keys.sort();
         keys
-    }
-}
-
-#[async_trait]
-impl CloudHeadStorage for InstrumentedHome {
-    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
-        self.inner.read_head(key).await
-    }
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
-        self.inner.create_head(key, bytes).await
-    }
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &CloudHeadVersion,
-        bytes: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
-        self.inner.replace_head(key, expected, bytes).await
-    }
-
-    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.inner.delete_head(key).await
     }
 }
 
@@ -297,15 +268,11 @@ struct UploadFixture {
     home: Arc<InstrumentedHome>,
 }
 
-async fn upload_fixture(policy: crate::WritePolicy, uploads: usize) -> UploadFixture {
-    upload_fixture_with_home(policy, uploads, Arc::new(InstrumentedHome::new())).await
+async fn upload_fixture(uploads: usize) -> UploadFixture {
+    upload_fixture_with_home(uploads, Arc::new(InstrumentedHome::new())).await
 }
 
-async fn upload_fixture_with_home(
-    policy: crate::WritePolicy,
-    uploads: usize,
-    home: Arc<InstrumentedHome>,
-) -> UploadFixture {
+async fn upload_fixture_with_home(uploads: usize, home: Arc<InstrumentedHome>) -> UploadFixture {
     let limits = crate::blob::TransferLimits {
         uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
         downloads: std::num::NonZeroUsize::MIN,
@@ -319,7 +286,6 @@ async fn upload_fixture_with_home(
         )),
         crate::blob::BLOB_TOMBSTONE_GRACE,
         limits,
-        policy,
         "test-device".to_string(),
         &test_migrations(),
     )
@@ -332,8 +298,7 @@ async fn upload_fixture_with_home(
         "upload-store",
         owner.clone(),
     )
-    .expect("construct exact sync storage")
-    .with_test_serial_coordination(home.clone());
+    .expect("construct exact sync storage");
     create_exact_test_store(&db, &storage, "upload-store", &owner)
         .await
         .expect("initialize exact local blob authority");
@@ -422,15 +387,13 @@ async fn run_drain(
     clock: &dyn Clock,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
-    let routing = (fixture.db.write_policy() == crate::WritePolicy::Serial)
-        .then(|| EncryptionService::from_key([42; 32]));
     drain_uploads(
         &fixture.db,
         &fixture.storage,
         store_dir,
         clock,
         &Hlc::new("test-device".to_string()),
-        routing.as_ref(),
+        None,
         observer,
     )
     .await
@@ -594,38 +557,33 @@ impl BlobTransitionObserver for PausingObserver {
 }
 
 #[tokio::test]
-async fn provider_upload_failure_remains_typed_for_both_write_policies() {
-    for policy in [
-        crate::WritePolicy::MergeConcurrent,
-        crate::WritePolicy::Serial,
-    ] {
-        let fixture = upload_fixture(policy, 1).await;
-        let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-        plant_uploads(
-            &fixture,
-            &store_dir,
-            &[("fail0001", b"provider upload")],
-            false,
-        )
-        .await;
-        fixture.home.fail_creates();
+async fn provider_upload_failure_remains_typed() {
+    let fixture = upload_fixture(1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(
+        &fixture,
+        &store_dir,
+        &[("fail0001", b"provider upload")],
+        false,
+    )
+    .await;
+    fixture.home.fail_creates();
 
-        let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
-            .await
-            .unwrap();
-        assert_eq!(outcome.failures.failures().len(), 1);
-        assert!(outcome.failures.has_transport_failure());
-        assert!(crate::sync::cycle::SyncCycleFailure::operation(
-            "upload queued blob",
-            outcome.failures,
-        )
-        .is_offline());
-    }
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.failures.failures().len(), 1);
+    assert!(outcome.failures.has_transport_failure());
+    assert!(crate::sync::cycle::SyncCycleFailure::operation(
+        "upload queued blob",
+        outcome.failures,
+    )
+    .is_offline());
 }
 
 #[tokio::test]
 async fn bad_item_does_not_block_good_later_item() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let paths = plant_uploads(
         &fixture,
@@ -651,7 +609,7 @@ async fn bad_item_does_not_block_good_later_item() {
 
 #[tokio::test]
 async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("rotate01", b"bytes")], false).await;
     fixture
@@ -671,7 +629,7 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
 
 #[tokio::test]
 async fn failure_persists_attempt_count_and_last_error() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("retry001", b"bytes")], false).await;
     fixture.home.fail_creates();
@@ -697,7 +655,7 @@ async fn failure_persists_attempt_count_and_last_error() {
 
 #[tokio::test]
 async fn backoff_skips_item_inside_window() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("backoff1", b"bytes")], false).await;
     fixture.home.fail_creates();
@@ -735,7 +693,7 @@ async fn backoff_skips_item_inside_window() {
 
 #[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("observe1", b"bytes")], false).await;
     let observer = RecordingObserver::new();
@@ -755,7 +713,7 @@ async fn observer_fires_started_then_uploaded_on_success() {
 
 #[tokio::test]
 async fn observer_fires_started_then_failed_on_failure() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("observe2", b"bytes")], false).await;
     fixture.home.fail_creates();
@@ -772,7 +730,7 @@ async fn observer_fires_started_then_failed_on_failure() {
 
 #[tokio::test(start_paused = true)]
 async fn observer_receives_advancing_midfile_progress() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let bytes = vec![7; 10_000];
     plant_uploads(&fixture, &store_dir, &[("progress", &bytes)], false).await;
@@ -810,7 +768,7 @@ fn backoff_window_is_exponential_and_capped() {
 
 #[tokio::test]
 async fn enqueue_upload_on_is_transactional_with_host_writes() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let paths = plant_local_rows(&fixture, &store_dir, &[("transact", b"bytes")]).await;
     let row = fixture
@@ -919,7 +877,7 @@ async fn plant_local_rows(
 
 #[tokio::test]
 async fn pinned_upload_populates_the_protected_cache_folder() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let bytes = b"PINNED-AUDIO-BYTES";
     plant_uploads(&fixture, &store_dir, &[("pinaaaa1", bytes)], true).await;
@@ -949,7 +907,7 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
 
 #[tokio::test]
 async fn unpinned_upload_populates_nothing_on_write() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("unpaaaa1", b"UNPINNED")], false).await;
 
@@ -971,7 +929,7 @@ async fn unpinned_upload_populates_nothing_on_write() {
 
 #[tokio::test]
 async fn a_failed_pin_populate_does_not_fail_the_upload() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let pinned_namespace = store_dir.storage_dir().join("pinned").join("photos");
     std::fs::create_dir_all(pinned_namespace.parent().unwrap()).unwrap();
@@ -1011,7 +969,7 @@ async fn seed_uploads(fixture: &UploadFixture, store_dir: &StoreDir, count: usiz
 
 #[tokio::test]
 async fn limit_one_drains_every_entry_in_order() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let ids = seed_uploads(&fixture, &store_dir, 3).await;
     let observer = RecordingObserver::new();
@@ -1048,8 +1006,7 @@ async fn limit_one_drains_every_entry_in_order() {
 #[tokio::test]
 async fn concurrent_drain_overlaps_up_to_the_limit() {
     let home = Arc::new(InstrumentedHome::with_barrier(Some(2)));
-    let fixture =
-        upload_fixture_with_home(crate::WritePolicy::MergeConcurrent, 2, home.clone()).await;
+    let fixture = upload_fixture_with_home(2, home.clone()).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let ids = seed_uploads(&fixture, &store_dir, 4).await;
     home.enable_barrier();
@@ -1067,7 +1024,7 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
 
 #[tokio::test]
 async fn concurrent_drain_isolates_a_failed_upload() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 3).await;
+    let fixture = upload_fixture(3).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let paths = plant_uploads(
         &fixture,
@@ -1094,7 +1051,7 @@ async fn concurrent_drain_isolates_a_failed_upload() {
 
 #[tokio::test]
 async fn paused_queue_admits_nothing_under_concurrency() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 3).await;
+    let fixture = upload_fixture(3).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let ids = seed_uploads(&fixture, &store_dir, 3).await;
     let observer = PausingObserver::new(0);
@@ -1112,7 +1069,7 @@ async fn paused_queue_admits_nothing_under_concurrency() {
 
 #[tokio::test]
 async fn pause_after_first_finishes_inflight_and_stops_admitting() {
-    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let ids = seed_uploads(&fixture, &store_dir, 2).await;
     let observer = PausingObserver::new(1);

@@ -2,15 +2,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use coven::{
     write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHeadCreateError, CloudHeadReplaceError, CloudHeadVersion, CloudHome,
-    CloudHomeError, CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment,
-    CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion,
-    CloudKitScope, CloudKitShare, CloudObjectStream, CloudVersionedHead, CovenHandle,
-    DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer, DeviceJoinWriteRevocationExecutor,
-    ExactSlotStorage, JoinerJoinTerminal, ObjectSlot, PhysicalObjectLocator, ProviderAccessLocator,
-    ProviderAccessWithdrawal, ProviderAdminGrantId, ProviderAdminJoinTerminal,
-    ProviderDeviceBinding, ProviderPrincipalId, ProviderWriteAuthorityRef, ResolvedProviderBinding,
-    StoreProviderBinding,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
+    CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
+    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
+    CloudVersionedObject, CovenHandle, DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer,
+    DeviceJoinWriteRevocationExecutor, ExactSlotStorage, JoinerJoinTerminal, ObjectSlot,
+    PhysicalObjectLocator, ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminGrantId,
+    ProviderAdminJoinTerminal, ProviderDeviceBinding, ProviderPrincipalId,
+    ProviderWriteAuthorityRef, ResolvedProviderBinding, StoreProviderBinding,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -112,26 +111,10 @@ impl CloudKitOps for ExternalCloudKitBridge {
         &self,
         _: &CloudKitScope,
         _: &str,
-    ) -> Result<CloudVersionedHead, CloudHomeError> {
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
         unimplemented!()
     }
-    fn create_record(
-        &self,
-        _: &CloudKitScope,
-        _: &str,
-        _: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
-        unimplemented!()
-    }
-    fn replace_record(
-        &self,
-        _: &CloudKitScope,
-        _: &str,
-        _: &CloudHeadVersion,
-        _: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
-        unimplemented!()
-    }
+
     fn begin_atomic_create(
         &self,
         _: &CloudKitScope,

@@ -384,7 +384,6 @@ pub(crate) async fn finalize_created_upload(
     let row = row.clone();
     let tables = db.synced_tables().to_vec();
     let gates = db.gates();
-    let write_policy = db.write_policy();
     let write_id = db.new_write_id();
     db.call(move |conn| {
         let resolved_root = gates
@@ -468,7 +467,6 @@ pub(crate) async fn finalize_created_upload(
         Database::run_internal_store_write_transaction_on(
             conn,
             &tables,
-            write_policy,
             routing_encryption.as_ref(),
             write_id,
             |tx| {
@@ -550,12 +548,7 @@ pub async fn make_local(
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), MakeLocalError> {
     let tables = db.synced_tables().to_vec();
-    let write_policy = db.write_policy();
-    Database::validate_store_write_routing(
-        db.gates().as_ref(),
-        write_policy,
-        routing_encryption.as_ref(),
-    )?;
+    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())?;
     if is_remote_root(&tables, root_table) {
         return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
     }
@@ -663,7 +656,6 @@ pub async fn make_local(
         Database::run_internal_store_write_transaction_on(
             conn,
             &tables,
-            write_policy,
             routing_encryption.as_ref(),
             write_id,
             |tx| {

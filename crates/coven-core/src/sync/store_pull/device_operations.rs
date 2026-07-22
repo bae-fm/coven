@@ -13,43 +13,26 @@ fn resolve_loaded_device_state(
     genesis: &ResolvedStoreDeviceState,
     states: &BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,
 ) -> Result<ResolvedStoreDeviceState, RegistrationLoadError> {
-    let state = match reference {
-        StoreDeviceStateRef::MergeConcurrent { frontier, .. } => {
-            let CommitFrontier::MergeConcurrent(frontier) = frontier else {
-                return Err(RegistrationLoadError::Invalid(
-                    "Merge device state contains a Serial frontier".to_string(),
-                ));
-            };
-            if frontier.is_empty() {
-                genesis.clone()
-            } else {
-                ResolvedStoreDeviceState::merge(
-                    frontier
-                        .values()
-                        .map(|commit| {
-                            states.get(commit).cloned().ok_or_else(|| {
-                                RegistrationLoadError::Invalid(
-                                    "device state references an unloaded predecessor snapshot"
-                                        .to_string(),
-                                )
-                            })
+    let state = {
+        let frontier = &reference.frontier().0;
+        if frontier.is_empty() {
+            genesis.clone()
+        } else {
+            ResolvedStoreDeviceState::merge(
+                frontier
+                    .values()
+                    .map(|commit| {
+                        states.get(commit).cloned().ok_or_else(|| {
+                            RegistrationLoadError::Invalid(
+                                "device state references an unloaded predecessor snapshot"
+                                    .to_string(),
+                            )
                         })
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?
-            }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?
         }
-        StoreDeviceStateRef::Serial { position, .. } => match position {
-            StoreSerialPredecessor::Genesis { .. } => genesis.clone(),
-            StoreSerialPredecessor::Commit(commit) => {
-                states.get(commit).cloned().ok_or_else(|| {
-                    RegistrationLoadError::Invalid(
-                        "Serial device state references an unloaded predecessor snapshot"
-                            .to_string(),
-                    )
-                })?
-            }
-        },
     };
     if state.state_hash != reference.state_hash() || state.recovery != reference.recovery() {
         return Err(RegistrationLoadError::Invalid(
@@ -81,25 +64,12 @@ async fn predecessor_acknowledgement_activation(
     expected: &super::store_commit::StoreAckRef,
     ack: &super::store_commit::StoreAck,
 ) -> Result<bool, RegistrationLoadError> {
-    let mut pending = match order {
-        super::store_commit::StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => predecessor
-            .iter()
-            .chain(dependencies.values())
-            .cloned()
-            .collect::<Vec<_>>(),
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: StoreSerialPredecessor::Commit(predecessor),
-            ..
-        } => vec![predecessor.clone()],
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: StoreSerialPredecessor::Genesis { .. },
-            ..
-        } => Vec::new(),
-    };
+    let mut pending = order
+        .predecessor
+        .iter()
+        .chain(order.dependencies.values())
+        .cloned()
+        .collect::<Vec<_>>();
     let mut visited = BTreeSet::new();
     while let Some(reference) = pending.pop() {
         if !visited.insert(reference.clone()) {
@@ -118,24 +88,8 @@ async fn predecessor_acknowledgement_activation(
                 && ack.store_cut == predecessor_cut
                 && ack.device_state == commit.device_state);
         }
-        match commit.order {
-            super::store_commit::StoreCommitOrder::MergeConcurrent {
-                predecessor,
-                dependencies,
-                ..
-            } => {
-                pending.extend(predecessor);
-                pending.extend(dependencies.into_values());
-            }
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: StoreSerialPredecessor::Commit(predecessor),
-                ..
-            } => pending.push(predecessor),
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: StoreSerialPredecessor::Genesis { .. },
-                ..
-            } => {}
-        }
+        pending.extend(commit.order.predecessor);
+        pending.extend(commit.order.dependencies.into_values());
     }
     Ok(false)
 }
@@ -206,16 +160,7 @@ async fn verify_merge_device_exclusion_proof(
                     .to_string(),
             ));
         }
-        let freezes = match &ack.exclusions {
-            super::store_commit::StoreAckExclusionState::MergeConcurrent { proposal_freezes } => {
-                proposal_freezes
-            }
-            super::store_commit::StoreAckExclusionState::Serial => {
-                return Err(RegistrationLoadError::Invalid(
-                    "Merge device exclusion proof contains a Serial acknowledgement".to_string(),
-                ))
-            }
-        };
+        let freezes = &ack.exclusions.proposal_freezes;
         let freeze = freezes
             .iter()
             .find(|freeze| freeze.proposal == proposal.reference)
@@ -225,11 +170,7 @@ async fn verify_merge_device_exclusion_proof(
                         .to_string(),
                 )
             })?;
-        let StoreHistoryCut::MergeConcurrent(target_cut) = &freeze.target_cut else {
-            return Err(RegistrationLoadError::Invalid(
-                "device exclusion proof acknowledgement carries a Serial target cut".to_string(),
-            ));
-        };
+        let target_cut = &freeze.target_cut.0;
         if target_cut.len() > 1 || target_cut.keys().any(|stream| stream != &target_stream) {
             return Err(RegistrationLoadError::Invalid(
                 "device exclusion proof acknowledgement includes a non-target stream".to_string(),
@@ -265,9 +206,7 @@ async fn verify_merge_device_exclusion_proof(
             }
         }
     }
-    if certified != required.into_keys().collect()
-        || cutoff != &StoreHistoryCut::MergeConcurrent(joined)
-    {
+    if certified != required.into_keys().collect() || cutoff != &StoreHistoryCut(joined) {
         return Err(RegistrationLoadError::Invalid(
             "device exclusion proof does not certify every remaining registration and exact cutoff"
                 .to_string(),
@@ -277,16 +216,11 @@ async fn verify_merge_device_exclusion_proof(
         .order
         .predecessor_cut()
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    let StoreHistoryCut::MergeConcurrent(predecessor_frontier) = predecessor_cut else {
-        return Err(RegistrationLoadError::Invalid(
-            "Merge device exclusion outcome carries a Serial predecessor".to_string(),
-        ));
-    };
+    let predecessor_frontier = predecessor_cut.0;
     let predecessor_target = predecessor_frontier
         .get(&target_stream)
         .map(|reference| BTreeMap::from([(target_stream, reference.clone())]));
-    let target_predecessor_cut =
-        StoreHistoryCut::MergeConcurrent(predecessor_target.unwrap_or_default());
+    let target_predecessor_cut = StoreHistoryCut(predecessor_target.unwrap_or_default());
     if !cutoff.frontier().covers(&target_predecessor_cut.frontier()) {
         return Err(RegistrationLoadError::Invalid(
             "device exclusion outcome predecessor advances the target beyond its certified cutoff"
@@ -381,47 +315,34 @@ pub(crate) async fn load_commit_device_operations(
             (
                 StoreDeviceExclusionOutcome::Excluded(exclusion),
                 super::store_commit::StoreDeviceExclusionOutcomeRef::Excluded(_),
-            ) => match &exclusion.proof {
-                StoreDeviceExclusionProof::Serial
-                    if commit.policy() == crate::WritePolicy::Serial => {}
-                StoreDeviceExclusionProof::Serial => {
-                    return Err(RegistrationLoadError::Invalid(
-                        "Merge device exclusion outcome carries a Serial proof".to_string(),
-                    ))
-                }
-                StoreDeviceExclusionProof::MergeConcurrent {
+            ) => {
+                let StoreDeviceExclusionProof {
                     frozen_device_state,
                     remaining_device_acks,
                     cutoff,
-                } if commit.policy() == crate::WritePolicy::MergeConcurrent => {
-                    if frozen_device_state != &proposal.object.value.frozen_device_state {
-                        return Err(RegistrationLoadError::Invalid(
-                            "device exclusion proof names another frozen device state".to_string(),
-                        ));
-                    }
-                    let resolver = resolver.ok_or_else(|| {
-                        RegistrationLoadError::Invalid(
-                            "Merge device exclusion proof has no materialized state resolver"
-                                .to_string(),
-                        )
-                    })?;
-                    verify_merge_device_exclusion_proof(
-                        resolver,
-                        storage,
-                        root,
-                        commit,
-                        &proposal,
-                        remaining_device_acks,
-                        cutoff,
-                    )
-                    .await?;
-                }
-                StoreDeviceExclusionProof::MergeConcurrent { .. } => {
+                } = &exclusion.proof;
+                if frozen_device_state != &proposal.object.value.frozen_device_state {
                     return Err(RegistrationLoadError::Invalid(
-                        "Serial device exclusion outcome carries a Merge proof".to_string(),
-                    ))
+                        "device exclusion proof names another frozen device state".to_string(),
+                    ));
                 }
-            },
+                let resolver = resolver.ok_or_else(|| {
+                    RegistrationLoadError::Invalid(
+                        "Merge device exclusion proof has no materialized state resolver"
+                            .to_string(),
+                    )
+                })?;
+                verify_merge_device_exclusion_proof(
+                    resolver,
+                    storage,
+                    root,
+                    commit,
+                    &proposal,
+                    remaining_device_acks,
+                    cutoff,
+                )
+                .await?;
+            }
             _ => {
                 return Err(RegistrationLoadError::Invalid(
                     "device exclusion outcome variant differs from its exact reference".to_string(),

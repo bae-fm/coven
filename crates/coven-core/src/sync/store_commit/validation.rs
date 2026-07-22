@@ -34,20 +34,11 @@ pub enum StoreProtocolError {
     FounderMismatch { expected: String, actual: String },
     #[error("store protocol root has an invalid founder membership entry")]
     InvalidFounder,
-    #[error("Store write policy is {actual:?}, expected {expected:?}")]
-    WritePolicyMismatch {
-        expected: WritePolicy,
-        actual: WritePolicy,
-    },
     #[error("Store sync-routing hash is {actual}, expected {expected}")]
     SyncRoutingMismatch {
         expected: ObjectHash,
         actual: ObjectHash,
     },
-    #[error("Store controls require the Serial write policy")]
-    ControlRequiresSerial,
-    #[error("Store Serial control is invalid or signed by a different commit author")]
-    InvalidSerialControl,
     #[error("Store Merge membership control is invalid or signed by a different device")]
     InvalidMergeMembershipControl,
     #[error("Store batch has no Store package, circle package, or control")]
@@ -85,11 +76,6 @@ pub enum StoreProtocolError {
     DuplicateCircleControl(CircleId),
     #[error("circle control coordinate is invalid")]
     InvalidCircleControlCoord,
-    #[error("circle control uses {actual:?}, expected Store policy {expected:?}")]
-    CircleControlPolicyMismatch {
-        expected: WritePolicy,
-        actual: WritePolicy,
-    },
     #[error("circle {circle_id} package is at {actual:?}, expected {expected:?}")]
     RelocatedCirclePackage {
         circle_id: CircleId,
@@ -98,8 +84,6 @@ pub enum StoreProtocolError {
     },
     #[error("Store key generation must be positive, got {0}")]
     InvalidKeyGeneration(u64),
-    #[error("Serial head commit and tip write id must either both be present or both be absent")]
-    InvalidSerialHead,
     #[error("store protocol root store id is empty")]
     EmptyStoreId,
     #[error("Store commit sequence must start at 1, got {0}")]
@@ -157,10 +141,6 @@ pub enum StoreProtocolError {
 
 pub fn protocol_prefix() -> &'static str {
     STORE_PROTOCOL_PREFIX
-}
-
-pub fn serial_head_key() -> &'static str {
-    STORE_SERIAL_HEAD_KEY
 }
 
 pub fn store_protocol_root_logical_key() -> &'static str {
@@ -418,57 +398,28 @@ pub(super) fn validate_commit_order(order: &StoreCommitOrder) -> Result<(), Stor
     if seq == 0 {
         return Err(StoreProtocolError::InvalidSequence(0));
     }
-    match order {
-        StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => {
-            match (seq, predecessor) {
-                (1, None) => {}
-                (1, Some(_)) => return Err(StoreProtocolError::UnexpectedPredecessor),
-                (_, None) => return Err(StoreProtocolError::MissingPredecessor),
-                (_, Some(reference)) => match reference.coord {
-                    StoreCommitCoord::MergeConcurrent { sequence, .. }
-                        if sequence.checked_add(1) == Some(seq) => {}
-                    _ => {
-                        return Err(StoreProtocolError::Malformed(
-                            "Merge predecessor is not the preceding Merge commit".to_string(),
-                        ));
-                    }
-                },
-            }
-            for (stream_id, reference) in dependencies {
-                match reference.coord {
-                    StoreCommitCoord::MergeConcurrent {
-                        stream_id: declared,
-                        sequence,
-                    } if declared == *stream_id && sequence > 0 => {}
-                    _ => {
-                        return Err(StoreProtocolError::Malformed(format!(
-                            "Merge dependency {stream_id} has a different exact coordinate"
-                        )));
-                    }
+    {
+        let predecessor = &order.predecessor;
+        let dependencies = &order.dependencies;
+        match (seq, predecessor) {
+            (1, None) => {}
+            (1, Some(_)) => return Err(StoreProtocolError::UnexpectedPredecessor),
+            (_, None) => return Err(StoreProtocolError::MissingPredecessor),
+            (_, Some(reference)) => {
+                if reference.coord.sequence.checked_add(1) != Some(seq) {
+                    return Err(StoreProtocolError::Malformed(
+                        "predecessor is not the preceding author-stream commit".to_string(),
+                    ));
                 }
             }
         }
-        StoreCommitOrder::Serial { predecessor, .. } => match (seq, predecessor) {
-            (1, StoreSerialPredecessor::Genesis { .. }) => {}
-            (1, StoreSerialPredecessor::Commit(_)) => {
-                return Err(StoreProtocolError::UnexpectedPredecessor);
+        for (stream_id, reference) in dependencies {
+            if reference.coord.stream_id != *stream_id || reference.coord.sequence == 0 {
+                return Err(StoreProtocolError::Malformed(format!(
+                    "dependency {stream_id} has a different exact coordinate"
+                )));
             }
-            (_, StoreSerialPredecessor::Genesis { .. }) => {
-                return Err(StoreProtocolError::MissingPredecessor);
-            }
-            (_, StoreSerialPredecessor::Commit(reference)) => match reference.coord {
-                StoreCommitCoord::Serial { sequence } if sequence.checked_add(1) == Some(seq) => {}
-                _ => {
-                    return Err(StoreProtocolError::Malformed(
-                        "Serial predecessor is not the preceding Serial commit".to_string(),
-                    ));
-                }
-            },
-        },
+        }
     }
     Ok(())
 }
@@ -479,153 +430,58 @@ pub(super) fn validate_commit_predecessor_states(
     devices: &StoreDeviceStateRef,
 ) -> Result<(), StoreProtocolError> {
     membership.validate_shape()?;
-    if membership.write_policy() != order.policy() || devices.write_policy() != order.policy() {
-        return Err(StoreProtocolError::WritePolicyMismatch {
-            expected: order.policy(),
-            actual: if membership.write_policy() != order.policy() {
-                membership.write_policy()
-            } else {
-                devices.write_policy()
-            },
-        });
-    }
     if membership.recovery() != devices.recovery() {
         return Err(StoreProtocolError::OwnerRecoveryMismatch);
     }
     validate_recovery_cursors(membership.recovery())?;
     validate_recovery_cursors(devices.recovery())?;
-    match (order, membership, devices) {
-        (
-            StoreCommitOrder::MergeConcurrent {
-                predecessor,
-                dependencies,
-                ..
-            },
-            StoreMembershipStateRef::MergeConcurrent { .. },
-            StoreDeviceStateRef::MergeConcurrent { frontier, .. },
-        ) => {
-            let mut expected = dependencies.clone();
-            if let Some(predecessor) = predecessor {
-                let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord else {
-                    return Err(StoreProtocolError::Malformed(
-                        "Merge predecessor has a Serial coordinate".to_string(),
-                    ));
-                };
-                if expected
-                    .insert(stream_id, predecessor.clone())
-                    .is_some_and(|dependency| dependency != *predecessor)
-                {
-                    return Err(StoreProtocolError::Malformed(
-                        "Merge predecessor disagrees with the same-stream dependency".to_string(),
-                    ));
-                }
-            }
-            if frontier != &CommitFrontier::MergeConcurrent(expected) {
+    {
+        let mut expected = order.dependencies.clone();
+        if let Some(predecessor) = &order.predecessor {
+            if expected
+                .insert(predecessor.coord.stream_id, predecessor.clone())
+                .is_some_and(|dependency| dependency != *predecessor)
+            {
                 return Err(StoreProtocolError::Malformed(
-                    "Store device state names a different Merge predecessor cut".to_string(),
+                    "Merge predecessor disagrees with the same-stream dependency".to_string(),
                 ));
             }
-            Ok(())
         }
-        (
-            StoreCommitOrder::Serial { predecessor, .. },
-            StoreMembershipStateRef::Serial(state),
-            StoreDeviceStateRef::Serial {
-                position: device_position,
-                ..
-            },
-        ) => {
-            if &state.position != predecessor || device_position != predecessor {
-                return Err(StoreProtocolError::Malformed(
-                    "Store predecessor state differs from the exact Serial predecessor".to_string(),
-                ));
-            }
-            Ok(())
+        if devices.frontier() != &CommitFrontier(expected) {
+            return Err(StoreProtocolError::Malformed(
+                "Store device state names a different Merge predecessor cut".to_string(),
+            ));
         }
-        _ => Err(StoreProtocolError::WritePolicyMismatch {
-            expected: order.policy(),
-            actual: membership.write_policy(),
-        }),
+        Ok(())
     }
 }
 
 pub(super) fn validate_commit_frontier(
     frontier: &CommitFrontier,
 ) -> Result<(), StoreProtocolError> {
-    match frontier {
-        CommitFrontier::MergeConcurrent(frontier) => {
-            for (stream_id, reference) in frontier {
-                match reference.coord {
-                    StoreCommitCoord::MergeConcurrent {
-                        stream_id: declared,
-                        sequence,
-                    } if declared == *stream_id && sequence > 0 => {}
-                    _ => {
-                        return Err(StoreProtocolError::Malformed(format!(
-                            "Merge frontier entry {stream_id} has a different exact coordinate"
-                        )));
-                    }
-                }
+    {
+        for (stream_id, reference) in &frontier.0 {
+            if reference.coord.stream_id != *stream_id || reference.coord.sequence == 0 {
+                return Err(StoreProtocolError::Malformed(format!(
+                    "frontier entry {stream_id} has a different exact coordinate"
+                )));
             }
-            Ok(())
         }
-        CommitFrontier::Serial(Some(reference)) if !matches!(reference.coord, StoreCommitCoord::Serial { sequence } if sequence > 0) => {
-            Err(StoreProtocolError::Malformed(
-                "Serial frontier contains an invalid exact coordinate".to_string(),
-            ))
-        }
-        CommitFrontier::Serial(_) => Ok(()),
+        Ok(())
     }
 }
 
 pub(crate) fn validate_store_history_cut(
     frontier: &StoreHistoryCut,
 ) -> Result<(), StoreProtocolError> {
-    match frontier {
-        StoreHistoryCut::MergeConcurrent(commits) => {
-            validate_commit_frontier(&CommitFrontier::MergeConcurrent(commits.clone()))
-        }
-        StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis { .. }) => Ok(()),
-        StoreHistoryCut::Serial(StoreSerialPredecessor::Commit(reference)) => {
-            validate_commit_frontier(&CommitFrontier::Serial(Some(reference.clone())))
-        }
-    }
+    validate_commit_frontier(&CommitFrontier(frontier.0.clone()))
 }
 
 pub(super) fn validate_store_device_state_ref(
     state: &StoreDeviceStateRef,
 ) -> Result<(), StoreProtocolError> {
     validate_recovery_cursors(state.recovery())?;
-    match state {
-        StoreDeviceStateRef::MergeConcurrent { frontier, .. } => {
-            if !matches!(frontier, CommitFrontier::MergeConcurrent(_)) {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            }
-            validate_commit_frontier(frontier)
-        }
-        StoreDeviceStateRef::Serial { position, .. } => {
-            validate_store_history_cut(&StoreHistoryCut::Serial(position.clone()))
-        }
-    }
-}
-
-fn validate_ack_history_cut(
-    store_root_hash: ObjectHash,
-    _author: &StoreDeviceRegistrationRef,
-    cut: &StoreHistoryCut,
-) -> Result<(), StoreProtocolError> {
-    if let StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
-        root,
-        founder_registration: _,
-    }) = cut
-    {
-        if root.store_root_hash != store_root_hash {
-            return Err(StoreProtocolError::Malformed(
-                "Serial genesis acknowledgement belongs to another exact Store root".to_string(),
-            ));
-        }
-    }
-    Ok(())
+    validate_commit_frontier(state.frontier())
 }
 
 pub(super) fn validate_successor_sequence(
@@ -649,55 +505,27 @@ pub(super) fn validate_ack_state(
     exclusions: &StoreAckExclusionState,
 ) -> Result<(), StoreProtocolError> {
     validate_store_history_cut(store_cut)?;
-    validate_ack_history_cut(store_root_hash, registration, store_cut)?;
-    let state_matches = match (store_cut, device_state) {
-        (
-            StoreHistoryCut::MergeConcurrent(commits),
-            StoreDeviceStateRef::MergeConcurrent { frontier, .. },
-        ) => frontier == &CommitFrontier::MergeConcurrent(commits.clone()),
-        (
-            StoreHistoryCut::Serial(position),
-            StoreDeviceStateRef::Serial {
-                position: device_position,
-                ..
-            },
-        ) => position == device_position,
-        _ => false,
-    };
+    let _ = (store_root_hash, registration);
+    let state_matches = device_state.frontier() == &store_cut.frontier();
     if !state_matches {
         return Err(StoreProtocolError::DeviceStateMismatch);
     }
-    match (store_cut, exclusions) {
-        (
-            StoreHistoryCut::MergeConcurrent(_),
-            StoreAckExclusionState::MergeConcurrent { proposal_freezes },
-        ) => {
-            if proposal_freezes
-                .windows(2)
-                .any(|pair| pair[0].proposal.proposal_id >= pair[1].proposal.proposal_id)
-                || proposal_freezes
-                    .iter()
-                    .any(|freeze| !matches!(freeze.target_cut, StoreHistoryCut::MergeConcurrent(_)))
-            {
+    {
+        let proposal_freezes = &exclusions.proposal_freezes;
+        if proposal_freezes
+            .windows(2)
+            .any(|pair| pair[0].proposal.proposal_id >= pair[1].proposal.proposal_id)
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        for freeze in proposal_freezes {
+            validate_store_history_cut(&freeze.target_cut)?;
+            freeze.proposal.validate_path()?;
+            if !store_cut.frontier().covers(&freeze.target_cut.frontier()) {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
-            for freeze in proposal_freezes {
-                validate_store_history_cut(&freeze.target_cut)?;
-                freeze.proposal.validate_path()?;
-                if !store_cut.frontier().covers(&freeze.target_cut.frontier()) {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-            }
-            Ok(())
         }
-        (StoreHistoryCut::Serial(_), StoreAckExclusionState::Serial) => Ok(()),
-        _ => Err(StoreProtocolError::WritePolicyMismatch {
-            expected: device_state.write_policy(),
-            actual: match exclusions {
-                StoreAckExclusionState::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-                StoreAckExclusionState::Serial => WritePolicy::Serial,
-            },
-        }),
+        Ok(())
     }
 }
 
@@ -736,19 +564,7 @@ pub(super) fn validate_membership_authority(
 }
 
 pub(super) fn validate_operation_membership_authority(
-    policy: WritePolicy,
-    authority: Option<&MembershipGrantCreationAuthority>,
+    authority: &MembershipGrantCreationAuthority,
 ) -> Result<(), StoreProtocolError> {
-    match (policy, authority) {
-        (WritePolicy::MergeConcurrent, Some(authority)) => validate_membership_authority(authority),
-        (WritePolicy::Serial, None) => Ok(()),
-        (WritePolicy::MergeConcurrent, None) => Err(StoreProtocolError::Malformed(
-            "MergeConcurrent operations commit omits its predecessor membership grant authority"
-                .to_string(),
-        )),
-        (WritePolicy::Serial, Some(_)) => Err(StoreProtocolError::Malformed(
-            "Serial operations commit carries a MergeConcurrent membership grant authority"
-                .to_string(),
-        )),
-    }
+    validate_membership_authority(authority)
 }

@@ -105,13 +105,7 @@ pub(super) async fn publish_competing_merge_head(
     let signer = registration
         .device_signer(&fixture.keypair)
         .expect("derive Merge device signer");
-    let stream_id = match &candidate.order {
-        StoreCommitOrder::MergeConcurrent { .. } => match &batch.head.value.commit.coord {
-            StoreCommitCoord::MergeConcurrent { stream_id, .. } => *stream_id,
-            StoreCommitCoord::Serial { .. } => unreachable!("fixture is MergeConcurrent"),
-        },
-        StoreCommitOrder::Serial { .. } => unreachable!("fixture is MergeConcurrent"),
-    };
+    let stream_id = batch.head.value.commit.coord.stream_id;
     let package = super::super::super::audience_package::AudiencePackage::store(
         fixture.root.store_root_hash,
         candidate.candidate_family(),
@@ -170,7 +164,7 @@ pub(super) async fn publish_competing_merge_head(
         candidate.order.clone(),
         candidate.membership_state.clone(),
         candidate.device_state.clone(),
-        StoreOperationMembershipAuthority::MergeConcurrent { predecessor },
+        StoreOperationMembershipAuthority { predecessor },
         StorePackageInput {
             candidate_family: candidate.candidate_family(),
             schema_version: fixture.db.schema_version(),
@@ -319,10 +313,7 @@ pub(super) fn exact_object_exists(
 }
 
 pub(super) fn commit_stream(reference: &StoreBatchCommitRef) -> String {
-    match reference.coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    }
+    reference.coord.stream_id.to_string()
 }
 
 pub(super) async fn stored_remote_object(

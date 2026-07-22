@@ -131,7 +131,7 @@ async fn invite_merge_member_impl(
         owner_pubkey,
         wrapped_key,
         store_root: root_ref,
-        membership_floor: crate::join_code::MembershipFloor::MergeConcurrent(membership_floor),
+        membership_floor: crate::join_code::MembershipFloor(membership_floor),
     })
 }
 

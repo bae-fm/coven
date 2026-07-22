@@ -3,13 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use super::membership::{MembershipChain, SerialAuthorizationState};
-#[cfg(test)]
-use super::membership_ops;
-use super::storage::{
-    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, SyncStorage,
-    VersionedObject,
-};
+use super::membership::MembershipChain;
+use super::storage::{BlobWriteAuthority, ExactObjectRef, SyncStorage};
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
@@ -18,7 +13,6 @@ use super::store_commit::{
     StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
     StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
-    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
 };
 use super::store_objects::{run_blocking_object_verification, StoreObjectError};
 use super::{
@@ -28,7 +22,6 @@ use super::{
 };
 
 pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
-pub(crate) const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
     StoreWriteBlobFact, StoreWriteBlobFacts,
@@ -93,15 +86,6 @@ pub enum StoreOutboundError {
         namespace: String,
         id: String,
         source: super::storage::StorageError,
-    },
-    #[error("Serial coordination capability is required")]
-    MissingSerialCoordination,
-    #[error("Serial coordination: {0}")]
-    Coordination(#[source] CoordinationError),
-    #[error("Serial control branch is stale: expected {expected:?}, current {current:?}")]
-    SerialControlConflict {
-        expected: Box<StoreSerialPredecessor>,
-        current: Box<StoreSerialPredecessor>,
     },
     #[error("candidate cleanup: {0}")]
     CandidateCleanup(#[from] super::store_pull::StorePullError),

@@ -201,11 +201,7 @@ pub async fn drain_uploads(
     routing_encryption: Option<&EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
-    Database::validate_store_write_routing(
-        db.gates().as_ref(),
-        db.write_policy(),
-        routing_encryption,
-    )?;
+    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption)?;
     let uploads = db.get_pending_cloud_uploads().await?;
 
     let now = clock.now();
@@ -224,7 +220,7 @@ pub async fn drain_uploads(
         .map_err(|error| DbError::Message(error.to_string()))?;
 
     // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
-    // and refilling as each completes. At limit 1 this is the serial drain: admit
+    // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
     // one, await it fully, then the next — same order-observable effects and error
     // semantics. Prepared and Created handoffs are exact compare-and-set updates;
     // the finalizer reads every row-version journal in one transaction and flips

@@ -70,11 +70,9 @@ mod model;
 mod outbound;
 
 pub(crate) use audience::{
-    active_circle_control, capture_routing_changes, combine_serial_inbound_changesets,
-    filter_inbound_circle_changeset, is_routing_table, live_row_audience, partition_outbound,
-    prune_inactive_serial_circles, prune_ineligible_scoped_rows,
-    validate_serial_visibility_deletes, AudiencePartition, CirclePartitionControl, RoutingChanges,
-    SerialInboundChangesets,
+    active_circle_control, capture_routing_changes, filter_inbound_circle_changeset,
+    is_routing_table, live_row_audience, partition_outbound, prune_ineligible_scoped_rows,
+    AudiencePartition, CirclePartitionControl, RoutingChanges,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;
@@ -182,11 +180,6 @@ pub enum GateError {
         circle_id: crate::sync::circle::CircleId,
         reason: String,
     },
-    CircleControlPolicy {
-        circle_id: crate::sync::circle::CircleId,
-        expected: crate::WritePolicy,
-        actual: crate::WritePolicy,
-    },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
     /// descendant — no synced table has a foreign key into it after the
     /// join-table back-edge is excluded. The keep would be vacuously false, so
@@ -260,14 +253,6 @@ impl std::fmt::Display for GateError {
             GateError::InvalidCircleControl { circle_id, reason } => {
                 write!(f, "circle {circle_id} has invalid active control: {reason}")
             }
-            GateError::CircleControlPolicy {
-                circle_id,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "circle {circle_id} control uses {actual:?}, expected Store policy {expected:?}"
-            ),
             GateError::NoGatedDescendants(tbl) => {
                 write!(
                     f,

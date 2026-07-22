@@ -289,27 +289,6 @@ pub(crate) fn signed_wrapped_key(
     Ok(wrapped)
 }
 
-pub(crate) fn signed_serial_wrapped_key(
-    store_id: &str,
-    recipient_ed25519_pubkey: &str,
-    encryption: &EncryptionService,
-    owner_keypair: &UserKeypair,
-) -> Result<WrappedStoreKey, InviteError> {
-    let recipient_x25519_pk = ed25519_hex_to_x25519(recipient_ed25519_pubkey)?;
-    let payload = encryption
-        .to_keyring_payload()
-        .map_err(|error| InviteError::Crypto(format!("serialize keyring payload: {error}")))?;
-    let sealed = keys::seal_box_encrypt(&payload, &recipient_x25519_pk);
-    let wrapped = WrappedStoreKey::signed(
-        store_id,
-        recipient_ed25519_pubkey,
-        encryption.current_generation(),
-        sealed,
-        owner_keypair,
-    );
-    Ok(wrapped)
-}
-
 #[cfg(test)]
 pub(crate) fn signed_wrapped_keyring_for_test(
     store_id: &str,
@@ -739,7 +718,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
         .validate_closed_shape()
         .map_err(InviteError::InvalidDurableMutation)?;
     if candidate.commit.control()
-        != Some(&super::store_commit::StoreControl::MergeMembership {
+        != Some(&super::store_commit::StoreControl {
             transition: transition.transition.clone(),
         })
         || !transition
@@ -1140,95 +1119,6 @@ pub async fn unwrap_store_keyring(
     .await
 }
 
-pub async fn unwrap_serial_store_keyring(
-    storage: &dyn SyncStorage,
-    coordination: &dyn super::storage::CoordinationStorage,
-    keypair: &UserKeypair,
-    store_root: &super::store_commit::StoreRootRef,
-    wrapped_key: &WrappedStoreKeyRef,
-    activation: &super::store_commit::StoreBatchCommitRef,
-) -> Result<EncryptionService, InviteError> {
-    let recipient = hex::encode(keypair.public_key());
-    if wrapped_key.recipient_pubkey != recipient {
-        return Err(InviteError::Crypto(
-            "invite wrapped-key ref names another recipient".to_string(),
-        ));
-    }
-    let semantic_prefix =
-        super::store_commit::semantic_prefix_from_exact_object(&activation.object, ".json")
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        store_root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let bytes = storage
-        .read_protocol_object(&context, &activation.object, &semantic_prefix)
-        .await?;
-    let unverified: super::store_commit::StoreBatchCommit = serde_json::from_slice(&bytes)
-        .map_err(|error| InviteError::Crypto(format!("parse Serial invite commit: {error}")))?;
-    let author = super::store_objects::load_registration_ref(
-        storage,
-        store_root,
-        &unverified.author_registration,
-    )
-    .await
-    .map_err(|error| InviteError::Crypto(error.to_string()))?
-    .value;
-    let commit = super::store_commit::StoreBatchCommit::parse_at(
-        &bytes,
-        store_root.store_root_hash,
-        &activation.coord,
-        &author,
-    )
-    .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    activation
-        .verify_commit(&commit)
-        .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    let activated = commit.control().is_some_and(|control| {
-        control.serial_membership_entry().is_some_and(|entry| {
-            matches!(
-                &entry.change,
-                super::membership::SerialMembershipChange::SetMember {
-                    wrapped_key: authority,
-                    ..
-                } if authority == wrapped_key
-            )
-        })
-    });
-    if !activated {
-        return Err(InviteError::Crypto(
-            "Serial invite commit does not activate the supplied wrapped-key ref".to_string(),
-        ));
-    }
-    let current = super::store_engine::serial::pull::load_serial_cycle_authorization(
-        storage,
-        coordination,
-        store_root,
-    )
-    .await
-    .map_err(|error| InviteError::Crypto(format!("current Serial authority: {error}")))?;
-    if !current
-        .authorization
-        .membership
-        .current_members()
-        .iter()
-        .any(|(pubkey, _)| pubkey == &recipient)
-    {
-        return Err(InviteError::Crypto(
-            "invite recipient is not a current Serial member".to_string(),
-        ));
-    }
-    let current_refs = current.authorization.active_wrapped_keys_for(&recipient);
-    unwrap_store_keyring_for_refs(
-        storage,
-        store_root.store_root_hash,
-        keypair,
-        &store_root.store_root_id.to_string(),
-        &current_refs,
-    )
-    .await
-}
-
 /// Open a sealed box carrying a store keyring to `keypair` and reconstruct the
 /// [`EncryptionService`]. `sealed` is the raw sealed-box bytes — the unverified
 /// candidate takes them straight off the wrapped key, the authenticated path
@@ -1398,7 +1288,7 @@ async fn build_revoke_mutation(
         let operation = Box::pin(super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            super::store_outbound::StoreOperationPreparation::MergeConcurrent { membership: chain },
+            super::store_outbound::StoreOperationPreparation::new(chain),
             &device_id,
             owner_keypair,
         ))
@@ -1615,7 +1505,7 @@ impl RevokeMutationPlan {
                         )
                     })
                     || candidate.commit.control()
-                        != Some(&super::store_commit::StoreControl::MergeMembership {
+                        != Some(&super::store_commit::StoreControl {
                             transition: transition.transition.clone(),
                         })
                     || !transition
@@ -1694,10 +1584,7 @@ impl RevokeMutationPlan {
                             .map(|wrap| wrap.prepared.reference.object.clone()),
                     )
                     .collect();
-                let retained = match candidate.merge_head_ref() {
-                    Some(head) => vec![head.object],
-                    None => Vec::new(),
-                };
+                let retained = vec![candidate.head_ref().object];
                 (candidate_objects, retained)
             }
         }
@@ -1755,7 +1642,7 @@ impl ResolveMutationPlan {
             || self.transition.entry_ref != self.publication.entry_ref
             || self.transition.entry_object != self.publication.entry_object
             || self.candidate.commit.control()
-                != Some(&super::store_commit::StoreControl::MergeMembership {
+                != Some(&super::store_commit::StoreControl {
                     transition: self.transition.transition.clone(),
                 })
             || !matches!(
@@ -2293,7 +2180,7 @@ async fn execute_revoke_mutation(
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            super::store_engine::merge::operations::upload_commit(storage, &candidate)
+            super::store_engine::engine::operations::upload_commit(storage, &candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
             persistence
@@ -2389,17 +2276,8 @@ async fn execute_revoke_mutation(
                             .map_err(|error| {
                                 InviteError::InvalidDurableMutation(error.to_string())
                             })?;
-                        let previous_head = previous_candidate.merge_head_ref().ok_or_else(|| {
-                            InviteError::InvalidDurableMutation(
-                                "previous Merge membership candidate has no Store head".to_string(),
-                            )
-                        })?;
-                        let replacement_head = candidate.merge_head_ref().ok_or_else(|| {
-                            InviteError::InvalidDurableMutation(
-                                "replacement Merge membership candidate has no Store head"
-                                    .to_string(),
-                            )
-                        })?;
+                        let previous_head = previous_candidate.head_ref();
+                        let replacement_head = candidate.head_ref();
                         plan.publication = RevokeMembershipPublication::StoreActivated {
                             transition: transition.clone(),
                             candidate: candidate.clone(),
@@ -2543,7 +2421,7 @@ async fn finish_nonactivating_resolution(
         plan.publication.head_ref.object.clone(),
     ];
     let mut retained = vec![plan.reference.object.clone()];
-    retained.extend(plan.candidate.merge_head_ref().map(|head| head.object));
+    retained.push(plan.candidate.head_ref().object);
     let cleanup = persistence
         .db
         .membership_candidate_cleanup_targets(
@@ -2668,7 +2546,7 @@ async fn execute_resolution_mutation(
             &plan.transition.entry_ref.object,
         )?)
         .await?;
-    super::store_engine::merge::operations::upload_commit(storage, &plan.candidate)
+    super::store_engine::engine::operations::upload_commit(storage, &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence
@@ -2712,18 +2590,10 @@ async fn execute_resolution_mutation(
                 replacement,
             ) if replacement.reference == plan.candidate.reference => {
                 let previous_remotes = plan.remote_objects()?;
-                let previous_head = previous.merge_head_ref().ok_or_else(|| {
-                    InviteError::InvalidDurableMutation(
-                        "previous resolution candidate has no Merge Store head".to_string(),
-                    )
-                })?;
+                let previous_head = previous.head_ref();
                 plan.candidate = replacement;
                 let replacement_remotes = plan.remote_objects()?;
-                let replacement_head = plan.candidate.merge_head_ref().ok_or_else(|| {
-                    InviteError::InvalidDurableMutation(
-                        "replacement resolution candidate has no Merge Store head".to_string(),
-                    )
-                })?;
+                let replacement_head = plan.candidate.head_ref();
                 let bytes =
                     encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
                 persistence.intent_hash = persistence
@@ -2756,10 +2626,7 @@ async fn execute_resolution_mutation(
                         ],
                         vec![
                             plan.reference.object.clone(),
-                            plan.candidate
-                                .merge_head_ref()
-                                .expect("validated Merge candidate has a head")
-                                .object,
+                            plan.candidate.head_ref().object,
                         ],
                         encode_membership_progress(&progress)?,
                         *nonactivation,

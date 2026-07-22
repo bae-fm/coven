@@ -463,18 +463,7 @@ pub struct MergeCircleRosterStateRef {
     pub state_hash: ObjectHash,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCircleRosterStateRef {
-    pub state_hash: ObjectHash,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CircleRosterStateRef {
-    MergeConcurrent(MergeCircleRosterStateRef),
-    Serial(SerialCircleRosterStateRef),
-}
+pub type CircleRosterStateRef = MergeCircleRosterStateRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -501,77 +490,37 @@ pub enum CircleGrantRetirement {
     ConflictResolution(CircleRosterConflictResolutionRef),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCircleGrantRecord {
-    pub member_pubkey: String,
-    pub role: CircleRole,
-    pub created_at_generation: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCircleGrantRetirement {
-    pub generation: u64,
-    pub control_hash: ObjectHash,
-}
-
-trait CircleGrantView {
-    fn member_pubkey(&self) -> &str;
-    fn role(&self) -> CircleRole;
-}
-
-impl CircleGrantView for CircleGrantRecord {
-    fn member_pubkey(&self) -> &str {
-        &self.member_pubkey
-    }
-
-    fn role(&self) -> CircleRole {
-        self.role
-    }
-}
-
-impl CircleGrantView for SerialCircleGrantRecord {
-    fn member_pubkey(&self) -> &str {
-        &self.member_pubkey
-    }
-
-    fn role(&self) -> CircleRole {
-        self.role
-    }
-}
-
-fn active_circle_grants<R: CircleGrantView, T: Ord>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
-) -> impl Iterator<Item = (&MembershipGrantId, &R)> {
+fn active_circle_grants(
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
+) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
     grants
         .iter()
         .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
 }
 
-fn roster_members<R: CircleGrantView, T: Ord>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+fn roster_members(
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> BTreeMap<String, CircleRole> {
     active_circle_grants(grants)
         .map(|(_, record)| record)
-        .map(|record| (record.member_pubkey().to_string(), record.role()))
+        .map(|record| (record.member_pubkey.clone(), record.role))
         .collect()
 }
 
-fn roster_owners<R: CircleGrantView, T: Ord>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+fn roster_owners(
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> Vec<String> {
     let mut owners = active_circle_grants(grants)
         .map(|(_, record)| record)
-        .filter(|record| record.role() == CircleRole::Owner)
-        .map(|record| record.member_pubkey().to_string())
+        .filter(|record| record.role == CircleRole::Owner)
+        .map(|record| record.member_pubkey.clone())
         .collect::<Vec<_>>();
     owners.sort();
     owners
 }
 
-fn roster_authorizes_owner_grant<R: CircleGrantView, T: Ord>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+fn roster_authorizes_owner_grant(
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
     author_pubkey: &str,
     grant_id: &MembershipGrantId,
 ) -> bool {
@@ -579,16 +528,16 @@ fn roster_authorizes_owner_grant<R: CircleGrantView, T: Ord>(
         .get(grant_id)
         .and_then(GrantState::active)
         .is_some_and(|record| {
-            record.member_pubkey() == author_pubkey && record.role() == CircleRole::Owner
+            record.member_pubkey == author_pubkey && record.role == CircleRole::Owner
         })
 }
 
-fn roster_grants_are_valid<R: CircleGrantView, T: Ord>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+fn roster_grants_are_valid(
+    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> bool {
     active_circle_grants(grants)
         .map(|(_, record)| record)
-        .any(|record| record.role() == CircleRole::Owner)
+        .any(|record| record.role == CircleRole::Owner)
         && roster_members(grants).len() == active_circle_grants(grants).count()
 }
 
@@ -607,29 +556,6 @@ fn circle_roster_state_hash(
             grants,
         })
         .expect("circle roster state serialization cannot fail"),
-    )
-}
-
-fn serial_circle_roster_state_hash(
-    grants: &BTreeMap<
-        MembershipGrantId,
-        GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
-    >,
-) -> ObjectHash {
-    #[derive(Serialize)]
-    struct State<'a> {
-        domain: &'static str,
-        grants: &'a BTreeMap<
-            MembershipGrantId,
-            GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
-        >,
-    }
-    ObjectHash::digest(
-        &serde_json::to_vec(&State {
-            domain: "coven.serial-circle-roster-state.v2",
-            grants,
-        })
-        .expect("Serial circle roster state serialization cannot fail"),
     )
 }
 
@@ -1000,6 +926,10 @@ pub fn resolve_circle_roster_conflict(
 }
 
 impl ResolvedCircleRoster {
+    pub fn state_hash(&self) -> ObjectHash {
+        self.state_hash
+    }
+
     pub fn members(&self) -> BTreeMap<String, CircleRole> {
         roster_members(&self.grants)
     }
@@ -1066,114 +996,7 @@ impl CircleRosterBranch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerialCircleRoster {
-    pub grants: BTreeMap<
-        MembershipGrantId,
-        GrantState<SerialCircleGrantRecord, SerialCircleGrantRetirement>,
-    >,
-    pub state_hash: ObjectHash,
-}
-
-impl SerialCircleRoster {
-    pub(crate) fn founder(
-        author_pubkey: String,
-        grant_id: MembershipGrantId,
-        generation: u64,
-    ) -> Self {
-        let grants = BTreeMap::from([(
-            grant_id,
-            GrantState::Active {
-                record: SerialCircleGrantRecord {
-                    member_pubkey: author_pubkey,
-                    role: CircleRole::Owner,
-                    created_at_generation: generation,
-                },
-            },
-        )]);
-        let state_hash = serial_circle_roster_state_hash(&grants);
-        Self { grants, state_hash }
-    }
-
-    pub fn members(&self) -> BTreeMap<String, CircleRole> {
-        roster_members(&self.grants)
-    }
-
-    pub fn owners(&self) -> Vec<String> {
-        roster_owners(&self.grants)
-    }
-
-    pub fn authorizes_owner_grant(
-        &self,
-        author_pubkey: &str,
-        grant_id: &MembershipGrantId,
-        created_at_generation: u64,
-    ) -> bool {
-        self.authorizes_owner_grant_id(author_pubkey, grant_id)
-            && self
-                .grants
-                .get(grant_id)
-                .and_then(GrantState::active)
-                .is_some_and(|record| record.created_at_generation == created_at_generation)
-    }
-
-    pub fn authorizes_owner_grant_id(
-        &self,
-        author_pubkey: &str,
-        grant_id: &MembershipGrantId,
-    ) -> bool {
-        roster_authorizes_owner_grant(&self.grants, author_pubkey, grant_id)
-    }
-
-    pub fn verify(&self) -> bool {
-        self.state_hash == serial_circle_roster_state_hash(&self.grants)
-            && roster_grants_are_valid(&self.grants)
-    }
-
-    pub fn active_grants(
-        &self,
-    ) -> impl Iterator<Item = (&MembershipGrantId, &SerialCircleGrantRecord)> {
-        active_circle_grants(&self.grants)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CircleMaterializedRoster {
-    MergeConcurrent(ResolvedCircleRoster),
-    Serial(SerialCircleRoster),
-}
-
-impl CircleMaterializedRoster {
-    pub fn verify(&self) -> bool {
-        match self {
-            Self::MergeConcurrent(roster) => roster.verify(),
-            Self::Serial(roster) => roster.verify(),
-        }
-    }
-
-    pub fn state_hash(&self) -> ObjectHash {
-        match self {
-            Self::MergeConcurrent(roster) => roster.state_hash,
-            Self::Serial(roster) => roster.state_hash,
-        }
-    }
-
-    pub fn members(&self) -> BTreeMap<String, CircleRole> {
-        match self {
-            Self::MergeConcurrent(roster) => roster.members(),
-            Self::Serial(roster) => roster.members(),
-        }
-    }
-
-    pub fn owners(&self) -> Vec<String> {
-        match self {
-            Self::MergeConcurrent(roster) => roster.owners(),
-            Self::Serial(roster) => roster.owners(),
-        }
-    }
-}
+pub type CircleMaterializedRoster = ResolvedCircleRoster;
 
 #[derive(Debug, Clone)]
 pub struct CircleRosterChain {

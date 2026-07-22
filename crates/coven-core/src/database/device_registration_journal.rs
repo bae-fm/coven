@@ -536,34 +536,18 @@ impl Database {
                 &commit_ref,
                 &remote_object_ids,
             )?;
-            match materialization {
-                LocalRetirementMaterialization::MergeConcurrent {
-                    head,
-                    head_object,
-                    history_summary,
-                } => {
-                    Self::record_materialized_merge_commit_on(
-                        &tx,
-                        &root,
-                        &commit,
-                        &commit_ref,
-                        &[],
-                        &head,
-                        &head_object,
-                        &history_summary,
-                        &[],
-                        None,
-                    )?
-                }
-                LocalRetirementMaterialization::Serial { authorization } => {
-                    Self::record_materialized_serial_commit_on(
+            Self::record_materialized_merge_commit_on(
                     &tx,
+                &root,
                     &commit,
                     &commit_ref,
-                    &authorization,
-                )?
-                }
-            }
+                &[],
+                &materialization.head,
+                &materialization.head_object,
+                &materialization.history_summary,
+                &[],
+                None,
+            )?;
             let state: String = tx
                 .query_row(
                     "SELECT state FROM local_store_device_registration WHERE singleton = 1",

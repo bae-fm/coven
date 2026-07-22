@@ -998,7 +998,7 @@ async fn setup_remote_blobs(
     (blobs, all_bytes)
 }
 
-/// At limit 1 the pin loop is serial: every blob is fetched (one at a time) and
+/// At limit 1 the pin loop runs one at a time: every blob is fetched (one at a time) and
 /// lands in `pinned/` with its bytes.
 #[tokio::test]
 async fn pin_at_limit_one_pins_every_blob() {
@@ -1056,7 +1056,7 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
     }
 }
 
-/// A blob whose bytes are missing from the cloud fails the whole pin (the serial
+/// A blob whose bytes are missing from the cloud fails the whole pin (the one-at-a-time
 /// abort semantics: `pin` returns on the first error), even under concurrency.
 #[tokio::test]
 async fn pin_mid_batch_failure_surfaces_the_error() {

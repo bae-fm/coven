@@ -37,8 +37,6 @@ pub struct StoreSnapshotLocator {
 }
 
 /// The exact membership and device state represented by one Store snapshot.
-/// Both references retain their policy-specific coordinates, while their state
-/// hashes identify the resolved state across state-neutral commits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSnapshotState {
@@ -54,60 +52,21 @@ impl StoreSnapshotState {
     ) -> Result<(), StoreProtocolError> {
         self.membership.validate_shape()?;
         validate_store_device_state_ref(&self.devices)?;
-        if self.membership.write_policy() != coverage.policy()
-            || self.devices.write_policy() != coverage.policy()
-        {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: coverage.policy(),
-                actual: if self.membership.write_policy() != coverage.policy() {
-                    self.membership.write_policy()
-                } else {
-                    self.devices.write_policy()
-                },
-            });
-        }
         if self.membership.recovery() != self.devices.recovery() {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
-        match (coverage, &self.membership, &self.devices) {
-            (
-                CommitFrontier::MergeConcurrent(expected),
-                StoreMembershipStateRef::MergeConcurrent(_),
-                StoreDeviceStateRef::MergeConcurrent { frontier, .. },
-            ) if frontier == &CommitFrontier::MergeConcurrent(expected.clone()) => Ok(()),
-            (
-                CommitFrontier::Serial(expected),
-                StoreMembershipStateRef::Serial(membership),
-                StoreDeviceStateRef::Serial { position, .. },
-            ) => {
-                let expected = match expected {
-                    Some(commit) => StoreSerialPredecessor::Commit(commit.clone()),
-                    None => match position {
-                        StoreSerialPredecessor::Genesis { root, .. }
-                            if root.store_root_hash == store_root_hash =>
-                        {
-                            position.clone()
-                        }
-                        _ => return Err(StoreProtocolError::DeviceStateMismatch),
-                    },
-                };
-                if membership.position != expected || position != &expected {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-                Ok(())
-            }
-            _ => Err(StoreProtocolError::DeviceStateMismatch),
+        if self.devices.frontier() != coverage {
+            return Err(StoreProtocolError::DeviceStateMismatch);
         }
+        let _ = store_root_hash;
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreAckExclusionState {
-    MergeConcurrent {
-        proposal_freezes: Vec<StoreDeviceProposalAck>,
-    },
-    Serial,
+#[serde(deny_unknown_fields)]
+pub struct StoreAckExclusionState {
+    pub proposal_freezes: Vec<StoreDeviceProposalAck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -276,52 +235,28 @@ pub struct SnapshotMeta {
     pub image: SnapshotImageRef,
     pub coverage: CommitFrontier,
     pub state: StoreSnapshotState,
-    pub history_summary: StoreSnapshotHistorySummary,
+    pub history_summary: RetainedVerifiedMergeHistorySummary,
     pub schema_version: u32,
     pub created_at: String,
     pub successor: SnapshotSuccessorLink,
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreSnapshotHistorySummary {
-    MergeConcurrent(RetainedVerifiedMergeHistorySummary),
-    Serial,
-}
-
-impl StoreSnapshotHistorySummary {
+impl RetainedVerifiedMergeHistorySummary {
     fn validate(
         &self,
         store_root_hash: ObjectHash,
         coverage: &CommitFrontier,
         state: &StoreSnapshotState,
     ) -> Result<(), StoreProtocolError> {
-        match (self, coverage) {
-            (Self::MergeConcurrent(summary), CommitFrontier::MergeConcurrent(frontier)) => {
-                summary.validate_snapshot_baseline()?;
-                if summary.store_root_hash != store_root_hash
-                    || summary.frontier()? != *frontier
-                    || summary.post_state != state.devices
-                {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-                Ok(())
-            }
-            (Self::Serial, CommitFrontier::Serial(_)) => Ok(()),
-            (Self::MergeConcurrent(_), CommitFrontier::Serial(_)) => {
-                Err(StoreProtocolError::WritePolicyMismatch {
-                    expected: WritePolicy::Serial,
-                    actual: WritePolicy::MergeConcurrent,
-                })
-            }
-            (Self::Serial, CommitFrontier::MergeConcurrent(_)) => {
-                Err(StoreProtocolError::WritePolicyMismatch {
-                    expected: WritePolicy::MergeConcurrent,
-                    actual: WritePolicy::Serial,
-                })
-            }
+        self.validate_snapshot_baseline()?;
+        if self.store_root_hash != store_root_hash
+            || self.frontier()? != coverage.0
+            || self.post_state != state.devices
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
         }
+        Ok(())
     }
 }
 
@@ -358,7 +293,7 @@ struct SnapshotSignedFields<'a> {
     image: &'a SnapshotImageRef,
     coverage: &'a CommitFrontier,
     state: &'a StoreSnapshotState,
-    history_summary: &'a StoreSnapshotHistorySummary,
+    history_summary: &'a RetainedVerifiedMergeHistorySummary,
     schema_version: u32,
     created_at: &'a str,
     successor: &'a SnapshotSuccessorLink,
@@ -373,7 +308,7 @@ impl SnapshotMeta {
         image: SnapshotImageRef,
         coverage: CommitFrontier,
         state: StoreSnapshotState,
-        history_summary: StoreSnapshotHistorySummary,
+        history_summary: RetainedVerifiedMergeHistorySummary,
         schema_version: u32,
         created_at: String,
         successor: SnapshotSuccessorLink,

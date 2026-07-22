@@ -75,15 +75,14 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         })
         .await
         .expect("create join snapshot");
-    let snapshot_coverage =
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
+    let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &store.storage,
         &store.root,
         snapshot,
         snapshot_coverage.clone(),
         &owner,
-        Some(&membership),
+        &membership,
         &owner_db,
     )
     .await
@@ -91,8 +90,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     publish_merge_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
         .await
         .expect("publish join snapshot acknowledgement");
-    let authorization =
-        crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(membership);
+    let authorization = membership;
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = crate::store_dir::StoreLayout::new(app.path());
@@ -103,8 +101,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             layout.clone(),
             tables.clone(),
             test_migrations(),
-            crate::WritePolicy::MergeConcurrent,
-            None,
             None,
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
@@ -153,7 +149,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let approval = Box::pin(crate::sync::device_join::authorize_device_provider_access(
         &owner_db,
         &store.storage,
-        None,
         Some(store.home.as_ref()),
         None,
         &authorization,
@@ -177,7 +172,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         crate::sync::device_join::accept_device_registration_request(
             &owner_db,
             &store.storage,
-            None,
             &authorization,
             &owner,
             registration_request,
@@ -222,7 +216,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let interrupted = Box::pin(crate::sync::device_join::finalize_device_join(
         &owner_db,
         &store.storage,
-        None,
         &authorization,
         &owner,
         completion.clone(),
@@ -255,7 +248,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let activation = Box::pin(crate::sync::device_join::finalize_device_join(
         &owner_db,
         &store.storage,
-        None,
         &authorization,
         &owner,
         completion,

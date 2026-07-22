@@ -55,12 +55,6 @@ pub(crate) struct DurableMembershipMutation {
     pub progress_bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TerminalMembershipMutation {
-    pub plan_bytes: Vec<u8>,
-    pub result_bytes: Vec<u8>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum MembershipMutationActivation {
     WithoutRotation,

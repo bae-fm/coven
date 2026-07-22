@@ -53,7 +53,6 @@ impl Database {
     }
 
     pub(crate) async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
-        let policy = self.write_policy();
         self.call(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
@@ -74,7 +73,7 @@ impl Database {
                 let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
                 frontier.insert(device_id.clone(), reference);
             }
-            CommitFrontier::from_refs(policy, frontier)
+            CommitFrontier::from_refs(frontier)
                 .map_err(|error| DbError::Message(format!("snapshot coverage frontier: {error}")))
         })
         .await
@@ -164,15 +163,8 @@ impl Database {
     ) -> Result<StoreBatchCommitRef, DbError> {
         let reference: StoreBatchCommitRef = serde_json::from_str(encoded)
             .map_err(|error| DbError::Message(format!("stored exact Store commit ref: {error}")))?;
-        let coordinate_matches = match &reference.coord {
-            StoreCommitCoord::Serial { sequence: declared } => {
-                stream_id == SERIAL_STREAM_ID && *declared == sequence
-            }
-            StoreCommitCoord::MergeConcurrent {
-                stream_id: declared,
-                sequence: declared_sequence,
-            } => declared.to_string() == stream_id && *declared_sequence == sequence,
-        };
+        let coordinate_matches = reference.coord.stream_id.to_string() == stream_id
+            && reference.coord.sequence == sequence;
         if !coordinate_matches {
             return Err(DbError::Message(format!(
                 "stored exact Store commit ref differs from {stream_id}/{sequence}"
@@ -190,35 +182,24 @@ impl Database {
         retained_input_hash: Option<&str>,
     ) -> Result<StoreBatchCommitRef, DbError> {
         let reference = Self::parse_stored_commit_ref(stream_id, sequence, encoded)?;
-        match &reference.coord {
-            StoreCommitCoord::MergeConcurrent { .. } => {
-                if retained_commit_ref != Some(encoded) {
-                    return Err(DbError::Message(format!(
-                        "materialized Merge coordinate {stream_id}/{sequence} does not bind its exact retained commit"
-                    )));
-                }
-                let input_hash = retained_input_hash.ok_or_else(|| {
-                    DbError::Message(format!(
-                        "materialized Merge coordinate {stream_id}/{sequence} has no retained input hash"
-                    ))
-                })?;
-                let retained = Self::load_retained_merge_materialization_on(
-                    conn, stream_id, sequence, &reference, input_hash,
-                )?;
-                retained.as_verified()?;
-                if retained.input_hash().to_string() != input_hash {
-                    return Err(DbError::Message(format!(
-                        "materialized Merge coordinate {stream_id}/{sequence} differs from its opened input"
-                    )));
-                }
-            }
-            StoreCommitCoord::Serial { .. } => {
-                if retained_commit_ref.is_some() || retained_input_hash.is_some() {
-                    return Err(DbError::Message(format!(
-                        "materialized Serial coordinate {stream_id}/{sequence} carries Merge retained input"
-                    )));
-                }
-            }
+        if retained_commit_ref != Some(encoded) {
+            return Err(DbError::Message(format!(
+                "materialized coordinate {stream_id}/{sequence} does not bind its exact retained commit"
+            )));
+        }
+        let input_hash = retained_input_hash.ok_or_else(|| {
+            DbError::Message(format!(
+                "materialized coordinate {stream_id}/{sequence} has no retained input hash"
+            ))
+        })?;
+        let retained = Self::load_retained_merge_materialization_on(
+            conn, stream_id, sequence, &reference, input_hash,
+        )?;
+        retained.as_verified()?;
+        if retained.input_hash().to_string() != input_hash {
+            return Err(DbError::Message(format!(
+                "materialized coordinate {stream_id}/{sequence} differs from its opened input"
+            )));
         }
         Ok(reference)
     }
@@ -666,41 +647,11 @@ impl Database {
         &self,
         order: &crate::sync::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        let order = order.clone();
-        self.call(move |conn| {
-            let cut = match order {
-                crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
-                    predecessor,
-                    dependencies,
-                    ..
-                } => {
-                    let mut frontier = dependencies;
-                    if let Some(predecessor) = predecessor {
-                        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord
-                        else {
-                            return Err(DbError::Message(
-                                "Merge predecessor has a Serial coordinate".to_string(),
-                            ));
-                        };
-                        if frontier
-                            .insert(stream_id, predecessor.clone())
-                            .is_some_and(|current| current != predecessor)
-                        {
-                            return Err(DbError::Message(
-                                "Merge predecessor differs from the same-stream dependency"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    StoreHistoryCut::MergeConcurrent(frontier)
-                }
-                crate::sync::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
-                    StoreHistoryCut::Serial(predecessor)
-                }
-            };
-            store_device_state_for_history_cut_on(conn, &cut)
-        })
-        .await
+        let cut = order
+            .predecessor_cut()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        self.call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .await
     }
 
     pub(crate) async fn store_device_state_for_history_cut(

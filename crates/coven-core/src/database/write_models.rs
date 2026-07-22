@@ -25,7 +25,6 @@ pub(crate) struct MergeReplayWriteOverlay {
 pub(crate) enum StoreWriteRouting<'a> {
     Unscoped,
     MergeScoped(&'a EncryptionService),
-    SerialScoped,
 }
 
 impl PreparedStoreWritePartitions {
@@ -38,22 +37,10 @@ impl PreparedStoreWritePartitions {
     }
 }
 
-pub(crate) struct SerialStoreBranchPreparationWork {
-    pub branch_id: PendingBranchId,
-    pub base: Option<StoreBatchCommitRef>,
-    pub writes: Vec<PreparedStoreWrite>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum StoreWriteBase {
-    MergeConcurrent {
-        dependencies: BTreeMap<String, StoreBatchCommitRef>,
-    },
-    Serial {
-        branch_id: PendingBranchId,
-        base: Option<StoreBatchCommitRef>,
-    },
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreWriteBase {
+    pub dependencies: BTreeMap<String, StoreBatchCommitRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,12 +87,6 @@ pub(crate) struct ExactProtocolObject<T> {
     pub bytes: Vec<u8>,
     pub object: ExactObjectRef,
     pub prepared: PreparedExactObject,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CanonicalProtocolObject<T> {
-    pub value: T,
-    pub bytes: Vec<u8>,
 }
 
 pub(crate) struct PreparedProtocolObject<T> {
@@ -187,7 +168,7 @@ pub(crate) enum TerminalCandidateAuthority {
     AuthorExclusion(AuthorExclusionActivationLocator),
     MembershipGrantRevocation {
         grant_id: crate::sync::membership::MembershipGrantId,
-        membership: crate::sync::circle_control::MergeStoreMembershipStateRef,
+        membership: crate::sync::circle_control::StoreMembershipStateRef,
         activation_commit: StoreBatchCommitRef,
         activation_head: crate::sync::store_commit::StoreDeviceHeadRef,
     },
@@ -200,13 +181,8 @@ pub(crate) struct TerminalCandidateCleanupVerification {
     pub(crate) candidate: BlockedMergeCandidate,
 }
 
-pub(crate) enum InitialStoreMembershipAuthority {
-    MergeConcurrent {
-        head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
-    },
-    Serial {
-        authorization: SerialAuthorizationState,
-    },
+pub(crate) struct InitialStoreMembershipAuthority {
+    pub head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,52 +193,6 @@ pub(crate) enum MergeAbandonmentState {
     CandidateWon,
     OtherWon,
     AuthorExcluded,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedSerialStoreWriteCommit {
-    pub audiences: PreparedAudienceObjects,
-    pub commit: ExactProtocolObject<StoreBatchCommit>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedSerialStoreBranch {
-    pub branch_id: PendingBranchId,
-    pub base: Option<StoreBatchCommitRef>,
-    pub base_head: VersionedObject,
-    pub writes: Vec<PreparedSerialStoreWriteCommit>,
-    pub head: CanonicalProtocolObject<StoreSerialHead>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedSerialCandidateAbandonment {
-    pub branch_id: PendingBranchId,
-    pub base: Option<StoreBatchCommitRef>,
-    pub base_head: VersionedObject,
-    pub authority: ExactProtocolObject<StoreBatchCommit>,
-    pub head: CanonicalProtocolObject<StoreSerialHead>,
-    pub original_head_bytes: Vec<u8>,
-    pub(super) durable_state: String,
-}
-
-impl PreparedSerialCandidateAbandonment {
-    pub(crate) fn durable_state(&self) -> &str {
-        &self.durable_state
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerialBranchDiscardState {
-    Local,
-    Abandonment,
-    Conflict,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct UnresolvedSerialBranch {
-    pub branch_id: PendingBranchId,
-    pub base: Option<StoreBatchCommitRef>,
-    pub conflicted: bool,
 }
 
 #[derive(Debug, Clone)]

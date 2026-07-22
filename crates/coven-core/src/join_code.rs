@@ -11,20 +11,8 @@ use crate::sync::store_commit::ObjectHash;
 pub const INVITE_CODE_VERSION: u8 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MembershipFloor {
-    MergeConcurrent(Vec<MembershipHeadRef>),
-    Serial(Option<crate::sync::store_commit::StoreBatchCommitRef>),
-}
-
-impl MembershipFloor {
-    pub fn write_policy(&self) -> crate::WritePolicy {
-        match self {
-            Self::MergeConcurrent(_) => crate::WritePolicy::MergeConcurrent,
-            Self::Serial(_) => crate::WritePolicy::Serial,
-        }
-    }
-}
+#[serde(transparent)]
+pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
 
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
@@ -43,9 +31,7 @@ pub struct InviteCode {
     pub owner_pubkey: String,
     pub wrapped_key: crate::sync::wrapped_store_key::WrappedStoreKeyRef,
     pub store_root: crate::sync::store_commit::StoreRootRef,
-    /// The exact membership state the joiner must observe: causal author
-    /// heads for MergeConcurrent stores, or the exact global commit for Serial
-    /// stores.
+    /// The exact causal membership heads the joiner must observe.
     pub membership_floor: MembershipFloor,
 }
 
@@ -88,28 +74,11 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     code.wrapped_key
         .validate_identity()
         .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
-    match &code.membership_floor {
-        MembershipFloor::MergeConcurrent(floor) => {
-            if floor.is_empty() {
-                return Err(JoinCodeError::EmptyMembershipFloor);
-            }
-            crate::sync::membership_ops::validate_membership_floor(floor)
-                .map_err(JoinCodeError::InvalidMembershipFloor)?;
-        }
-        MembershipFloor::Serial(None) => {
-            return Err(JoinCodeError::EmptyMembershipFloor);
-        }
-        MembershipFloor::Serial(Some(reference))
-            if reference.coord.policy() != crate::WritePolicy::Serial
-                || reference.coord.sequence() == 0 =>
-        {
-            return Err(JoinCodeError::InvalidMembershipFloor(
-                "Serial membership floor is not an exact nonzero Serial commit reference"
-                    .to_string(),
-            ));
-        }
-        MembershipFloor::Serial(Some(_)) => {}
+    if code.membership_floor.0.is_empty() {
+        return Err(JoinCodeError::EmptyMembershipFloor);
     }
+    crate::sync::membership_ops::validate_membership_floor(&code.membership_floor.0)
+        .map_err(JoinCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }
 
@@ -296,33 +265,7 @@ mod tests {
                     ObjectHash::digest(b"root"),
                 ),
             },
-            membership_floor: MembershipFloor::MergeConcurrent(test_membership_floor()),
-        }
-    }
-
-    fn test_serial_commit_ref() -> crate::sync::store_commit::StoreBatchCommitRef {
-        let stored = b"invite Serial floor commit";
-        let commit_hash = ObjectHash::digest(b"invite Serial floor semantic bytes");
-        let family = crate::sync::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
-            b"invite Serial floor candidate family",
-        ));
-        crate::sync::store_commit::StoreBatchCommitRef {
-            coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: 7 },
-            commit_hash,
-            object: crate::sync::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!(
-                    "{}.json",
-                    crate::sync::store_commit::commit_semantic_prefix(
-                        family,
-                        crate::sync::store_commit::SERIAL_STREAM_ID,
-                        7,
-                        commit_hash,
-                    )
-                ))
-                .expect("valid test Store-commit slot"),
-                stored.len() as u64,
-                ObjectHash::digest(stored),
-            ),
+            membership_floor: MembershipFloor(test_membership_floor()),
         }
     }
 
@@ -339,7 +282,7 @@ mod tests {
         assert_eq!(decoded.store_root, code.store_root);
         assert_eq!(
             decoded.membership_floor,
-            MembershipFloor::MergeConcurrent(test_membership_floor())
+            MembershipFloor(test_membership_floor())
         );
         match decoded.join_info {
             CloudHomeJoinInfo::S3 {
@@ -359,18 +302,6 @@ mod tests {
             }
             _ => panic!("expected S3 variant"),
         }
-    }
-
-    #[test]
-    fn serial_invite_round_trips_the_exact_commit_floor() {
-        let mut code = sample_s3_code("serial-store");
-        let reference = test_serial_commit_ref();
-        code.membership_floor = MembershipFloor::Serial(Some(reference.clone()));
-        let decoded = decode(&encode(&code)).unwrap();
-        assert_eq!(
-            decoded.membership_floor,
-            MembershipFloor::Serial(Some(reference))
-        );
     }
 
     #[test]
@@ -500,7 +431,7 @@ mod tests {
     #[test]
     fn decode_empty_membership_floor_is_refused() {
         let mut code = sample_s3_code("lib-empty-floor");
-        code.membership_floor = MembershipFloor::MergeConcurrent(Vec::new());
+        code.membership_floor = MembershipFloor(Vec::new());
         assert!(matches!(
             decode(&encode(&code)),
             Err(JoinCodeError::EmptyMembershipFloor)

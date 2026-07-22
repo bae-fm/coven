@@ -13,14 +13,11 @@ use super::store_commit::{
 };
 use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
-    SERIAL_KEY_GENERATION_STATE_KEY, SERIAL_MEMBERSHIP_STATE_KEY, SERIAL_PROVIDER_ADMIN_STATE_KEY,
-    SERIAL_WRAPPED_KEYS_STATE_KEY, STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY,
-    SYNC_ROUTING_HASH_STATE_KEY, WRITE_POLICY_STATE_KEY,
+    STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
 use crate::sync::membership_ops::{
     MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX, OWNER_PUBKEY_STATE_KEY,
 };
-use crate::WritePolicy;
 
 pub(crate) const GENERATION_ZERO: u64 = 0;
 
@@ -110,11 +107,6 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ),
     ("retained_replay_objects", ReplayTableDisposition::Preserve),
     ("row_blob_locators", ReplayTableDisposition::Replace),
-    ("serial_head_receipt", ReplayTableDisposition::MustBeEmpty),
-    (
-        "terminal_membership_mutation",
-        ReplayTableDisposition::MustBeEmpty,
-    ),
     (
         "snapshot_blob_spool_cleanup",
         ReplayTableDisposition::Preserve,
@@ -260,7 +252,6 @@ impl RetainedReplaySnapshotAuthority {
             || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
             || self.snapshot.object.verify(&metadata_bytes).is_err()
             || self.snapshot_cut.frontier() != self.metadata.coverage
-            || self.snapshot_cut.policy() != self.accepted_cut.policy()
             || !self
                 .accepted_cut
                 .frontier()
@@ -375,21 +366,16 @@ impl RetainedReplaySnapshotAuthority {
 }
 
 fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommitRef) -> bool {
-    let covered = match &reference.coord {
-        super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-            CommitFrontier::MergeConcurrent(BTreeMap::from([(*stream_id, reference.clone())]))
-        }
-        super::store_commit::StoreCommitCoord::Serial { .. } => {
-            CommitFrontier::Serial(Some(reference.clone()))
-        }
-    };
+    let covered = CommitFrontier(BTreeMap::from([(
+        reference.coord.stream_id,
+        reference.clone(),
+    )]));
     cut.frontier().covers(&covered)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RetainedReplayBaseline {
     pub(crate) generation: u64,
-    pub(crate) write_policy: WritePolicy,
     pub(crate) exact_cut: CommitFrontier,
     pub(crate) schema_version: u32,
     pub(crate) routing_hash: ObjectHash,
@@ -401,19 +387,14 @@ pub(crate) struct RetainedReplayBaseline {
 impl RetainedReplayBaseline {
     pub(crate) fn generation_zero(
         source: &Connection,
-        write_policy: WritePolicy,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplayGenesisAuthority,
     ) -> Result<Self, DbError> {
-        let image_bytes = project_generation_zero_image(source, write_policy)?;
+        let image_bytes = project_generation_zero_image(source)?;
         let baseline = Self {
             generation: GENERATION_ZERO,
-            write_policy,
-            exact_cut: match write_policy {
-                WritePolicy::MergeConcurrent => CommitFrontier::MergeConcurrent(Default::default()),
-                WritePolicy::Serial => CommitFrontier::Serial(None),
-            },
+            exact_cut: CommitFrontier(Default::default()),
             schema_version,
             routing_hash,
             image_hash: ObjectHash::digest(&image_bytes),
@@ -426,7 +407,6 @@ impl RetainedReplayBaseline {
 
     pub(crate) fn stable_snapshot(
         source: &Connection,
-        write_policy: WritePolicy,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplaySnapshotAuthority,
@@ -435,7 +415,6 @@ impl RetainedReplayBaseline {
         let image_bytes = serialized_database(source)?;
         let baseline = Self {
             generation: GENERATION_ZERO,
-            write_policy,
             exact_cut: authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
@@ -455,7 +434,6 @@ impl RetainedReplayBaseline {
 
     pub(crate) fn validate_image(&self) -> Result<(), DbError> {
         if self.generation != GENERATION_ZERO
-            || self.exact_cut.policy() != self.write_policy
             || self.image_hash != ObjectHash::digest(&self.image_bytes)
         {
             return Err(DbError::Message(
@@ -465,26 +443,12 @@ impl RetainedReplayBaseline {
         let image = open_image(&self.image_bytes)?;
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
-                if !matches!(
-                    (&self.write_policy, &self.exact_cut),
-                    (
-                        WritePolicy::MergeConcurrent,
-                        CommitFrontier::MergeConcurrent(frontier)
-                    ) if frontier.is_empty()
-                ) && !matches!(
-                    (&self.write_policy, &self.exact_cut),
-                    (WritePolicy::Serial, CommitFrontier::Serial(None))
-                ) {
+                if !self.exact_cut.0.is_empty() {
                     return Err(DbError::Message(
                         "genesis retained replay baseline has a non-genesis cut".to_string(),
                     ));
                 }
-                validate_generation_zero_image(
-                    &image,
-                    self.write_policy,
-                    self.schema_version,
-                    self.routing_hash,
-                )
+                validate_generation_zero_image(&image, self.schema_version, self.routing_hash)
             }
             RetainedReplayAuthority::StableSnapshot(authority) => {
                 authority.validate()?;
@@ -495,7 +459,6 @@ impl RetainedReplayBaseline {
                 }
                 validate_snapshot_replay_image(
                     &image,
-                    self.write_policy,
                     self.schema_version,
                     self.routing_hash,
                     &self.exact_cut,
@@ -634,17 +597,14 @@ fn serialized_database(connection: &Connection) -> Result<Vec<u8>, DbError> {
         .map_err(DbError::from)
 }
 
-fn project_generation_zero_image(
-    source: &Connection,
-    write_policy: WritePolicy,
-) -> Result<Vec<u8>, DbError> {
+fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
     let source_bytes = serialized_database(source)?;
     let image = open_image(&source_bytes)?;
     image
         .pragma_update(None, "foreign_keys", "OFF")
         .map_err(DbError::from)?;
     let transaction = image.unchecked_transaction().map_err(DbError::from)?;
-    let founder_membership_cursor = founder_membership_cursor_key(&transaction, write_policy)?;
+    let founder_membership_cursor = founder_membership_cursor_key(&transaction)?;
     for table in crate::db::user_table_names(&transaction).map_err(DbError::from)? {
         if GENESIS_PRESERVED_TABLES.contains(&table.as_str()) {
             continue;
@@ -658,7 +618,7 @@ fn project_generation_zero_image(
     }
     let protocol_keys = protocol_state_keys(&transaction)?;
     for key in protocol_keys {
-        if !generation_zero_protocol_key(write_policy, founder_membership_cursor.as_deref(), &key) {
+        if !generation_zero_protocol_key(founder_membership_cursor.as_deref(), &key) {
             transaction
                 .execute("DELETE FROM protocol_state WHERE key = ?1", [&key])
                 .map_err(DbError::from)?;
@@ -686,24 +646,21 @@ fn project_generation_zero_image(
 
 fn validate_generation_zero_image(
     image: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
 ) -> Result<(), DbError> {
-    validate_replay_image_metadata(image, write_policy, schema_version, routing_hash)?;
+    validate_replay_image_metadata(image, schema_version, routing_hash)?;
     let protocol_keys = protocol_state_keys(image)?;
-    let founder_membership_cursor = founder_membership_cursor_key(image, write_policy)?;
-    if protocol_keys.iter().any(|key| {
-        !generation_zero_protocol_key(write_policy, founder_membership_cursor.as_deref(), key)
-    }) || !required_generation_zero_protocol_keys(write_policy)
+    let founder_membership_cursor = founder_membership_cursor_key(image)?;
+    if protocol_keys
         .iter()
-        .all(|key| protocol_keys.contains(*key))
-        || match write_policy {
-            WritePolicy::MergeConcurrent => founder_membership_cursor
-                .as_ref()
-                .is_none_or(|key| !protocol_keys.contains(key)),
-            WritePolicy::Serial => founder_membership_cursor.is_some(),
-        }
+        .any(|key| !generation_zero_protocol_key(founder_membership_cursor.as_deref(), key))
+        || !required_generation_zero_protocol_keys()
+            .iter()
+            .all(|key| protocol_keys.contains(*key))
+        || founder_membership_cursor
+            .as_ref()
+            .is_none_or(|key| !protocol_keys.contains(key))
     {
         return Err(DbError::Message(
             "retained replay image protocol state is not the generation-zero set".to_string(),
@@ -736,7 +693,6 @@ fn validate_generation_zero_image(
 
 fn validate_replay_image_metadata(
     image: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
 ) -> Result<(), DbError> {
@@ -748,18 +704,6 @@ fn validate_replay_image_metadata(
             "retained replay image schema version is {stored_schema_version}, expected {schema_version}"
         )));
     }
-    let stored_policy: String = image
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [WRITE_POLICY_STATE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    let stored_policy: WritePolicy = serde_json::from_str(&stored_policy).map_err(|error| {
-        DbError::Message(format!(
-            "retained replay image write policy is invalid: {error}"
-        ))
-    })?;
     let stored_routing_hash: String = image
         .query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",
@@ -767,9 +711,9 @@ fn validate_replay_image_metadata(
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    if stored_policy != write_policy || stored_routing_hash != routing_hash.to_string() {
+    if stored_routing_hash != routing_hash.to_string() {
         return Err(DbError::Message(
-            "retained replay image policy or routing hash differs from its baseline".to_string(),
+            "retained replay image routing hash differs from its baseline".to_string(),
         ));
     }
     Ok(())
@@ -777,12 +721,11 @@ fn validate_replay_image_metadata(
 
 fn validate_snapshot_replay_image(
     image: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
     exact_cut: &CommitFrontier,
 ) -> Result<(), DbError> {
-    validate_replay_image_metadata(image, write_policy, schema_version, routing_hash)?;
+    validate_replay_image_metadata(image, schema_version, routing_hash)?;
     let mut actual = BTreeMap::new();
     let mut statement = image
         .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id")
@@ -861,41 +804,18 @@ fn protocol_state_keys(connection: &Connection) -> Result<BTreeSet<String>, DbEr
     Ok(keys)
 }
 
-fn required_generation_zero_protocol_keys(write_policy: WritePolicy) -> &'static [&'static str] {
-    const MERGE: &[&str] = &[
+fn required_generation_zero_protocol_keys() -> &'static [&'static str] {
+    &[
         COVEN_INITIALIZED_STATE_KEY,
         COVEN_SCHEMA_MANIFEST_STATE_KEY,
         OWNER_PUBKEY_STATE_KEY,
         STORE_DEVICE_GENESIS_STATE_KEY,
         SYNC_ROUTING_CONTRACT_STATE_KEY,
         SYNC_ROUTING_HASH_STATE_KEY,
-        WRITE_POLICY_STATE_KEY,
-    ];
-    const SERIAL: &[&str] = &[
-        COVEN_INITIALIZED_STATE_KEY,
-        COVEN_SCHEMA_MANIFEST_STATE_KEY,
-        SERIAL_KEY_GENERATION_STATE_KEY,
-        SERIAL_MEMBERSHIP_STATE_KEY,
-        SERIAL_PROVIDER_ADMIN_STATE_KEY,
-        SERIAL_WRAPPED_KEYS_STATE_KEY,
-        STORE_DEVICE_GENESIS_STATE_KEY,
-        SYNC_ROUTING_CONTRACT_STATE_KEY,
-        SYNC_ROUTING_HASH_STATE_KEY,
-        WRITE_POLICY_STATE_KEY,
-    ];
-    match write_policy {
-        WritePolicy::MergeConcurrent => MERGE,
-        WritePolicy::Serial => SERIAL,
-    }
+    ]
 }
 
-fn founder_membership_cursor_key(
-    connection: &Connection,
-    write_policy: WritePolicy,
-) -> Result<Option<String>, DbError> {
-    if write_policy == WritePolicy::Serial {
-        return Ok(None);
-    }
+fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<String>, DbError> {
     let bytes: Vec<u8> = connection
         .query_row(
             "SELECT store_protocol_root_bytes
@@ -906,11 +826,6 @@ fn founder_membership_cursor_key(
         .map_err(DbError::from)?;
     let root = super::store_commit::StoreProtocolRoot::parse(&bytes)
         .map_err(|error| DbError::Message(format!("retained replay Store root: {error}")))?;
-    if root.descriptor.write_policy != write_policy {
-        return Err(DbError::Message(
-            "retained replay Store root differs from its write policy".to_string(),
-        ));
-    }
     let stream = super::membership::derive_founder_stream_id(
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,
@@ -921,13 +836,9 @@ fn founder_membership_cursor_key(
     )))
 }
 
-fn generation_zero_protocol_key(
-    write_policy: WritePolicy,
-    founder_membership_cursor: Option<&str>,
-    key: &str,
-) -> bool {
-    required_generation_zero_protocol_keys(write_policy).contains(&key)
-        || write_policy == WritePolicy::MergeConcurrent && founder_membership_cursor == Some(key)
+fn generation_zero_protocol_key(founder_membership_cursor: Option<&str>, key: &str) -> bool {
+    required_generation_zero_protocol_keys().contains(&key)
+        || founder_membership_cursor == Some(key)
 }
 
 #[cfg(test)]
@@ -962,28 +873,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn merge_replay_rejects_serial_terminal_membership_receipts() {
-        let connection = fixture(WritePolicy::MergeConcurrent);
-        let plan = b"terminal Serial invitation plan";
-        connection
-            .execute(
-                "INSERT INTO terminal_membership_mutation
-                 (singleton, kind, intent_hash, plan_bytes, result_bytes)
-                 VALUES (1, 'serial_invite', ?1, ?2, x'01')",
-                (ObjectHash::digest(plan).to_string(), plan.as_slice()),
-            )
-            .expect("insert Serial-only terminal receipt into Merge fixture");
-
-        let error = validate_merge_generation_zero_preconditions(&connection)
-            .expect_err("Merge retained replay must reject a Serial terminal receipt");
-
-        assert!(error
-            .to_string()
-            .contains("terminal_membership_mutation to be empty"));
-    }
-
-    fn populate_fixture(connection: &Connection, policy: WritePolicy) {
+    fn populate_fixture(connection: &Connection) {
         connection
             .execute_batch(
                 "CREATE TABLE host_rows (
@@ -1005,14 +895,10 @@ mod tests {
                          'author', 'device', x'01', '{}', '{}');",
             )
             .expect("insert projection rows");
-        let mut keys = required_generation_zero_protocol_keys(policy)
+        let mut keys = required_generation_zero_protocol_keys()
             .iter()
             .map(|key| ((*key).to_string(), "{}".to_string()))
             .collect::<Vec<_>>();
-        keys.iter_mut()
-            .find(|(key, _)| key == WRITE_POLICY_STATE_KEY)
-            .expect("write policy key")
-            .1 = serde_json::to_string(&policy).expect("serialize policy");
         keys.iter_mut()
             .find(|(key, _)| key == SYNC_ROUTING_HASH_STATE_KEY)
             .expect("routing hash key")
@@ -1030,22 +916,20 @@ mod tests {
             connection,
             "retained-replay-fixture",
         );
-        if policy == WritePolicy::MergeConcurrent {
-            let cursor = founder_membership_cursor_key(connection, policy)
-                .expect("derive founder membership cursor")
-                .expect("Merge has a founder membership cursor");
-            connection
-                .execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, '{}')",
-                    [cursor],
-                )
-                .expect("insert founder membership cursor");
-        }
+        let cursor = founder_membership_cursor_key(connection)
+            .expect("derive founder membership cursor")
+            .expect("founder membership cursor");
+        connection
+            .execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, '{}')",
+                [cursor],
+            )
+            .expect("insert founder membership cursor");
     }
 
-    fn fixture(policy: WritePolicy) -> Connection {
+    fn fixture() -> Connection {
         let connection = Connection::open_in_memory().expect("open projection fixture");
-        populate_fixture(&connection, policy);
+        populate_fixture(&connection);
         connection
     }
 
@@ -1058,10 +942,9 @@ mod tests {
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .expect("enable WAL");
         assert_eq!(journal_mode, "wal");
-        populate_fixture(&connection, WritePolicy::MergeConcurrent);
+        populate_fixture(&connection);
 
-        let bytes = project_generation_zero_image(&connection, WritePolicy::MergeConcurrent)
-            .expect("project WAL database");
+        let bytes = project_generation_zero_image(&connection).expect("project WAL database");
         let image = open_image(&bytes).expect("open projected WAL image");
         assert_eq!(
             image
@@ -1074,7 +957,7 @@ mod tests {
 
     #[test]
     fn generation_zero_projection_reads_uncommitted_founder_state_and_removes_local_bytes() {
-        let mut source = fixture(WritePolicy::MergeConcurrent);
+        let mut source = fixture();
         source
             .execute("DELETE FROM store_device_registration_activations", [])
             .expect("remove committed founder fixture");
@@ -1089,8 +972,8 @@ mod tests {
             )
             .expect("insert uncommitted founder");
 
-        let bytes = project_generation_zero_image(&transaction, WritePolicy::MergeConcurrent)
-            .expect("project uncommitted founder state");
+        let bytes =
+            project_generation_zero_image(&transaction).expect("project uncommitted founder state");
         assert!(!bytes
             .windows(b"projection-secret-marker".len())
             .any(|window| window == b"projection-secret-marker"));
@@ -1133,8 +1016,8 @@ mod tests {
 
     #[test]
     fn projection_replacement_returns_the_host_row_delta() {
-        let mut live = fixture(WritePolicy::MergeConcurrent);
-        let replay = fixture(WritePolicy::MergeConcurrent);
+        let mut live = fixture();
+        let replay = fixture();
         replay
             .execute(
                 "UPDATE host_rows SET secret = 'replayed-value' WHERE id = 'host'",

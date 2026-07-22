@@ -1,16 +1,13 @@
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
 
-use super::fixtures::*;
-
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
     let (db, _stamper) = Database::open(
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         &[],
     )
@@ -49,103 +46,7 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
     );
 }
 
-#[tokio::test]
-async fn serial_pending_branch_survives_reopen_with_exact_base_and_inverses() {
-    let temp = tempfile::tempdir().expect("temporary Store");
-    let path = temp.path().join("serial.db");
-    let tables = vec![SyncedTable::new(
-        "notes",
-        crate::sync::session::RowIdentity::SharedKey,
-    )];
-    let migrations = vec![notes_migration()];
-    let (db, _) = Database::open(
-        &path,
-        tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::Serial,
-        "serial-device".to_string(),
-        &migrations,
-    )
-    .expect("open serial Store");
-    for (write_id, sql) in [
-        (
-            "serial-write-1",
-            "INSERT INTO notes VALUES ('n1', 'first', '0000000001000-0000-serial')",
-        ),
-        (
-            "serial-write-2",
-            "UPDATE notes SET body = 'second', _updated_at = '0000000002000-0000-serial' WHERE id = 'n1'",
-        ),
-    ] {
-        let tables = tables.clone();
-        let write_id = WriteId::from_generated(write_id.to_string());
-        db.call(move |conn| {
-            Database::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                crate::WritePolicy::Serial,
-                None,
-                write_id,
-                |tx| tx.execute_batch(sql).map_err(DbError::from),
-            )
-        })
-        .await
-        .expect("commit provisional serial write");
-    }
-    drop(db);
-
-    let (reopened, _) = Database::open(
-        &path,
-        tables,
-        BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::Serial,
-        "serial-device".to_string(),
-        &migrations,
-    )
-    .expect("reopen serial Store");
-    let rows = reopened
-        .call(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT write_id, inverse_changeset, base
-                     FROM store_writes ORDER BY ordinal",
-                )
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            Ok(rows)
-        })
-        .await
-        .expect("read reopened branch");
-    assert_eq!(rows.len(), 2);
-    for (write_id, inverse, base) in rows {
-        assert!(!inverse.is_empty(), "{write_id} retains its inverse");
-        let base: StoreWriteBase = serde_json::from_str(&base).expect("serial base");
-        assert_eq!(
-            base,
-            StoreWriteBase::Serial {
-                branch_id: PendingBranchId::from_first_write(WriteId::from_generated(
-                    "serial-write-1".to_string(),
-                )),
-                base: None,
-            }
-        );
-    }
-}
-
 async fn capture_scoped_write_then_reopen(
-    policy: WritePolicy,
     name: &str,
 ) -> (
     tempfile::TempDir,
@@ -171,8 +72,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         &migrations,
     )
@@ -186,7 +86,6 @@ async fn capture_scoped_write_then_reopen(
             Ok(crate::sync::test_helpers::install_test_active_circle(
                 conn,
                 &circle_label,
-                policy,
             ))
         })
         .await
@@ -196,8 +95,7 @@ async fn capture_scoped_write_then_reopen(
     let gates = db.gates();
     let blob_decls = db.blob_decls();
     let write_id = db.new_write_id();
-    let routing =
-        (policy == WritePolicy::MergeConcurrent).then(|| EncryptionService::from_key([7; 32]));
+    let routing = EncryptionService::from_key([7; 32]);
     let capture_tables = tables.clone();
     let capture_circle_id = circle_id.clone();
     db.call(move |conn| {
@@ -206,8 +104,7 @@ async fn capture_scoped_write_then_reopen(
             &capture_tables,
             &gates,
             &blob_decls,
-            policy,
-            routing.as_ref(),
+            Some(&routing),
             write_id,
             |tx| {
                 tx.execute(
@@ -264,8 +161,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         &migrations,
     )
@@ -302,8 +198,7 @@ fn assert_prepared_partitions(
 
 #[tokio::test]
 async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
-    let (_temp, reopened, expected) =
-        capture_scoped_write_then_reopen(WritePolicy::MergeConcurrent, "merge-restart").await;
+    let (_temp, reopened, expected) = capture_scoped_write_then_reopen("merge-restart").await;
     let prepared = reopened
         .prepare_store_write()
         .await
@@ -314,24 +209,9 @@ async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
 }
 
 #[tokio::test]
-async fn serial_preparation_reloads_exact_scoped_partitions_after_restart() {
-    let (_temp, reopened, expected) =
-        capture_scoped_write_then_reopen(WritePolicy::Serial, "serial-restart").await;
-    let branch = reopened
-        .reserve_serial_store_branch()
-        .await
-        .expect("reserve restarted Serial branch")
-        .expect("pending Serial branch");
-    assert_eq!(branch.writes.len(), 1);
-
-    assert_prepared_partitions(&branch.writes[0].partitions, &expected);
-}
-
-#[tokio::test]
 async fn preparation_rejects_a_local_partition_with_circle_control() {
     let (_temp, reopened, _expected) =
-        capture_scoped_write_then_reopen(WritePolicy::MergeConcurrent, "controlled-local-restart")
-            .await;
+        capture_scoped_write_then_reopen("controlled-local-restart").await;
     reopened
         .call(|conn| {
             conn.pragma_update(None, "ignore_check_constraints", true)
@@ -358,8 +238,8 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
         .contains("Local partition carries a Circle control"));
 }
 
-async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
-    let (_temp, db, _) = capture_scoped_write_then_reopen(policy, name).await;
+async fn assert_local_only_scoped_write(name: &str) {
+    let (_temp, db, _) = capture_scoped_write_then_reopen(name).await;
     let tables = vec![
         SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
             .scoped_by("audience"),
@@ -367,8 +247,7 @@ async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
     let gates = db.gates();
     let blob_decls = db.blob_decls();
     let write_id = db.new_write_id();
-    let routing =
-        (policy == WritePolicy::MergeConcurrent).then(|| EncryptionService::from_key([7; 32]));
+    let routing = EncryptionService::from_key([7; 32]);
     let receipt = db
         .call(move |conn| {
             Database::run_store_write_transaction_on(
@@ -376,8 +255,7 @@ async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
                 &tables,
                 &gates,
                 &blob_decls,
-                policy,
-                routing.as_ref(),
+                Some(&routing),
                 write_id,
                 |tx| {
                     tx.execute(
@@ -393,7 +271,6 @@ async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
         .expect("capture local-only partition");
 
     assert_eq!(receipt.status, WriteStatus::LocalOnly);
-    assert_eq!(receipt.pending_branch_id, None);
     assert_eq!(
         db.write_status(&receipt.write_id)
             .await
@@ -436,10 +313,5 @@ async fn assert_local_only_scoped_write(policy: WritePolicy, name: &str) {
 
 #[tokio::test]
 async fn merge_local_only_scoped_write_is_not_pending() {
-    assert_local_only_scoped_write(WritePolicy::MergeConcurrent, "merge-local-only").await;
-}
-
-#[tokio::test]
-async fn serial_local_only_scoped_write_is_not_pending() {
-    assert_local_only_scoped_write(WritePolicy::Serial, "serial-local-only").await;
+    assert_local_only_scoped_write("merge-local-only").await;
 }

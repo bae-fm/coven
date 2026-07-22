@@ -24,11 +24,8 @@ use crate::storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
 };
-use crate::storage::cloud::{
-    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadVersion, CloudHomeError,
-    CloudVersionedHead,
-};
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use crate::storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::hlc::Hlc;
@@ -45,9 +42,8 @@ use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    create_exact_test_store, host_exec, open_serial_test_db, open_test_db, open_test_db_with_blob,
-    pubkey_hex, publish_merge_store_ack_fixture, publish_serial_store_ack_fixture, temp_store_dir,
-    test_migrations, test_synced_tables, test_synced_tables_with_blob,
+    host_exec, open_test_db, open_test_db_with_blob, pubkey_hex, publish_merge_store_ack_fixture,
+    temp_store_dir, test_migrations, test_synced_tables, test_synced_tables_with_blob,
 };
 
 struct RestoreCloudKitOps {
@@ -161,7 +157,7 @@ impl CloudKitOps for RestoreCloudKitOps {
         &self,
         scope: &CloudKitScope,
         key: &str,
-    ) -> Result<CloudVersionedHead, CloudHomeError> {
+    ) -> Result<CloudVersionedObject, CloudHomeError> {
         let record = (scope.clone(), key.to_string());
         let bytes = self
             .records
@@ -177,28 +173,9 @@ impl CloudKitOps for RestoreCloudKitOps {
             .get(&record)
             .copied()
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        Ok(CloudVersionedHead {
+        Ok(CloudVersionedObject {
             bytes,
-            version: CloudHeadVersion::from_provider(version.to_string())?,
-        })
-    }
-
-    fn create_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
-        let record = (scope.clone(), key.to_string());
-        let mut records = self.records.lock().unwrap();
-        if records.contains_key(&record) {
-            return Err(CloudHeadCreateError::AlreadyExists);
-        }
-        records.insert(record.clone(), data.clone());
-        self.versions.lock().unwrap().insert(record, 1);
-        Ok(CloudVersionedHead {
-            bytes: data,
-            version: CloudHeadVersion::from_provider("1".to_string())?,
+            version: CloudObjectVersion::from_provider(version.to_string())?,
         })
     }
 
@@ -258,7 +235,7 @@ impl CloudKitOps for RestoreCloudKitOps {
             versions.insert(coordinate, 1);
             created.push(CloudKitRecordVersion {
                 key: create.key,
-                version: CloudHeadVersion::from_provider("1".to_string())?,
+                version: CloudObjectVersion::from_provider("1".to_string())?,
             });
         }
         Ok(created)
@@ -271,34 +248,6 @@ impl CloudKitOps for RestoreCloudKitOps {
     ) -> Result<(), CloudHomeError> {
         self.batches.lock().unwrap().remove(batch.as_provider());
         Ok(())
-    }
-
-    fn replace_record(
-        &self,
-        scope: &CloudKitScope,
-        key: &str,
-        expected: &CloudHeadVersion,
-        data: Vec<u8>,
-    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
-        let record = (scope.clone(), key.to_string());
-        let mut versions = self.versions.lock().unwrap();
-        let current = versions
-            .get(&record)
-            .copied()
-            .ok_or(CloudHeadReplaceError::VersionMismatch)?;
-        if expected.as_provider() != current.to_string() {
-            return Err(CloudHeadReplaceError::VersionMismatch);
-        }
-        let next = current + 1;
-        self.records
-            .lock()
-            .unwrap()
-            .insert(record.clone(), data.clone());
-        versions.insert(record, next);
-        Ok(CloudVersionedHead {
-            bytes: data,
-            version: CloudHeadVersion::from_provider(next.to_string())?,
-        })
     }
 
     fn delete_record_versions(
@@ -368,7 +317,7 @@ fn membership_floor(author_pubkey: String) -> MembershipFloor {
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"restore test founder entry"),
     };
     let stored = b"restore test membership head";
-    MembershipFloor::MergeConcurrent(vec![crate::sync::membership::MembershipHeadRef {
+    MembershipFloor(vec![crate::sync::membership::MembershipHeadRef {
         coord,
         head_hash: crate::sync::store_commit::ObjectHash::digest(
             b"restore test membership head semantic bytes",
@@ -397,34 +346,6 @@ fn store_root_ref(label: &str) -> crate::sync::store_commit::StoreRootRef {
                 crate::sync::store_commit::ObjectHash::digest(label.as_bytes())
             ))
             .expect("valid test Store-root slot"),
-            stored.len() as u64,
-            crate::sync::store_commit::ObjectHash::digest(stored.as_bytes()),
-        ),
-    }
-}
-
-fn serial_commit_ref(seq: u64, label: &str) -> crate::sync::store_commit::StoreBatchCommitRef {
-    let stored = format!("{label} stored commit");
-    let commit_hash = crate::sync::store_commit::ObjectHash::digest(label.as_bytes());
-    let family = crate::sync::store_commit::CandidateFamilyId::from_hash(
-        crate::sync::store_commit::ObjectHash::digest(
-            format!("{label} candidate family").as_bytes(),
-        ),
-    );
-    crate::sync::store_commit::StoreBatchCommitRef {
-        coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: seq },
-        commit_hash,
-        object: crate::sync::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!(
-                "{}.json",
-                crate::sync::store_commit::commit_semantic_prefix(
-                    family,
-                    crate::sync::store_commit::SERIAL_STREAM_ID,
-                    seq,
-                    commit_hash,
-                )
-            ))
-            .expect("valid test Store-commit slot"),
             stored.len() as u64,
             crate::sync::store_commit::ObjectHash::digest(stored.as_bytes()),
         ),
@@ -537,8 +458,6 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
-        crate::WritePolicy::MergeConcurrent,
-        None,
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
@@ -551,89 +470,6 @@ async fn restore_result_for(
         &tokio::sync::watch::channel(false).1,
     )
     .await
-}
-
-#[tokio::test]
-async fn restore_refuses_the_code_policy_before_any_provider_or_local_write() {
-    let code = restore_code_with_sid("restore-policy-mismatch");
-    let app = tempfile::tempdir().unwrap();
-    let result = restore_from_code(
-        &code,
-        &test_synced_tables(),
-        &test_migrations(),
-        crate::WritePolicy::Serial,
-        None,
-        None,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
-        None,
-        None,
-        &crate::store_dir::StoreLayout::new(app.path()),
-        Arc::new(SystemClock),
-        Arc::new(SequentialIdProvider::new("device")),
-        |_| {},
-        &tokio::sync::watch::channel(false).1,
-    )
-    .await;
-    assert!(matches!(
-        result,
-        Err(BootstrapError::WritePolicyMismatch {
-            expected: crate::WritePolicy::Serial,
-            actual: crate::WritePolicy::MergeConcurrent,
-        })
-    ));
-    assert!(!app.path().join("stores/restore-policy-mismatch").exists());
-}
-
-#[tokio::test]
-async fn restore_refuses_a_known_unsupported_serial_provider_before_any_provider_or_local_write() {
-    let root = store_root_ref("Serial restore root");
-    let owner = crate::keys::UserKeypair::generate();
-    let code = encode_restore_code(&RestoreCode {
-        v: crate::sync::restore_code::RESTORE_CODE_VERSION,
-        sid: "restore-serial-google-drive".to_string(),
-        ek: Some(serialized_keyring(0xaa)),
-        name: "Serial Store".to_string(),
-        provider: CloudHomeJoinInfo::GoogleDrive {
-            folder_id: "never-read".to_string(),
-        },
-        store_root: root.clone(),
-        founder_pubkey: hex::encode([0xAB_u8; 32]),
-        membership_floor: MembershipFloor::Serial(Some(serial_commit_ref(
-            1,
-            "Serial restore floor",
-        ))),
-        authority: owner_recovery_authority(&root, &owner),
-    });
-    let app = tempfile::tempdir().unwrap();
-    let result = restore_from_code(
-        &code,
-        &test_synced_tables(),
-        &test_migrations(),
-        crate::WritePolicy::Serial,
-        None,
-        None,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
-        None,
-        None,
-        &crate::store_dir::StoreLayout::new(app.path()),
-        Arc::new(SystemClock),
-        Arc::new(SequentialIdProvider::new("device")),
-        |_| {},
-        &tokio::sync::watch::channel(false).1,
-    )
-    .await;
-    assert!(matches!(
-        result,
-        Err(BootstrapError::SerialCoordinationUnavailable {
-            provider: crate::CloudProvider::GoogleDrive,
-        })
-    ));
-    assert!(!app
-        .path()
-        .join("stores/restore-serial-google-drive")
-        .exists());
 }
 
 #[tokio::test]
@@ -666,8 +502,6 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         &code,
         &tables,
         &test_migrations(),
-        crate::WritePolicy::MergeConcurrent,
-        None,
         None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
@@ -856,8 +690,6 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
-        crate::WritePolicy::MergeConcurrent,
-        None,
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
@@ -1027,15 +859,14 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         })
         .await
         .expect("create owner snapshot");
-    let snapshot_coverage =
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
+    let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &store_root,
         snapshot,
         snapshot_coverage.clone(),
         &owner_keypair,
-        Some(&membership),
+        &membership,
         &db,
     )
     .await
@@ -1086,12 +917,11 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             authority: &authority,
             continuation: None,
         },
-        &MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+        &MembershipFloor(membership.head_refs().to_vec()),
         &tables,
         &migrations,
         &join_info,
         "Late Step Test",
-        None,
         None,
         &store_keys,
         custody.as_ref(),
@@ -1224,12 +1054,11 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             authority: &authority,
             continuation: None,
         },
-        &MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+        &MembershipFloor(membership.head_refs().to_vec()),
         &tables,
         &migrations,
         &join_info,
         "Late Step Test",
-        None,
         None,
         &store_keys,
         custody.as_ref(),
@@ -1292,16 +1121,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
 
 #[tokio::test]
 async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_device() {
-    let fixture = Box::pin(prepare_owner_recovery_restore(
-        crate::WritePolicy::MergeConcurrent,
-    ))
-    .await;
-    Box::pin(assert_owner_recovery_restore(fixture)).await;
-}
-
-#[tokio::test]
-async fn serial_owner_recovery_restore_code_creates_an_activated_replacement_device() {
-    let fixture = Box::pin(prepare_owner_recovery_restore(crate::WritePolicy::Serial)).await;
+    let fixture = Box::pin(prepare_owner_recovery_restore()).await;
     Box::pin(assert_owner_recovery_restore(fixture)).await;
 }
 
@@ -1309,25 +1129,19 @@ struct OwnerRecoveryRestoreFixture {
     code: String,
     tables: Vec<crate::sync::session::SyncedTable>,
     migrations: Vec<crate::migration::Migration>,
-    write_policy: crate::WritePolicy,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
 }
 
-async fn prepare_owner_recovery_restore(
-    write_policy: crate::WritePolicy,
-) -> OwnerRecoveryRestoreFixture {
+async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     crate::keys::test_keyring::install();
-    let store_id = match write_policy {
-        crate::WritePolicy::MergeConcurrent => "merge-owner-recovery-restore",
-        crate::WritePolicy::Serial => "serial-owner-recovery-restore",
-    };
+    let store_id = "owner-recovery-restore";
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
         crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
     );
     let owner = UserKeypair::generate();
-    let mut owner_storage = CloudSyncStorage::new(
+    let owner_storage = CloudSyncStorage::new(
         cloud.clone(),
         CloudCipher::Plaintext,
         BlobPathScheme::for_storage(HomeStorage::Browsable),
@@ -1335,36 +1149,16 @@ async fn prepare_owner_recovery_restore(
         owner.clone(),
     )
     .expect("build Owner recovery storage");
-    if write_policy == crate::WritePolicy::Serial {
-        owner_storage = owner_storage.with_serial_coordination_clients(cloud.clone(), cloud);
-    }
-    let owner_db = match write_policy {
-        crate::WritePolicy::MergeConcurrent => open_test_db(),
-        crate::WritePolicy::Serial => open_serial_test_db(),
-    };
-    let (root, floor, membership) = match write_policy {
-        crate::WritePolicy::MergeConcurrent => {
-            let (root, membership) = crate::sync::test_helpers::initialize_store_fixture(
-                &owner_db,
-                &owner_storage,
-                store_id,
-                &owner,
-            )
-            .await
-            .expect("initialize MergeConcurrent recovery Store");
-            (
-                root,
-                MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
-                Some(membership),
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let root = create_exact_test_store(&owner_db, &owner_storage, store_id, &owner)
-                .await
-                .expect("initialize Serial recovery Store");
-            (root, MembershipFloor::Serial(None), None)
-        }
-    };
+    let owner_db = open_test_db();
+    let (root, membership) = crate::sync::test_helpers::initialize_store_fixture(
+        &owner_db,
+        &owner_storage,
+        store_id,
+        &owner,
+    )
+    .await
+    .expect("initialize recovery Store");
+    let floor = MembershipFloor(membership.head_refs().to_vec());
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_dir = snapshot_tmp.path().to_path_buf();
@@ -1376,34 +1170,21 @@ async fn prepare_owner_recovery_restore(
         })
         .await
         .expect("create recovery snapshot");
-    let snapshot_coverage = match write_policy {
-        crate::WritePolicy::MergeConcurrent => {
-            crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new())
-        }
-        crate::WritePolicy::Serial => crate::sync::store_commit::CommitFrontier::Serial(None),
-    };
+    let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &root,
         snapshot,
         snapshot_coverage.clone(),
         &owner,
-        membership.as_ref(),
+        &membership,
         &owner_db,
     )
     .await
     .expect("publish recovery snapshot");
-    match write_policy {
-        crate::WritePolicy::MergeConcurrent => {
-            publish_merge_store_ack_fixture(&owner_db, &owner_storage, snapshot_coverage, &owner)
-                .await
-        }
-        crate::WritePolicy::Serial => {
-            publish_serial_store_ack_fixture(&owner_db, &owner_storage, snapshot_coverage, &owner)
-                .await
-        }
-    }
-    .expect("publish recovery snapshot acknowledgement");
+    publish_merge_store_ack_fixture(&owner_db, &owner_storage, snapshot_coverage, &owner)
+        .await
+        .expect("publish recovery snapshot acknowledgement");
     let authority = published_owner_recovery_authority(&owner_storage, &root, &owner).await;
     let code = encode_restore_code(&RestoreCode {
         v: crate::sync::restore_code::RESTORE_CODE_VERSION,
@@ -1421,7 +1202,6 @@ async fn prepare_owner_recovery_restore(
         code,
         tables,
         migrations: test_migrations(),
-        write_policy,
         cloudkit_ops,
         app,
     }
@@ -1432,7 +1212,6 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         code,
         tables,
         migrations,
-        write_policy,
         cloudkit_ops,
         app,
     } = fixture;
@@ -1441,8 +1220,6 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         &code,
         &tables,
         &migrations,
-        write_policy,
-        None,
         None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
@@ -1460,8 +1237,7 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         &config.store_dir.db_path(),
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        write_policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         config.device_id.clone(),
         &migrations,
     )
@@ -1545,15 +1321,14 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
         })
         .await
         .expect("owner snapshot");
-    let snapshot_coverage =
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
+    let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &owner_storage,
         &store_root,
         snapshot,
         snapshot_coverage.clone(),
         &owner_keypair,
-        Some(&membership),
+        &membership,
         &db_owner,
     )
     .await
@@ -1585,7 +1360,7 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
         provider: CloudHomeJoinInfo::CloudKit,
         store_root: store_root.clone(),
         founder_pubkey: pubkey_hex(&owner_keypair),
-        membership_floor: MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+        membership_floor: MembershipFloor(membership.head_refs().to_vec()),
         authority: RestoreAuthority::ActivatedContinuation(continuation),
     });
     let decoded = decode_restore_code(&restore_code).expect("decode continuation restore code");
@@ -1606,8 +1381,6 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
             &restore_code,
             &restore_tables,
             &test_migrations(),
-            crate::WritePolicy::MergeConcurrent,
-            None,
             None,
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
@@ -1655,8 +1428,7 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        coven_core::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         config.device_id.clone(),
         &test_migrations(),
     )
@@ -1723,15 +1495,14 @@ async fn restore_pins_the_chain_founder_as_owner() {
         })
         .await
         .expect("owner snapshot");
-    let snapshot_coverage =
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new());
+    let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
     crate::sync::test_helpers::publish_snapshot_fixture(
         &storage.storage,
         &storage.root,
         snapshot,
         snapshot_coverage.clone(),
         &owner_keypair,
-        Some(&chain),
+        &chain,
         &db_owner,
     )
     .await
@@ -1748,10 +1519,9 @@ async fn restore_pins_the_chain_founder_as_owner() {
     let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(
         &storage.storage,
-        None,
         "test-lib",
         storage.root.clone(),
-        &MembershipFloor::MergeConcurrent(chain.head_refs().to_vec()),
+        &MembershipFloor(chain.head_refs().to_vec()),
         1,
         &lib_b.db_path(),
     )
@@ -1767,9 +1537,8 @@ async fn restore_pins_the_chain_founder_as_owner() {
         storage.root.clone(),
         None,
         None,
-        &MembershipFloor::MergeConcurrent(chain.head_refs().to_vec()),
+        &MembershipFloor(chain.head_refs().to_vec()),
         &storage.storage,
-        None,
         boot,
         &lib_b,
         &tokio::sync::watch::channel(false).1,
@@ -1781,8 +1550,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        coven_core::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "B".to_string(),
         &test_migrations(),
     )
@@ -1862,7 +1630,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
 
     // The restore code is minted right after the removal: its floor is the
     // current (post-removal) chain state.
-    let membership_floor = MembershipFloor::MergeConcurrent(chain.head_refs().to_vec());
+    let membership_floor = MembershipFloor(chain.head_refs().to_vec());
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let tables_c = tables.clone();
@@ -1876,9 +1644,9 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         &storage.storage,
         &storage.root,
         snapshot,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        crate::sync::store_commit::CommitFrontier(BTreeMap::new()),
         &owner,
-        Some(&chain),
+        &chain,
         &db_owner,
     )
     .await
@@ -1896,7 +1664,6 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let (_tmp_b, lib_b) = temp_store_dir();
     let error = bootstrap_from_snapshot(
         &storage.storage,
-        None,
         "test-lib",
         storage.root.clone(),
         &membership_floor,
@@ -2113,12 +1880,11 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             authority: &authority,
             continuation: Some((&continuation, &device_signer)),
         },
-        &MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+        &MembershipFloor(membership.head_refs().to_vec()),
         &tables,
         &test_migrations(),
         &join_info,
         "Restored Store",
-        None,
         None,
         &store_keys,
         custody.as_ref(),
@@ -2145,8 +1911,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &lib_b.db_path(),
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        coven_core::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         config.device_id,
         &test_migrations(),
     )

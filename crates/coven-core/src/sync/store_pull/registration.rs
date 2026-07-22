@@ -24,34 +24,16 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
     }
 }
 
-pub(crate) enum RegistrationPredecessorAuthority<'a> {
-    MergeConcurrent(&'a MembershipChain),
-    Serial {
-        authorization: &'a SerialAuthorizationState,
-        position: super::store_commit::SerialStorePosition,
-        history: SerialAuthorizationHistory<'a>,
-    },
-}
-
-pub(crate) enum SerialAuthorizationHistory<'a> {
-    ExactPredecessor,
-    Prefix {
-        genesis_position: &'a super::store_commit::SerialStorePosition,
-        genesis_authorization: &'a SerialAuthorizationState,
-        commits: &'a [AuthorizedSerialCommit],
-    },
-}
+pub(crate) struct RegistrationPredecessorAuthority<'a>(pub(crate) &'a MembershipChain);
 
 impl RegistrationPredecessorAuthority<'_> {
     fn provider_admin_state(&self) -> Option<&super::provider::ProviderAdminState> {
-        match self {
-            Self::MergeConcurrent(chain) => {
-                let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
-                    return None;
-                };
-                Some(resolved.provider_admin.combined_state())
-            }
-            Self::Serial { authorization, .. } => Some(&authorization.provider_admin),
+        {
+            let chain = self.0;
+            let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
+                return None;
+            };
+            Some(resolved.provider_admin.combined_state())
         }
     }
 
@@ -61,95 +43,24 @@ impl RegistrationPredecessorAuthority<'_> {
         owner_pubkey: &str,
         owner_grant: &super::membership::MembershipGrantId,
     ) -> bool {
-        match self {
-            Self::MergeConcurrent(chain) => {
-                let MembershipStatus::Resolved(resolved) = chain.status() else {
-                    return false;
-                };
-                StoreMembershipStateRef::merge_concurrent(
-                    chain.head_refs().to_vec(),
-                    chain.resolution_refs().to_vec(),
-                    membership.recovery().to_vec(),
-                    resolved.state_hash,
-                )
-                .is_ok_and(|expected| membership == &expected)
-                    && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
-            }
-            Self::Serial {
-                authorization,
-                position,
-                ..
-            } => {
-                StoreMembershipStateRef::serial(
-                    position.clone(),
-                    membership.recovery().to_vec(),
-                    authorization,
-                )
-                .is_ok_and(|expected| membership == &expected)
-                    && authorization
-                        .membership
-                        .authorizes_owner_grant_id(owner_pubkey, owner_grant)
-            }
+        {
+            let chain = self.0;
+            let MembershipStatus::Resolved(resolved) = chain.status() else {
+                return false;
+            };
+            StoreMembershipStateRef::from_parts(
+                chain.head_refs().to_vec(),
+                chain.resolution_refs().to_vec(),
+                membership.recovery().to_vec(),
+                resolved.state_hash,
+            )
+            .is_ok_and(|expected| membership == &expected)
+                && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
         }
-    }
-
-    pub(crate) fn verifies_owner_at_ancestor(
-        &self,
-        membership: &StoreMembershipStateRef,
-        owner_pubkey: &str,
-        owner_grant: &super::membership::MembershipGrantId,
-    ) -> bool {
-        if self.verifies_owner(membership, owner_pubkey, owner_grant) {
-            return true;
-        }
-        let Self::Serial {
-            history:
-                SerialAuthorizationHistory::Prefix {
-                    genesis_position,
-                    genesis_authorization,
-                    commits,
-                },
-            ..
-        } = self
-        else {
-            return false;
-        };
-        let StoreMembershipStateRef::Serial(state) = membership else {
-            return false;
-        };
-        let historical_authorization = match &state.position {
-            super::store_commit::SerialStorePosition::Genesis { .. }
-                if &state.position == *genesis_position =>
-            {
-                *genesis_authorization
-            }
-            super::store_commit::SerialStorePosition::Commit(reference) => {
-                let Some(accepted) = commits
-                    .iter()
-                    .find(|accepted| &accepted.commit_ref == reference)
-                else {
-                    return false;
-                };
-                &accepted.authorization_after
-            }
-            _ => return false,
-        };
-        StoreMembershipStateRef::serial(
-            state.position.clone(),
-            state.recovery.clone(),
-            historical_authorization,
-        )
-        .is_ok_and(|expected| membership == &expected)
-            && historical_authorization
-                .membership
-                .authorizes_owner_grant_id(owner_pubkey, owner_grant)
     }
 
     pub(crate) fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
-        match self {
-            Self::MergeConcurrent(chain) => chain.is_owner_now(owner_pubkey),
-            Self::Serial { authorization, .. } => authorization.membership.is_owner(owner_pubkey),
-        }
+        self.0.is_owner_now(owner_pubkey)
     }
 
     pub(crate) fn verifies_provider_administrator(
@@ -179,7 +90,6 @@ impl RegistrationPredecessorAuthority<'_> {
 }
 
 pub(crate) struct LoadedDeviceJoinCleanupActivation {
-    pub(crate) write_policy: crate::WritePolicy,
     pub(crate) commit: StoreBatchCommit,
     pub(crate) author: StoreDeviceRegistration,
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
@@ -209,7 +119,6 @@ pub(crate) fn load_device_join_cleanup_activation<'a>(
                     RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
                 })?;
         Ok(LoadedDeviceJoinCleanupActivation {
-            write_policy: root_value.descriptor.write_policy,
             commit,
             author,
             receipts,
@@ -375,21 +284,12 @@ async fn validate_commit_reclaim_authorization(
         .map_err(RegistrationLoadError::Object)?;
     let evidence = &opened.evidence.value;
     let authorization = &opened.authorization.value;
-    let owner_authorized = match &authorization.authority.membership {
-        StoreMembershipStateRef::MergeConcurrent { .. } => {
-            authorization.authority.membership == commit.membership_state
-                && predecessor.verifies_owner(
-                    &authorization.authority.membership,
-                    &evidence.author_pubkey,
-                    &authorization.authority.owner_grant,
-                )
-        }
-        StoreMembershipStateRef::Serial { .. } => predecessor.verifies_owner_at_ancestor(
+    let owner_authorized = authorization.authority.membership == commit.membership_state
+        && predecessor.verifies_owner(
             &authorization.authority.membership,
             &evidence.author_pubkey,
             &authorization.authority.owner_grant,
-        ),
-    };
+        );
     if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
         return Err(RegistrationLoadError::Invalid(
             "reclaim authorization signer is not an active Owner at its exact predecessor"
@@ -579,7 +479,6 @@ pub(crate) async fn load_commit_registrations_with_root(
             activated,
             &registration,
             activating_author,
-            commit.serial_recovery_activation(),
             predecessor,
             &verified_join_outcomes,
         ))

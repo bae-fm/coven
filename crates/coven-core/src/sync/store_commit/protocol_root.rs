@@ -9,23 +9,13 @@ pub struct StoreCreationDescriptor {
     pub provider: crate::sync::storage::StoreProviderBinding,
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,
-    pub write_policy: WritePolicy,
     pub founder_pubkey: String,
     pub founder_grant: MembershipGrantId,
     pub root_slot: ObjectSlot,
     pub founder_registration: ObjectSlot,
     pub founder_provider_admin: crate::sync::provider::FounderProviderAdminGrant,
-    pub membership: StoreMembershipGenesis,
+    pub founder_membership: GrantStreamAnchor,
     pub founder_recovery: GrantStreamAnchor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreMembershipGenesis {
-    MergeConcurrent {
-        founder_membership: GrantStreamAnchor,
-    },
-    Serial,
 }
 
 impl StoreCreationDescriptor {
@@ -37,10 +27,6 @@ impl StoreCreationDescriptor {
         &self,
         founder: &MembershipEntry,
     ) -> Result<(), StoreProtocolError> {
-        let StoreMembershipGenesis::MergeConcurrent { founder_membership } = &self.membership
-        else {
-            return Err(StoreProtocolError::InvalidFounder);
-        };
         let MembershipChange::Founder {
             creation_id,
             owner_pubkey,
@@ -57,7 +43,7 @@ impl StoreCreationDescriptor {
             || founder.author_owner_grant != self.founder_grant
             || owner_pubkey != &self.founder_pubkey
             || owner_grant_id != &self.founder_grant
-            || membership != founder_membership
+            || membership != &self.founder_membership
             || provider_admin != &self.founder_provider_admin
             || founder.seq != 1
             || founder.previous_hash.is_some()
@@ -127,16 +113,9 @@ impl StoreProtocolRoot {
     pub fn parse_expected(
         bytes: &[u8],
         expected: &StoreRootRef,
-        expected_write_policy: WritePolicy,
         expected_sync_routing_hash: ObjectHash,
     ) -> Result<Self, StoreProtocolError> {
         let store_protocol_root = Self::parse_pinned(bytes, expected)?;
-        if store_protocol_root.descriptor.write_policy != expected_write_policy {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: expected_write_policy,
-                actual: store_protocol_root.descriptor.write_policy,
-            });
-        }
         if store_protocol_root.descriptor.sync_routing_hash != expected_sync_routing_hash {
             return Err(StoreProtocolError::SyncRoutingMismatch {
                 expected: expected_sync_routing_hash,
@@ -190,7 +169,6 @@ impl StoreProtocolRoot {
             .verify(
                 &descriptor.provider,
                 &descriptor.founder_provider_admin.provider,
-                descriptor.write_policy == WritePolicy::Serial,
             )
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         if !matches!(
@@ -203,13 +181,8 @@ impl StoreProtocolRoot {
             || descriptor.founder_pubkey.is_empty()
             || descriptor.root_slot.logical_key() != "store-v1/store-protocol-root.json"
             || !matches!(
-                (&descriptor.write_policy, &descriptor.membership),
-                (
-                    WritePolicy::MergeConcurrent,
-                    StoreMembershipGenesis::MergeConcurrent {
-                        founder_membership: GrantStreamAnchor::StoreMembership { .. }
-                    }
-                ) | (WritePolicy::Serial, StoreMembershipGenesis::Serial)
+                descriptor.founder_membership,
+                GrantStreamAnchor::StoreMembership { .. }
             )
         {
             return Err(StoreProtocolError::InvalidFounder);

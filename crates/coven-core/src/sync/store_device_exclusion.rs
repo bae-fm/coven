@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
+use crate::sync::membership::MembershipChain;
 
 use super::remote_object::{
     CandidateNonactivation, CandidateNonactivationProof, RemoteObjectRecord,
@@ -568,43 +569,25 @@ pub enum StoreDeviceExclusionError {
 pub async fn propose_device_exclusion(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     target: &super::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
     let _lock = db.lock_store_device_exclusion().await;
     reject_active_operation(db).await?;
-    let durable = Box::pin(prepare_proposal(
-        db,
-        storage,
-        coordination,
-        identity_signer,
-        target,
-    ))
-    .await?;
-    drive_device_exclusion(
-        db,
-        storage,
-        coordination,
-        identity_signer,
-        Box::new(durable),
-    )
-    .await
+    let durable = Box::pin(prepare_proposal(db, storage, identity_signer, target)).await?;
+    drive_device_exclusion(db, storage, identity_signer, Box::new(durable)).await
 }
 
 async fn prepare_proposal(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     target: &super::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
     let authorization = Box::new(
         Box::pin(super::device_join::load_current_device_join_authorization(
-            db,
-            storage,
-            coordination,
+            db, storage,
         ))
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
@@ -613,11 +596,7 @@ async fn prepare_proposal(
         Box::pin(super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            super::store_outbound::StoreOperationPreparation::from_dependencies(
-                db.write_policy(),
-                coordination,
-                authorization.merge_chain(),
-            )?,
+            super::store_outbound::StoreOperationPreparation::new(&authorization),
             &device_id,
             identity_signer,
         ))
@@ -709,7 +688,6 @@ async fn prepare_proposal(
 pub fn cancel_device_exclusion<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
     identity_signer: &'a UserKeypair,
     proposal: &'a StoreDeviceExclusionProposalRef,
 ) -> std::pin::Pin<
@@ -723,7 +701,6 @@ pub fn cancel_device_exclusion<'a>(
     publish_outcome(
         db,
         storage,
-        coordination,
         identity_signer,
         proposal,
         OutcomeIntent::Cancel,
@@ -733,7 +710,6 @@ pub fn cancel_device_exclusion<'a>(
 pub fn finalize_device_exclusion<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
     identity_signer: &'a UserKeypair,
     proposal: &'a StoreDeviceExclusionProposalRef,
 ) -> std::pin::Pin<
@@ -747,7 +723,6 @@ pub fn finalize_device_exclusion<'a>(
     publish_outcome(
         db,
         storage,
-        coordination,
         identity_signer,
         proposal,
         OutcomeIntent::Exclude,
@@ -757,22 +732,15 @@ pub fn finalize_device_exclusion<'a>(
 pub async fn resume_device_exclusion(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
     let _lock = db.lock_store_device_exclusion().await;
     let Some(operation) = db.active_outbound_store_device_exclusion().await? else {
         return Ok(None);
     };
-    drive_device_exclusion(
-        db,
-        storage,
-        coordination,
-        identity_signer,
-        Box::new(operation),
-    )
-    .await
-    .map(Some)
+    drive_device_exclusion(db, storage, identity_signer, Box::new(operation))
+        .await
+        .map(Some)
 }
 
 pub async fn get_device_exclusion_operations(
@@ -805,7 +773,6 @@ enum OutcomeIntent {
 fn publish_outcome<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
     identity_signer: &'a UserKeypair,
     proposal_ref: &'a StoreDeviceExclusionProposalRef,
     intent: OutcomeIntent,
@@ -821,51 +788,36 @@ fn publish_outcome<'a>(
         let _lock = db.lock_store_device_exclusion().await;
         reject_active_operation(db).await?;
         let authorization = Box::pin(super::device_join::load_current_device_join_authorization(
-            db,
-            storage,
-            coordination,
+            db, storage,
         ))
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
         let durable = Box::pin(prepare_outcome(
             db,
             storage,
-            coordination,
             identity_signer,
             proposal_ref,
             intent,
             authorization,
         ))
         .await?;
-        drive_device_exclusion(
-            db,
-            storage,
-            coordination,
-            identity_signer,
-            Box::new(durable),
-        )
-        .await
+        drive_device_exclusion(db, storage, identity_signer, Box::new(durable)).await
     })
 }
 
 async fn prepare_outcome(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     proposal_ref: &StoreDeviceExclusionProposalRef,
     intent: OutcomeIntent,
-    authorization: super::device_join::DeviceJoinAuthorization,
+    authorization: MembershipChain,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        super::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        super::store_outbound::StoreOperationPreparation::new(&authorization),
         &device_id,
         identity_signer,
     ))
@@ -967,7 +919,6 @@ async fn prepare_outcome(
 fn drive_device_exclusion<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn super::storage::CoordinationStorage>,
     identity_signer: &'a UserKeypair,
     mut operation: Box<DurableStoreDeviceExclusionOperation>,
 ) -> impl std::future::Future<Output = Result<StoreDeviceExclusionResult, StoreDeviceExclusionError>>
@@ -996,7 +947,6 @@ fn drive_device_exclusion<'a>(
             let progress = Box::pin(publish_device_exclusion_candidate(
                 db,
                 storage,
-                coordination,
                 &mut operation,
             ))
             .await?;
@@ -1007,7 +957,6 @@ fn drive_device_exclusion<'a>(
                     Box::pin(replace_device_exclusion_candidate(
                         db,
                         storage,
-                        coordination,
                         identity_signer,
                         &mut operation,
                         proof,
@@ -1029,7 +978,6 @@ enum DeviceExclusionPublicationProgress {
 async fn publish_device_exclusion_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
 ) -> Result<DeviceExclusionPublicationProgress, StoreDeviceExclusionError> {
     let candidate = operation.candidate().cloned().ok_or_else(|| {
@@ -1037,15 +985,8 @@ async fn publish_device_exclusion_candidate(
             "active exclusion operation has no activation candidate".to_string(),
         )
     })?;
-    let publish = super::store_outbound::publish_prepared_store_operation(
-        db,
-        storage,
-        super::store_outbound::StoreOperationPublicationMode::from_dependencies(
-            db.write_policy(),
-            coordination,
-        )?,
-        Box::new(candidate),
-    );
+    let publish =
+        super::store_outbound::publish_prepared_store_operation(db, storage, Box::new(candidate));
     let publication = Box::new(Box::pin(publish).await?);
     match publication.as_ref() {
         StoreOperationPublicationOutcome::Activated(_) => {
@@ -1100,7 +1041,6 @@ async fn publish_device_exclusion_candidate(
 async fn replace_device_exclusion_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
     nonactivation: super::remote_object::VerifiedCandidateNonactivation,
@@ -1108,7 +1048,6 @@ async fn replace_device_exclusion_candidate(
     let replacement = Box::pin(prepare_replacement_candidate(
         db,
         storage,
-        coordination,
         identity_signer,
         operation.object(),
     ))
@@ -1186,14 +1125,7 @@ async fn resume_device_exclusion_candidate(
         }
         DurableStoreDeviceExclusionOperation::CandidatePrepared { candidate, .. } => {
             let reference = candidate.reference.clone();
-            let stream = match &reference.coord {
-                super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-                    stream_id.to_string()
-                }
-                super::store_commit::StoreCommitCoord::Serial { .. } => {
-                    super::store_commit::SERIAL_STREAM_ID.to_string()
-                }
-            };
+            let stream = reference.coord.stream_id.to_string();
             if db
                 .exact_materialized_ref(&stream, reference.coord.sequence())
                 .await?
@@ -1217,7 +1149,6 @@ async fn resume_device_exclusion_candidate(
 async fn prepare_replacement_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     identity_signer: &UserKeypair,
     object: &DurableStoreDeviceExclusionObject,
 ) -> Result<PreparedStoreOperationCommit, StoreDeviceExclusionError> {
@@ -1230,18 +1161,13 @@ async fn prepare_replacement_candidate(
         ));
     };
     let device_id = local_device_id(db).await?;
-    let authorization =
-        super::device_join::load_current_device_join_authorization(db, storage, coordination)
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+    let authorization = super::device_join::load_current_device_join_authorization(db, storage)
+        .await
+        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
     let plan = super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        super::store_outbound::StoreOperationPreparation::from_dependencies(
-            db.write_policy(),
-            coordination,
-            authorization.merge_chain(),
-        )?,
+        super::store_outbound::StoreOperationPreparation::new(&authorization),
         &device_id,
         identity_signer,
     )
@@ -1351,9 +1277,6 @@ async fn build_exclusion_proof(
     proposal_ref: &StoreDeviceExclusionProposalRef,
     proposal: &StoreDeviceExclusionProposal,
 ) -> Result<StoreDeviceExclusionProof, StoreDeviceExclusionError> {
-    if db.write_policy() == crate::WritePolicy::Serial {
-        return Ok(StoreDeviceExclusionProof::Serial);
-    }
     let frozen = db
         .resolved_store_device_state(&proposal.frozen_device_state)
         .await?;
@@ -1380,13 +1303,7 @@ async fn build_exclusion_proof(
         let acknowledgement =
             super::store_objects::load_store_ack_ref(storage, root, &reference, &registration)
                 .await?;
-        let super::store_commit::StoreAckExclusionState::MergeConcurrent { proposal_freezes } =
-            &acknowledgement.value.exclusions
-        else {
-            return Err(StoreDeviceExclusionError::InvalidState(
-                "Merge exclusion evidence contains a Serial acknowledgement".to_string(),
-            ));
-        };
+        let proposal_freezes = &acknowledgement.value.exclusions.proposal_freezes;
         let freeze = proposal_freezes
             .iter()
             .find(|freeze| freeze.proposal == *proposal_ref)
@@ -1408,7 +1325,7 @@ async fn build_exclusion_proof(
             "Merge exclusion has no remaining active-device acknowledgement".to_string(),
         )
     })?;
-    Ok(StoreDeviceExclusionProof::MergeConcurrent {
+    Ok(StoreDeviceExclusionProof {
         frozen_device_state: proposal.frozen_device_state.clone(),
         remaining_device_acks: acknowledgements,
         cutoff,
@@ -1558,8 +1475,7 @@ mod tests {
             path,
             crate::sync::test_helpers::test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             &crate::sync::test_helpers::test_migrations(),
         )
@@ -1734,7 +1650,6 @@ mod tests {
             .await
             .expect("create author exclusion snapshot");
         let snapshot_coverage = super::super::store_commit::CommitFrontier::from_refs(
-            owner_db.write_policy(),
             owner_db
                 .materialized_frontier()
                 .await
@@ -1747,7 +1662,7 @@ mod tests {
             image.clone(),
             snapshot_coverage.clone(),
             &signer,
-            Some(&membership),
+            &membership,
             &owner_db,
         )
         .await
@@ -1814,7 +1729,7 @@ mod tests {
             ))
             .await;
             Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &restored,
                     &store.storage,
                     &target.device_id.to_string(),
@@ -1868,7 +1783,7 @@ mod tests {
             .expect("snapshotted exclusion covers restored candidate");
         assert_eq!(
             Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &restored,
                     &store.storage,
                     &target.device_id.to_string(),
@@ -1878,7 +1793,7 @@ mod tests {
             )
             .await
             .expect("consume snapshotted exclusion evidence"),
-            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!restored
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -1936,7 +1851,6 @@ mod tests {
             .await
             .expect("create pre-exclusion snapshot");
         let snapshot_coverage = super::super::store_commit::CommitFrontier::from_refs(
-            owner_db.write_policy(),
             owner_db
                 .materialized_frontier()
                 .await
@@ -1949,7 +1863,7 @@ mod tests {
             image,
             snapshot_coverage.clone(),
             &signer,
-            Some(&membership),
+            &membership,
             &owner_db,
         )
         .await
@@ -1964,10 +1878,9 @@ mod tests {
             &peer_db,
             peer_db.synced_tables(),
             &store.storage,
-            None,
             store.root.store_root_hash,
             &peer_pull_dir,
-            Some(&membership),
+            &membership,
             Some(&signer),
         )
         .await
@@ -2037,13 +1950,11 @@ mod tests {
         let database_path = destination.path().join("store.db");
         let bootstrap_store = Arc::clone(&store);
         let bootstrap_root = store.root.clone();
-        let bootstrap_floor =
-            crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec());
+        let bootstrap_floor = crate::join_code::MembershipFloor(membership.head_refs().to_vec());
         let bootstrap_path = database_path.clone();
         let bootstrap = tokio::spawn(async move {
             super::super::snapshot::bootstrap_from_snapshot(
                 &bootstrap_store.storage,
-                None,
                 "bootstrap-author-exclusion-store",
                 bootstrap_root,
                 &bootstrap_floor,
@@ -2061,7 +1972,7 @@ mod tests {
                 &database_path,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
+                crate::blob::TransferLimits::one_at_a_time(),
                 "post-snapshot-joining-device".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
             )
@@ -2097,7 +2008,7 @@ mod tests {
         assert!(!stored.1.is_empty());
         assert_eq!(
             Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &joining_db,
                     &store.storage,
                     &target.device_id.to_string(),
@@ -2107,7 +2018,7 @@ mod tests {
             )
             .await
             .expect("consume replayed exclusion evidence"),
-            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!joining_db
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -2134,7 +2045,6 @@ mod tests {
         let proposal = match Box::pin(propose_device_exclusion(
             owner_db,
             &store.storage,
-            None,
             signer,
             target,
         ))
@@ -2153,7 +2063,6 @@ mod tests {
         assert_eq!(&freezes[0].proposal.target, target);
 
         let frontier = super::super::store_commit::CommitFrontier::from_refs(
-            owner_db.write_policy(),
             owner_db
                 .materialized_frontier()
                 .await
@@ -2171,11 +2080,7 @@ mod tests {
         )
         .await
         .expect("stage owner exclusion acknowledgement");
-        let StoreAckExclusionState::MergeConcurrent { proposal_freezes } =
-            acknowledgement.exclusions
-        else {
-            panic!("Merge acknowledgement changed policy")
-        };
+        let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
         assert_eq!(proposal_freezes, freezes);
         assert_eq!(
             Box::pin(
@@ -2201,7 +2106,6 @@ mod tests {
         let result = Box::pin(finalize_device_exclusion(
             owner_db,
             &store.storage,
-            None,
             signer,
             proposal,
         ))
@@ -2566,7 +2470,7 @@ mod tests {
         .expect("load owner membership before surviving commit");
         let owner_device_id = local_device_id(owner_db).await.expect("owner device id");
         assert!(Box::pin(
-            super::super::store_engine::merge::preparation::prepare_store_write(
+            super::super::store_engine::engine::preparation::prepare_store_write(
                 owner_db,
                 &store.storage,
                 &owner_device_id,
@@ -2582,7 +2486,7 @@ mod tests {
         .await
         .expect("prepare surviving owner commit"));
         Box::pin(
-            super::super::store_engine::merge::publication::drain_store_writes(
+            super::super::store_engine::engine::publication::drain_store_writes(
                 owner_db,
                 &store.storage,
             ),
@@ -2599,10 +2503,12 @@ mod tests {
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
-            None,
             store.root.store_root_hash,
             store_dir,
-            peer_membership.chain.as_ref(),
+            peer_membership
+                .chain
+                .as_ref()
+                .expect("opened peer Store has membership"),
             None,
         ))
         .await
@@ -2658,10 +2564,12 @@ mod tests {
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
-            None,
             store.root.store_root_hash,
             store_dir,
-            membership.chain.as_ref(),
+            membership
+                .chain
+                .as_ref()
+                .expect("opened Store has membership"),
             None,
         ))
         .await
@@ -2676,13 +2584,10 @@ mod tests {
             error.to_string().contains(expected),
             "unexpected terminal transaction error: {error:?}"
         );
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &activation_commit.coord
-        else {
-            panic!("author exclusion activation is not Merge")
-        };
+        } = &activation_commit.coord;
         assert!(peer_db
             .exact_materialized_ref(&stream_id.to_string(), *sequence)
             .await
@@ -2787,7 +2692,7 @@ mod tests {
             .await
             .expect("excluded peer device id");
         assert!(Box::pin(
-            super::super::store_engine::merge::preparation::prepare_store_write(
+            super::super::store_engine::engine::preparation::prepare_store_write(
                 &peer_db,
                 &store.storage,
                 &peer_device_id,
@@ -2866,7 +2771,7 @@ mod tests {
         .await;
         if materialize_before_exclusion {
             Box::pin(
-                super::super::store_engine::merge::publication::drain_store_writes(
+                super::super::store_engine::engine::publication::drain_store_writes(
                     &peer_db,
                     &store.storage,
                 ),
@@ -2953,10 +2858,12 @@ mod tests {
                 &peer_db,
                 peer_db.synced_tables(),
                 &store.storage,
-                None,
                 store.root.store_root_hash,
                 &store_dir,
-                membership.chain.as_ref(),
+                membership
+                    .chain
+                    .as_ref()
+                    .expect("opened Store has membership"),
                 None,
             ))
             .await
@@ -3094,7 +3001,7 @@ mod tests {
             let drain_db = peer_db.clone();
             let drain_store = store.clone();
             let drain = tokio::spawn(async move {
-                super::super::store_engine::merge::publication::drain_store_writes(
+                super::super::store_engine::engine::publication::drain_store_writes(
                     &drain_db,
                     &drain_store.storage,
                 )
@@ -3157,7 +3064,7 @@ mod tests {
                     candidate.head.value.to_bytes(),
                 );
             }
-            super::super::store_engine::merge::publication::drain_store_writes(
+            super::super::store_engine::engine::publication::drain_store_writes(
                 &peer_db,
                 &store.storage,
             )
@@ -3276,7 +3183,7 @@ mod tests {
         if cleanup_pending {
             store.home.fail_exact_delete_on_call(1);
             assert!(Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3292,7 +3199,7 @@ mod tests {
                 .expect("excluded peer cleanup remains pending"));
         } else {
             assert!(matches!(
-                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3301,8 +3208,8 @@ mod tests {
                 ))
                 .await
                 .expect("observe completed excluded peer cleanup"),
-                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::NotRequired
-                    | super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned
+                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::NotRequired
+                    | super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned
             ));
         }
         if cleanup_pending && !indexed_shared_blobs.is_empty() {
@@ -3380,7 +3287,7 @@ mod tests {
             )
         {
             assert_eq!(
-                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3389,7 +3296,7 @@ mod tests {
                 ))
                 .await
                 .expect("reconcile candidate head published after the absence proof"),
-                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
+                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
             );
         }
         if cleanup_pending && sabotage_activation_head {
@@ -3451,7 +3358,7 @@ mod tests {
                 .await
                 .is_err());
             assert!(Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3467,7 +3374,7 @@ mod tests {
             drop(reopened);
             let retried = open(&path, "excluded-peer-host");
             assert_eq!(
-                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     &retried,
                     &store.storage,
                     &peer_device_id,
@@ -3476,7 +3383,7 @@ mod tests {
                 ))
                 .await
                 .expect("resume excluded peer cleanup"),
-                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
+                super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
             );
             retried
         } else {
@@ -3703,7 +3610,7 @@ mod tests {
             .await
             .expect("block candidate before abandonment preparation");
         assert!(Box::pin(
-            super::super::store_engine::merge::abandonment::prepare_merge_candidate_abandonment(
+            super::super::store_engine::engine::abandonment::prepare_merge_candidate_abandonment(
                 peer_db,
                 &store.storage,
                 peer_device_id,
@@ -3785,13 +3692,10 @@ mod tests {
             Vec::new(),
         )
         .expect("construct third winner package");
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = coord.clone()
-        else {
-            panic!("prepared abandonment has Serial coordinate");
-        };
+        } = coord.clone();
         let package_bytes = package.to_bytes();
         let package_context = ProtocolObjectContext::store_encrypted(
             store.root.store_root_hash,
@@ -3980,7 +3884,7 @@ mod tests {
         .await;
         assert_eq!(
             Box::pin(
-                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                super::super::store_engine::engine::abandonment::abandon_merge_candidate(
                     peer_db,
                     &store.storage,
                     peer_device_id,
@@ -3990,7 +3894,7 @@ mod tests {
             )
             .await
             .expect("exclude prepared abandonment candidates"),
-            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::engine::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         for reference in [
             &candidates.candidate.head.value.commit,
@@ -4058,10 +3962,12 @@ mod tests {
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
-            None,
             store.root.store_root_hash,
             store_dir,
-            membership.chain.as_ref(),
+            membership
+                .chain
+                .as_ref()
+                .expect("opened Store has membership"),
             None,
         ))
         .await
@@ -4115,10 +4021,9 @@ mod tests {
         let path = directory.path().join("restored.db");
         let bootstrap = super::super::snapshot::bootstrap_from_snapshot(
             &store.storage,
-            None,
             store_id,
             store.root.clone(),
-            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
             schema_version,
             &path,
         )
@@ -4130,7 +4035,7 @@ mod tests {
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
+                crate::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 &crate::sync::test_helpers::test_migrations(),
             )
@@ -4474,7 +4379,7 @@ mod tests {
             .expect("transfer candidate device id");
         let (temporary, store_dir) = temp_store_dir();
         assert!(Box::pin(
-            super::super::store_engine::merge::preparation::prepare_store_write(
+            super::super::store_engine::engine::preparation::prepare_store_write(
                 peer_db,
                 &store.storage,
                 &peer_device_id,
@@ -4537,7 +4442,7 @@ mod tests {
         let plan = super::super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
+            super::super::store_outbound::StoreOperationPreparation {
                 membership: membership
                     .chain
                     .as_ref()
@@ -4643,7 +4548,6 @@ mod tests {
         let result = Box::pin(resume_device_exclusion(
             &reopened,
             storage.as_ref(),
-            None,
             &signer,
         ))
         .await
@@ -4669,7 +4573,6 @@ mod tests {
         );
 
         let frontier = super::super::store_commit::CommitFrontier::from_refs(
-            reopened.write_policy(),
             reopened
                 .materialized_frontier()
                 .await
@@ -4687,11 +4590,7 @@ mod tests {
         )
         .await
         .expect("stage exclusion acknowledgement");
-        let StoreAckExclusionState::MergeConcurrent { proposal_freezes } =
-            acknowledgement.exclusions
-        else {
-            panic!("Merge acknowledgement changed policy")
-        };
+        let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
         assert!(proposal_freezes.is_empty());
 
         assert_eq!(
@@ -4734,7 +4633,6 @@ mod tests {
             cancel_device_exclusion(
                 &cancel_db,
                 cancel_storage.as_ref(),
-                None,
                 &cancel_signer,
                 &cancel_reference,
             )
@@ -4743,7 +4641,6 @@ mod tests {
         candidate_staged.notified().await;
 
         let frontier = super::super::store_commit::CommitFrontier::from_refs(
-            reopened.write_policy(),
             reopened
                 .materialized_frontier()
                 .await

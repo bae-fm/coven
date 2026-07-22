@@ -108,231 +108,6 @@ async fn cycle_test_store(db: &Database, signer: &UserKeypair) -> TestStore {
         .expect("create exact cycle test Store")
 }
 
-#[tokio::test]
-async fn serial_store_engine_requires_coordination_before_loading_store_authority() {
-    let db = open_serial_test_db();
-    let signer = UserKeypair::generate();
-    let storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::new(
-        cycle_test_store(&db, &signer).await,
-    )));
-
-    let error = crate::sync::store_engine::StoreEngine::authorize_borrowed(&*storage, None, &db)
-        .await
-        .err()
-        .expect("Serial cycle engine requires coordination");
-
-    assert!(
-        error
-            .to_string()
-            .contains("coordination capability is absent"),
-        "{error}"
-    );
-    assert_eq!(storage.protocol_read_calls(), 0);
-}
-
-#[tokio::test]
-async fn store_engine_rejects_local_policy_that_differs_from_verified_root() {
-    let source = open_test_db();
-    let signer = UserKeypair::generate();
-    let store = cycle_test_store(&source, &signer).await;
-    let local = open_serial_test_db();
-    local
-        .install_store_root_authority(store.root.clone(), store.protocol_root.to_bytes())
-        .await
-        .expect("install exact MergeConcurrent root into Serial database");
-
-    let error = crate::sync::store_engine::StoreEngine::authorize_borrowed(
-        &store.storage,
-        Some(
-            store
-                .storage
-                .serial_coordination()
-                .expect("test Store provides Serial coordination"),
-        ),
-        &local,
-    )
-    .await
-    .err()
-    .expect("verified root policy must match the local database policy");
-
-    assert!(error.to_string().contains("write policy"), "{error}");
-    assert!(error.to_string().contains("MergeConcurrent"), "{error}");
-    assert!(error.to_string().contains("Serial"), "{error}");
-}
-
-#[tokio::test]
-async fn serial_post_pull_engine_rejects_partial_materialized_authorization() {
-    let db = open_serial_test_db();
-    let signer = UserKeypair::generate();
-    let store = cycle_test_store(&db, &signer).await;
-    let engine = crate::sync::store_engine::StoreEngine::authorize_borrowed(
-        &store.storage,
-        Some(
-            store
-                .storage
-                .serial_coordination()
-                .expect("test Store provides Serial coordination"),
-        ),
-        &db,
-    )
-    .await
-    .expect("authorize Serial cycle engine");
-    host_exec(
-        &db,
-        "DELETE FROM protocol_state WHERE key = 'serial_membership_state'",
-    )
-    .await;
-
-    let error = engine
-        .after_pull()
-        .await
-        .err()
-        .expect("partial Serial authorization must fail the cycle");
-
-    assert!(
-        error
-            .to_string()
-            .contains("read materialized Serial membership"),
-        "{error}"
-    );
-    assert!(error.to_string().contains("partially durable"), "{error}");
-}
-
-async fn recover_serial_owner_state(
-    storage: &CloudSyncStorage,
-    source: &Database,
-    store_id: &str,
-    root: &crate::sync::store_commit::StoreRootRef,
-    owner: &UserKeypair,
-) -> (tempfile::TempDir, Database, String) {
-    let image_dir = tempfile::tempdir().expect("create Serial snapshot image directory");
-    let image_path = image_dir.path().to_path_buf();
-    let tables = test_synced_tables();
-    let image = source
-        .call(move |connection| {
-            crate::sync::snapshot::create_snapshot(connection, &image_path, &tables)
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))
-        })
-        .await
-        .expect("create Serial bootstrap snapshot image");
-    publish_snapshot_fixture(
-        storage,
-        root,
-        image,
-        crate::sync::store_commit::CommitFrontier::Serial(None),
-        owner,
-        None,
-        source,
-    )
-    .await
-    .expect("publish Serial bootstrap snapshot");
-    crate::sync::store_engine::stage_serial_acknowledgement_for_test(
-        source,
-        storage,
-        storage
-            .serial_coordination()
-            .expect("Serial bootstrap coordination"),
-        crate::sync::store_commit::CommitFrontier::Serial(None),
-        "2024-01-01T00:00:01Z".to_string(),
-        owner,
-    )
-    .await
-    .expect("stage Serial bootstrap stability acknowledgement");
-    crate::sync::store_engine::drain_serial_acknowledgements_for_test(
-        source,
-        storage,
-        storage
-            .serial_coordination()
-            .expect("Serial bootstrap coordination"),
-        owner,
-    )
-    .await
-    .expect("activate Serial bootstrap stability acknowledgement");
-    let target_dir = tempfile::tempdir().expect("create Serial bootstrap destination");
-    let target_path = target_dir.path().join("store.sqlite");
-    let bootstrap = crate::sync::snapshot::bootstrap_from_snapshot(
-        storage,
-        Some(
-            storage
-                .serial_coordination()
-                .expect("Serial bootstrap coordination"),
-        ),
-        store_id,
-        root.clone(),
-        &crate::join_code::MembershipFloor::Serial(None),
-        source.schema_version(),
-        &target_path,
-    )
-    .await
-    .expect("verify Serial bootstrap snapshot");
-    let target = bootstrap
-        .open_database(
-            store_id,
-            &target_path,
-            test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            "recovering-owner".to_string(),
-            &test_migrations(),
-        )
-        .await
-        .expect("open Serial bootstrap database");
-    let protocol = crate::sync::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .expect("load exact Serial Store for Owner recovery")
-        .value;
-    crate::sync::cycle::ensure_serial_founder_authorization(storage, &target, root, &protocol)
-        .await
-        .expect("install exact Serial founder authorization");
-    crate::sync::store_engine::pull_store_commits(
-        &target,
-        target.synced_tables(),
-        storage,
-        Some(
-            storage
-                .serial_coordination()
-                .expect("Serial bootstrap coordination"),
-        ),
-        root.store_root_hash,
-        &StoreDir::new(target_dir.path()),
-        None,
-        None,
-    )
-    .await
-    .expect("pull accepted Serial commits after bootstrap snapshot");
-    let owner_grant = protocol.descriptor.founder_grant.clone();
-    let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
-        root,
-        &pubkey_hex(owner),
-        &owner_grant,
-        &protocol.descriptor.founder_recovery,
-    )
-    .expect("derive exact founder recovery activation");
-    let authority = crate::sync::restore_code::OwnerRecoveryAuthority {
-        owner_identity_secret: hex::encode(owner.to_keypair_bytes()),
-        owner_grant: owner_grant.clone(),
-        recovery: crate::sync::store_commit::OwnerRecoveryCursor {
-            owner_grant,
-            position: crate::sync::store_commit::OwnerRecoveryPosition::BeforeFirst { activation },
-        },
-        published_at: T0.to_string(),
-    };
-    let device_id = crate::sync::store_registration::recover_owner_device_serial(
-        &target,
-        storage,
-        storage
-            .serial_coordination()
-            .expect("Serial test coordination"),
-        owner,
-        &authority,
-    )
-    .await
-    .expect("recover exact Serial Owner device")
-    .device_id
-    .to_string();
-    (target_dir, target, device_id)
-}
-
 /// Run one sync cycle for device "M" with no cloud home (no outbox drain).
 async fn run_cycle_m(
     storage: &TestStore,
@@ -364,7 +139,7 @@ async fn run_cycle_m_result(
         &storage.protocol_founder_keypair(),
     )
     .await
-    .expect("initialize MergeConcurrent test membership");
+    .expect("initialize test membership");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -435,7 +210,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
         &storage.protocol_founder_keypair(),
     )
     .await
-    .expect("initialize MergeConcurrent membership");
+    .expect("initialize membership");
     let stored = create_exact_blob(&storage, "photos", "maintenance", b"maintenance").await;
     db.call(move |conn| Database::enqueue_delete_on(conn, &stored, T0))
         .await
@@ -533,11 +308,11 @@ async fn retain_store_packages_for_assertion(db: &Database, storage: &TestStore,
             db_image: marker.to_vec(),
             blobs: Vec::new(),
         },
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::new()),
+        crate::sync::store_commit::CommitFrontier(BTreeMap::new()),
         db.schema_version(),
         &storage.protocol_founder_keypair(),
         T0.to_string(),
-        Some(&membership),
+        &membership,
         db,
     )
     .await
@@ -660,37 +435,12 @@ fn exercise_pre_attempt_abandonment<'a>(
     Box::pin(async move {
         use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
 
-        let coordination = if owner_db.write_policy() == crate::WritePolicy::Serial {
-            Some(
-                storage
-                    .storage
-                    .serial_coordination()
-                    .expect("Serial test Store has coordination"),
-            )
-        } else {
-            None
-        };
-        let authorization = Box::new(match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => {
-                crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                    storage
-                        .open_into(owner_db)
-                        .await
-                        .expect("load exact Merge membership"),
-                )
-            }
-            crate::WritePolicy::Serial => {
-                crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_engine::serial::publication::current_serial_authorization(
-                        owner_db,
-                        &storage.storage,
-                        coordination.expect("Serial test Store has coordination"),
-                    )
-                    .await
-                    .expect("load exact Serial authorization"),
-                )
-            }
-        });
+        let authorization = Box::new(
+            storage
+                .open_into(owner_db)
+                .await
+                .expect("load exact Store membership"),
+        );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -731,7 +481,6 @@ fn exercise_pre_attempt_abandonment<'a>(
             Box::pin(crate::sync::device_join::abandon_device_join(
                 owner_db,
                 &storage.storage,
-                coordination,
                 &authorization,
                 owner,
                 (*offer).clone(),
@@ -742,7 +491,6 @@ fn exercise_pre_attempt_abandonment<'a>(
         let retried = Box::pin(crate::sync::device_join::abandon_device_join(
             owner_db,
             &storage.storage,
-            coordination,
             &authorization,
             owner,
             *offer,
@@ -811,37 +559,12 @@ fn exercise_provider_access_grant_create_interruption<'a>(
     Box::pin(async move {
         use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
 
-        let coordination = if owner_db.write_policy() == crate::WritePolicy::Serial {
-            Some(
-                storage
-                    .storage
-                    .serial_coordination()
-                    .expect("Serial test Store has coordination"),
-            )
-        } else {
-            None
-        };
-        let authorization = Box::new(match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => {
-                crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                    storage
-                        .open_into(owner_db)
-                        .await
-                        .expect("load exact Merge membership"),
-                )
-            }
-            crate::WritePolicy::Serial => {
-                crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_engine::serial::publication::current_serial_authorization(
-                        owner_db,
-                        &storage.storage,
-                        coordination.expect("Serial test Store has coordination"),
-                    )
-                    .await
-                    .expect("load exact Serial authorization"),
-                )
-            }
-        });
+        let authorization = Box::new(
+            storage
+                .open_into(owner_db)
+                .await
+                .expect("load exact Store membership"),
+        );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -890,7 +613,6 @@ fn exercise_provider_access_grant_create_interruption<'a>(
         let first = Box::pin(crate::sync::device_join::authorize_device_provider_access(
             owner_db,
             &storage.storage,
-            coordination,
             None,
             None,
             &authorization,
@@ -917,7 +639,6 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 Box::pin(crate::sync::device_join::authorize_device_provider_access(
                     owner_db,
                     &storage.storage,
-                    coordination,
                     None,
                     None,
                     &authorization,
@@ -934,7 +655,6 @@ fn exercise_provider_access_grant_create_interruption<'a>(
         let retry = Box::pin(crate::sync::device_join::authorize_device_provider_access(
             owner_db,
             &storage.storage,
-            coordination,
             None,
             None,
             &authorization,
@@ -969,37 +689,12 @@ fn exercise_post_attempt_cancellation<'a>(
             DeviceJoinRole, DeviceJoinStatus, JoinerJoinTerminal, ProviderAdminJoinTerminal,
         };
 
-        let coordination = if owner_db.write_policy() == crate::WritePolicy::Serial {
-            Some(
-                storage
-                    .storage
-                    .serial_coordination()
-                    .expect("Serial test Store has coordination"),
-            )
-        } else {
-            None
-        };
-        let authorization = Box::new(match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => {
-                crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                    storage
-                        .open_into(owner_db)
-                        .await
-                        .expect("load exact Merge membership"),
-                )
-            }
-            crate::WritePolicy::Serial => {
-                crate::sync::device_join::DeviceJoinAuthorization::Serial(
-                    crate::sync::store_engine::serial::publication::current_serial_authorization(
-                        owner_db,
-                        &storage.storage,
-                        coordination.expect("Serial test Store has coordination"),
-                    )
-                    .await
-                    .expect("load exact Serial authorization"),
-                )
-            }
-        });
+        let authorization = Box::new(
+            storage
+                .open_into(owner_db)
+                .await
+                .expect("load exact Store membership"),
+        );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1040,7 +735,6 @@ fn exercise_post_attempt_cancellation<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 owner_db,
                 &storage.storage,
-                coordination,
                 None,
                 None,
                 &authorization,
@@ -1056,7 +750,6 @@ fn exercise_post_attempt_cancellation<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
-                    coordination,
                     None,
                     member,
                     *approval,
@@ -1070,7 +763,6 @@ fn exercise_post_attempt_cancellation<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
-                    coordination,
                     &authorization,
                     owner,
                     *registration_request,
@@ -1084,7 +776,6 @@ fn exercise_post_attempt_cancellation<'a>(
             Box::pin(crate::sync::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
-                coordination,
                 &authorization,
                 owner,
                 provisional.publication_authorization.attempt.clone(),
@@ -1095,7 +786,6 @@ fn exercise_post_attempt_cancellation<'a>(
         let cancellation_retry = Box::pin(crate::sync::device_join::cancel_device_join(
             owner_db,
             &storage.storage,
-            coordination,
             &authorization,
             owner,
             provisional.publication_authorization.attempt.clone(),
@@ -1272,7 +962,6 @@ fn exercise_post_attempt_cancellation<'a>(
         let interrupted_cleanup = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
             owner_db,
             &storage.storage,
-            coordination,
             storage.home.as_ref(),
             &authorization,
             owner,
@@ -1299,7 +988,6 @@ fn exercise_post_attempt_cancellation<'a>(
             Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
                 owner_db,
                 &storage.storage,
-                coordination,
                 storage.home.as_ref(),
                 &authorization,
                 owner,
@@ -1313,7 +1001,6 @@ fn exercise_post_attempt_cancellation<'a>(
         let receipt_retry = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
             owner_db,
             &storage.storage,
-            coordination,
             storage.home.as_ref(),
             &authorization,
             owner,
@@ -1329,7 +1016,6 @@ fn exercise_post_attempt_cancellation<'a>(
             Box::pin(crate::sync::device_join::activate_device_join_cleanup(
                 owner_db,
                 &storage.storage,
-                coordination,
                 &authorization,
                 owner,
                 attempt_id,
@@ -1341,7 +1027,6 @@ fn exercise_post_attempt_cancellation<'a>(
         let activation_retry = Box::pin(crate::sync::device_join::activate_device_join_cleanup(
             owner_db,
             &storage.storage,
-            coordination,
             &authorization,
             owner,
             attempt_id,
@@ -1428,12 +1113,10 @@ fn exercise_missing_provider_administrator<'a>(
         };
 
         let authorization = Box::new(
-            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-                storage
-                    .open_into(owner_db)
-                    .await
-                    .expect("load exact Merge membership"),
-            ),
+            storage
+                .open_into(owner_db)
+                .await
+                .expect("load exact Store membership"),
         );
         let crate::sync::storage::StoreProviderBinding::Dropbox { namespace_id } =
             &storage.protocol_root.descriptor.provider
@@ -1459,8 +1142,7 @@ fn exercise_missing_provider_administrator<'a>(
             "cross-principal-revocation-store",
             member.clone(),
         )
-        .expect("create peer exact storage")
-        .with_test_serial_coordination(peer_home.clone());
+        .expect("create peer exact storage");
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1505,7 +1187,6 @@ fn exercise_missing_provider_administrator<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 owner_db,
                 &storage.storage,
-                None,
                 Some(storage.home.as_ref()),
                 Some(&access_administrator),
                 &authorization,
@@ -1520,7 +1201,6 @@ fn exercise_missing_provider_administrator<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
-                    None,
                     Some(peer_home.as_ref()),
                     member,
                     *approval,
@@ -1534,7 +1214,6 @@ fn exercise_missing_provider_administrator<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
-                    None,
                     &authorization,
                     owner,
                     *registration_request,
@@ -1548,7 +1227,6 @@ fn exercise_missing_provider_administrator<'a>(
             Box::pin(crate::sync::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
-                None,
                 &authorization,
                 owner,
                 provisional.publication_authorization.attempt.clone(),
@@ -1658,7 +1336,6 @@ fn exercise_missing_provider_administrator<'a>(
             Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
                 owner_db,
                 &storage.storage,
-                None,
                 storage.home.as_ref(),
                 &authorization,
                 owner,
@@ -1673,7 +1350,6 @@ fn exercise_missing_provider_administrator<'a>(
             Box::pin(crate::sync::device_join::activate_device_join_cleanup(
                 owner_db,
                 &storage.storage,
-                None,
                 &authorization,
                 owner,
                 attempt_id,
@@ -1709,35 +1385,12 @@ fn exercise_cancellation_against_inflight_registration<'a>(
     member: &'a UserKeypair,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use crate::sync::device_join::DeviceJoinAuthorization;
-
-        let coordination = if owner_db.write_policy() == crate::WritePolicy::Serial {
-            Some(
-                storage
-                    .storage
-                    .serial_coordination()
-                    .expect("Serial test Store has coordination"),
-            )
-        } else {
-            None
-        };
-        let authorization = Box::new(match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => DeviceJoinAuthorization::MergeConcurrent(
-                storage
-                    .open_into(owner_db)
-                    .await
-                    .expect("load exact Merge membership"),
-            ),
-            crate::WritePolicy::Serial => DeviceJoinAuthorization::Serial(
-                crate::sync::store_engine::serial::publication::current_serial_authorization(
-                    owner_db,
-                    &storage.storage,
-                    coordination.expect("Serial test Store has coordination"),
-                )
+        let authorization = Box::new(
+            storage
+                .open_into(owner_db)
                 .await
-                .expect("load exact Serial authorization"),
-            ),
-        });
+                .expect("load exact Store membership"),
+        );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1778,7 +1431,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             Box::pin(crate::sync::device_join::authorize_device_provider_access(
                 owner_db,
                 &storage.storage,
-                coordination,
                 None,
                 None,
                 &authorization,
@@ -1793,7 +1445,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
                 crate::sync::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
-                    coordination,
                     None,
                     member,
                     *approval,
@@ -1807,7 +1458,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
                 crate::sync::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
-                    coordination,
                     &authorization,
                     owner,
                     *registration_request,
@@ -1826,27 +1476,11 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .await
             .expect("publish same-principal provider readiness"),
         );
-        let joining_db = match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => open_test_db(),
-            crate::WritePolicy::Serial => open_serial_test_db(),
-        };
-        match owner_db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => {
-                storage
-                    .open_into(&joining_db)
-                    .await
-                    .expect("open exact Merge Store for joining device");
-            }
-            crate::WritePolicy::Serial => {
-                crate::sync::store_protocol_root::open_store(
-                    &joining_db,
-                    &storage.storage,
-                    &storage.root,
-                )
-                .await
-                .expect("open exact Serial Store for joining device");
-            }
-        }
+        let joining_db = open_test_db();
+        storage
+            .open_into(&joining_db)
+            .await
+            .expect("open exact Store for joining device");
         let (registration_visible, release_registration_create) =
             storage.home.pause_after_exact_create_call(1);
         let mut bootstrap = Box::pin(crate::sync::device_join::bootstrap_pending_device(
@@ -1868,7 +1502,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             Box::pin(crate::sync::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
-                coordination,
                 &authorization,
                 owner,
                 provisional.publication_authorization.attempt.clone(),
@@ -1909,7 +1542,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
                 owner_db,
                 &storage.storage,
-                coordination,
                 storage.home.as_ref(),
                 &authorization,
                 owner,
@@ -1923,7 +1555,6 @@ fn exercise_cancellation_against_inflight_registration<'a>(
         Box::pin(crate::sync::device_join::activate_device_join_cleanup(
             owner_db,
             &storage.storage,
-            coordination,
             &authorization,
             owner,
             provisional.publication_authorization.attempt.attempt_id,
@@ -2353,7 +1984,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         &storage.protocol_founder_keypair(),
     )
     .await
-    .expect("initialize MergeConcurrent test membership");
+    .expect("initialize test membership");
 
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -2483,10 +2114,9 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let restore_path = restore_dir.db_path();
     let bootstrap = crate::sync::snapshot::bootstrap_from_snapshot(
         &storage.storage,
-        None,
         "test-lib",
         storage.root.clone(),
-        &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
         db.schema_version(),
         &restore_path,
     )
@@ -2498,7 +2128,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             &restore_path,
             tables.clone(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
+            crate::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
             &test_migrations(),
         )
@@ -2652,8 +2282,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
             &database_path,
             tables.clone(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             "snapshot-cleanup-device".to_string(),
             &test_migrations(),
         )
@@ -3058,7 +2687,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .expect("load exact founder membership")
         .chain
-        .expect("MergeConcurrent Store has membership");
+        .expect("Store has membership");
     assert!(
         membership.is_founded_by(&owner_pk),
         "the persisted chain is founded by the owner",
@@ -3079,10 +2708,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .expect("read founder graph")
         .expect("founder graph exists");
-    let crate::database::DurableFounderMembership::MergeConcurrent { head, .. } = graph.membership
-    else {
-        panic!("MergeConcurrent test Store has Serial founder membership");
-    };
+    let crate::database::DurableFounderMembership { head, .. } = graph.membership;
     storage
         .storage
         .delete_protocol_object(&head.object)
@@ -3254,14 +2880,14 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         .await
         .expect("load exact founder membership")
         .chain
-        .expect("MergeConcurrent Store has membership");
+        .expect("Store has membership");
     protocol_root
         .descriptor
         .validate_merge_founder_entry(
             membership
                 .entries()
                 .first()
-                .expect("MergeConcurrent Store has a founder entry"),
+                .expect("Store has a founder entry"),
         )
         .expect("membership begins with the descriptor's founder entry");
     let cursor_count = db
@@ -3276,607 +2902,6 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         .await
         .unwrap();
     assert_eq!(cursor_count, 1);
-}
-
-#[tokio::test]
-async fn initializing_serial_storage_uses_only_the_root_authorization_state() {
-    use crate::sync::membership::MemberRole;
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
-
-    let home = InMemoryCloudHome::new();
-    let owner = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
-    let db = open_serial_test_db();
-    let storage = cycle_cloud_storage(
-        Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        owner,
-    )
-    .with_test_serial_coordination(Arc::new(home.clone()));
-
-    let components = Box::pin(cycle::init_sync_over_storage(
-        &db,
-        storage,
-        cycle::StoreInitialization::CreateStore,
-        None,
-    ))
-    .await
-    .expect("initialize Serial storage");
-    let (_temp, store_dir) = temp_store_dir();
-    Box::pin(components.run_cycle(&SystemClock, None, &store_dir, None))
-        .await
-        .expect("run Serial cycle");
-
-    assert!(home
-        .keys()
-        .iter()
-        .all(|key| !key.starts_with("store-v1/membership/")));
-    assert_eq!(
-        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
-        Some(owner_pk.clone()),
-    );
-    assert_eq!(
-        db.serial_membership_state()
-            .await
-            .unwrap()
-            .expect("Serial root membership")
-            .current_members(),
-        vec![(owner_pk, MemberRole::Owner)],
-    );
-    assert_eq!(
-        db.serial_key_generation().await.unwrap(),
-        Some(crate::encryption::INITIAL_KEY_GENERATION),
-    );
-    let causal_floor_count = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_cursor/%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
-        .await
-        .unwrap();
-    assert_eq!(causal_floor_count, 0);
-}
-
-#[tokio::test]
-async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_work() {
-    tokio::spawn(async {
-        Box::pin(async {
-            use std::sync::atomic::{AtomicUsize, Ordering};
-
-            use crate::sync::membership::MemberRole;
-            use crate::sync::storage::{
-                CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError,
-                VersionToken, VersionedObject,
-            };
-            use crate::sync::store_commit::StoreControl;
-
-            struct HeadAdvancesAfterInitialAuthorization<'a> {
-                inner: &'a dyn CoordinationStorage,
-                initial: VersionedObject,
-                reads: AtomicUsize,
-            }
-
-            #[async_trait::async_trait]
-            impl CoordinationStorage for HeadAdvancesAfterInitialAuthorization<'_> {
-                async fn provider_binding(
-                    &self,
-                ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError>
-                {
-                    self.inner.provider_binding().await
-                }
-
-                async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-                    if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
-                        return Ok(self.initial.clone());
-                    }
-                    self.inner.read_head(key).await
-                }
-
-                async fn create_head(
-                    &self,
-                    key: &str,
-                    bytes: &[u8],
-                ) -> Result<VersionedObject, CreateHeadError> {
-                    self.inner.create_head(key, bytes).await
-                }
-
-                async fn replace_head(
-                    &self,
-                    key: &str,
-                    expected: &VersionToken,
-                    bytes: &[u8],
-                ) -> Result<VersionedObject, ReplaceHeadError> {
-                    self.inner.replace_head(key, expected, bytes).await
-                }
-
-                async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-                    self.inner.delete_head(key).await
-                }
-            }
-
-            let store_id = "serial-post-pull-authorization";
-            let founder = UserKeypair::generate();
-            let successor = UserKeypair::generate();
-            let local = open_serial_test_db();
-            let store = Arc::new(
-                TestStore::create(&local, store_id, founder.clone())
-                    .await
-                    .unwrap(),
-            );
-            let home = store.home.clone();
-            let storage = &store.storage;
-            let root = store.root.clone();
-            let encryption = EncryptionService::from_key([42; 32]);
-            let initial_head = storage
-                .serial_coordination()
-                .expect("Serial coordination")
-                .read_head(crate::sync::store_commit::serial_head_key())
-                .await
-                .expect("read initial Serial head");
-            let local_device_id = local
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                .await
-                .unwrap()
-                .expect("Serial founder device exists");
-            let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
-                storage, &local, store_id, &root, &founder,
-            ))
-            .await;
-            let coordination = storage.serial_coordination().unwrap();
-            let (_, remote_registration, remote_registration_value, _) =
-                crate::sync::store_outbound::load_local_store_authority(
-                    &remote,
-                    &remote_device_id,
-                    &founder,
-                )
-                .await
-                .expect("load recovered Owner device authority");
-            let founder_provider_admin = &store.protocol_root.descriptor.founder_provider_admin;
-            let provider_admin_plan = crate::sync::store_outbound::prepare_store_operation_commit(
-                &remote,
-                storage,
-                crate::sync::store_outbound::StoreOperationPreparation::Serial { coordination },
-                &remote_device_id,
-                &founder,
-            )
-            .await
-            .expect("prepare recovered provider administrator control");
-            crate::sync::store_outbound::activate_store_operation_commit(
-                &remote,
-                storage,
-                crate::sync::store_outbound::StoreOperationPublicationMode::Serial { coordination },
-                provider_admin_plan,
-                crate::sync::store_outbound::StoreOperationBatch::Control(
-                    StoreControl::ProviderAdmin {
-                        change: crate::sync::provider::ProviderAdminChange::Set {
-                            administrator: remote_registration,
-                            provider: remote_registration_value.provider,
-                            access: founder_provider_admin.access.clone(),
-                            capability: founder_provider_admin.capability.clone(),
-                            grant_id:
-                                crate::sync::provider::ProviderAdminGrantId::from_random_bytes(
-                                    *crate::sync::store_commit::ObjectHash::digest(
-                                        b"serial post-pull recovered provider administrator",
-                                    )
-                                    .as_bytes(),
-                                ),
-                            replaces: std::collections::BTreeSet::from([founder_provider_admin
-                                .grant_id
-                                .clone()]),
-                        },
-                    },
-                ),
-            )
-            .await
-            .expect("transfer provider administrator authority to recovered Owner device");
-            crate::sync::membership_ops::invite_serial_member(
-                storage,
-                home.as_ref(),
-                coordination,
-                &remote_device_id,
-                &founder,
-                &Hlc::new("serial-successor-member".to_string()),
-                &pubkey_hex(&successor),
-                None,
-                MemberRole::Member,
-                &encryption,
-                store_id,
-                "Serial post-pull authorization Store",
-                &remote,
-            )
-            .await
-            .expect("add successor as a Serial Member");
-            let successor_db = open_serial_test_db();
-            install_active_device_fixture(
-                store.as_ref(),
-                &remote,
-                &successor_db,
-                &successor,
-                "0000000002000-0000-successor",
-            )
-            .await
-            .expect("activate successor device");
-            let promotion_store = store.clone();
-            let promotion_remote = remote.clone();
-            let promotion_successor_db = successor_db.clone();
-            let promotion_founder = founder.clone();
-            let promotion_successor = successor.clone();
-            let promotion_encryption = encryption.clone();
-            tokio::spawn(async move {
-                Box::pin(promote_active_member_fixture(
-                    promotion_store.as_ref(),
-                    &promotion_remote,
-                    &promotion_successor_db,
-                    &promotion_founder,
-                    &promotion_successor,
-                    &promotion_encryption,
-                ))
-                .await
-            })
-            .await
-            .expect("successor promotion task")
-            .expect("promote active successor Owner");
-            let authorization =
-                crate::sync::store_engine::serial::publication::current_serial_authorization(
-                    &remote,
-                    storage,
-                    coordination,
-                )
-                .await
-                .unwrap();
-            let founder_pubkey = pubkey_hex(&founder);
-            let founder_wrap = crate::sync::wrapped_store_key::prepare_wrapped_store_key(
-                storage,
-                root.store_root_hash,
-                &founder_pubkey,
-                crate::sync::wrapped_store_key::WrappedStoreKey::signed(
-                    &root.store_root_id.to_string(),
-                    &founder_pubkey,
-                    1,
-                    b"cycle Serial founder role wrap".to_vec(),
-                    &founder,
-                ),
-            )
-            .await
-            .unwrap();
-            let demote_founder = authorization
-                .membership
-                .signed_set_member_with_wrapped_key(
-                    &founder,
-                    founder_pubkey,
-                    None,
-                    MemberRole::Follower,
-                    founder_wrap.reference.clone(),
-                    "0000000000003-0000-founder".to_string(),
-                )
-                .unwrap();
-            crate::sync::store_outbound::activate_test_serial_control_candidate(
-                &remote,
-                storage,
-                coordination,
-                &remote_device_id,
-                &founder,
-                StoreControl::SerialMembership {
-                    entry: demote_founder,
-                },
-                vec![founder_wrap],
-            )
-            .await
-            .unwrap();
-
-            let snapshot_before = local
-                .latest_local_store_snapshot()
-                .await
-                .unwrap()
-                .expect("Serial bootstrap snapshot was published locally")
-                .reference;
-            drop(remote);
-            drop(_remote_dir);
-            let store = store.clone();
-            tokio::spawn(async move {
-                Box::pin(async move {
-                    let storage = &store.storage;
-                    assert_eq!(local.local_store_root_ref().await.unwrap(), Some(root));
-                    let coordination = storage.serial_coordination().unwrap();
-                    let delayed = HeadAdvancesAfterInitialAuthorization {
-                        inner: coordination,
-                        initial: initial_head,
-                        reads: AtomicUsize::new(0),
-                    };
-                    let (_temp, store_dir) = temp_store_dir();
-                    let cipher = storage.cipher_state().clone();
-                    let pending_rotation = storage.shared_pending_rotation();
-                    cycle::run_single_sync_cycle_with_coordination(
-                        storage,
-                        Some(&delayed),
-                        &local_device_id,
-                        &Hlc::new(local_device_id.clone()),
-                        &SystemClock,
-                        &local,
-                        cipher.as_ref(),
-                        pending_rotation.as_ref(),
-                        &founder,
-                        None,
-                        None,
-                        &store_dir,
-                        Some(home.as_ref()),
-                        None,
-                    )
-                    .await
-                    .expect("run cycle across a newly visible Serial control chain");
-
-                    let mut expected_members = vec![
-                        (pubkey_hex(&founder), MemberRole::Follower),
-                        (pubkey_hex(&successor), MemberRole::Owner),
-                    ];
-                    expected_members.sort_by(|left, right| left.0.cmp(&right.0));
-                    assert_eq!(
-                        local
-                            .serial_membership_state()
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .current_members(),
-                        expected_members,
-                    );
-                    assert_eq!(
-                        local
-                            .latest_local_store_snapshot()
-                            .await
-                            .unwrap()
-                            .expect("Serial bootstrap snapshot remains published")
-                            .reference,
-                        snapshot_before,
-                    );
-                })
-                .await;
-            })
-            .await
-            .expect("Serial post-pull cycle task");
-        })
-        .await;
-    })
-    .await
-    .expect("Serial post-pull cycle orchestration task");
-}
-
-#[tokio::test]
-async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remote_commits() {
-    tokio::spawn(async {
-        let store_id = "serial-conflict-before-pull";
-        let home = InMemoryCloudHome::new();
-        let owner = UserKeypair::generate();
-        let storage = cycle_cloud_storage(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            store_id,
-            owner.clone(),
-        )
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let local = open_serial_test_db();
-        let root = create_exact_test_store(&local, &storage, store_id, &owner)
-            .await
-            .expect("create exact Serial Store");
-        let local_device_id = local
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap()
-            .expect("Serial founder device exists");
-        let (_remote_dir, remote, remote_device_id) = Box::pin(recover_serial_owner_state(
-            &storage, &local, store_id, &root, &owner,
-        ))
-        .await;
-        host_exec(
-            &remote,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('remote-row', 'remote', NULL, 1, '0000000001000-0000-remote', '2026-01-01')",
-        )
-        .await;
-        let (_remote_temp, remote_store_dir) = temp_store_dir();
-        assert!(
-            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-                &remote,
-                &storage,
-                storage.serial_coordination().unwrap(),
-                &remote_device_id,
-                &owner,
-                &remote_store_dir
-            )
-            .await
-            .unwrap()
-        );
-        assert_eq!(
-            crate::sync::store_engine::serial::publication::drain_store_writes(
-                &remote,
-                &storage,
-                storage.serial_coordination().unwrap(),
-            )
-            .await
-            .unwrap(),
-            1
-        );
-
-        assert_eq!(
-            local.local_store_root_ref().await.unwrap(),
-            Some(root.clone())
-        );
-        host_exec(
-            &local,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('local-row', 'local', NULL, 1, '0000000001000-0000-local', '2026-01-01')",
-        )
-        .await;
-        let local_write = local.pending_writes().await.unwrap().remove(0).write_id;
-        let (_local_temp, local_store_dir) = temp_store_dir();
-        cycle::run_single_sync_cycle_with_coordination(
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-            &local_device_id,
-            &Hlc::new(local_device_id.clone()),
-            &SystemClock,
-            &local,
-            storage.cipher_state().as_ref(),
-            storage.shared_pending_rotation().as_ref(),
-            &owner,
-            None,
-            None,
-            &local_store_dir,
-            Some(&home),
-            None,
-        )
-        .await
-        .expect("record the stale provisional branch without applying its successor");
-
-        assert!(matches!(
-            local.write_status(&local_write).await.unwrap(),
-            crate::WriteStatus::Conflict(_)
-        ));
-        assert_eq!(
-            local
-                .exact_materialized_ref(crate::sync::store_commit::SERIAL_STREAM_ID, 2)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            query_text(
-                &local,
-                "SELECT CAST(COUNT(*) AS TEXT) FROM notes WHERE id = 'remote-row'"
-            )
-            .await,
-            "0"
-        );
-        assert_eq!(
-            query_text(&local, "SELECT title FROM notes WHERE id = 'local-row'").await,
-            "local"
-        );
-    })
-    .await
-    .expect("Serial stale provisional branch cycle task");
-}
-
-#[tokio::test]
-async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
-    tokio::spawn(async {
-        let store_id = "serial-cycle-rebased-suffix";
-        let home = InMemoryCloudHome::new();
-        let owner = UserKeypair::generate();
-        let storage = cycle_cloud_storage(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            store_id,
-            owner.clone(),
-        )
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let db = open_serial_test_db();
-        let root = create_exact_test_store(&db, &storage, store_id, &owner)
-            .await
-            .expect("create exact Serial Store");
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap()
-            .expect("Serial founder device exists");
-        crate::sync::store_snapshot::push_store_snapshot(
-            &storage,
-            root.store_root_hash,
-            crate::sync::snapshot::CreatedSnapshot {
-                db_image: b"existing-snapshot".to_vec(),
-                blobs: Vec::new(),
-            },
-            crate::sync::store_commit::CommitFrontier::Serial(None),
-            db.schema_version(),
-            &owner,
-            T0.to_string(),
-            None,
-            &db,
-        )
-        .await
-        .expect("publish exact Serial snapshot fixture");
-        host_exec(
-            &db,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('serial-first', 'first', NULL, 1, '0000000001000-0000-owner', '2026-01-01')",
-        )
-        .await;
-        let first = db.pending_writes().await.unwrap().pop().unwrap().write_id;
-        let (_temp, store_dir) = temp_store_dir();
-        assert!(
-            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-                &db,
-                &storage,
-                storage.serial_coordination().unwrap(),
-                &device_id,
-                &owner,
-                &store_dir
-            )
-            .await
-            .unwrap()
-        );
-        host_exec(
-            &db,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('serial-suffix', 'suffix', NULL, 1, '0000000001001-0000-owner', '2026-01-01')",
-        )
-        .await;
-        let suffix = db.pending_writes().await.unwrap().pop().unwrap().write_id;
-
-        cycle::run_single_sync_cycle_with_coordination(
-            &storage,
-            Some(storage.serial_coordination().unwrap()),
-            &device_id,
-            &Hlc::new(device_id.clone()),
-            &SystemClock,
-            &db,
-            storage.cipher_state().as_ref(),
-            storage.shared_pending_rotation().as_ref(),
-            &owner,
-            None,
-            None,
-            &store_dir,
-            Some(&home),
-            None,
-        )
-        .await
-        .expect("run cycle after a write joined the publishing branch");
-
-        let first_status = db.write_status(&first).await.unwrap();
-        assert!(
-            matches!(
-                &first_status,
-                crate::WriteStatus::Published(position)
-                    if matches!(
-                        position.as_ref(),
-                        crate::PublishedPosition::Serial { commit }
-                            if commit.coord.sequence() == 1
-                    )
-            ),
-            "unexpected first status: {first_status:?}"
-        );
-        let suffix_status = db.write_status(&suffix).await.unwrap();
-        assert!(
-            matches!(
-                &suffix_status,
-                crate::WriteStatus::Published(position)
-                    if matches!(
-                        position.as_ref(),
-                        crate::PublishedPosition::Serial { commit }
-                            if commit.coord.sequence() == 2
-                    )
-            ),
-            "unexpected suffix status: {suffix_status:?}"
-        );
-    })
-    .await
-    .expect("Serial suffix cycle orchestration task");
 }
 
 #[tokio::test]
@@ -4305,10 +3330,6 @@ impl CycleStorageInterceptor {
                 panic!("storage interception does not record blob writes")
             }
         }
-    }
-
-    fn protocol_read_calls(&self) -> usize {
-        self.protocol_read_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -5137,10 +4158,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .await
         .expect("read adopted Store write status")
     {
-        crate::WriteStatus::Published(position) => match *position {
-            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
-            position => panic!("adopted Store write has wrong policy: {position:?}"),
-        },
+        crate::WriteStatus::Published(position) => position.commit,
         status => panic!("adopted Store write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
@@ -5718,7 +4736,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .expect("read retried Store write status");
     let commit = match status {
         crate::WriteStatus::Published(position) => match *position {
-            crate::PublishedPosition::MergeConcurrent {
+            crate::PublishedPosition {
                 device_id: published_device,
                 commit,
             } if published_device == device_id => commit,
@@ -5838,10 +4856,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         .await
         .expect("read push-timestamp write status")
     {
-        crate::WriteStatus::Published(position) => match *position {
-            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
-            position => panic!("push-timestamp write has wrong policy: {position:?}"),
-        },
+        crate::WriteStatus::Published(position) => position.commit,
         status => panic!("push-timestamp write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
@@ -5919,22 +4934,8 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .expect("read local Store position after peer setup")
             .expect("local Store stream has an exact snapshot position");
         let local_snapshot_sequence = local_at_snapshot.coord.sequence();
-        let local_stream = match &local_at_snapshot.coord {
-            crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-                *stream_id
-            }
-            crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-                panic!("MergeConcurrent local fixture published a Serial commit")
-            }
-        };
-        let peer_stream = match &peer_at_snapshot.coord {
-            crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-                *stream_id
-            }
-            crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-                panic!("MergeConcurrent peer fixture published a Serial commit")
-            }
-        };
+        let local_stream = local_at_snapshot.coord.stream_id;
+        let peer_stream = peer_at_snapshot.coord.stream_id;
         let membership = storage
             .open_into(&db)
             .await
@@ -5946,14 +4947,14 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 db_image: b"cadence-snapshot".to_vec(),
                 blobs: Vec::new(),
             },
-            crate::sync::store_commit::CommitFrontier::MergeConcurrent(BTreeMap::from([
+            crate::sync::store_commit::CommitFrontier(BTreeMap::from([
                 (local_stream, local_at_snapshot),
                 (peer_stream, peer_at_snapshot),
             ])),
             db.schema_version(),
             &owner,
             T0.to_string(),
-            Some(&membership),
+            &membership,
             &db,
         )
         .await
@@ -6114,7 +5115,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         &storage.protocol_founder_keypair(),
     )
     .await
-    .expect("initialize MergeConcurrent test membership");
+    .expect("initialize test membership");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -6197,7 +5198,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
             crate::WriteStatus::Published(position)
                 if matches!(
                     position.as_ref(),
-                    crate::PublishedPosition::MergeConcurrent { commit, .. }
+                    crate::PublishedPosition { commit, .. }
                         if commit.coord.sequence() == 1
                 )
         ),
@@ -6330,10 +5331,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         .await
         .expect("read retried preparation write status")
     {
-        crate::WriteStatus::Published(position) => match *position {
-            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
-            position => panic!("retried preparation has wrong policy: {position:?}"),
-        },
+        crate::WriteStatus::Published(position) => position.commit,
         status => panic!("retried preparation write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
@@ -6373,7 +5371,7 @@ async fn run_cycle_m_storage(
         &storage.inner.protocol_founder_keypair(),
     )
     .await
-    .expect("initialize MergeConcurrent test membership");
+    .expect("initialize test membership");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -6431,14 +5429,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .publish_changeset("A", 1, &a_cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let published_stream = match &published.coord {
-        crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-            *stream_id
-        }
-        crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-            panic!("MergeConcurrent fixture published a Serial commit")
-        }
-    };
+    let published_stream = published.coord.stream_id;
     let stream_id = published_stream.to_string();
 
     // M's cycle pulls A->1, acks A->1, snapshots covering A->1, then reclaims.
@@ -6464,7 +5455,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .expect("the reclamation cycle publishes a covering snapshot");
     assert!(matches!(
         &snapshot.coverage,
-        crate::sync::store_commit::CommitFrontier::MergeConcurrent(frontier)
+        crate::sync::store_commit::CommitFrontier(frontier)
             if frontier.get(&published_stream) == Some(&published)
     ));
     let ack_ref = db_m
@@ -6504,7 +5495,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
     .value;
     assert!(matches!(
         &acknowledgement.store_cut,
-        crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(frontier)
+        crate::sync::store_commit::StoreHistoryCut(frontier)
             if frontier.get(&published_stream) == Some(&published)
     ));
     assert!(
@@ -6566,7 +5557,6 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     pull_into(&behind_db, &storage, &ld).await;
 
     let behind_frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
         behind_db
             .materialized_frontier()
             .await
@@ -6757,7 +5747,7 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
 struct SamePrincipalApprovalFixture {
     _pending_dir: tempfile::TempDir,
     pending: crate::sync::device_join::DeviceJoinJournalDatabase,
-    authorization: crate::sync::device_join::DeviceJoinAuthorization,
+    authorization: crate::sync::membership::MembershipChain,
     approval: crate::sync::device_join::DeviceProviderAdmissionApproval,
 }
 
@@ -6783,12 +5773,10 @@ async fn prepare_same_principal_approval_fixture(
     )
     .await
     .expect("invite exact Member identity");
-    let authorization = crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
-        storage
-            .open_into(owner_db)
-            .await
-            .expect("load exact Merge membership"),
-    );
+    let authorization = storage
+        .open_into(owner_db)
+        .await
+        .expect("load exact Store membership");
     let pending_dir = tempfile::tempdir().expect("create join directory");
     let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
         pending_dir.path().join("pending.sqlite"),
@@ -6824,7 +5812,6 @@ async fn prepare_same_principal_approval_fixture(
         &storage.storage,
         None,
         None,
-        None,
         &authorization,
         owner,
         access_request,
@@ -6837,128 +5824,6 @@ async fn prepare_same_principal_approval_fixture(
         authorization,
         approval,
     }
-}
-
-#[tokio::test]
-async fn provider_approval_rejects_access_activation_policy_that_differs_from_the_signed_store_root(
-) {
-    use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(&owner_db, &owner).await;
-    let member = UserKeypair::generate();
-    let source = prepare_same_principal_approval_fixture(
-        &owner_db,
-        &storage,
-        &owner,
-        &member,
-        "join-policy-member",
-    )
-    .await;
-    let valid_approval = source.approval;
-
-    let serial_db = open_serial_test_db();
-    let serial_store = TestStore::create(&serial_db, "join-policy-source", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-    let mut provider_admin = valid_approval.request.offer.provider_admin.as_ref().clone();
-    provider_admin.capability.serial_coordination = serial_store
-        .protocol_root
-        .descriptor
-        .founder_provider_admin
-        .capability
-        .serial_coordination
-        .clone();
-    let (owner_registration_ref, owner_registration, owner_device_signer) = storage
-        .founder_device_authority()
-        .await
-        .expect("load exact founder authority");
-    let valid_offer = valid_approval.request.offer.as_ref();
-    let conflicting_offer = crate::sync::device_join::DeviceJoinOffer::signed(
-        valid_offer.attempt_id,
-        valid_offer.member_pubkey.clone(),
-        valid_offer.store_root.clone(),
-        valid_offer.provider.clone(),
-        valid_offer.attempt_slot.clone(),
-        valid_offer.outcome_slot.clone(),
-        owner_registration_ref,
-        valid_offer.owner_grant.clone(),
-        provider_admin,
-        &owner_registration,
-        &owner_device_signer,
-    )
-    .expect("sign conflicting offer");
-    let pending_dir = tempfile::tempdir().expect("create joining directory");
-    let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
-        pending_dir.path().join("pending.sqlite"),
-    )
-    .expect("open joining journal");
-    let conflicting_request = crate::sync::device_join::prepare_device_provider_access_request(
-        &pending,
-        SyncStorage::provider_binding(&storage.storage)
-            .await
-            .expect("resolve provider binding"),
-        &member,
-        conflicting_offer,
-    )
-    .await
-    .expect("prepare conflicting provider request");
-    let mut conflicting_grant = valid_approval.access_grant;
-    conflicting_grant.activation.coord = crate::sync::store_commit::StoreCommitCoord::Serial {
-        sequence: conflicting_grant.activation.coord.sequence(),
-    };
-    let verified_root =
-        crate::sync::store_objects::load_store_protocol_root(&storage.storage, &storage.root)
-            .await
-            .expect("load exact signed Store root");
-    let error = crate::sync::device_join::DeviceProviderAdmissionApproval::signed(
-        conflicting_request.clone(),
-        conflicting_grant.clone(),
-        crate::sync::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
-        &verified_root,
-        &owner_registration,
-        &owner_device_signer,
-    )
-    .expect_err("the pinned Merge root rejects a Serial access activation");
-    assert!(matches!(
-        error,
-        crate::sync::device_join::DeviceJoinError::ApprovalMismatch
-    ));
-    let malformed_approval =
-        crate::sync::device_join::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
-            conflicting_request.clone(),
-            conflicting_grant,
-            crate::sync::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
-            &owner_device_signer,
-        );
-    let consumer_error = crate::sync::device_join::prepare_device_registration_request(
-        &pending,
-        &storage.storage,
-        None,
-        None,
-        &member,
-        malformed_approval,
-    )
-    .await
-    .expect_err("the production joiner rejects the signed malformed approval");
-    assert!(matches!(
-        consumer_error,
-        crate::sync::device_join::DeviceJoinError::ApprovalMismatch
-    ));
-    assert!(matches!(
-        crate::sync::device_join::load_pending_device_join_status(
-            &pending,
-            conflicting_request.offer.attempt_id,
-        )
-        .expect("load unchanged join status"),
-        Some(DeviceJoinStatus::AwaitingProviderAdmission { request })
-            if request == conflicting_request
-    ));
-    assert!(pending
-        .load(conflicting_request.offer.attempt_id, DeviceJoinRole::Joiner,)
-        .expect("load exact join journal")
-        .is_some());
 }
 
 #[tokio::test]
@@ -6979,7 +5844,6 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
         &first.pending,
         &storage.storage,
         None,
-        None,
         &member,
         first.approval,
     )
@@ -6999,7 +5863,6 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
     crate::sync::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
-        None,
         &second.authorization,
         &owner,
         first_registration_request,
@@ -7026,7 +5889,6 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         &fixture.pending,
         &storage.storage,
         None,
-        None,
         &member,
         fixture.approval,
     )
@@ -7041,11 +5903,8 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         &owner_db,
         &storage.storage,
-        crate::sync::store_outbound::StoreOperationPreparation::MergeConcurrent {
-            membership: fixture
-                .authorization
-                .merge_chain()
-                .expect("Merge authorization"),
+        crate::sync::store_outbound::StoreOperationPreparation {
+            membership: &fixture.authorization,
         },
         &local_device_id,
         &owner,
@@ -7130,7 +5989,6 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
         &fixture.pending,
         &storage.storage,
         None,
-        None,
         &member,
         fixture.approval,
     )
@@ -7161,7 +6019,6 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
     crate::sync::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
-        None,
         &fixture.authorization,
         &owner,
         malformed_request,
@@ -7171,7 +6028,6 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
     crate::sync::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
-        None,
         &fixture.authorization,
         &owner,
         valid_request,
@@ -7231,7 +6087,6 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         let proposal = match crate::sync::store_device_exclusion::propose_device_exclusion(
         &excluding_db,
         &storage.storage,
-        None,
         &excluding_owner,
         &founder_registration,
     )
@@ -7256,7 +6111,6 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         .await;
 
         let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-            excluding_db.write_policy(),
             excluding_db
                 .materialized_frontier()
                 .await
@@ -7282,7 +6136,6 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         match crate::sync::store_device_exclusion::finalize_device_exclusion(
             &excluding_db,
             &storage.storage,
-            None,
             &excluding_owner,
             &proposal,
         )
@@ -7298,7 +6151,6 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         crate::sync::device_join::prepare_device_registration_request(
             &approval.pending,
             &storage.storage,
-            None,
             None,
             &joining_member,
             approval.approval,
@@ -7341,7 +6193,6 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
     crate::sync::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
-        None,
         None,
         &member,
         fixture.approval,
@@ -7404,7 +6255,6 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         &fixture.pending,
         &storage.storage,
         None,
-        None,
         &member,
         fixture.approval,
     )
@@ -7455,13 +6305,9 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .sequence()
         .checked_add(1)
         .expect("next sequence exists");
-    let crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
-        activation.coord
-    else {
-        panic!("Merge fixture produced a Serial activation");
-    };
+    let stream_id = activation.coord.stream_id;
     let mut next_commit = activation;
-    next_commit.coord = crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+    next_commit.coord = crate::sync::store_commit::StoreCommitCoord {
         stream_id,
         sequence: next_sequence,
     };
@@ -7503,7 +6349,6 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
     crate::sync::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
-        None,
         None,
         &member,
         fixture.approval,
@@ -7573,48 +6418,6 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
 }
 
 #[tokio::test]
-async fn pre_attempt_device_join_abandonment_is_retry_safe_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(&owner_db, "serial-device-join-abandonment", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-
-    exercise_pre_attempt_abandonment(&owner_db, &storage, &owner, &owner).await;
-}
-
-#[tokio::test]
-async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_serial() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            tokio::task::spawn_local(
-                run_post_attempt_device_join_cancellation_closes_and_cleans_up_on_serial(),
-            )
-            .await
-            .expect("Serial post-attempt cancellation orchestration");
-        })
-        .await;
-}
-
-async fn run_post_attempt_device_join_cancellation_closes_and_cleans_up_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(&owner_db, "serial-device-join-cancellation", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-
-    exercise_post_attempt_cancellation(
-        &owner_db,
-        &storage,
-        &owner,
-        &owner,
-        JoinerCancellationDisposition::Closure,
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
     use crate::sync::membership::MemberRole;
 
@@ -7642,37 +6445,6 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
         &storage,
         &owner,
         &member,
-        JoinerCancellationDisposition::WriteRevocation,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_serial() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            tokio::task::spawn_local(
-                run_missing_joiner_writes_are_revoked_and_cleaned_up_on_serial(),
-            )
-            .await
-            .expect("Serial missing-joiner revocation orchestration");
-        })
-        .await;
-}
-
-async fn run_missing_joiner_writes_are_revoked_and_cleaned_up_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(&owner_db, "serial-device-join-revocation", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-
-    exercise_post_attempt_cancellation(
-        &owner_db,
-        &storage,
-        &owner,
-        &owner,
         JoinerCancellationDisposition::WriteRevocation,
     )
     .await;
@@ -7751,17 +6523,6 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
 }
 
 #[tokio::test]
-async fn cancellation_removes_an_inflight_registration_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(&owner_db, "serial-inflight-registration", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-
-    exercise_cancellation_against_inflight_registration(&owner_db, &storage, &owner, &owner).await;
-}
-
-#[tokio::test]
 async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_merge() {
     use crate::sync::membership::MemberRole;
 
@@ -7822,44 +6583,6 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         &storage,
         &owner,
         &member,
-        ExactCreateInterruption::AfterVisibility,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(&owner_db, "serial-access-grant-resume", owner.clone())
-        .await
-        .expect("create exact Serial Store");
-    exercise_provider_access_grant_create_interruption(
-        &owner_db,
-        &storage,
-        &owner,
-        &owner,
-        ExactCreateInterruption::BeforeVisibility,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn provider_access_grant_create_settles_lost_response_on_serial() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_serial_test_db();
-    let storage = TestStore::create(
-        &owner_db,
-        "serial-access-grant-lost-response",
-        owner.clone(),
-    )
-    .await
-    .expect("create exact Serial Store");
-    exercise_provider_access_grant_create_interruption(
-        &owner_db,
-        &storage,
-        &owner,
-        &owner,
         ExactCreateInterruption::AfterVisibility,
     )
     .await;

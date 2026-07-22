@@ -556,12 +556,7 @@ impl Database {
                 if operation.commit_ref.object.slot().logical_key()
                     != commit_semantic_prefix(
                         commit.candidate_family(),
-                        &match &operation.commit_ref.coord {
-                            StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-                                stream_id.to_string()
-                            }
-                            StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-                        },
+                        &operation.commit_ref.coord.stream_id.to_string(),
                         commit.seq(),
                         commit.commit_hash(),
                     ) + ".json"
@@ -578,7 +573,7 @@ impl Database {
                 };
                 let expected_ref = creation.control_ref(
                     control_ref.objects().clone(),
-                    control_ref.head_object().cloned(),
+                    Some(control_ref.head_object().clone()),
                 );
                 if control_ref != &expected_ref
                     || !commit.operations().is_some_and(
@@ -603,11 +598,9 @@ impl Database {
                 }
                 Ok(commit)
             };
-            let (commit, activation, merge_head_object_id) = match &operation.policy {
-                crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent {
-                    head,
-                    history_summary,
-                } => {
+            let (commit, activation, head_object_id) = {
+                    let head = &operation.policy.head;
+                    let history_summary = &operation.policy.history_summary;
                     let commit = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
@@ -651,47 +644,13 @@ impl Database {
                         activation.clone(),
                         Some(remote_object_id(prepared_head.reference())),
                     )
-                }
-                crate::sync::circle_ops::CircleOperationPolicy::Serial {
-                    head,
-                    authorization,
-                    ..
-                } => {
-                    let commit = verify_commit()?;
-                    let parsed =
-                        StoreSerialHead::parse(&head.to_bytes(), commit.store_root_hash, &author)
-                            .map_err(|error| {
-                            DbError::Message(format!("verify circle Serial head: {error}"))
-                        })?;
-                    if !matches!(
-                        parsed.state,
-                        StoreSerialHeadState::Commit { ref commit, .. }
-                            if commit == &operation.commit_ref
-                    ) {
-                        return Err(DbError::Message(
-                            "circle Serial head names a different commit".to_string(),
-                        ));
-                    }
-                    let device_operations =
-                        VerifiedStoreDeviceOperations::without_exclusions(&commit)
-                            .map_err(|error| DbError::Message(error.to_string()))?;
-                    Self::record_materialized_serial_commit_with_device_operations_on(
-                        &tx,
-                        &commit,
-                        &operation.commit_ref,
-                        authorization,
-                        &device_operations,
-                        verified.stream_activations(),
-                    )?;
-                    (commit, activation.clone(), None)
-                }
             };
             let mut object_ids = candidate_graph_exact_objects(&commit)?
                 .iter()
                 .map(remote_object_id)
                 .collect::<Vec<_>>();
             object_ids.push(remote_object_id(&operation.commit_ref.object));
-            if let Some(head_object_id) = merge_head_object_id {
+            if let Some(head_object_id) = head_object_id {
                 object_ids.push(head_object_id);
             }
             Self::activate_store_operation_remote_objects_on(

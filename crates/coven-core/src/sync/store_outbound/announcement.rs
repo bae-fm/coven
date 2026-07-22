@@ -71,9 +71,8 @@ async fn exact_next_announcement_slot_impl(
     ),
     StoreOutboundError,
 > {
-    let super::store_commit::StoreCommitAnchor::MergeConcurrent {
-        announcements: super::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot },
-    } = &registration.store_commits
+    let super::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
+        &registration.store_commits
     else {
         return Err(StoreOutboundError::InvalidOutbound(
             "Merge registration has no Store announcement anchor".to_string(),
@@ -87,10 +86,7 @@ async fn exact_next_announcement_slot_impl(
         registration_ref,
         super::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
-    if !matches!(
-        target.coord,
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } if stream_id == expected_stream
-    ) {
+    if target.coord.stream_id != expected_stream {
         return Err(StoreOutboundError::InvalidOutbound(
             "local predecessor belongs to another Store announcement stream".to_string(),
         ));

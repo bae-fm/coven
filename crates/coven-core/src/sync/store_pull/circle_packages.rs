@@ -13,7 +13,6 @@ pub(crate) async fn load_circle_payload_activations(
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
     identity: Option<&crate::keys::UserKeypair>,
-    membership_authority: &CircleMembershipAuthority,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
     if commit.circle_controls().is_empty()
@@ -48,7 +47,6 @@ pub(crate) async fn load_circle_payload_activations(
             author,
             identity,
             &founder,
-            membership_authority,
             verified_prefix,
         ),
     )
@@ -107,25 +105,6 @@ fn circle_package_access(
         key_fingerprint: *key_fingerprint,
         writers: active.roster.members().keys().cloned().collect(),
     }))
-}
-
-pub(crate) fn circle_package_accesses(
-    activations: &[super::circle_ops::VerifiedCircleReference],
-) -> Result<CirclePackageAccesses, String> {
-    let mut accesses = CirclePackageAccesses::new();
-    for activation in activations {
-        let Some(access) = circle_package_access(activation)? else {
-            continue;
-        };
-        let key = (activation.circle_id, activation.control.coord.clone());
-        if accesses.insert(key, access).is_some() {
-            return Err(format!(
-                "Circle {} has duplicate package access at one control",
-                activation.circle_id
-            ));
-        }
-    }
-    Ok(accesses)
 }
 
 pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(

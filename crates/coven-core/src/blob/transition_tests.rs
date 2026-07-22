@@ -1186,7 +1186,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         &cancel,
     )
     .await
-    .expect_err("a scoped MergeConcurrent transition requires routing encryption");
+    .expect_err("a scoped transition requires routing encryption");
 
     assert!(
         error

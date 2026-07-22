@@ -290,15 +290,10 @@ impl Database {
         }
         let expected = Self::retained_merge_object_ids(input);
         let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &commit.coord
-        else {
-            return Err(DbError::Message(
-                "retained Merge replay owner names a Serial commit".to_string(),
-            ));
-        };
+        } = &commit.coord;
         let stream_id = stream_id.to_string();
         let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
         let commit_ref = serde_json::to_string(commit).map_err(|error| {
@@ -389,15 +384,10 @@ impl Database {
                     ))
                 })?;
             Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
-            let StoreCommitCoord::MergeConcurrent {
+            let StoreCommitCoord {
                 stream_id,
                 sequence,
-            } = &reference.coord
-            else {
-                return Err(DbError::Message(
-                    "snapshot author exclusion activation names a Serial commit".to_string(),
-                ));
-            };
+            } = &reference.coord;
             let stream_id = stream_id.to_string();
             let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
             let (stored_ref, input_hash, canonical_input): (String, String, Vec<u8>) = conn
@@ -427,15 +417,10 @@ impl Database {
         conn.execute("DELETE FROM retained_merge_materializations", [])
             .map_err(DbError::from)?;
         for (reference, input_hash, canonical_input, input) in retained {
-            let StoreCommitCoord::MergeConcurrent {
+            let StoreCommitCoord {
                 stream_id,
                 sequence,
-            } = &reference.coord
-            else {
-                return Err(DbError::Message(
-                    "snapshot author exclusion activation became Serial".to_string(),
-                ));
-            };
+            } = &reference.coord;
             let stream_id = stream_id.to_string();
             let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
             let encoded_ref = serde_json::to_string(&reference).map_err(|error| {
@@ -493,21 +478,15 @@ impl Database {
             let materialization =
                 Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
             required.insert(reference);
-            match &materialization.commit().order {
-                crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
-                    predecessor,
-                    dependencies,
-                    ..
-                } => {
-                    required.extend(predecessor.iter().cloned());
-                    required.extend(dependencies.values().cloned());
-                }
-                crate::sync::store_commit::StoreCommitOrder::Serial { .. } => {
-                    return Err(DbError::Message(
-                        "snapshot retained Merge authority has a Serial order".to_string(),
-                    ));
-                }
-            }
+            required.extend(materialization.commit().order.predecessor.iter().cloned());
+            required.extend(
+                materialization
+                    .commit()
+                    .order
+                    .dependencies
+                    .values()
+                    .cloned(),
+            );
         }
         conn.execute_batch(
             "CREATE TEMP TABLE snapshot_required_device_states (
@@ -634,15 +613,7 @@ impl Database {
         input: &RetainedMergeMaterializationInput,
         input_hash: ObjectHash,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let StoreCommitCoord::MergeConcurrent {
-            stream_id,
-            sequence,
-        } = &commit_ref.coord
-        else {
-            return Err(DbError::Message(
-                "retained Merge input names a Serial commit".to_string(),
-            ));
-        };
+        let sequence = &commit_ref.coord.sequence;
         if sequence == &0 {
             return Err(DbError::Message(
                 "retained Merge input names sequence zero".to_string(),
@@ -699,10 +670,7 @@ impl Database {
             input.commit.reference().clone(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
-        if &exact_ref != commit_ref
-            || commit.author_registration.device_id.to_string() == SERIAL_STREAM_ID
-            || stream_id.to_string() == SERIAL_STREAM_ID
-        {
+        if &exact_ref != commit_ref {
             return Err(DbError::Message(
                 "retained Merge commit differs from its materialized coordinate".to_string(),
             ));
@@ -758,11 +726,7 @@ impl Database {
             local_identity.as_deref(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
-        if matches!(
-            commit.control(),
-            Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
-        ) != input.membership_objects.is_some()
-        {
+        if commit.control().is_some() != input.membership_objects.is_some() {
             return Err(DbError::Message(
                 "retained Merge membership closure differs from its exact Store control"
                     .to_string(),
@@ -876,15 +840,10 @@ impl Database {
             &input,
             input_hash,
         )?;
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &materialization.commit_ref().coord
-        else {
-            return Err(DbError::Message(
-                "retained Merge materialization names a Serial coordinate".to_string(),
-            ));
-        };
+        } = &materialization.commit_ref().coord;
         let stream_id = stream_id.to_string();
         let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
         let commit_ref_json =
@@ -1008,15 +967,10 @@ impl Database {
         conn: &Connection,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &reference.coord
-        else {
-            return Err(DbError::Message(
-                "retained Merge materialization lookup received a Serial commit".to_string(),
-            ));
-        };
+        } = &reference.coord;
         let stream_id = stream_id.to_string();
         let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
         let (stored_ref, input_hash): (String, String) = conn
@@ -1046,15 +1000,10 @@ impl Database {
         conn: &Connection,
         reference: &StoreBatchCommitRef,
     ) -> Result<crate::sync::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &reference.coord
-        else {
-            return Err(DbError::Message(
-                "retained Merge checkpoint names a Serial commit".to_string(),
-            ));
-        };
+        } = &reference.coord;
         let stream = stream_id.to_string();
         let sequence_sql = Self::sequence_to_sqlite(&stream, *sequence)?;
         let snapshot_reference: Option<String> = conn
@@ -1085,13 +1034,7 @@ impl Database {
                     "snapshot Merge checkpoint has genesis replay authority".to_string(),
                 ));
             };
-            let crate::sync::store_commit::StoreSnapshotHistorySummary::MergeConcurrent(summary) =
-                authority.metadata.history_summary
-            else {
-                return Err(DbError::Message(
-                    "snapshot Merge checkpoint carries Serial history authority".to_string(),
-                ));
-            };
+            let summary = authority.metadata.history_summary;
             summary
                 .validate_snapshot_baseline()
                 .map_err(|error| DbError::Message(format!("snapshot Merge checkpoint: {error}")))?;
@@ -1108,8 +1051,8 @@ impl Database {
                 ));
             }
             let state = load_store_device_snapshot_on(conn, reference)?;
-            let expected_state = crate::sync::store_commit::StoreDeviceStateRef::merge_concurrent(
-                CommitFrontier::MergeConcurrent(
+            let expected_state = crate::sync::store_commit::StoreDeviceStateRef::from_resolved(
+                CommitFrontier(
                     summary
                         .frontier()
                         .map_err(|error| DbError::Message(error.to_string()))?,
@@ -1216,17 +1159,9 @@ impl Database {
         let existing = load_store_device_exclusion_freezes_on(conn, &root)?;
         let frontier = Self::materialized_frontier_on(conn, None)?
             .into_values()
-            .map(|reference| match reference.coord {
-                StoreCommitCoord::MergeConcurrent { stream_id, .. } => Ok((stream_id, reference)),
-                StoreCommitCoord::Serial { .. } => Err(DbError::Message(
-                    "Merge retained replay produced a Serial frontier".to_string(),
-                )),
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let (_, state) = store_device_state_for_history_cut_on(
-            conn,
-            &StoreHistoryCut::MergeConcurrent(frontier),
-        )?;
+            .map(|reference| (reference.coord.stream_id, reference))
+            .collect::<BTreeMap<_, _>>();
+        let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
         let mut retained = Vec::new();
         for freeze in existing.into_values() {
             let proposal_state = state
@@ -1293,12 +1228,8 @@ impl Database {
                     "retained replay write {encoded_write_id} status: {error}"
                 ))
             })?;
-            let partitions = Self::store_write_partitions_on(
-                conn,
-                &encoded_write_id,
-                &stored_store_changeset,
-                WritePolicy::MergeConcurrent,
-            )?;
+            let partitions =
+                Self::store_write_partitions_on(conn, &encoded_write_id, &stored_store_changeset)?;
             let active = active_accepted_writes.contains(&write_id);
             let retracted = retracted_writes.contains(&write_id);
             let partitions = match status {
@@ -1331,12 +1262,7 @@ impl Database {
                         partitions
                     }
                 }
-                WriteStatus::Published(position) => {
-                    if position.commit().coord.policy() != WritePolicy::MergeConcurrent {
-                        return Err(DbError::Message(format!(
-                            "Merge retained replay found a Serial published write {encoded_write_id}"
-                        )));
-                    }
+                WriteStatus::Published(_) => {
                     if retracted {
                         PreparedStoreWritePartitions {
                             store: None,
@@ -1360,11 +1286,6 @@ impl Database {
                     circles: Vec::new(),
                     local: None,
                 },
-                WriteStatus::Conflict(_) => {
-                    return Err(DbError::Message(format!(
-                        "Merge retained replay found a Serial conflict write {encoded_write_id}"
-                    )));
-                }
             };
             if partitions.store.is_some()
                 || !partitions.circles.is_empty()
@@ -1391,15 +1312,10 @@ impl Database {
         conn: &Connection,
         candidate: &StoreBatchCommitRef,
     ) -> Result<PreparedMergeCandidate, DbError> {
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &candidate.coord
-        else {
-            return Err(DbError::Message(
-                "Merge retraction cleanup names a Serial commit".to_string(),
-            ));
-        };
+        } = &candidate.coord;
         let stream_id = stream_id.to_string();
         let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
         let encoded_ref = serde_json::to_string(candidate).map_err(|error| {
@@ -1452,15 +1368,10 @@ impl Database {
         conn: &rusqlite::Transaction<'_>,
         retained: &OwnedVerifiedMergeMaterialization,
     ) -> Result<(), DbError> {
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &retained.commit_ref().coord
-        else {
-            return Err(DbError::Message(
-                "Merge retraction cleanup names a Serial commit".to_string(),
-            ));
-        };
+        } = &retained.commit_ref().coord;
         let input = MergeRetractionCleanupInput {
             commit: PreparedExactObject::new(
                 retained.commit_ref().object.clone(),
@@ -1580,8 +1491,7 @@ impl Database {
                     .commit()
                     .order
                     .dependencies()
-                    .into_iter()
-                    .flat_map(|dependencies| dependencies.values())
+                    .values()
                     .cloned()
                     .collect::<BTreeSet<_>>();
                 if let Some(predecessor) = retained.commit().order.predecessor() {
@@ -1619,22 +1529,16 @@ impl Database {
                 }
                 crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {}
                 crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {}
-                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
                     return Err(DbError::Message(
                         "terminal Merge retraction carries nonterminal evidence".to_string(),
                     ));
                 }
             }
-            let StoreCommitCoord::MergeConcurrent {
+            let StoreCommitCoord {
                 stream_id,
                 sequence,
-            } = &candidate.coord
-            else {
-                return Err(DbError::Message(
-                    "terminal Merge retraction names a Serial commit".to_string(),
-                ));
-            };
+            } = &candidate.coord;
             let stream_id = stream_id.to_string();
             let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
             let encoded_ref = serde_json::to_string(&candidate).map_err(|error| {
@@ -1793,12 +1697,10 @@ impl Database {
                     WriteStatus::Published(original) if original.commit() == &candidate => {
                         *original
                     }
-                    WriteStatus::Publishing | WriteStatus::Blocked(_) => {
-                        PublishedPosition::MergeConcurrent {
-                            device_id: retained.commit().author_registration.device_id.to_string(),
-                            commit: candidate.clone(),
-                        }
-                    }
+                    WriteStatus::Publishing | WriteStatus::Blocked(_) => PublishedPosition {
+                        device_id: retained.commit().author_registration.device_id.to_string(),
+                        commit: candidate.clone(),
+                    },
                     WriteStatus::Resolved(WriteResolution::Retracted { witness })
                         if witness.original_position().commit() == &candidate =>
                     {

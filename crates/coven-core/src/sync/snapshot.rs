@@ -179,10 +179,6 @@ impl BootstrapResult {
         self.coverage.position_count()
     }
 
-    pub fn write_policy(&self) -> crate::WritePolicy {
-        self.coverage.policy()
-    }
-
     /// Consume the verified bootstrap authority by opening its bound database
     /// file and atomically installing its Store protocol root and exact signed coverage.
     #[allow(clippy::too_many_arguments)]
@@ -215,7 +211,6 @@ impl BootstrapResult {
             if snapshot_db_hash(&database_bytes) != self.db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
-            let write_policy = self.coverage.policy();
             let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
                 self.snapshot,
                 self.store_root,
@@ -229,7 +224,6 @@ impl BootstrapResult {
                 synced_tables,
                 blob_tombstone_grace,
                 transfer_limits,
-                write_policy,
                 device_id,
                 migrations,
             )
@@ -348,17 +342,6 @@ fn snapshot_blob_facts(
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let gates = crate::sync::gate::Gates::from_tables(live, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    let write_policy: crate::WritePolicy = live
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [crate::database::WRITE_POLICY_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))
-        .and_then(|encoded| {
-            serde_json::from_str(&encoded)
-                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))
-        })?;
     let mut facts = Vec::with_capacity(publications.len());
     for publication in publications {
         let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
@@ -411,7 +394,7 @@ fn snapshot_blob_facts(
             super::circle::Audience::Store => SnapshotBlobAudience::Store,
             super::circle::Audience::Circle(circle_id) => SnapshotBlobAudience::Circle {
                 circle_id,
-                control: super::gate::active_circle_control(live, circle_id, write_policy)
+                control: super::gate::active_circle_control(live, circle_id)
                     .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
             },
             super::circle::Audience::Local => {
@@ -760,7 +743,6 @@ pub fn should_create_snapshot(
 /// installs all bootstrap state in one database transaction.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     store_id: &str,
     expected_store_root: super::store_commit::StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
@@ -769,22 +751,15 @@ pub async fn bootstrap_from_snapshot(
 ) -> Result<BootstrapResult, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (store_root, write_policy, snapshot, plaintext, stability) =
+    let (store_root, snapshot, plaintext, stability) =
         Box::pin(super::store_snapshot::select_store_snapshot(
             storage,
-            serial_coordination,
             &expected_store_root,
             membership_floor,
             binary_schema_version,
         ))
         .await?;
     let coverage = snapshot.meta.coverage.clone();
-    if coverage.policy() != write_policy {
-        return Err(SnapshotError::Parse(format!(
-            "snapshot coverage uses {:?}, Store protocol root uses {write_policy:?}",
-            coverage.policy()
-        )));
-    }
     write_snapshot_db(target_path, &plaintext)?;
     let founder_registration =
         super::store_objects::load_founder_registration(storage, &expected_store_root)
@@ -968,7 +943,7 @@ mod tests {
             )
             .await;
             assert!(
-                super::super::store_engine::merge::preparation::prepare_store_write(
+                super::super::store_engine::engine::preparation::prepare_store_write(
                     &source,
                     &store.storage,
                     &device_id,
@@ -981,7 +956,7 @@ mod tests {
                 .expect("prepare snapshot history write")
             );
             assert_eq!(
-                super::super::store_engine::merge::publication::drain_store_writes(
+                super::super::store_engine::engine::publication::drain_store_writes(
                     &source,
                     &store.storage
                 )
@@ -1055,9 +1030,9 @@ mod tests {
             &store.storage,
             &store.root,
             image,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             &signer,
-            Some(&membership),
+            &membership,
             &source,
         )
         .await
@@ -1065,7 +1040,7 @@ mod tests {
         crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &source,
             &store.storage,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             "2026-07-16T00:00:01Z".to_string(),
             &signer,
         )
@@ -1083,10 +1058,9 @@ mod tests {
         let database_path = destination.path().join("store.db");
         let bootstrap = bootstrap_from_snapshot(
             &store.storage,
-            None,
             "snapshot-bootstrap-exact-root",
             store.root.clone(),
-            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
             1,
             &database_path,
         )
@@ -1098,7 +1072,7 @@ mod tests {
                 &database_path,
                 tables,
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
+                crate::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
             )
@@ -1160,117 +1134,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_rejects_a_signed_snapshot_with_a_terminal_membership_receipt() {
-        let source = crate::sync::test_helpers::open_test_db();
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &source,
-            "snapshot-bootstrap-rejects-terminal-receipt",
-            signer.clone(),
-        )
-        .await
-        .expect("create terminal-receipt bootstrap Store");
-        let membership = store
-            .open_into(&source)
-            .await
-            .expect("open terminal-receipt bootstrap Store membership");
-        let image_dir = tempfile::tempdir().expect("snapshot image directory");
-        let image_path = image_dir.path().to_path_buf();
-        let tables = crate::sync::test_helpers::test_synced_tables();
-        let image_tables = tables.clone();
-        let image = source
-            .call(move |connection| {
-                create_snapshot(connection, &image_path, &image_tables)
-                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
-            })
-            .await
-            .expect("create terminal-receipt bootstrap database image");
-        let signed_image_path = image_dir.path().join("signed-image.db");
-        std::fs::write(&signed_image_path, image).expect("write signed snapshot fixture");
-        let plan = b"terminal Serial invitation plan";
-        let image = {
-            let image = Connection::open(&signed_image_path).expect("open signed snapshot fixture");
-            image
-                .execute(
-                    "INSERT INTO terminal_membership_mutation
-                     (singleton, kind, intent_hash, plan_bytes, result_bytes)
-                     VALUES (1, 'serial_invite', ?1, ?2, x'01')",
-                    (
-                        crate::sync::store_commit::ObjectHash::digest(plan).to_string(),
-                        plan.as_slice(),
-                    ),
-                )
-                .expect("insert terminal receipt into signed snapshot fixture");
-            image
-                .close()
-                .map_err(|(_, error)| error)
-                .expect("close signed snapshot fixture");
-            std::fs::read(&signed_image_path).expect("read signed snapshot fixture")
-        };
-        crate::sync::test_helpers::publish_snapshot_fixture(
-            &store.storage,
-            &store.root,
-            image,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
-            &signer,
-            Some(&membership),
-            &source,
-        )
-        .await
-        .expect("publish terminal-receipt bootstrap database image");
-        crate::sync::store_engine::stage_merge_acknowledgement_for_test(
-            &source,
-            &store.storage,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
-            "2026-07-16T00:00:01Z".to_string(),
-            &signer,
-        )
-        .await
-        .expect("stage terminal-receipt snapshot stability acknowledgement");
-        crate::sync::store_engine::drain_merge_acknowledgements_for_test(
-            &source,
-            &store.storage,
-            &signer,
-        )
-        .await
-        .expect("activate terminal-receipt snapshot stability acknowledgement");
-
-        let destination = tempfile::tempdir().expect("bootstrap destination");
-        let database_path = destination.path().join("store.db");
-        let bootstrap = bootstrap_from_snapshot(
-            &store.storage,
-            None,
-            "snapshot-bootstrap-rejects-terminal-receipt",
-            store.root,
-            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
-            1,
-            &database_path,
-        )
-        .await
-        .expect("verify signed terminal-receipt bootstrap authority");
-        let result = bootstrap
-            .open_database(
-                "snapshot-bootstrap-rejects-terminal-receipt",
-                &database_path,
-                tables,
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                "joining-device".to_string(),
-                &crate::sync::test_helpers::test_migrations(),
-            )
-            .await;
-        let error = match result {
-            Ok(_) => panic!("accepted terminal membership receipt during snapshot installation"),
-            Err(error) => error,
-        };
-
-        assert!(error
-            .to_string()
-            .contains("terminal_membership_mutation to be empty"));
-        assert!(!database_path.exists());
-    }
-
-    #[tokio::test]
     async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements() {
         let source = crate::sync::test_helpers::open_test_db();
         let signer = UserKeypair::generate();
@@ -1300,9 +1163,9 @@ mod tests {
             &store.storage,
             &store.root,
             image,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             &signer,
-            Some(&membership),
+            &membership,
             &source,
         )
         .await
@@ -1312,10 +1175,9 @@ mod tests {
         let database_path = destination.path().join("store.db");
         let result = bootstrap_from_snapshot(
             &store.storage,
-            None,
             "snapshot-bootstrap-requires-stability",
             store.root,
-            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
             1,
             &database_path,
         )

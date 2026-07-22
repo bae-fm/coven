@@ -24,7 +24,6 @@ use super::store_commit::{
     StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal,
     StoreDeviceExclusionProposalRef, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
-    SERIAL_STREAM_ID,
 };
 
 #[derive(Debug)]
@@ -1221,8 +1220,5 @@ pub async fn load_membership_resolution_ref(
 }
 
 fn commit_stream_id(coord: &StoreCommitCoord) -> String {
-    match coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    }
+    coord.stream_id.to_string()
 }

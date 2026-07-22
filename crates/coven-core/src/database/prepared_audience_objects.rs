@@ -275,13 +275,17 @@ pub fn exercise_exact_outbound_blob_graph(
     use crate::blob::BlobScope;
     use crate::storage::cloud::ObjectSlot;
     use crate::sync::audience_package::RowBlobLocatorBinding;
+    use crate::sync::causal_grants::AuthorStreamId;
     use crate::sync::circle::CircleId;
     use crate::sync::circle_control::CircleControlCoord;
     use crate::sync::store_commit::{CandidateFamilyId, StoreCommitCoord};
 
     let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
     let write_id = WriteId::from_generated("outbound-graph-write".to_string());
-    let coord = StoreCommitCoord::Serial { sequence: 1 };
+    let coord = StoreCommitCoord {
+        stream_id: AuthorStreamId::from_bytes([4; 32]),
+        sequence: 1,
+    };
     let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(b"outbound-family"));
     let remote_audience = if circle {
         RemoteAudience::Circle(CircleId::from_bytes([7; 16]))
@@ -336,9 +340,14 @@ pub fn exercise_exact_outbound_blob_graph(
             coord,
             1,
             circle_id,
-            CircleControlCoord::Serial {
+            CircleControlCoord {
+                device_id: "01".repeat(32),
+                stream_id: AuthorStreamId::from_bytes([5; 32]),
                 author_pubkey: "author-a".to_string(),
-                generation: 1,
+                author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+                    "outbound-graph owner grant",
+                ),
+                seq: 1,
                 control_hash: ObjectHash::digest(b"circle-control"),
             },
             crate::KeyFingerprint::from_bytes([3; 8]),

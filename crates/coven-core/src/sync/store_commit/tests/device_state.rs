@@ -12,12 +12,7 @@ fn self_retirement_is_exact_commit_state_and_dominates_active_merge_state() {
         &write_id,
         &order,
     );
-    let retiring_cut = match &order {
-        StoreCommitOrder::Serial { predecessor, .. } => {
-            StoreHistoryCut::Serial(predecessor.clone())
-        }
-        StoreCommitOrder::MergeConcurrent { .. } => unreachable!(),
-    };
+    let retiring_cut = order.predecessor_cut().expect("derive retiring cut");
     let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
     let retirement = StoreDeviceSelfRetirement::signed(
         fixture.root_ref.store_root_hash,
@@ -78,7 +73,7 @@ fn self_retirement_is_exact_commit_state_and_dominates_active_merge_state() {
                 "{}.json",
                 commit_semantic_prefix(
                     commit.candidate_family(),
-                    SERIAL_STREAM_ID,
+                    &fixture.commit_ref.coord.stream_id.to_string(),
                     commit.seq(),
                     commit.commit_hash(),
                 )
@@ -133,86 +128,6 @@ fn self_retirement_is_exact_commit_state_and_dominates_active_merge_state() {
     ));
 }
 
-#[test]
-fn serial_membership_and_rotation_are_authenticated_by_the_global_commit() {
-    let fixture = fixture();
-    let member = UserKeypair::generate();
-    let state = crate::sync::membership::SerialMembershipState::from_founder(
-        fixture.root_ref.store_root_hash,
-        &founder_entry(
-            &fixture.root_ref.store_root_id.to_string(),
-            &fixture.signer,
-            fixture.root.descriptor.founder_grant.clone(),
-            "0000000001000-0000-device-a",
-            GrantStreamAnchor::StoreMembership {
-                first_slot: slot("store-v1/membership/founder/1.json".to_string()),
-            },
-            fixture.root.descriptor.founder_provider_admin.clone(),
-        ),
-    )
-    .unwrap();
-    let add = state
-        .signed_set_member(
-            &fixture.signer,
-            keys::public_key_hex(&member),
-            None,
-            crate::sync::membership::MemberRole::Member,
-            "add".to_string(),
-        )
-        .unwrap();
-    let state = state.apply(&add).unwrap();
-    let entry = state
-        .signed_remove_member(
-            &fixture.signer,
-            keys::public_key_hex(&member),
-            "remove".to_string(),
-        )
-        .unwrap();
-    let wrapped_keys = vec![crate::sync::membership::test_wrapped_key_ref(
-        &keys::public_key_hex(&fixture.signer),
-        &keys::public_key_hex(&fixture.signer),
-        2,
-        b"Store commit Serial rotation wrap",
-    )];
-    let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let commit = StoreBatchCommit::signed_with_control(
-        fixture.root_ref.store_root_hash,
-        WriteId::from_generated("serial-control-write".to_string()),
-        fixture.commit_ref.coord.clone(),
-        fixture.registration_ref,
-        &fixture.registration,
-        fixture.commit.order,
-        fixture.commit.membership_state,
-        fixture.commit.device_state,
-        StoreOperationMembershipAuthority::Serial,
-        Some(StoreControl::SerialMembershipAndKeyRotation {
-            entry: entry.clone(),
-            generation: 2,
-            wrapped_keys,
-        }),
-        None,
-        &device_signer,
-    )
-    .unwrap();
-    let parsed = StoreBatchCommit::parse_at(
-        &commit.to_bytes(),
-        fixture.root_ref.store_root_hash,
-        &fixture.commit_ref.coord,
-        &fixture.registration,
-    )
-    .unwrap();
-    assert_eq!(parsed, commit);
-    assert!(state
-        .apply(
-            parsed
-                .control()
-                .unwrap()
-                .serial_membership_entry()
-                .expect("membership control")
-        )
-        .is_ok());
-}
-
 fn merge_cut_reference(
     stream_byte: u8,
     sequence: u64,
@@ -222,7 +137,7 @@ fn merge_cut_reference(
     (
         stream,
         StoreBatchCommitRef {
-            coord: StoreCommitCoord::MergeConcurrent {
+            coord: StoreCommitCoord {
                 stream_id: stream,
                 sequence,
             },
@@ -239,7 +154,7 @@ fn terminal_ref(fixture: &Fixture, identity_byte: u8) -> StoreDeviceTerminalRef 
     StoreDeviceTerminalRef::SelfRetirement(StoreDeviceSelfRetirementRef {
         candidate_family: fixture.commit.candidate_family(),
         target: fixture.registration_ref.clone(),
-        retiring_cut: StoreHistoryCut::MergeConcurrent(BTreeMap::new()),
+        retiring_cut: StoreHistoryCut(BTreeMap::new()),
         retirement_hash: ObjectHash::digest(&[identity_byte]),
         object: exact(
             format!("test/terminal/{identity_byte}.json"),
@@ -254,7 +169,7 @@ fn inactive_status(
 ) -> StoreDeviceStatus {
     StoreDeviceStatus::Inactive {
         terminals,
-        accepted_cut: StoreHistoryCut::MergeConcurrent(cut.into_iter().collect()),
+        accepted_cut: StoreHistoryCut(cut.into_iter().collect()),
     }
 }
 
@@ -334,8 +249,8 @@ fn acknowledgement_cut_join_remains_componentwise_maximum() {
     let (stream_a, a2) = merge_cut_reference(1, 2, 21);
     let (_, a4) = merge_cut_reference(1, 4, 41);
     let (stream_b, b1) = merge_cut_reference(2, 1, 12);
-    let joined = StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_a, a2)]))
-        .join(StoreHistoryCut::MergeConcurrent(BTreeMap::from([
+    let joined = StoreHistoryCut(BTreeMap::from([(stream_a, a2)]))
+        .join(StoreHistoryCut(BTreeMap::from([
             (stream_a, a4.clone()),
             (stream_b, b1.clone()),
         ])))
@@ -343,7 +258,7 @@ fn acknowledgement_cut_join_remains_componentwise_maximum() {
 
     assert_eq!(
         joined,
-        StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_a, a4), (stream_b, b1),]))
+        StoreHistoryCut(BTreeMap::from([(stream_a, a4), (stream_b, b1),]))
     );
 }
 
@@ -460,7 +375,15 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         &proposal,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        StoreDeviceExclusionProof::Serial,
+        StoreDeviceExclusionProof {
+            frozen_device_state: proposal.frozen_device_state.clone(),
+            remaining_device_acks: Vec::new(),
+            cutoff: fixture
+                .commit
+                .order
+                .predecessor_cut()
+                .expect("derive exclusion cutoff"),
+        },
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -482,7 +405,7 @@ fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
         .commit
         .order
         .predecessor_cut()
-        .expect("Serial predecessor cut");
+        .expect("derive predecessor cut");
     let excluded = pending
         .exclude(exclusion_ref.clone(), accepted_cut.clone())
         .expect("activate device exclusion");
@@ -512,7 +435,9 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
             owner_grant: fixture.root.descriptor.founder_grant.clone(),
         },
         fixture.registration.provider.clone(),
-        StoreCommitAnchor::Serial,
+        DeviceStreamAnchor::StoreAnnouncements {
+            first_slot: slot("store-v1/announcements/retained/1.json".to_string()),
+        },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: slot("store-v1/acks/retained/1.json".to_string()),
         },
@@ -567,7 +492,10 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
         fixture.commit.order.clone(),
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        StoreOperationMembershipAuthority::Serial,
+        fixture
+            .commit
+            .operations_membership_authority()
+            .expect("fixture carries membership authority"),
         vec![activated],
         &device_signer,
     )
@@ -670,7 +598,10 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         fixture.commit.order.clone(),
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        StoreOperationMembershipAuthority::Serial,
+        fixture
+            .commit
+            .operations_membership_authority()
+            .expect("fixture carries membership authority"),
         vec![proposal_ref.clone()],
         Vec::new(),
         &device_signer,
@@ -704,7 +635,15 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         &proposal,
         fixture.registration_ref.clone(),
         &fixture.registration,
-        StoreDeviceExclusionProof::Serial,
+        StoreDeviceExclusionProof {
+            frozen_device_state: proposal.frozen_device_state.clone(),
+            remaining_device_acks: Vec::new(),
+            cutoff: fixture
+                .commit
+                .order
+                .predecessor_cut()
+                .expect("derive exclusion cutoff"),
+        },
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -735,7 +674,10 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         fixture.commit.order.clone(),
         fixture.commit.membership_state.clone(),
         fixture.commit.device_state.clone(),
-        StoreOperationMembershipAuthority::Serial,
+        fixture
+            .commit
+            .operations_membership_authority()
+            .expect("fixture carries membership authority"),
         Vec::new(),
         vec![outcome_ref],
         &device_signer,

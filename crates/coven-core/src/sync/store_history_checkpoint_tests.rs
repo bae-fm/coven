@@ -24,7 +24,7 @@ async fn publish_note(
     )
     .await;
     assert!(
-        super::store_engine::merge::preparation::prepare_store_write(
+        super::store_engine::engine::preparation::prepare_store_write(
             db,
             &store.storage,
             device_id,
@@ -38,7 +38,7 @@ async fn publish_note(
         "host write produces a prepared Store commit",
     );
     assert_eq!(
-        super::store_engine::merge::publication::drain_store_writes(db, &store.storage)
+        super::store_engine::engine::publication::drain_store_writes(db, &store.storage)
             .await
             .expect("publish Merge Store write"),
         1,
@@ -167,7 +167,7 @@ async fn prepare_sabotaged_successor(
                  '0000000002000-0000-history', '2026-07-21')",
     )
     .await;
-    match super::store_engine::merge::preparation::prepare_store_write(
+    match super::store_engine::engine::preparation::prepare_store_write(
         db,
         &store.storage,
         device_id,
@@ -179,10 +179,12 @@ async fn prepare_sabotaged_successor(
     .await
     {
         Err(error) => error.to_string(),
-        Ok(true) => super::store_engine::merge::publication::drain_store_writes(db, &store.storage)
-            .await
-            .expect_err("checkpoint sabotage must fail before remote publication")
-            .to_string(),
+        Ok(true) => {
+            super::store_engine::engine::publication::drain_store_writes(db, &store.storage)
+                .await
+                .expect_err("checkpoint sabotage must fail before remote publication")
+                .to_string()
+        }
         Ok(false) => panic!("sabotaged host write produced no pending Store write"),
     }
 }
@@ -238,15 +240,8 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
         .await
         .expect("load retained history");
     let reference = retained[0].commit_ref().clone();
-    let (stream_id, sequence) = match reference.coord {
-        crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
-            stream_id,
-            sequence,
-        } => (stream_id.to_string(), sequence),
-        crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-            panic!("Merge fixture produced Serial history")
-        }
-    };
+    let stream_id = reference.coord.stream_id.to_string();
+    let sequence = reference.coord.sequence;
     db.call(move |conn| {
         conn.pragma_update(None, "foreign_keys", "OFF")
             .map_err(crate::database::DbError::from)?;
@@ -460,7 +455,6 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 async fn signed_head_rejects_an_omitted_acknowledgement() {
     let (db, store, _device_id, _membership, _temp, _store_dir) = published_history(1).await;
     let coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
@@ -665,7 +659,6 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         .await
         .expect("create checkpoint snapshot image");
     let coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
             .await
             .expect("load snapshot coverage"),
@@ -677,7 +670,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         image,
         coverage,
         &store.signer,
-        Some(&membership),
+        &membership,
         &db,
     )
     .await
@@ -698,11 +691,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     .await
     .expect("load snapshot author");
     let mut forged = meta;
-    let crate::sync::store_commit::StoreSnapshotHistorySummary::MergeConcurrent(summary) =
-        &mut forged.history_summary
-    else {
-        panic!("Merge snapshot carries Serial history")
-    };
+    let summary = &mut forged.history_summary;
     let removal = summary
         .membership_proofs
         .iter()
@@ -795,14 +784,13 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         .checked_add(1)
         .expect("test sequence advances");
     let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
-        crate::WritePolicy::MergeConcurrent,
         db.materialized_frontier()
             .await
             .expect("load materialized frontier"),
     )
-    .and_then(|frontier| frontier.merge_commits().cloned())
+    .map(|frontier| frontier.commits().clone())
     .expect("derive Merge dependencies");
-    let order = crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
+    let order = crate::sync::store_commit::StoreCommitOrder {
         seq,
         predecessor: previous,
         dependencies,
@@ -813,7 +801,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             .expect("load local Store authority");
 
     store.home.clear_exact_reads();
-    crate::sync::store_engine::merge::pull::load_merge_conflict_resolution_authorization(
+    crate::sync::store_engine::engine::pull::load_merge_conflict_resolution_authorization(
         &db,
         &store.storage,
         &root,

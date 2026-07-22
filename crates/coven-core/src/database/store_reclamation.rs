@@ -80,15 +80,10 @@ impl Database {
             }
             for owner in remote.retained_replay_owners() {
                 let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-                let StoreCommitCoord::MergeConcurrent {
+                let StoreCommitCoord {
                     stream_id,
                     sequence,
-                } = &commit.coord
-                else {
-                    return Err(DbError::Message(format!(
-                        "Store package {object_id} has a Serial retained-replay owner"
-                    )));
-                };
+                } = &commit.coord;
                 Self::load_retained_merge_materialization_on(
                     conn,
                     &stream_id.to_string(),
@@ -282,18 +277,9 @@ impl Database {
                 ));
             }
             let next_candidate = next.candidate().expect("constructed candidate state");
-            match (
-                current_candidate.merge_head_ref(),
-                next_candidate.merge_head_ref(),
-            ) {
-                (Some(current), Some(replacement)) if current != replacement => {
-                    let (winner, prepared) =
-                        next_candidate.merge_publication().ok_or_else(|| {
-                            DbError::Message(
-                                "replacement Merge reclaim candidate has no signed head"
-                                    .to_string(),
-                            )
-                        })?;
+            match (current_candidate.head_ref(), next_candidate.head_ref()) {
+                (current, replacement) if current != replacement => {
+                    let (winner, prepared) = next_candidate.publication();
                     replace_prepared_merge_head_remote_on(
                         &tx,
                         &current.object,
@@ -302,12 +288,7 @@ impl Database {
                         &current_candidate.reference,
                     )?;
                 }
-                (None, None) | (Some(_), Some(_)) => {}
-                _ => {
-                    return Err(DbError::Message(
-                        "replacement reclaim candidate changes Store write policy".to_string(),
-                    ));
-                }
+                _ => {}
             }
             update_store_reclaim_operation_on(&tx, &expected, &next)?;
             tx.commit().map_err(DbError::from)?;
@@ -432,18 +413,17 @@ impl Database {
                     ));
                 }
             }
-            if let Some(head) = losing_candidate.merge_head_ref() {
-                if begin_remote_candidate_nonactivation_on(
-                    &tx,
-                    remote_object_id(&head.object),
-                    nonactivation.clone(),
-                )?
-                .is_some()
-                {
-                    return Err(DbError::Message(
-                        "losing reclaim activation head became a deletion target".to_string(),
-                    ));
-                }
+            let head = losing_candidate.head_ref();
+            if begin_remote_candidate_nonactivation_on(
+                &tx,
+                remote_object_id(&head.object),
+                nonactivation.clone(),
+            )?
+            .is_some()
+            {
+                return Err(DbError::Message(
+                    "losing reclaim activation head became a deletion target".to_string(),
+                ));
             }
             if begin_remote_candidate_nonactivation_on(
                 &tx,

@@ -224,14 +224,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
         .publish_changeset("dev-a", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish remote changeset");
-    let expected_stream = match expected_commit.coord {
-        crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-            stream_id.to_string()
-        }
-        crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-            panic!("test Store must use MergeConcurrent commits")
-        }
-    };
+    let expected_stream = expected_commit.coord.stream_id.to_string();
 
     let local_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), || 1_000));
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
@@ -258,7 +251,6 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 write_id,
                 |tx| {
@@ -385,7 +377,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
     assert!(
-        crate::sync::store_engine::merge::preparation::prepare_store_write(
+        crate::sync::store_engine::engine::preparation::prepare_store_write(
             &member_db,
             &storage.storage,
             &member_device_id,
@@ -401,9 +393,12 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    crate::sync::store_engine::merge::publication::drain_store_writes(&member_db, &storage.storage)
-        .await
-        .expect("publish member commit while grant is active");
+    crate::sync::store_engine::engine::publication::drain_store_writes(
+        &member_db,
+        &storage.storage,
+    )
+    .await
+    .expect("publish member commit while grant is active");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
@@ -444,8 +439,7 @@ async fn register_seeds_from_persisted_high_water() {
         &path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "dev-a".to_string(),
         &migrations,
     )
@@ -460,8 +454,7 @@ async fn register_seeds_from_persisted_high_water() {
         &path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::new("dev-a".into())),
         &migrations,
     )
@@ -596,8 +589,7 @@ async fn returned_stamper_shares_seeded_clock() {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
         &migrations,
     )
@@ -766,8 +758,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "dev-self".to_string(),
         &migrations,
     )

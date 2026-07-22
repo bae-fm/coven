@@ -47,14 +47,14 @@ pub enum SyncLoopError {
 }
 
 /// A sync-loop status the host renders. The loop reports provider reachability,
-/// publication, and one terminal status. [`Conflict`](Self::Conflict)
-/// and [`Blocked`](Self::Blocked) are successful storage cycles with unresolved
-/// durable writes; [`Synchronized`](Self::Synchronized) has none, while
+/// publication, and one terminal status. [`Blocked`](Self::Blocked) is a
+/// successful storage cycle with unresolved durable writes;
+/// [`Synchronized`](Self::Synchronized) has none, while
 /// [`Failed`](Self::Failed) means the cycle itself failed. The in-progress marker
 /// is the variant itself, so there is no separate "syncing" flag.
 ///
 /// A whole-cycle failure is `Failed`; an otherwise-successful cycle carries its
-/// [`SyncLoopSuccess`] in `Synchronized`, `Conflict`, or `Blocked`. Warnings ride in
+/// [`SyncLoopSuccess`] in `Synchronized` or `Blocked`. Warnings ride in
 /// [`SyncLoopSuccess::alerts`].
 ///
 /// A subscription immediately exposes the current value. Intermediate values may
@@ -72,12 +72,6 @@ pub enum SyncLoopStatus {
     /// The cycle completed. Warnings, if any, ride in the success's `alerts`;
     /// the observed device activity and applied row changes are on it too.
     Synchronized(SyncLoopSuccess),
-    /// The cycle reached storage, but the Serial branch was based on
-    /// an older global head and require explicit discard or replacement.
-    Conflict {
-        success: SyncLoopSuccess,
-        branch: crate::PendingBranch,
-    },
     /// The cycle reached storage, but one or more writes cannot publish until
     /// their named prerequisite is supplied or repaired.
     Blocked {
@@ -555,13 +549,6 @@ async fn current_success_status(
     db: &crate::database::Database,
     success: SyncLoopSuccess,
 ) -> Result<SyncLoopStatus, String> {
-    let branches = db
-        .pending_branches()
-        .await
-        .map_err(|error| format!("read pending Serial branches after sync: {error}"))?;
-    if let Some(branch) = branches {
-        return Ok(SyncLoopStatus::Conflict { success, branch });
-    }
     let writes: Vec<_> = db
         .pending_writes()
         .await
@@ -636,8 +623,7 @@ mod tests {
             std::path::Path::new(":memory:"),
             Vec::new(),
             chrono::Duration::days(30),
-            coven_core::blob::TransferLimits::serial(),
-            crate::WritePolicy::Serial,
+            coven_core::blob::TransferLimits::one_at_a_time(),
             "status-test".to_string(),
             &[],
         )
@@ -648,10 +634,9 @@ mod tests {
     async fn insert_write_status(
         db: &crate::database::Database,
         write_id: &'static str,
-        branch_id: &'static str,
         status: crate::WriteStatus,
     ) {
-        let base = format!(r#"{{"serial":{{"branch_id":"{branch_id}","base":null}}}}"#);
+        let base = serde_json::json!({ "dependencies": {} }).to_string();
         let status = serde_json::to_string(&status).expect("serialize durable write status");
         db.call(move |conn| {
             conn.execute(
@@ -668,11 +653,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_cycle_projects_durable_blocked_and_conflict_states() {
+    async fn successful_cycle_projects_durable_blocked_state() {
         let db = database();
         insert_write_status(
             &db,
-            "blocked-write",
             "blocked-write",
             crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
                 namespace: "audio".to_string(),
@@ -699,52 +683,11 @@ mod tests {
         .await
         .expect("remove blocked projection fixture");
 
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            "status-test",
-            crate::keys::UserKeypair::generate(),
-        )
-        .await
-        .expect("create exact Serial status test Store");
-        let founder_registration = db
-            .call(|conn| {
-                let encoded: String = conn
-                    .query_row(
-                        "SELECT registration_object FROM store_device_registration_activations",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::DbError::from)?;
-                serde_json::from_str(&encoded)
-                    .map_err(|error| crate::DbError::Message(error.to_string()))
-            })
-            .await
-            .expect("read exact founder registration reference");
-        let genesis = crate::StoreSerialPredecessor::Genesis {
-            root: store.root.clone(),
-            founder_registration,
-        };
-        let branch_id =
-            serde_json::from_str(r#""branch-write""#).expect("parse test pending branch identity");
-
-        insert_write_status(
-            &db,
-            "branch-write",
-            "branch-write",
-            crate::WriteStatus::Conflict(Box::new(crate::SerializationConflict {
-                branch_id,
-                base: genesis.clone(),
-                current: genesis,
-            })),
-        )
-        .await;
-        let conflict = current_success_status(&db, success())
-            .await
-            .expect("project conflict state");
         assert!(matches!(
-            conflict,
-            SyncLoopStatus::Conflict { branch, .. }
-                if branch.branch_id.first_write_id().as_str() == "branch-write"
+            current_success_status(&db, success())
+                .await
+                .expect("project synchronized state"),
+            SyncLoopStatus::Synchronized(_)
         ));
     }
 }

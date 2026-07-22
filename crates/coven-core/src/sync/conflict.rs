@@ -77,10 +77,9 @@ impl TableSchema {
         conn: &Connection,
         synced_tables: &[SyncedTable],
         gates: &super::gate::Gates,
-        write_policy: crate::WritePolicy,
     ) -> Result<Self, DbError> {
         let mut tables = synced_tables.to_vec();
-        if write_policy == crate::WritePolicy::MergeConcurrent && gates.has_scoped_graph() {
+        if gates.has_scoped_graph() {
             for table in ["_coven_audience", "_coven_row_routes"] {
                 tables.push(SyncedTable::new(
                     table,

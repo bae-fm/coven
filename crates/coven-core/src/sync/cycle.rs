@@ -8,11 +8,7 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
-#[cfg(test)]
-use std::future::Future;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::pin::Pin;
 use std::str::FromStr;
 
 use tracing::{debug, info, warn};
@@ -32,7 +28,7 @@ use super::hlc::Hlc;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
-use super::store_engine::{AuthorizedStoreEngine, PostPullStoreEngine, StoreEngine};
+use super::store_engine::{AuthorizedStoreEngine, StoreEngine};
 use super::store_pull::HeldStorePosition;
 
 /// Result of a single sync cycle.
@@ -132,9 +128,6 @@ fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> 
                             | crate::storage::cloud::CloudHomeError::Io(_)
                     )
                 })
-            || source
-                .downcast_ref::<super::storage::CoordinationError>()
-                .is_some_and(|error| matches!(error, super::storage::CoordinationError::Storage(_)))
         {
             return true;
         }
@@ -176,15 +169,6 @@ mod sync_cycle_failure_tests {
         );
 
         assert!(!SyncCycleFailure::operation("register", error).is_offline());
-    }
-
-    #[test]
-    fn unavailable_coordination_is_failed() {
-        let error = super::super::storage::CoordinationError::Unavailable(
-            "provider has no coordination capability".to_string(),
-        );
-
-        assert!(!SyncCycleFailure::operation("coordinate", error).is_offline());
     }
 }
 
@@ -367,7 +351,6 @@ async fn capture_snapshot_cut(
     temp_dir: PathBuf,
     tables: Vec<super::session::SyncedTable>,
 ) -> Result<SnapshotCut, DbError> {
-    let write_policy = db.write_policy();
     db.call(move |conn| {
         let pending: i64 = conn
             .query_row(
@@ -388,7 +371,6 @@ async fn capture_snapshot_cut(
         let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
             .map_err(|e| DbError::Message(e.to_string()))?;
         let coverage = super::store_commit::CommitFrontier::from_refs(
-            write_policy,
             Database::materialized_frontier_on(conn, None)?,
         )
         .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
@@ -421,7 +403,7 @@ pub(crate) async fn run_single_sync_cycle(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = StoreEngine::authorize_borrowed(storage, None, db).await?;
+    let authorization = StoreEngine::authorize_borrowed(storage, db).await?;
     Box::pin(run_single_sync_cycle_with_authorization(
         device_id,
         hlc,
@@ -437,43 +419,6 @@ pub(crate) async fn run_single_sync_cycle(
         authorization,
     ))
     .await
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) async fn run_single_sync_cycle_with_coordination(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    device_id: &str,
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
-    db: &Database,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    user_keypair: &UserKeypair,
-    custody: Option<&dyn MasterKeyCustody>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = StoreEngine::authorize_borrowed(storage, serial_coordination, db).await?;
-    let cycle_future: Pin<Box<dyn Future<Output = _> + Send + '_>> =
-        Box::pin(run_single_sync_cycle_with_authorization(
-            device_id,
-            hlc,
-            clock,
-            cipher,
-            pending_rotation,
-            user_keypair,
-            custody,
-            routing_encryption,
-            store_dir,
-            cloud_home,
-            observer,
-            authorization,
-        ));
-    cycle_future.await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -519,14 +464,14 @@ async fn run_single_sync_cycle_with_authorization(
         user_keypair,
         store_dir,
         &authorization,
-        &post_pull,
+        post_pull,
         prepared,
         store_pull,
     ))
     .await?;
     if completed.rotation_pending.is_none() {
         Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
-        Box::pin(reclaim_cycle_packages(device_id, user_keypair, &post_pull)).await?;
+        Box::pin(reclaim_cycle_packages(device_id, user_keypair, post_pull)).await?;
     }
     let core_status = super::status::build_sync_status(
         &completed.store_pull.visible_heads,
@@ -762,7 +707,7 @@ async fn complete_cycle_after_pull(
     user_keypair: &UserKeypair,
     store_dir: &StoreDir,
     authorization: &AuthorizedStoreEngine<'_>,
-    post_pull: &PostPullStoreEngine<'_, '_>,
+    post_pull: &AuthorizedStoreEngine<'_>,
     prepared: PreparedCycle,
     store_pull: super::store_pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
@@ -778,10 +723,8 @@ async fn complete_cycle_after_pull(
     } = prepared;
     let tables = db.synced_tables();
 
-    // A Serial registration appends to the exact global predecessor. Materialize
-    // the selected global prefix first so the registration commit and its durable
-    // predecessor enter one continuous local chain. The same pull also installs
-    // the membership state that decides whether this active member may register.
+    // Pull installs the membership state that decides whether this active member
+    // may register before registration is ensured.
     if rotation_pending.is_none() {
         authorization.ensure_active_registration().await?;
     }
@@ -868,11 +811,8 @@ async fn complete_cycle_after_pull(
         // exactly the kind of new cloud content the pending rotation must block.
         false
     } else if snapshot_due {
-        // Judge against the policy-shaped post-pull membership authority using the
-        // same current-Owner rule as readers. Merge retains the chain verified at
-        // cycle authorization; Serial uses the authorization materialized by this
-        // pull. Loading either authority fails the cycle, while a verified non-owner
-        // skips the snapshot.
+        // Judge against the post-pull membership authority using the same
+        // current-Owner rule as readers. A verified non-owner skips the snapshot.
         let our_pk = hex::encode(user_keypair.public_key());
         let authorized = post_pull.may_author_snapshot(&our_pk);
         match authorized {
@@ -929,7 +869,7 @@ async fn complete_cycle_after_pull(
 async fn reclaim_cycle_packages(
     device_id: &str,
     user_keypair: &UserKeypair,
-    post_pull: &PostPullStoreEngine<'_, '_>,
+    post_pull: &AuthorizedStoreEngine<'_>,
 ) -> Result<(), SyncCycleFailure> {
     match post_pull.reclaim_packages(device_id, user_keypair).await {
         Ok(result) if result.packages_deleted > 0 => info!(
@@ -994,8 +934,8 @@ async fn refresh_authorization_state(
         return Ok(());
     }
 
-    // Adopt every exact wrapped-key ref selected by current membership or Serial
-    // commit authority. Each ref binds its semantic path and bytes; the value's
+    // Adopt every exact wrapped-key ref selected by current membership authority.
+    // Each ref binds its semantic path and bytes; the value's
     // signature binds the Store, recipient, generation, author, and sealed keyring.
     // A new key is persisted and installed through `apply_key_rotation`, so this
     // same cycle's push, pull, and blob operations use it.
@@ -1132,12 +1072,8 @@ pub async fn init_sync_over_storage(
     if db.synced_tables().is_empty() {
         return Err(InitSyncError::NoSyncedTables);
     }
-    Database::validate_store_write_routing(
-        db.gates().as_ref(),
-        db.write_policy(),
-        routing_encryption.as_ref(),
-    )
-    .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
+    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())
+        .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
 
     let cipher = storage.cipher_state().clone();
     let cipher_is_plaintext = cipher.is_plaintext();
@@ -1176,29 +1112,15 @@ pub async fn init_sync_over_storage(
                 "opened Store root has no durable exact reference".to_string(),
             )
         })?;
-    match store_protocol_root.descriptor.write_policy {
-        crate::WritePolicy::MergeConcurrent => {
-            ensure_owner_anchored_chain(
-                &storage,
-                db,
-                &store_root_ref,
-                &store_protocol_root,
-                &user_keypair,
-            )
-            .await
-            .map_err(InitSyncError::MembershipAnchor)?;
-        }
-        crate::WritePolicy::Serial => {
-            ensure_serial_founder_authorization(
-                &storage,
-                db,
-                &store_root_ref,
-                &store_protocol_root,
-            )
-            .await
-            .map_err(InitSyncError::MembershipAnchor)?;
-        }
-    }
+    ensure_owner_anchored_chain(
+        &storage,
+        db,
+        &store_root_ref,
+        &store_protocol_root,
+        &user_keypair,
+    )
+    .await
+    .map_err(InitSyncError::MembershipAnchor)?;
 
     // Restore any durably-recorded pending rotation into this connection's marker
     // before the first cycle seals anything, so a restart that interrupted an
@@ -1258,84 +1180,6 @@ pub async fn init_sync_over_storage(
     })
 }
 
-pub(crate) async fn ensure_serial_founder_authorization(
-    storage: &dyn super::storage::SyncStorage,
-    db: &Database,
-    root_ref: &super::store_commit::StoreRootRef,
-    root: &super::store_commit::StoreProtocolRoot,
-) -> Result<(), String> {
-    let pinned = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(|error| format!("read pinned Serial founder: {error}"))?;
-    if pinned
-        .as_ref()
-        .is_some_and(|founder| founder != &root.descriptor.founder_pubkey)
-    {
-        return Err(format!(
-            "pinned Serial founder {:?} does not match Store root founder {:?}",
-            pinned.as_deref(),
-            root.descriptor.founder_pubkey
-        ));
-    }
-    let authorization = db
-        .serial_authorization_state()
-        .await
-        .map_err(|error| format!("read Serial authorization state: {error}"))?;
-    match (pinned, authorization) {
-        (Some(_), Some(authorization)) => {
-            if authorization.membership.store_root_hash() != root.object_hash() {
-                return Err("Serial membership state belongs to another Store root".to_string());
-            }
-            Ok(())
-        }
-        (None, None) => {
-            let founder = super::store_objects::load_founder_registration(storage, root_ref)
-                .await
-                .map_err(|error| error.to_string())?;
-            let founder_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
-                &founder.value,
-                founder.object.clone(),
-            );
-            let authorization = super::membership::SerialAuthorizationState::from_founder(
-                root_ref,
-                root,
-                &founder_ref,
-                &founder.value,
-            )
-            .map_err(|error| error.to_string())?;
-            let genesis = super::store_commit::ResolvedStoreDeviceState::founder(
-                root_ref,
-                founder_ref.clone(),
-                &root.descriptor.founder_pubkey,
-                root.descriptor.founder_grant.clone(),
-                &root.descriptor.founder_recovery,
-            )
-            .map_err(|error| error.to_string())?;
-            db.install_store_owner_anchor(
-                root_ref.clone(),
-                founder_ref,
-                founder.value,
-                founder.bytes,
-                genesis,
-                root.descriptor.founder_pubkey.clone(),
-                crate::database::InitialStoreMembershipAuthority::Serial { authorization },
-            )
-            .await
-            .map_err(|error| error.to_string())
-        }
-        _ => Err("Serial founder pin and authorization are only valid together".to_string()),
-    }
-}
-
-/// Establish or verify the owner-anchored membership chain for a store.
-/// Returns once the chain is established and verified, or an error to abort sync.
-///
-/// Cloud publication and the local trust transaction cannot be one transaction,
-/// so this completes an interrupted own founder publication idempotently. A
-/// founder entry without its signed head is uncommitted; a committed own founder
-/// is validated before the owner and complete head floor are recorded together.
-/// A committed chain founded by a different key is never adopted.
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
     db: &Database,

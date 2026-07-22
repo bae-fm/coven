@@ -14,32 +14,6 @@ pub(super) fn load_store_device_genesis_state_on(
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }
 
-pub(crate) fn store_serial_predecessor_on(
-    conn: &Connection,
-    commit: Option<&StoreBatchCommitRef>,
-) -> Result<StoreSerialPredecessor, DbError> {
-    if let Some(commit) = commit {
-        return Ok(StoreSerialPredecessor::Commit(commit.clone()));
-    }
-    let root = required_store_root_authority_on(conn)?;
-    let genesis = load_store_device_genesis_state_on(conn)?;
-    let mut devices = genesis.devices.values();
-    let Some(founder) = devices.next() else {
-        return Err(DbError::Message(
-            "Serial genesis must contain exactly one founder registration".to_string(),
-        ));
-    };
-    if devices.next().is_some() {
-        return Err(DbError::Message(
-            "Serial genesis must contain exactly one founder registration".to_string(),
-        ));
-    }
-    Ok(StoreSerialPredecessor::Genesis {
-        root,
-        founder_registration: founder.registration.clone(),
-    })
-}
-
 pub(super) fn load_store_device_snapshot_on(
     conn: &Connection,
     reference: &StoreBatchCommitRef,
@@ -66,67 +40,39 @@ pub(super) fn store_device_state_for_history_cut_on(
     cut: &crate::sync::store_commit::StoreHistoryCut,
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
     let genesis = load_store_device_genesis_state_on(conn)?;
-    match cut {
-        crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(frontier) => {
-            let state = if frontier.is_empty() {
-                genesis
-            } else {
-                ResolvedStoreDeviceState::merge(
-                    frontier
-                        .values()
-                        .map(|reference| load_store_device_snapshot_on(conn, reference))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?
-            };
-            let reference = StoreDeviceStateRef::merge_concurrent(
-                CommitFrontier::MergeConcurrent(frontier.clone()),
-                &state,
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?;
-            Ok((reference, state))
-        }
-        crate::sync::store_commit::StoreHistoryCut::Serial(position) => {
-            let state = match position {
-                StoreSerialPredecessor::Genesis { .. } => genesis,
-                StoreSerialPredecessor::Commit(reference) => {
-                    load_store_device_snapshot_on(conn, reference)?
-                }
-            };
-            let reference = StoreDeviceStateRef::serial(position.clone(), &state)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-            Ok((reference, state))
-        }
-    }
+    let frontier = &cut.0;
+    let state = if frontier.is_empty() {
+        genesis
+    } else {
+        ResolvedStoreDeviceState::merge(
+            frontier
+                .values()
+                .map(|reference| load_store_device_snapshot_on(conn, reference))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?
+    };
+    let reference = StoreDeviceStateRef::from_resolved(CommitFrontier(frontier.clone()), &state)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    Ok((reference, state))
 }
 
 pub(super) fn load_declared_store_device_state_on(
     conn: &Connection,
     reference: &StoreDeviceStateRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
-    let state = match reference {
-        StoreDeviceStateRef::MergeConcurrent { frontier, .. } => {
-            let CommitFrontier::MergeConcurrent(frontier) = frontier else {
-                return Err(DbError::Message(
-                    "Merge device state carries a Serial frontier".into(),
-                ));
-            };
-            if frontier.is_empty() {
-                load_store_device_genesis_state_on(conn)?
-            } else {
-                ResolvedStoreDeviceState::merge(
-                    frontier
-                        .values()
-                        .map(|commit| load_store_device_snapshot_on(conn, commit))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?
-            }
-        }
-        StoreDeviceStateRef::Serial { position, .. } => match position {
-            StoreSerialPredecessor::Genesis { .. } => load_store_device_genesis_state_on(conn)?,
-            StoreSerialPredecessor::Commit(commit) => load_store_device_snapshot_on(conn, commit)?,
-        },
+    let frontier = reference.frontier();
+    let state = if frontier.0.is_empty() {
+        load_store_device_genesis_state_on(conn)?
+    } else {
+        ResolvedStoreDeviceState::merge(
+            frontier
+                .0
+                .values()
+                .map(|commit| load_store_device_snapshot_on(conn, commit))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?
     };
     if state.state_hash != reference.state_hash() || state.recovery != reference.recovery() {
         return Err(DbError::Message(
@@ -173,11 +119,7 @@ pub(super) fn load_store_device_exclusion_freezes_on(
         let target_cut: StoreHistoryCut = serde_json::from_str(&target_cut).map_err(|error| {
             DbError::Message(format!("stored device exclusion target cut: {error}"))
         })?;
-        let StoreHistoryCut::MergeConcurrent(target_frontier) = &target_cut else {
-            return Err(DbError::Message(
-                "stored device exclusion freeze carries a Serial target cut".to_string(),
-            ));
-        };
+        let target_frontier = &target_cut.0;
         let target_stream =
             crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
@@ -207,20 +149,10 @@ pub(super) fn load_store_device_exclusion_freezes_on(
 pub(super) fn apply_store_device_exclusion_freezes_on(
     conn: &Connection,
     root: &crate::sync::store_commit::StoreRootRef,
-    policy: WritePolicy,
     state: &ResolvedStoreDeviceState,
     operations: &VerifiedStoreDeviceOperations,
 ) -> Result<(), DbError> {
     let existing = load_store_device_exclusion_freezes_on(conn, root)?;
-
-    if policy == WritePolicy::Serial {
-        if !existing.is_empty() {
-            return Err(DbError::Message(
-                "Serial Store contains Merge device exclusion freezes".to_string(),
-            ));
-        }
-        return Ok(());
-    }
 
     let mut desired = Vec::with_capacity(existing.len() + operations.proposals().len());
     for freeze in existing.into_values() {
@@ -283,7 +215,7 @@ pub(super) fn apply_store_device_exclusion_freezes_on(
             let target = Database::latest_position_for_device_on(conn, &target_stream.to_string())?;
             desired.push(StoreDeviceProposalAck {
                 proposal: reference.clone(),
-                target_cut: StoreHistoryCut::MergeConcurrent(match target {
+                target_cut: StoreHistoryCut(match target {
                     Some(reference) => BTreeMap::from([(target_stream, reference)]),
                     None => BTreeMap::new(),
                 }),

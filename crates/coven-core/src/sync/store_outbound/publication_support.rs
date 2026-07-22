@@ -4,15 +4,8 @@ pub(crate) fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteB
     match error {
         StoreOutboundError::Database(_)
         | StoreOutboundError::BlobStorage { .. }
-        | StoreOutboundError::Coordination(_)
         | StoreOutboundError::CandidateCleanup(_) => None,
-        StoreOutboundError::MissingSerialCoordination => {
-            Some(crate::WriteBlock::InvalidProtocolState {
-                reason: error.to_string(),
-            })
-        }
-        StoreOutboundError::SerialControlConflict { .. }
-        | StoreOutboundError::MergeAnnouncementOccupied { .. } => {
+        StoreOutboundError::MergeAnnouncementOccupied { .. } => {
             Some(crate::WriteBlock::InvalidProtocolState {
                 reason: error.to_string(),
             })
@@ -106,15 +99,8 @@ pub(crate) async fn publish_prepared_remote_objects(
                     remote.bytes().canonical_semantic_bytes(),
                 )
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-                let (stream_id, sequence) = match package.commit_coord() {
-                    StoreCommitCoord::MergeConcurrent {
-                        stream_id,
-                        sequence,
-                    } => (stream_id.to_string(), *sequence),
-                    StoreCommitCoord::Serial { sequence } => {
-                        (SERIAL_STREAM_ID.to_string(), *sequence)
-                    }
-                };
+                let stream_id = package.commit_coord().stream_id.to_string();
+                let sequence = package.commit_coord().sequence;
                 let (context, prefix) = match package.audience() {
                     super::audience_package::PackageAudience::Store => (
                         ProtocolObjectContext::store_encrypted(

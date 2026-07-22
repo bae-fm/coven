@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::storage::cloud::{CloudHeadVersion, ObjectSlot};
+use crate::storage::cloud::ObjectSlot;
 use crate::sync::store_commit::ObjectHash;
 
 /// Signed object kind bound into protection AAD and checked against the
@@ -385,10 +385,6 @@ impl ProtectedObjectDomain {
                         component_count: 9,
                         fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "heads")],
                     },
-                    ExactPathShape {
-                        component_count: 6,
-                        fixed_components: &[(0, "circle-control"), (2, "serial")],
-                    },
                 ]),
                 extension: ".json",
             },
@@ -695,47 +691,6 @@ impl ProtocolObjectContext {
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionToken(CloudHeadVersion);
-
-impl VersionToken {
-    pub(crate) fn from_cloud(version: CloudHeadVersion) -> Self {
-        Self(version)
-    }
-
-    pub(crate) fn cloud(&self) -> &CloudHeadVersion {
-        &self.0
-    }
-}
-
-impl serde::Serialize for VersionToken {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.0.as_provider())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for VersionToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        CloudHeadVersion::from_provider(value)
-            .map(Self)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VersionedObject {
-    pub bytes: Vec<u8>,
-    pub version: VersionToken,
 }
 
 /// Protection selected by the audience authority that prepares a blob spool.
@@ -1141,57 +1096,6 @@ impl PreparedExactObject {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum CoordinationError {
-    #[error("serial coordination is unavailable: {0}")]
-    Unavailable(String),
-    #[error("coordination head not found: {0}")]
-    NotFound(String),
-    #[error("coordination storage failed: {0}")]
-    Storage(String),
-    #[error("coordination storage violated exact readback integrity: {0}")]
-    Integrity(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CreateHeadError {
-    #[error("coordination head already exists")]
-    AlreadyExists,
-    #[error(transparent)]
-    Coordination(#[from] CoordinationError),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ReplaceHeadError {
-    #[error("coordination head version no longer matches")]
-    VersionMismatch,
-    #[error(transparent)]
-    Coordination(#[from] CoordinationError),
-}
-
-/// Mandatory compare-and-swap operations exposed only by eligible adapters.
-#[async_trait]
-pub trait CoordinationStorage: Send + Sync {
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError>;
-
-    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError>;
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, CreateHeadError>;
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &VersionToken,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, ReplaceHeadError>;
-
-    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError>;
-}
-
 /// Error type for storage operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StorageError {
@@ -1581,7 +1485,6 @@ mod tests {
                 valid: &[
                     "circle-control/circle/merge/entries/owner/device/grant/stream/1/hash",
                     "circle-control/circle/merge/heads/owner/device/grant/stream/1",
-                    "circle-control/circle/serial/owner/1/hash",
                 ],
                 cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
             },

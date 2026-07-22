@@ -114,9 +114,7 @@ pub struct RestoreCode {
     pub provider: CloudHomeJoinInfo,
     pub store_root: super::store_commit::StoreRootRef,
     pub founder_pubkey: String,
-    /// The exact membership state the restorer must observe: causal author
-    /// heads for MergeConcurrent stores, or the exact global commit for Serial
-    /// stores.
+    /// The exact causal membership heads the restorer must observe.
     pub membership_floor: MembershipFloor,
     pub authority: RestoreAuthority,
 }
@@ -253,25 +251,11 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     }
     decode_hex_bytes("founder public key", &code.founder_pubkey, 32)
         .map_err(RestoreCodeError::InvalidFounderKey)?;
-    match &code.membership_floor {
-        MembershipFloor::MergeConcurrent(floor) => {
-            if floor.is_empty() {
-                return Err(RestoreCodeError::EmptyMembershipFloor);
-            }
-            super::membership_ops::validate_membership_floor(floor)
-                .map_err(RestoreCodeError::InvalidMembershipFloor)?;
-        }
-        MembershipFloor::Serial(Some(reference)) => {
-            if reference.coord.policy() != crate::WritePolicy::Serial
-                || reference.coord.sequence() == 0
-            {
-                return Err(RestoreCodeError::InvalidMembershipFloor(
-                    "Serial floor must be an exact nonzero Serial commit reference".to_string(),
-                ));
-            }
-        }
-        MembershipFloor::Serial(None) => {}
+    if code.membership_floor.0.is_empty() {
+        return Err(RestoreCodeError::EmptyMembershipFloor);
     }
+    super::membership_ops::validate_membership_floor(&code.membership_floor.0)
+        .map_err(RestoreCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }
 
@@ -358,32 +342,6 @@ mod tests {
         }
     }
 
-    fn test_serial_commit_ref() -> crate::sync::store_commit::StoreBatchCommitRef {
-        let stored = b"restore Serial floor commit";
-        let commit_hash = ObjectHash::digest(b"restore Serial floor semantic bytes");
-        let family = crate::sync::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
-            b"restore Serial floor candidate family",
-        ));
-        crate::sync::store_commit::StoreBatchCommitRef {
-            coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: 7 },
-            commit_hash,
-            object: crate::sync::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!(
-                    "{}.json",
-                    crate::sync::store_commit::commit_semantic_prefix(
-                        family,
-                        crate::sync::store_commit::SERIAL_STREAM_ID,
-                        7,
-                        commit_hash,
-                    )
-                ))
-                .expect("valid test Store-commit slot"),
-                stored.len() as u64,
-                ObjectHash::digest(stored),
-            ),
-        }
-    }
-
     fn test_membership_floor() -> MembershipFloor {
         let coord = MembershipCoord {
             author_pubkey: hex::encode([0xCDu8; 32]),
@@ -393,7 +351,7 @@ mod tests {
             entry_hash: ObjectHash::digest(b"test membership entry"),
         };
         let stored = b"test restore membership head";
-        MembershipFloor::MergeConcurrent(vec![MembershipHeadRef {
+        MembershipFloor(vec![MembershipHeadRef {
             coord,
             head_hash: ObjectHash::digest(b"test restore membership head semantic bytes"),
             object: crate::sync::storage::ExactObjectRef::new(
@@ -491,26 +449,6 @@ mod tests {
             }
             _ => panic!("expected S3 provider"),
         }
-    }
-
-    #[test]
-    fn empty_serial_store_round_trips_the_founder_only_floor() {
-        let mut code = sample_s3_code();
-        code.membership_floor = MembershipFloor::Serial(None);
-        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
-        assert_eq!(decoded.membership_floor, MembershipFloor::Serial(None));
-    }
-
-    #[test]
-    fn serial_store_round_trips_the_exact_commit_floor() {
-        let mut code = sample_s3_code();
-        let reference = test_serial_commit_ref();
-        code.membership_floor = MembershipFloor::Serial(Some(reference.clone()));
-        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
-        assert_eq!(
-            decoded.membership_floor,
-            MembershipFloor::Serial(Some(reference))
-        );
     }
 
     #[test]
@@ -889,7 +827,7 @@ mod tests {
     #[test]
     fn empty_membership_floor_is_refused_at_decode() {
         let mut code = sample_s3_code();
-        code.membership_floor = MembershipFloor::MergeConcurrent(Vec::new());
+        code.membership_floor = MembershipFloor(Vec::new());
         assert!(matches!(
             decode_restore_code(&encode_restore_code(&code)),
             Err(RestoreCodeError::EmptyMembershipFloor)

@@ -55,8 +55,14 @@ fn exact_partition_blob(
 }
 
 fn exact_blob_owner() -> StoreBatchCommitRef {
+    let stream_id = super::super::super::membership::AuthorStreamId::from_digest(
+        ObjectHash::digest(b"exact-ref owner stream"),
+    );
     StoreBatchCommitRef {
-        coord: StoreCommitCoord::Serial { sequence: 1 },
+        coord: StoreCommitCoord {
+            stream_id,
+            sequence: 1,
+        },
         commit_hash: ObjectHash::digest(b"exact-ref owner"),
         object: crate::sync::storage::ExactObjectRef::new(
             crate::storage::cloud::ObjectSlot::logical(
@@ -127,50 +133,6 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
     assert!(conflict.to_string().contains("conflicting spool paths"));
 }
 
-pub(super) struct FailFirstCoordinationRead<'a> {
-    pub(super) inner: &'a dyn CoordinationStorage,
-    pub(super) failed: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl CoordinationStorage for FailFirstCoordinationRead<'_> {
-    async fn provider_binding(
-        &self,
-    ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError> {
-        self.inner.provider_binding().await
-    }
-
-    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-        if !self.failed.swap(true, Ordering::SeqCst) {
-            return Err(CoordinationError::Storage(
-                "injected coordination read failure".to_string(),
-            ));
-        }
-        self.inner.read_head(key).await
-    }
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, CreateHeadError> {
-        self.inner.create_head(key, bytes).await
-    }
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &VersionToken,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, ReplaceHeadError> {
-        self.inner.replace_head(key, expected, bytes).await
-    }
-
-    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-        self.inner.delete_head(key).await
-    }
-}
-
 pub(super) async fn initialize_exact_store(
     db: &Database,
     storage: &CloudSyncStorage,
@@ -217,27 +179,4 @@ pub(super) async fn reinstall_exact_store_root(
     db.install_store_root_authority(root.clone(), verified.bytes)
         .await
         .expect("reinstall exact Store root authority");
-}
-
-pub(super) async fn parse_serial_head(
-    db: &Database,
-    root: ObjectHash,
-    bytes: &[u8],
-) -> StoreSerialHead {
-    let unverified: StoreSerialHead = serde_json::from_slice(bytes).expect("parse Serial head");
-    let registration_ref = match &unverified.state {
-        StoreSerialHeadState::Genesis {
-            founder_registration,
-            ..
-        } => founder_registration,
-        StoreSerialHeadState::Commit {
-            author_registration,
-            ..
-        } => author_registration,
-    };
-    let registration = db
-        .activated_store_device_registration(registration_ref.clone())
-        .await
-        .expect("load Serial head author");
-    StoreSerialHead::parse(bytes, root, &registration).expect("verify Serial head")
 }

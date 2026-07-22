@@ -6,8 +6,7 @@ use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotHistorySummary,
-    StoreSnapshotRef, StoreSnapshotState,
+    StoreProtocolError, StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::keys::UserKeypair;
 
@@ -20,7 +19,7 @@ pub(crate) async fn push_store_snapshot(
     schema_version: u32,
     keypair: &UserKeypair,
     created_at: String,
-    membership: Option<&MembershipChain>,
+    membership: &MembershipChain,
     db: &crate::database::Database,
 ) -> Result<SnapshotMeta, SnapshotError> {
     let _publication = db.lock_snapshot_publication().await;
@@ -49,133 +48,42 @@ pub(crate) async fn push_store_snapshot(
         ));
     }
     let author = registration.author_pubkey.clone();
-    let authorized = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            membership.is_none_or(|chain| chain.is_owner_now(&author))
-        }
-        crate::WritePolicy::Serial => db
-            .serial_authorization_state()
-            .await
-            .map_err(publication_error)?
-            .ok_or_else(|| {
-                SnapshotError::PublicationState(
-                    "Serial snapshot publication has no membership state".to_string(),
-                )
-            })?
-            .membership
-            .is_owner(&author),
-    };
-    if !authorized {
+    if !membership.is_owner_now(&author) {
         return Err(SnapshotError::UnauthorizedAuthor(author));
     }
-    if coverage.policy() != db.write_policy() {
-        return Err(SnapshotError::Parse(format!(
-            "snapshot coverage uses {:?}, database uses {:?}",
-            coverage.policy(),
-            db.write_policy()
-        )));
-    }
-    let history_cut = match &coverage {
-        CommitFrontier::MergeConcurrent(frontier) => {
-            StoreHistoryCut::MergeConcurrent(frontier.clone())
-        }
-        CommitFrontier::Serial(Some(commit)) => {
-            StoreHistoryCut::Serial(StoreSerialPredecessor::Commit(commit.clone()))
-        }
-        CommitFrontier::Serial(None)
-            if matches!(
-                registration.origin,
-                super::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
-            ) =>
-        {
-            StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
-                root: root.clone(),
-                founder_registration: registration_ref.clone(),
-            })
-        }
-        CommitFrontier::Serial(None) => {
-            return Err(SnapshotError::PublicationState(
-                "only the founder registration can publish a Serial genesis snapshot".to_string(),
-            ));
-        }
-    };
+    let history_cut = StoreHistoryCut(coverage.0.clone());
     let (devices, resolved_devices) = db
         .store_device_state_for_history_cut(&history_cut)
         .await
         .map_err(publication_error)?;
-    let membership_state = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let membership = membership.ok_or_else(|| {
-                SnapshotError::PublicationState(
-                    "Merge snapshot publication has no exact membership state".to_string(),
-                )
-            })?;
-            let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
-            else {
-                return Err(SnapshotError::PublicationState(
-                    "Merge snapshot publication requires resolved membership".to_string(),
-                ));
-            };
-            super::circle_control::StoreMembershipStateRef::merge_concurrent(
-                membership.head_refs().to_vec(),
-                membership.resolution_refs().to_vec(),
-                resolved_devices.recovery.clone(),
-                resolved.state_hash,
-            )
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
-        }
-        crate::WritePolicy::Serial => {
-            let authorization = db
-                .serial_authorization_state()
-                .await
-                .map_err(publication_error)?
-                .ok_or_else(|| {
-                    SnapshotError::PublicationState(
-                        "Serial snapshot publication has no authorization state".to_string(),
-                    )
-                })?;
-            super::circle_control::StoreMembershipStateRef::serial(
-                match &history_cut {
-                    StoreHistoryCut::Serial(position) => position.clone(),
-                    StoreHistoryCut::MergeConcurrent(_) => {
-                        return Err(SnapshotError::PublicationState(
-                            "Serial snapshot publication produced a Merge history cut".to_string(),
-                        ));
-                    }
-                },
-                resolved_devices.recovery.clone(),
-                &authorization,
-            )
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
-        }
+    let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+        return Err(SnapshotError::PublicationState(
+            "snapshot publication requires resolved membership".to_string(),
+        ));
     };
+    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        resolved_devices.recovery.clone(),
+        resolved.state_hash,
+    )
+    .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     let state = StoreSnapshotState {
         membership: membership_state,
         devices,
     };
-    let history_summary = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let membership = membership.ok_or_else(|| {
-                SnapshotError::PublicationState(
-                    "Merge snapshot publication has no exact membership state".to_string(),
-                )
-            })?;
-            StoreSnapshotHistorySummary::MergeConcurrent(
-                super::store_engine::merge::pull::prepare_merge_snapshot_history_summary(
-                    db,
-                    &root,
-                    &coverage,
-                    membership,
-                    &resolved_devices,
-                    &registration_ref,
-                    &registration,
-                )
-                .await
-                .map_err(|error| SnapshotError::PublicationState(error.to_string()))?,
-            )
-        }
-        crate::WritePolicy::Serial => StoreSnapshotHistorySummary::Serial,
-    };
+    let history_summary =
+        super::store_engine::engine::pull::prepare_merge_snapshot_history_summary(
+            db,
+            &root,
+            &coverage,
+            membership,
+            &resolved_devices,
+            &registration_ref,
+            &registration,
+        )
+        .await
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     let previous = db
         .latest_local_store_snapshot()
         .await
@@ -785,7 +693,6 @@ pub(crate) struct SelectedStableStoreSnapshot {
 
 pub(crate) async fn select_maximal_stable_store_snapshot(
     storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     root: &StoreRootRef,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
 ) -> Result<Option<SelectedStableStoreSnapshot>, super::store_pull::StorePullError> {
@@ -796,14 +703,7 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     let mut stable = Vec::new();
     let mut maximal_rejection = None;
     for snapshot in candidates {
-        match super::store_engine::verify_store_snapshot_stability(
-            storage,
-            serial_coordination,
-            root,
-            &snapshot,
-        )
-        .await
-        {
+        match super::store_engine::verify_store_snapshot_stability(storage, root, &snapshot).await {
             Ok(stability) => stable.push(SelectedStableStoreSnapshot {
                 snapshot,
                 stability,
@@ -850,14 +750,12 @@ fn publication_error(error: crate::database::DbError) -> SnapshotError {
 
 pub(crate) async fn select_store_snapshot(
     storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
     root: &StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
     binary_schema_version: u32,
 ) -> Result<
     (
         super::store_objects::VerifiedObject<super::store_commit::StoreProtocolRoot>,
-        crate::WritePolicy,
         crate::database::PublishedStoreSnapshot,
         Vec<u8>,
         super::store_pull::VerifiedStoreSnapshotStability,
@@ -873,61 +771,38 @@ pub(crate) async fn select_store_snapshot(
             "Store root differs from bootstrap authority".to_string(),
         ));
     }
-    let registrations = match membership_floor {
-        crate::join_code::MembershipFloor::MergeConcurrent(heads) => {
-            if root_value.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
-                return Err(SnapshotError::UnauthorizedAuthor(
-                    "membership floor does not match Store write policy".to_string(),
-                ));
-            }
-            let mut registrations = std::collections::BTreeMap::new();
-            let mut resolutions = std::collections::BTreeSet::new();
-            for reference in heads {
-                let head =
-                    super::membership_ops::load_exact_membership_head(storage, root, reference)
-                        .await
-                        .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-                resolutions.extend(head.body.resolutions.iter().cloned());
-                let registration = super::store_objects::load_registration_ref(
-                    storage,
-                    root,
-                    &head.body.author_registration,
-                )
-                .await
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?
-                .value;
-                registrations.insert(head.body.author_registration.clone(), registration);
-            }
-            let resolutions = resolutions.into_iter().collect::<Vec<_>>();
-            let membership = super::membership_ops::load_anchored_chain_at_exact_heads(
-                storage,
-                root,
-                &root_value.descriptor.founder_pubkey,
-                heads,
-                &resolutions,
-            )
+    let heads = &membership_floor.0;
+    let mut registrations = std::collections::BTreeMap::new();
+    let mut resolutions = std::collections::BTreeSet::new();
+    for reference in heads {
+        let head = super::membership_ops::load_exact_membership_head(storage, root, reference)
             .await
             .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-            registrations
-                .into_iter()
-                .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
-                .collect::<Vec<_>>()
-        }
-        crate::join_code::MembershipFloor::Serial(reference) => {
-            if root_value.descriptor.write_policy != crate::WritePolicy::Serial {
-                return Err(SnapshotError::UnauthorizedAuthor(
-                    "membership floor does not match Store write policy".to_string(),
-                ));
-            }
-            super::store_engine::serial::pull::load_serial_snapshot_authorities_at_position(
-                storage,
-                root,
-                reference.clone(),
-            )
-            .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
-        }
-    };
+        resolutions.extend(head.body.resolutions.iter().cloned());
+        let registration = super::store_objects::load_registration_ref(
+            storage,
+            root,
+            &head.body.author_registration,
+        )
+        .await
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?
+        .value;
+        registrations.insert(head.body.author_registration.clone(), registration);
+    }
+    let resolutions = resolutions.into_iter().collect::<Vec<_>>();
+    let membership = super::membership_ops::load_anchored_chain_at_exact_heads(
+        storage,
+        root,
+        &root_value.descriptor.founder_pubkey,
+        heads,
+        &resolutions,
+    )
+    .await
+    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+    let registrations = registrations
+        .into_iter()
+        .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
+        .collect::<Vec<_>>();
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
         authorized.extend(
@@ -935,10 +810,7 @@ pub(crate) async fn select_store_snapshot(
         );
     }
     let selected = Box::pin(select_maximal_stable_store_snapshot(
-        storage,
-        serial_coordination,
-        root,
-        authorized,
+        storage, root, authorized,
     ))
     .await
     .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
@@ -975,8 +847,7 @@ pub(crate) async fn select_store_snapshot(
             "Store snapshot image differs from its exact reference".to_string(),
         ));
     }
-    let write_policy = root_value.descriptor.write_policy;
-    Ok((verified_root, write_policy, chosen, image, stability))
+    Ok((verified_root, chosen, image, stability))
 }
 
 fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
@@ -1013,8 +884,7 @@ mod tests {
             path,
             crate::sync::test_helpers::test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             &crate::sync::test_helpers::test_migrations(),
         )
@@ -1086,11 +956,11 @@ mod tests {
             storage,
             root,
             snapshot(bytes),
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             1,
             signer,
             created_at.to_string(),
-            Some(membership),
+            membership,
             db,
         )
         .await
@@ -1119,11 +989,11 @@ mod tests {
             &store.storage,
             store.root.store_root_hash,
             snapshot(b"snapshot selector image"),
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             1,
             &signer,
             "2026-07-16T00:00:00Z".to_string(),
-            Some(&membership),
+            &membership,
             &db,
         )
         .await
@@ -1131,7 +1001,7 @@ mod tests {
         crate::sync::store_engine::stage_merge_acknowledgement_for_test(
             &db,
             &store.storage,
-            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            CommitFrontier(BTreeMap::new()),
             "2026-07-16T00:00:01Z".to_string(),
             &signer,
         )
@@ -1145,11 +1015,10 @@ mod tests {
         .await
         .expect("activate exact snapshot selector acknowledgement");
 
-        let (_, _, selected, image, _) = select_store_snapshot(
+        let (_, selected, image, _) = select_store_snapshot(
             &store.storage,
-            None,
             &store.root,
-            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
             1,
         )
         .await

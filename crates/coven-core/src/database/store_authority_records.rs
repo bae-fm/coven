@@ -14,133 +14,77 @@ pub(crate) struct DurableFounderGraph {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum DurableFounderMembership {
-    MergeConcurrent {
-        entry: ExactProtocolObject<MembershipEntry>,
-        entry_ref: MembershipEntryRef,
-        head: ExactProtocolObject<AuthorHead>,
-        head_ref: MembershipHeadRef,
-    },
-    Serial {
-        genesis: crate::sync::store_commit::StoreSerialHead,
-        genesis_bytes: Vec<u8>,
-    },
+pub(crate) struct DurableFounderMembership {
+    pub entry: ExactProtocolObject<MembershipEntry>,
+    pub entry_ref: MembershipEntryRef,
+    pub head: ExactProtocolObject<AuthorHead>,
+    pub head_ref: MembershipHeadRef,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum DurableFounderMembershipJournal {
-    MergeConcurrent {
-        entry_ref: MembershipEntryRef,
-        entry_bytes: Vec<u8>,
-        entry_prepared: PreparedExactObject,
-        head_ref: MembershipHeadRef,
-        head_bytes: Vec<u8>,
-        head_prepared: PreparedExactObject,
-    },
-    Serial {
-        genesis_bytes: Vec<u8>,
-    },
+#[serde(deny_unknown_fields)]
+pub(super) struct DurableFounderMembershipJournal {
+    entry_ref: MembershipEntryRef,
+    entry_bytes: Vec<u8>,
+    entry_prepared: PreparedExactObject,
+    head_ref: MembershipHeadRef,
+    head_bytes: Vec<u8>,
+    head_prepared: PreparedExactObject,
 }
 
 impl DurableFounderMembershipJournal {
     pub(super) fn from_graph(graph: &DurableFounderMembership) -> Self {
-        match graph {
-            DurableFounderMembership::MergeConcurrent {
-                entry,
-                entry_ref,
-                head,
-                head_ref,
-            } => Self::MergeConcurrent {
-                entry_ref: entry_ref.clone(),
-                entry_bytes: entry.bytes.clone(),
-                entry_prepared: entry.prepared.clone(),
-                head_ref: head_ref.clone(),
-                head_bytes: head.bytes.clone(),
-                head_prepared: head.prepared.clone(),
-            },
-            DurableFounderMembership::Serial { genesis_bytes, .. } => Self::Serial {
-                genesis_bytes: genesis_bytes.clone(),
-            },
+        Self {
+            entry_ref: graph.entry_ref.clone(),
+            entry_bytes: graph.entry.bytes.clone(),
+            entry_prepared: graph.entry.prepared.clone(),
+            head_ref: graph.head_ref.clone(),
+            head_bytes: graph.head.bytes.clone(),
+            head_prepared: graph.head.prepared.clone(),
         }
     }
 
     pub(super) fn into_graph(self) -> Result<DurableFounderMembership, DbError> {
-        match self {
-            Self::MergeConcurrent {
-                entry_ref,
-                entry_bytes,
-                entry_prepared,
-                head_ref,
-                head_bytes,
-                head_prepared,
-            } => {
-                let entry_value: MembershipEntry =
-                    serde_json::from_slice(&entry_bytes).map_err(|error| {
-                        DbError::Message(format!("local founder membership entry: {error}"))
-                    })?;
-                let head_value: AuthorHead =
-                    serde_json::from_slice(&head_bytes).map_err(|error| {
-                        DbError::Message(format!("local founder membership head: {error}"))
-                    })?;
-                Ok(DurableFounderMembership::MergeConcurrent {
-                    entry: ExactProtocolObject {
-                        value: entry_value,
-                        bytes: entry_bytes,
-                        object: entry_prepared.reference().clone(),
-                        prepared: entry_prepared,
-                    },
-                    entry_ref,
-                    head: ExactProtocolObject {
-                        value: head_value,
-                        bytes: head_bytes,
-                        object: head_prepared.reference().clone(),
-                        prepared: head_prepared,
-                    },
-                    head_ref,
-                })
-            }
-            Self::Serial { genesis_bytes } => {
-                let genesis = serde_json::from_slice(&genesis_bytes).map_err(|error| {
-                    DbError::Message(format!("local founder Serial genesis: {error}"))
-                })?;
-                Ok(DurableFounderMembership::Serial {
-                    genesis,
-                    genesis_bytes,
-                })
-            }
-        }
+        let entry_value: MembershipEntry =
+            serde_json::from_slice(&self.entry_bytes).map_err(|error| {
+                DbError::Message(format!("local founder membership entry: {error}"))
+            })?;
+        let head_value: AuthorHead = serde_json::from_slice(&self.head_bytes)
+            .map_err(|error| DbError::Message(format!("local founder membership head: {error}")))?;
+        Ok(DurableFounderMembership {
+            entry: ExactProtocolObject {
+                value: entry_value,
+                bytes: self.entry_bytes,
+                object: self.entry_prepared.reference().clone(),
+                prepared: self.entry_prepared,
+            },
+            entry_ref: self.entry_ref,
+            head: ExactProtocolObject {
+                value: head_value,
+                bytes: self.head_bytes,
+                object: self.head_prepared.reference().clone(),
+                prepared: self.head_prepared,
+            },
+            head_ref: self.head_ref,
+        })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FounderMembershipRefs {
-    MergeConcurrent {
-        entry: MembershipEntryRef,
-        head: MembershipHeadRef,
-    },
-    Serial,
+pub(crate) struct FounderMembershipRefs {
+    pub entry: MembershipEntryRef,
+    pub head: MembershipHeadRef,
 }
 
 pub(super) fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
-    let membership = match &graph.membership {
-        DurableFounderMembership::MergeConcurrent {
-            entry,
-            entry_ref,
-            head,
-            head_ref,
-        } => serde_json::to_vec(&(
-            entry_ref,
-            &entry.bytes,
-            &entry.prepared,
-            head_ref,
-            &head.bytes,
-            &head.prepared,
-        )),
-        DurableFounderMembership::Serial { genesis_bytes, .. } => {
-            serde_json::to_vec(&("serial", genesis_bytes))
-        }
-    }
+    let membership = serde_json::to_vec(&(
+        &graph.membership.entry_ref,
+        &graph.membership.entry.bytes,
+        &graph.membership.entry.prepared,
+        &graph.membership.head_ref,
+        &graph.membership.head.bytes,
+        &graph.membership.head.prepared,
+    ))
     .expect("founder membership graph serialization cannot fail");
     ObjectHash::digest(
         &serde_json::to_vec(&(
@@ -257,7 +201,6 @@ pub(super) fn validate_replay_authority_on(
         }
     };
     if &root_ref != authority_root
-        || root.descriptor.write_policy != baseline.write_policy
         || root.descriptor.schema_version != baseline.schema_version
         || root.descriptor.sync_routing_hash != baseline.routing_hash
     {
@@ -316,22 +259,18 @@ pub(super) fn validate_generation_zero_replay_baseline_on(
     baseline.validate_image()?;
     validate_replay_authority_on(conn, baseline)?;
     let image = crate::sync::retained_replay::open_image(&baseline.image_bytes)?;
-    let routing = load_coven_metadata(&image, baseline.write_policy)?;
+    let routing = load_coven_metadata(&image)?;
     if routing.hash() != baseline.routing_hash {
         return Err(DbError::Message(
             "retained replay image routing contract differs from its baseline".to_string(),
         ));
     }
-    validate_initialized_coven_schema(
-        &image,
-        baseline.write_policy == WritePolicy::MergeConcurrent && routing.has_scoped_graph(),
-    )?;
+    validate_initialized_coven_schema(&image, routing.has_scoped_graph())?;
     validate_replay_authority_on(&image, baseline)
 }
 
 struct StoredGenerationZeroReplayBaseline {
     generation: i64,
-    write_policy: String,
     exact_cut: String,
     schema_version: i64,
     routing_hash: String,
@@ -345,20 +284,19 @@ pub(super) fn load_generation_zero_replay_baseline_on(
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn
         .query_row(
-            "SELECT generation, write_policy, exact_cut, schema_version,
+            "SELECT generation, exact_cut, schema_version,
                     routing_hash, image_hash, image_bytes, authority_bytes
              FROM retained_replay_baselines WHERE singleton = 1",
             [],
             |row| {
                 Ok(StoredGenerationZeroReplayBaseline {
                     generation: row.get(0)?,
-                    write_policy: row.get(1)?,
-                    exact_cut: row.get(2)?,
-                    schema_version: row.get(3)?,
-                    routing_hash: row.get(4)?,
-                    image_hash: row.get(5)?,
-                    image_bytes: row.get(6)?,
-                    authority_bytes: row.get(7)?,
+                    exact_cut: row.get(1)?,
+                    schema_version: row.get(2)?,
+                    routing_hash: row.get(3)?,
+                    image_hash: row.get(4)?,
+                    image_bytes: row.get(5)?,
+                    authority_bytes: row.get(6)?,
                 })
             },
         )
@@ -371,18 +309,13 @@ pub(super) fn load_generation_zero_replay_baseline_on(
         .map_err(|_| DbError::Message("retained replay generation is negative".to_string()))?;
     let schema_version = u32::try_from(stored.schema_version)
         .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
-    let parsed_write_policy: WritePolicy = serde_json::from_str(&stored.write_policy)
-        .map_err(|error| DbError::Message(format!("retained replay write policy: {error}")))?;
     let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
         .map_err(|error| DbError::Message(format!("retained replay exact cut: {error}")))?;
     let authority: RetainedReplayAuthority = serde_json::from_slice(&stored.authority_bytes)
         .map_err(|error| DbError::Message(format!("retained replay authority: {error}")))?;
-    if serde_json::to_string(&parsed_write_policy)
-        .map_err(|error| DbError::Message(format!("serialize retained replay policy: {error}")))?
-        != stored.write_policy
-        || serde_json::to_string(&parsed_exact_cut).map_err(|error| {
-            DbError::Message(format!("serialize retained replay exact cut: {error}"))
-        })? != stored.exact_cut
+    if serde_json::to_string(&parsed_exact_cut).map_err(|error| {
+        DbError::Message(format!("serialize retained replay exact cut: {error}"))
+    })? != stored.exact_cut
         || serde_json::to_vec(&authority).map_err(|error| {
             DbError::Message(format!("serialize retained replay authority: {error}"))
         })? != stored.authority_bytes
@@ -394,7 +327,6 @@ pub(super) fn load_generation_zero_replay_baseline_on(
     let baseline =
         RetainedReplayBaseline {
             generation,
-            write_policy: parsed_write_policy,
             exact_cut: parsed_exact_cut,
             schema_version,
             routing_hash: stored.routing_hash.parse().map_err(|error| {
@@ -412,7 +344,6 @@ pub(super) fn load_generation_zero_replay_baseline_on(
 
 pub(super) fn install_generation_zero_replay_baseline_on(
     conn: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
@@ -422,19 +353,13 @@ pub(super) fn install_generation_zero_replay_baseline_on(
             "retained replay baseline already exists before founder activation".to_string(),
         ));
     }
-    let baseline = RetainedReplayBaseline::generation_zero(
-        conn,
-        write_policy,
-        schema_version,
-        routing_hash,
-        authority,
-    )?;
+    let baseline =
+        RetainedReplayBaseline::generation_zero(conn, schema_version, routing_hash, authority)?;
     insert_retained_replay_baseline_on(conn, &baseline)
 }
 
 pub(super) fn install_snapshot_replay_baseline_on(
     conn: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplaySnapshotAuthority,
@@ -444,13 +369,8 @@ pub(super) fn install_snapshot_replay_baseline_on(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
         ));
     }
-    let baseline = RetainedReplayBaseline::stable_snapshot(
-        conn,
-        write_policy,
-        schema_version,
-        routing_hash,
-        authority,
-    )?;
+    let baseline =
+        RetainedReplayBaseline::stable_snapshot(conn, schema_version, routing_hash, authority)?;
     insert_retained_replay_baseline_on(conn, &baseline)
 }
 
@@ -461,15 +381,12 @@ pub(super) fn insert_retained_replay_baseline_on(
     validate_replay_authority_on(conn, baseline)?;
     conn.execute(
         "INSERT INTO retained_replay_baselines
-         (singleton, generation, write_policy, exact_cut, schema_version,
+         (singleton, generation, exact_cut, schema_version,
           routing_hash, image_hash, image_bytes, authority_bytes)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             i64::try_from(baseline.generation).map_err(|_| {
                 DbError::Message("retained replay generation exceeds SQLite INTEGER".to_string())
-            })?,
-            serde_json::to_string(&baseline.write_policy).map_err(|error| {
-                DbError::Message(format!("serialize retained replay policy: {error}"))
             })?,
             serde_json::to_string(&baseline.exact_cut).map_err(|error| {
                 DbError::Message(format!("serialize retained replay exact cut: {error}"))
@@ -495,7 +412,6 @@ pub(super) fn insert_retained_replay_baseline_on(
 
 pub(super) fn ensure_founder_replay_baseline_on(
     conn: &Connection,
-    write_policy: WritePolicy,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
@@ -508,8 +424,7 @@ pub(super) fn ensure_founder_replay_baseline_on(
                     && existing.founder_registration == authority.founder_registration
             }
         };
-        if existing.write_policy != write_policy
-            || existing.schema_version != schema_version
+        if existing.schema_version != schema_version
             || existing.routing_hash != routing_hash
             || !authority_matches
         {
@@ -532,13 +447,7 @@ pub(super) fn ensure_founder_replay_baseline_on(
             "accepted Store history exists without a retained replay baseline".to_string(),
         ));
     }
-    install_generation_zero_replay_baseline_on(
-        conn,
-        write_policy,
-        schema_version,
-        routing_hash,
-        authority,
-    )
+    install_generation_zero_replay_baseline_on(conn, schema_version, routing_hash, authority)
 }
 
 pub(super) fn install_store_founder_state_on(
@@ -693,120 +602,68 @@ pub(super) fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), 
         || graph.initial_ack.object != *graph.initial_ack.prepared.reference()
         || initial_ack.successor.predecessor.is_some()
         || initial_ack.registration != registration_ref
-        || match (&root.descriptor.write_policy, &initial_ack.store_cut) {
-            (
-                crate::WritePolicy::MergeConcurrent,
-                crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(commits),
-            ) => !commits.is_empty(),
-            (
-                crate::WritePolicy::Serial,
-                crate::sync::store_commit::StoreHistoryCut::Serial(
-                    crate::sync::store_commit::StoreSerialPredecessor::Genesis {
-                        root: ack_root,
-                        founder_registration,
-                    },
-                ),
-            ) => ack_root != &root_ref || founder_registration != &registration_ref,
-            _ => true,
-        }
+        || !initial_ack.store_cut.0.is_empty()
     {
         return Err(DbError::Message(
             "founder initial acknowledgement differs from its exact root graph".to_string(),
         ));
     }
-    match (&root.descriptor.membership, &graph.membership) {
-        (
-            crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent { .. },
-            DurableFounderMembership::MergeConcurrent {
-                entry,
-                entry_ref,
-                head,
-                head_ref,
-            },
-        ) => {
-            let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
-                .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
-            if parsed_entry != entry.value
-                || root
-                    .descriptor
-                    .validate_merge_founder_entry(&parsed_entry)
-                    .is_err()
-                || entry_ref.coord != parsed_entry.coord()
-                || entry_ref.object != entry.object
-                || entry.object != *entry.prepared.reference()
-            {
-                return Err(DbError::Message(
-                    "founder membership entry differs from its root or exact reference".to_string(),
-                ));
-            }
-            let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
-                .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
-            let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
-                DbError::Message("founder entry has no Store membership anchor".to_string())
-            })?;
-            let crate::sync::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
-                anchor
-            else {
-                return Err(DbError::Message(
-                    "founder membership entry uses a recovery anchor".to_string(),
-                ));
-            };
-            if parsed_head != head.value
-                || !parsed_head.verify(&registration)
-                || parsed_head.body.author_registration != registration_ref
-                || parsed_head.body.entry != *entry_ref
-                || parsed_head.body.predecessor.is_some()
-                || parsed_head.entry_coord() != parsed_entry.coord()
-                || head_ref.coord != parsed_entry.coord()
-                || head_ref.head_hash != parsed_head.head_hash()
-                || head_ref.object != head.object
-                || head.object != *head.prepared.reference()
-                || head.object.slot() != &first_slot
-                || parsed_head.body.successor.activation
-                    != crate::sync::store_commit::StreamActivation::grant_authorized(
-                        root_ref.store_root_hash,
-                        registration_ref.clone(),
-                        parsed_entry.author_owner_grant.clone(),
-                        crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
-                            first_slot: first_slot.clone(),
-                        },
-                    )
-                    .activation_id()
-            {
-                return Err(DbError::Message(
-                    "founder membership head differs from its exact root graph".to_string(),
-                ));
-            }
-        }
-        (
-            crate::sync::store_commit::StoreMembershipGenesis::Serial,
-            DurableFounderMembership::Serial {
-                genesis,
-                genesis_bytes,
-            },
-        ) => {
-            let parsed = crate::sync::store_commit::StoreSerialHead::parse(
-                genesis_bytes,
-                root_ref.store_root_hash,
-                &registration,
-            )
-            .map_err(|error| DbError::Message(format!("founder Serial genesis: {error}")))?;
-            if parsed != *genesis
-                || genesis.state
-                    != (crate::sync::store_commit::StoreSerialHeadState::Genesis {
-                        root: root_ref,
-                        founder_registration: registration_ref,
-                    })
-            {
-                return Err(DbError::Message(
-                    "founder Serial genesis differs from its exact root graph".to_string(),
-                ));
-            }
-        }
-        _ => {
+    {
+        let entry = &graph.membership.entry;
+        let entry_ref = &graph.membership.entry_ref;
+        let head = &graph.membership.head;
+        let head_ref = &graph.membership.head_ref;
+        let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
+            .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
+        if parsed_entry != entry.value
+            || root
+                .descriptor
+                .validate_merge_founder_entry(&parsed_entry)
+                .is_err()
+            || entry_ref.coord != parsed_entry.coord()
+            || entry_ref.object != entry.object
+            || entry.object != *entry.prepared.reference()
+        {
             return Err(DbError::Message(
-                "founder membership graph differs from the root policy".to_string(),
-            ))
+                "founder membership entry differs from its root or exact reference".to_string(),
+            ));
+        }
+        let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
+            .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
+        let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
+            DbError::Message("founder entry has no Store membership anchor".to_string())
+        })?;
+        let crate::sync::store_commit::GrantStreamAnchor::StoreMembership { first_slot } = anchor
+        else {
+            return Err(DbError::Message(
+                "founder membership entry uses a recovery anchor".to_string(),
+            ));
+        };
+        if parsed_head != head.value
+            || !parsed_head.verify(&registration)
+            || parsed_head.body.author_registration != registration_ref
+            || parsed_head.body.entry != *entry_ref
+            || parsed_head.body.predecessor.is_some()
+            || parsed_head.entry_coord() != parsed_entry.coord()
+            || head_ref.coord != parsed_entry.coord()
+            || head_ref.head_hash != parsed_head.head_hash()
+            || head_ref.object != head.object
+            || head.object != *head.prepared.reference()
+            || head.object.slot() != &first_slot
+            || parsed_head.body.successor.activation
+                != crate::sync::store_commit::StreamActivation::grant_authorized(
+                    root_ref.store_root_hash,
+                    registration_ref.clone(),
+                    parsed_entry.author_owner_grant.clone(),
+                    crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
+                        first_slot: first_slot.clone(),
+                    },
+                )
+                .activation_id()
+        {
+            return Err(DbError::Message(
+                "founder membership head differs from its exact root graph".to_string(),
+            ));
         }
     }
     Ok(())
@@ -816,11 +673,9 @@ pub(super) fn consume_store_creation_probes_on(
     conn: &Connection,
     graph: &DurableFounderGraph,
 ) -> Result<(), DbError> {
-    use crate::sync::provider::{
-        ExactProbeProgress, ProviderProbeJournalRecord, SerialProbeProgress,
-    };
+    use crate::sync::provider::{ExactProbeProgress, ProviderProbeJournalRecord};
     use crate::sync::store_protocol_root::{
-        StoreCreationAttempt, StoreCreationProbeIds, STORE_CREATION_ATTEMPT_STATE_KEY,
+        StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY,
     };
 
     let attempt_json: String = conn
@@ -839,7 +694,7 @@ pub(super) fn consume_store_creation_probes_on(
     };
     let reservation = &graph_reservation.descriptor;
     let descriptor = &graph.root.value.descriptor;
-    let founder = reservation.membership.founder();
+    let founder = &reservation.membership.founder;
     let authority = &founder.root.authority;
     if authority.creation_id != descriptor.creation_id
         || authority.founder_grant != descriptor.founder_grant
@@ -847,28 +702,12 @@ pub(super) fn consume_store_creation_probes_on(
         || authority.binding.store != descriptor.provider
         || authority.binding.device != descriptor.founder_provider_admin.provider
         || authority.founder_pubkey != descriptor.founder_pubkey
-        || authority.write_policy != descriptor.write_policy
         || authority.schema_version != descriptor.schema_version
         || authority.sync_routing_hash != descriptor.sync_routing_hash
         || founder.root.root_slot != descriptor.root_slot
         || founder.registration_slot != descriptor.founder_registration
         || &reservation.recovery_slot != descriptor.founder_recovery.first_slot()
-        || match (&reservation.membership, &descriptor.membership) {
-            (
-                crate::sync::store_protocol_root::MembershipReservation::MergeConcurrent {
-                    first_slot,
-                    ..
-                },
-                crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent {
-                    founder_membership,
-                },
-            ) => founder_membership.first_slot() != first_slot,
-            (
-                crate::sync::store_protocol_root::MembershipReservation::Serial { .. },
-                crate::sync::store_commit::StoreMembershipGenesis::Serial,
-            ) => false,
-            _ => true,
-        }
+        || descriptor.founder_membership.first_slot() != &reservation.membership.first_slot
     {
         return Err(DbError::Message(
             "signed Store descriptor differs from its durable creation attempt".to_string(),
@@ -879,22 +718,9 @@ pub(super) fn consume_store_creation_probes_on(
         || graph.registration.value.snapshots != graph_reservation.snapshots
         || graph.initial_ack.value.last_sync != authority.founder_timestamp
         || graph.initial_ack.value.successor.next_slot != graph_reservation.next_ack_slot
-        || match (&graph.membership, &graph_reservation.membership) {
-            (
-                DurableFounderMembership::MergeConcurrent { entry, head, .. },
-                crate::sync::store_protocol_root::FounderMembershipPublicationReservation::MergeConcurrent {
-                    next_head_slot,
-                },
-            ) => {
-                entry.value.created_at != authority.founder_timestamp
-                    || head.value.body.successor.next_slot != *next_head_slot
-            }
-            (
-                DurableFounderMembership::Serial { .. },
-                crate::sync::store_protocol_root::FounderMembershipPublicationReservation::Serial,
-            ) => false,
-            _ => true,
-        }
+        || graph.membership.entry.value.created_at != authority.founder_timestamp
+        || graph.membership.head.value.body.successor.next_slot
+            != graph_reservation.membership.next_head_slot
     {
         return Err(DbError::Message(
             "signed founder graph differs from its durable slot reservation".to_string(),
@@ -914,14 +740,7 @@ pub(super) fn consume_store_creation_probes_on(
             .map_err(|error| DbError::Message(format!("parse provider probe journal: {error}")))?;
         Ok::<_, DbError>((key, record))
     };
-    let (exact_id, serial_id) = match authority.probes {
-        StoreCreationProbeIds::MergeConcurrent { exact_slots } => (exact_slots, None),
-        StoreCreationProbeIds::Serial {
-            exact_slots,
-            serial_coordination,
-        } => (exact_slots, Some(serial_coordination)),
-    };
-    let (exact_key, exact) = load_probe(exact_id)?;
+    let (exact_key, exact) = load_probe(authority.probes.exact_slots())?;
     let ProviderProbeJournalRecord::Exact(exact) = exact else {
         return Err(DbError::Message(
             "Store creation exact probe id names another probe kind".to_string(),
@@ -938,39 +757,6 @@ pub(super) fn consume_store_creation_probes_on(
         ));
     }
     let mut consumed_keys = vec![exact_key];
-    match (
-        serial_id,
-        &descriptor
-            .founder_provider_admin
-            .capability
-            .serial_coordination,
-    ) {
-        (None, None) => {}
-        (Some(probe_id), Some(expected)) => {
-            let (key, serial) = load_probe(probe_id)?;
-            let ProviderProbeJournalRecord::Serial(serial) = serial else {
-                return Err(DbError::Message(
-                    "Store creation serial probe id names another probe kind".to_string(),
-                ));
-            };
-            let SerialProbeProgress::ReceiptReady { receipt } = serial.progress else {
-                return Err(DbError::Message(
-                    "Store creation serial probe has no terminal receipt".to_string(),
-                ));
-            };
-            if &receipt != expected {
-                return Err(DbError::Message(
-                    "signed Store descriptor differs from its terminal serial probe".to_string(),
-                ));
-            }
-            consumed_keys.push(key);
-        }
-        _ => {
-            return Err(DbError::Message(
-                "Store creation probe policy differs from the signed descriptor".to_string(),
-            ))
-        }
-    }
     consumed_keys.push(STORE_CREATION_ATTEMPT_STATE_KEY.to_string());
     for key in consumed_keys {
         let deleted = conn

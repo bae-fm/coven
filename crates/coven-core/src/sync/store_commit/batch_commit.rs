@@ -54,10 +54,6 @@ impl StoreBatchCommit {
         Ok(&self.candidate_objects)
     }
 
-    pub fn policy(&self) -> WritePolicy {
-        self.order.policy()
-    }
-
     pub fn seq(&self) -> u64 {
         self.order.seq()
     }
@@ -77,7 +73,6 @@ impl StoreBatchCommit {
             StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -92,21 +87,13 @@ impl StoreBatchCommit {
                 "Store commit does not carry operations".to_string(),
             ));
         }
-        validate_operation_membership_authority(
-            self.order.policy(),
-            self.membership_authority.as_ref(),
-        )?;
-        match self.order.policy() {
-            WritePolicy::MergeConcurrent => {
-                Ok(StoreOperationMembershipAuthority::MergeConcurrent {
-                    predecessor: self
-                        .membership_authority
-                        .clone()
-                        .expect("validated MergeConcurrent operations carry membership authority"),
-                })
-            }
-            WritePolicy::Serial => Ok(StoreOperationMembershipAuthority::Serial),
-        }
+        let predecessor = self.membership_authority.clone().ok_or_else(|| {
+            StoreProtocolError::Malformed(
+                "operations commit omits its predecessor membership grant authority".to_string(),
+            )
+        })?;
+        validate_operation_membership_authority(&predecessor)?;
+        Ok(StoreOperationMembershipAuthority { predecessor })
     }
 
     pub fn control(&self) -> Option<&StoreControl> {
@@ -119,25 +106,12 @@ impl StoreBatchCommit {
             .and_then(|operations| operations.acknowledgement.as_ref())
     }
 
-    pub fn serial_recovery_activation(&self) -> Option<&SerialRecoveryActivation> {
-        match &self.body {
-            StoreCommitBody::SerialRecoveryActivation { activation } => Some(activation),
-            StoreCommitBody::Operations(_)
-            | StoreCommitBody::ReclaimAuthorization { .. }
-            | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::OwnerPromotionRequest { .. }
-            | StoreCommitBody::AbandonCandidates { .. } => None,
-        }
-    }
-
     pub fn self_retirement(&self) -> Option<&StoreDeviceSelfRetirementRef> {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -150,7 +124,6 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
         }
     }
@@ -163,7 +136,6 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -175,7 +147,6 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -219,9 +190,6 @@ impl StoreBatchCommit {
     pub fn device_registrations(&self) -> &[ActivatedStoreDeviceRegistrationRef] {
         match &self.body {
             StoreCommitBody::Operations(operations) => operations.device_registrations.as_slice(),
-            StoreCommitBody::SerialRecoveryActivation { activation } => {
-                std::slice::from_ref(&activation.registration)
-            }
             StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
@@ -253,7 +221,6 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::OwnerPromotionRequest { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
@@ -266,7 +233,6 @@ impl StoreBatchCommit {
             | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
@@ -364,16 +330,8 @@ impl StoreBatchCommit {
         )
     }
 
-    pub fn merge_dependencies(
-        &self,
-    ) -> Result<&BTreeMap<AuthorStreamId, StoreBatchCommitRef>, StoreProtocolError> {
-        match &self.order {
-            StoreCommitOrder::MergeConcurrent { dependencies, .. } => Ok(dependencies),
-            StoreCommitOrder::Serial { .. } => Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            }),
-        }
+    pub fn merge_dependencies(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
+        &self.order.dependencies
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -510,44 +468,6 @@ impl StoreBatchCommit {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn signed_with_serial_recovery(
-        store_root_hash: ObjectHash,
-        write_id: WriteId,
-        coord: StoreCommitCoord,
-        author_registration: StoreDeviceRegistrationRef,
-        author: &StoreDeviceRegistration,
-        order: StoreCommitOrder,
-        membership_state: StoreMembershipStateRef,
-        device_state: StoreDeviceStateRef,
-        activation: SerialRecoveryActivation,
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        validate_commit_envelope(
-            store_root_hash,
-            &coord,
-            &author_registration,
-            author,
-            &order,
-            &membership_state,
-            &device_state,
-            None,
-            signer,
-        )?;
-        validate_serial_recovery_activation(&order, &activation, &author_registration)?;
-        Self::finish_signed_body(
-            store_root_hash,
-            write_id,
-            author_registration,
-            order,
-            membership_state,
-            device_state,
-            None,
-            StoreCommitBody::SerialRecoveryActivation { activation },
-            signer,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn signed_with_owner_promotion_request(
         store_root_hash: ObjectHash,
         write_id: WriteId,
@@ -561,12 +481,6 @@ impl StoreBatchCommit {
         request: OwnerPromotionRequest,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        if membership_authority.policy() != order.policy() {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: order.policy(),
-                actual: membership_authority.policy(),
-            });
-        }
         let membership_authority = membership_authority.into_commit_authority();
         validate_commit_envelope(
             store_root_hash,
@@ -576,7 +490,7 @@ impl StoreBatchCommit {
             &order,
             &membership_state,
             &device_state,
-            membership_authority.as_ref(),
+            Some(&membership_authority),
             signer,
         )?;
         validate_owner_promotion_request_for_commit(
@@ -586,7 +500,6 @@ impl StoreBatchCommit {
             author,
             &membership_state,
             &device_state,
-            order.policy(),
         )?;
         Self::finish_signed_body(
             store_root_hash,
@@ -595,7 +508,7 @@ impl StoreBatchCommit {
             order,
             membership_state,
             device_state,
-            membership_authority,
+            Some(membership_authority),
             StoreCommitBody::OwnerPromotionRequest {
                 request: Box::new(request),
             },
@@ -982,12 +895,6 @@ impl StoreBatchCommit {
         input: StoreCommitOperationsInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        if membership_authority.policy() != order.policy() {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: order.policy(),
-                actual: membership_authority.policy(),
-            });
-        }
         let membership_authority = membership_authority.into_commit_authority();
         validate_commit_envelope(
             store_root_hash,
@@ -997,7 +904,7 @@ impl StoreBatchCommit {
             &order,
             &membership_state,
             &device_state,
-            membership_authority.as_ref(),
+            Some(&membership_authority),
             signer,
         )?;
         let StoreCommitOperationsInput {
@@ -1017,8 +924,6 @@ impl StoreBatchCommit {
             circle_packages,
         } = input;
         validate_control(
-            order.policy(),
-            store_root_hash,
             &author_registration,
             &author.author_pubkey,
             &membership_state,
@@ -1054,7 +959,6 @@ impl StoreBatchCommit {
         validate_stream_activations(
             store_root_hash,
             &author_registration,
-            order.policy(),
             control.as_ref(),
             &stream_activations,
         )?;
@@ -1065,7 +969,7 @@ impl StoreBatchCommit {
                 if !seen_circles.insert(input.circle_id) {
                     return Err(StoreProtocolError::DuplicateCirclePackage(input.circle_id));
                 }
-                validate_circle_control_coord(order.policy(), &input.control)?;
+                validate_circle_control_coord(&input.control)?;
                 if input.package.candidate_family != candidate_family {
                     return Err(StoreProtocolError::Malformed(
                         "Circle package candidate family differs from its commit".to_string(),
@@ -1087,7 +991,7 @@ impl StoreBatchCommit {
                 })
             })
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
-        validate_circle_control_refs(order.policy(), &circle_controls)?;
+        validate_circle_control_refs(&circle_controls)?;
         let operations = StoreCommitOperations {
             acknowledgement,
             control,
@@ -1114,7 +1018,7 @@ impl StoreBatchCommit {
             order,
             membership_state,
             device_state,
-            membership_authority,
+            Some(membership_authority),
             StoreCommitBody::Operations(operations),
             signer,
         )
@@ -1203,12 +1107,6 @@ impl StoreBatchCommit {
                 actual: self.store_root_hash,
             });
         }
-        if self.order.policy() != expected_coord.policy() {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: expected_coord.policy(),
-                actual: self.order.policy(),
-            });
-        }
         let stream_id = commit_stream_id(expected_coord);
         if self.order.seq() != expected_coord.sequence() {
             return Err(StoreProtocolError::RelocatedSlot {
@@ -1245,7 +1143,7 @@ impl StoreBatchCommit {
                     circle_package.circle_id,
                 ));
             }
-            validate_circle_control_coord(self.policy(), &circle_package.control)?;
+            validate_circle_control_coord(&circle_package.control)?;
             let expected = circle_package_semantic_prefix(
                 circle_package.circle_id,
                 family,
@@ -1275,8 +1173,11 @@ impl StoreBatchCommit {
         )?;
         if matches!(self.body, StoreCommitBody::Operations(_)) {
             validate_operation_membership_authority(
-                self.order.policy(),
-                self.membership_authority.as_ref(),
+                self.membership_authority.as_ref().ok_or_else(|| {
+                    StoreProtocolError::Malformed(
+                        "operations commit omits membership authority".to_string(),
+                    )
+                })?,
             )?;
         }
         if let StoreCommitBody::AbandonCandidates { manifests } = &self.body {
@@ -1297,7 +1198,6 @@ impl StoreBatchCommit {
                 author,
                 &self.membership_state,
                 &self.device_state,
-                self.policy(),
             )?;
         }
         self.verified_candidate_objects()?;
@@ -1363,7 +1263,7 @@ fn validate_commit_envelope(
     }
     validate_commit_order(order)?;
     validate_commit_predecessor_states(order, membership_state, device_state)?;
-    if coord.sequence() != order.seq() || coord.policy() != order.policy() {
+    if coord.sequence() != order.seq() {
         return Err(StoreProtocolError::Malformed(
             "Store commit coordinate disagrees with its order".to_string(),
         ));
@@ -1392,7 +1292,7 @@ fn validate_commit_body(
             if operations.is_empty() {
                 return Err(StoreProtocolError::EmptyBatch);
             }
-            validate_circle_control_refs(order.policy(), &operations.circle_controls)?;
+            validate_circle_control_refs(&operations.circle_controls)?;
             validate_commit_acknowledgement(&operations.acknowledgement, author)?;
             validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
@@ -1409,7 +1309,6 @@ fn validate_commit_body(
             validate_stream_activations(
                 store_root_hash,
                 author,
-                order.policy(),
                 operations.control.as_ref(),
                 &operations.stream_activations,
             )?;
@@ -1424,13 +1323,9 @@ fn validate_commit_body(
                 order,
             )?;
         }
-        StoreCommitBody::SerialRecoveryActivation { activation } => {
-            validate_serial_recovery_activation(order, activation, author)?;
-        }
         StoreCommitBody::OwnerPromotionRequest { request } => {
             if request.store_root_hash != store_root_hash
                 || request.promoter_registration != *author
-                || request.finalization.policy() != order.policy()
             {
                 return Err(StoreProtocolError::OwnerPromotionMismatch);
             }
@@ -1453,14 +1348,12 @@ fn validate_owner_promotion_request_for_commit(
     author: &StoreDeviceRegistration,
     membership_state: &StoreMembershipStateRef,
     device_state: &StoreDeviceStateRef,
-    policy: WritePolicy,
 ) -> Result<(), StoreProtocolError> {
     request.verify(&author.store_root, author)?;
     if request.store_root_hash != store_root_hash
         || request.promoter_registration != *author_registration
         || request.predecessor_membership != *membership_state
         || request.predecessor_devices != *device_state
-        || request.finalization.policy() != policy
     {
         return Err(StoreProtocolError::OwnerPromotionMismatch);
     }
@@ -1470,7 +1363,6 @@ fn validate_owner_promotion_request_for_commit(
 pub(super) fn validate_stream_activations(
     store_root_hash: ObjectHash,
     author: &StoreDeviceRegistrationRef,
-    policy: WritePolicy,
     control: Option<&StoreControl>,
     activations: &[StreamActivation],
 ) -> Result<(), StoreProtocolError> {
@@ -1489,21 +1381,16 @@ pub(super) fn validate_stream_activations(
                 actual: activation.store_root_hash(),
             });
         }
-        let owner_promotion = matches!(control, Some(StoreControl::MergeMembership { .. }));
+        let owner_promotion = control.is_some();
         if activation.author_registration() != author && !owner_promotion {
             return Err(StoreProtocolError::Malformed(
                 "stream activation registration differs from its commit author".to_string(),
             ));
         }
-        if policy == WritePolicy::Serial {
-            return Err(StoreProtocolError::Malformed(
-                "Serial Store commit contains a stream activation".to_string(),
-            ));
-        }
         let allowed_anchor = matches!(
             (control, activation),
             (
-                Some(StoreControl::MergeMembership { .. }),
+                Some(StoreControl { .. }),
                 StreamActivation::GrantAuthorized {
                     anchor: GrantStreamAnchor::StoreMembership { .. }
                         | GrantStreamAnchor::OwnerRecovery { .. },
@@ -1569,23 +1456,7 @@ fn validate_candidate_abandonment(
                 "abandoned candidate has a different author registration".to_string(),
             ));
         }
-        let shares_predecessor = match (&candidate.order, order) {
-            (
-                StoreCommitOrder::MergeConcurrent {
-                    predecessor: candidate_predecessor,
-                    ..
-                },
-                StoreCommitOrder::MergeConcurrent { predecessor, .. },
-            ) => candidate_predecessor == predecessor,
-            (
-                StoreCommitOrder::Serial {
-                    predecessor: candidate_predecessor,
-                    ..
-                },
-                StoreCommitOrder::Serial { predecessor, .. },
-            ) => candidate_predecessor == predecessor,
-            _ => false,
-        };
+        let shares_predecessor = candidate.order.predecessor == order.predecessor;
         if !shares_predecessor {
             return Err(StoreProtocolError::Malformed(
                 "abandoned candidate has a different predecessor".to_string(),
@@ -1642,8 +1513,7 @@ pub(super) fn candidate_manifest(
                 retirement.clone(),
             ));
         }
-        StoreCommitBody::SerialRecoveryActivation { .. }
-        | StoreCommitBody::OwnerPromotionRequest { .. }
+        StoreCommitBody::OwnerPromotionRequest { .. }
         | StoreCommitBody::AbandonCandidates { .. } => {}
     }
     objects.sort_by_cached_key(|object| {
@@ -1837,69 +1707,20 @@ fn verify_package_ref(
 }
 
 fn validate_control(
-    policy: WritePolicy,
-    store_root_hash: ObjectHash,
     author_registration: &StoreDeviceRegistrationRef,
     author_pubkey: &str,
-    membership_state: &StoreMembershipStateRef,
+    _membership_state: &StoreMembershipStateRef,
     control: Option<&StoreControl>,
 ) -> Result<(), StoreProtocolError> {
     let Some(control) = control else {
         return Ok(());
     };
-    if let StoreControl::MergeMembership { transition } = control {
-        let StoreMembershipStateRef::MergeConcurrent(_) = membership_state else {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: membership_state.write_policy(),
-            });
-        };
-        if policy != WritePolicy::MergeConcurrent
-            || transition.body.author_registration != *author_registration
-            || transition.body.entry.coord.author_pubkey != author_pubkey
-            || transition.body.entry.coord.seq == 0
-        {
-            return Err(StoreProtocolError::InvalidMergeMembershipControl);
-        }
-        return Ok(());
-    }
-    if policy != WritePolicy::Serial {
-        return Err(StoreProtocolError::ControlRequiresSerial);
-    }
-    if let Some(entry) = control.serial_membership_entry() {
-        if entry.store_root_hash != store_root_hash
-            || entry.author_pubkey != author_pubkey
-            || !entry.verify()
-        {
-            return Err(StoreProtocolError::InvalidSerialControl);
-        }
-    }
-    if control.key_generation() == Some(0) {
-        return Err(StoreProtocolError::InvalidKeyGeneration(0));
-    }
-    Ok(())
-}
-
-fn validate_serial_recovery_activation(
-    order: &StoreCommitOrder,
-    activation: &SerialRecoveryActivation,
-    author_registration: &StoreDeviceRegistrationRef,
-) -> Result<(), StoreProtocolError> {
-    if order.policy() != WritePolicy::Serial {
-        return Err(StoreProtocolError::WritePolicyMismatch {
-            expected: WritePolicy::Serial,
-            actual: order.policy(),
-        });
-    }
-    if &activation.registration.registration != author_registration
-        || !matches!(
-            activation.registration.authority,
-            StoreDeviceRegistrationActivationRef::Recovery { .. }
-        )
+    let transition = &control.transition;
+    if transition.body.author_registration != *author_registration
+        || transition.body.entry.coord.author_pubkey != author_pubkey
+        || transition.body.entry.coord.seq == 0
     {
-        return Err(StoreProtocolError::Malformed(
-            "Serial recovery activation does not bind its Recovery author registration".to_string(),
-        ));
+        return Err(StoreProtocolError::InvalidMergeMembershipControl);
     }
     Ok(())
 }
@@ -1909,8 +1730,6 @@ fn validate_parsed_control(
     author: &StoreDeviceRegistration,
 ) -> Result<(), StoreProtocolError> {
     validate_control(
-        commit.policy(),
-        commit.store_root_hash,
         &commit.author_registration,
         &author.author_pubkey,
         &commit.membership_state,
@@ -1918,30 +1737,14 @@ fn validate_parsed_control(
     )
 }
 
-fn validate_circle_control_coord(
-    policy: WritePolicy,
-    coord: &CircleControlCoord,
-) -> Result<(), StoreProtocolError> {
+fn validate_circle_control_coord(coord: &CircleControlCoord) -> Result<(), StoreProtocolError> {
     coord
         .validate()
         .map_err(|_| StoreProtocolError::InvalidCircleControlCoord)?;
-    let actual = match coord {
-        CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-        CircleControlCoord::Serial { .. } => WritePolicy::Serial,
-    };
-    if policy != actual {
-        return Err(StoreProtocolError::CircleControlPolicyMismatch {
-            expected: policy,
-            actual,
-        });
-    }
     Ok(())
 }
 
-fn validate_circle_control_refs(
-    policy: WritePolicy,
-    controls: &[CircleControlRef],
-) -> Result<(), StoreProtocolError> {
+fn validate_circle_control_refs(controls: &[CircleControlRef]) -> Result<(), StoreProtocolError> {
     let mut seen = BTreeSet::new();
     for control_ref in controls {
         if !seen.insert(control_ref.circle_id()) {
@@ -1949,18 +1752,7 @@ fn validate_circle_control_refs(
                 control_ref.circle_id(),
             ));
         }
-        validate_circle_control_coord(policy, control_ref.control())?;
-        if matches!(policy, WritePolicy::MergeConcurrent)
-            != matches!(control_ref, CircleControlRef::MergeConcurrent { .. })
-        {
-            return Err(StoreProtocolError::CircleControlPolicyMismatch {
-                expected: policy,
-                actual: match control_ref {
-                    CircleControlRef::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-                    CircleControlRef::Serial { .. } => WritePolicy::Serial,
-                },
-            });
-        }
+        validate_circle_control_coord(control_ref.control())?;
     }
     Ok(())
 }

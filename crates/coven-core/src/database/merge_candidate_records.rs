@@ -5,19 +5,16 @@ use super::*;
 pub(super) fn parse_prepared_merge_candidate_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,
-) -> Result<Option<PreparedMergeCandidate>, DbError> {
+) -> Result<PreparedMergeCandidate, DbError> {
     let (commit, head) = match prepared {
-        PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => (commit, head),
+        PreparedStoreWriteState::Publication { commit, head, .. } => (commit, head),
         PreparedStoreWriteState::MergeAbandonment {
             candidate_commit,
             candidate_head,
             ..
         } => (candidate_commit, candidate_head),
-        PreparedStoreWriteState::SerialPreparing | PreparedStoreWriteState::Serial { .. } => {
-            return Ok(None);
-        }
     };
-    parse_prepared_merge_candidate_parts_on(conn, commit, head).map(Some)
+    parse_prepared_merge_candidate_parts_on(conn, commit, head)
 }
 
 pub(super) fn parse_prepared_merge_candidate_parts_on(
@@ -30,7 +27,7 @@ pub(super) fn parse_prepared_merge_candidate_parts_on(
         .map_err(|error| DbError::Message(format!("signed Merge candidate: {error}")))?;
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
-    let coord = StoreCommitCoord::MergeConcurrent {
+    let coord = StoreCommitCoord {
         stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &unverified.author_registration,
@@ -87,55 +84,17 @@ pub(super) fn blocked_merge_candidate_from_prepared(
 pub(super) fn parse_prepared_merge_publication_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,
-) -> Result<Option<PreparedMergeCandidate>, DbError> {
+) -> Result<PreparedMergeCandidate, DbError> {
     match prepared {
-        PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => {
-            parse_prepared_merge_candidate_parts_on(conn, commit, head).map(Some)
+        PreparedStoreWriteState::Publication { commit, head, .. } => {
+            parse_prepared_merge_candidate_parts_on(conn, commit, head)
         }
         PreparedStoreWriteState::MergeAbandonment {
             authority_commit,
             authority_head,
             ..
-        } => parse_prepared_merge_candidate_parts_on(conn, authority_commit, authority_head)
-            .map(Some),
-        PreparedStoreWriteState::SerialPreparing | PreparedStoreWriteState::Serial { .. } => {
-            Ok(None)
-        }
+        } => parse_prepared_merge_candidate_parts_on(conn, authority_commit, authority_head),
     }
-}
-
-pub(crate) fn parse_prepared_serial_candidate(
-    raw: &str,
-) -> Result<Option<PreparedSerialCandidate>, DbError> {
-    let prepared: PreparedStoreWriteState = serde_json::from_str(raw)
-        .map_err(|error| DbError::Message(format!("prepared Serial candidate: {error}")))?;
-    let PreparedStoreWriteState::Serial { commit, .. } = prepared else {
-        return match prepared {
-            PreparedStoreWriteState::SerialPreparing => Ok(None),
-            PreparedStoreWriteState::MergeConcurrent { .. } => Err(DbError::Message(
-                "MergeConcurrent publication reached Serial candidate state".to_string(),
-            )),
-            PreparedStoreWriteState::MergeAbandonment { .. } => Err(DbError::Message(
-                "Merge abandonment reached Serial candidate state".to_string(),
-            )),
-            PreparedStoreWriteState::Serial { .. } => unreachable!(),
-        };
-    };
-    let value: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
-        .map_err(|error| DbError::Message(format!("signed Serial candidate: {error}")))?;
-    let reference = StoreBatchCommitRef::from_commit(
-        &value,
-        StoreCommitCoord::Serial {
-            sequence: value.seq(),
-        },
-        commit.prepared.reference().clone(),
-    )
-    .map_err(|error| DbError::Message(error.to_string()))?;
-    Ok(Some(PreparedSerialCandidate {
-        commit: value,
-        reference,
-        canonical_signed_bytes: commit.semantic_bytes,
-    }))
 }
 
 pub(super) enum MergeCandidateHeadEvidence<'a> {
@@ -153,15 +112,10 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
         author,
         crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
-    let StoreCommitCoord::MergeConcurrent {
+    let StoreCommitCoord {
         stream_id,
         sequence,
-    } = &candidate.coord
-    else {
-        return Err(DbError::Message(
-            "author exclusion dispatch received a Serial candidate".to_string(),
-        ));
-    };
+    } = &candidate.coord;
     if *stream_id != expected_stream {
         return Err(DbError::Message(
             "candidate stream differs from its exact author registration".to_string(),
@@ -169,15 +123,9 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
     }
     let frontier = Database::materialized_frontier_on(conn, None)?
         .into_values()
-        .map(|reference| match reference.coord {
-            StoreCommitCoord::MergeConcurrent { stream_id, .. } => Ok((stream_id, reference)),
-            StoreCommitCoord::Serial { .. } => Err(DbError::Message(
-                "Merge author exclusion dispatch found a Serial frontier".to_string(),
-            )),
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (_, state) =
-        store_device_state_for_history_cut_on(conn, &StoreHistoryCut::MergeConcurrent(frontier))?;
+        .map(|reference| (reference.coord.stream_id, reference))
+        .collect::<BTreeMap<_, _>>();
+    let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
     let Some(record) = state.devices.get(&author.device_id) else {
         return Err(DbError::Message(
             "candidate author is absent from the current device state".to_string(),
@@ -190,15 +138,10 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
     }
     let crate::sync::store_commit::StoreDeviceStatus::Inactive {
         terminals,
-        accepted_cut,
+        accepted_cut: _,
     } = &record.status
     else {
         return Ok(None);
-    };
-    let StoreHistoryCut::MergeConcurrent(_) = accepted_cut else {
-        return Err(DbError::Message(
-            "Merge device state carries a Serial inactive cutoff".to_string(),
-        ));
     };
     select_author_exclusion_activation_locator(
         terminals.as_slice(),
@@ -272,7 +215,7 @@ pub(super) fn load_author_exclusion_activation_locator_on(
     );
     let retained =
         Database::load_retained_merge_materialization_by_ref_on(conn, locator.activation_commit())?;
-    let accepted_cut = StoreHistoryCut::MergeConcurrent(locator.accepted_cut().clone());
+    let accepted_cut = StoreHistoryCut(locator.accepted_cut().clone());
     if retained.activation_head_object() != &locator.activation_head().object
         || retained.activation_head().head_hash() != locator.activation_head().head_hash
         || !retained
@@ -377,15 +320,10 @@ pub(super) fn validate_terminal_nonactivation_authority_on(
             activation_commit,
             ..
         } => {
-            let StoreCommitCoord::MergeConcurrent {
+            let StoreCommitCoord {
                 stream_id,
                 sequence,
-            } = &activation_commit.coord
-            else {
-                return Err(DbError::Message(
-                    "membership-grant revocation activation is not Merge".to_string(),
-                ));
-            };
+            } = &activation_commit.coord;
             if Database::materialized_commit_ref_on(
                 conn,
                 &stream_id.to_string(),
@@ -406,8 +344,7 @@ pub(super) fn validate_terminal_nonactivation_authority_on(
         } => {
             validate_terminal_nonactivation_authority_on(conn, dependency_nonactivation)?;
         }
-        crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-        | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+        crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
             return Err(DbError::Message(
                 "terminal candidate authority received another proof family".to_string(),
             ));
@@ -712,13 +649,10 @@ pub(super) fn finish_merge_retraction_cleanup_on(
             }
         }
     }
-    let StoreCommitCoord::MergeConcurrent {
+    let StoreCommitCoord {
         stream_id,
         sequence,
-    } = &candidate.reference.coord
-    else {
-        unreachable!("validated Merge retraction candidate")
-    };
+    } = &candidate.reference.coord;
     let deleted = tx
         .execute(
             "DELETE FROM merge_retraction_cleanups

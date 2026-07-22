@@ -36,18 +36,10 @@ impl Database {
                 serde_json::from_str(&raw_prepared).map_err(|error| {
                     DbError::Message(format!("blocked Merge candidate preparation: {error}"))
                 })?;
-            let PreparedStoreWriteState::MergeConcurrent { .. } = &prepared else {
-                return match prepared {
-                    PreparedStoreWriteState::MergeAbandonment { .. } => Ok(None),
-                    PreparedStoreWriteState::SerialPreparing
-                    | PreparedStoreWriteState::Serial { .. } => Err(DbError::Message(
-                        "Serial state reached Merge candidate abandonment".to_string(),
-                    )),
-                    PreparedStoreWriteState::MergeConcurrent { .. } => unreachable!(),
-                };
+            let PreparedStoreWriteState::Publication { .. } = &prepared else {
+                return Ok(None);
             };
-            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?
-                .expect("matched Merge preparation");
+            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
             if candidate.commit.write_id != write_id {
                 return Err(DbError::Message(
                     "blocked Merge candidate differs from its write identity".to_string(),
@@ -59,7 +51,7 @@ impl Database {
                     bytes: candidate.canonical_signed_bytes,
                     object: candidate.reference.object.clone(),
                     prepared: match &prepared {
-                        PreparedStoreWriteState::MergeConcurrent { commit, .. } => {
+                        PreparedStoreWriteState::Publication { commit, .. } => {
                             commit.prepared.clone()
                         }
                         _ => unreachable!("matched Merge preparation"),
@@ -68,7 +60,7 @@ impl Database {
                 head: ExactProtocolObject {
                     value: candidate.head,
                     bytes: match &prepared {
-                        PreparedStoreWriteState::MergeConcurrent { head, .. } => {
+                        PreparedStoreWriteState::Publication { head, .. } => {
                             head.semantic_bytes.clone()
                         }
                         _ => unreachable!("matched Merge preparation"),
@@ -97,7 +89,7 @@ impl Database {
                 serde_json::from_str(&raw).map_err(|error| {
                     DbError::Message(format!("blocked Merge history summary: {error}"))
                 })?;
-            let PreparedStoreWriteState::MergeConcurrent {
+            let PreparedStoreWriteState::Publication {
                 history_summary, ..
             } = prepared
             else {
@@ -198,13 +190,12 @@ impl Database {
                 serde_json::from_str(&raw_prepared).map_err(|error| {
                     DbError::Message(format!("blocked Merge candidate preparation: {error}"))
                 })?;
-            let PreparedStoreWriteState::MergeConcurrent { .. } = &prepared else {
+            let PreparedStoreWriteState::Publication { .. } = &prepared else {
                 return Err(DbError::Message(
                     "author exclusion reached a non-candidate Merge preparation".to_string(),
                 ));
             };
-            let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?
-                .expect("matched Merge candidate preparation");
+            let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
             begin_blocked_merge_candidate_nonactivation_on(
                 &tx,
                 &write_id,
@@ -434,7 +425,7 @@ impl Database {
             let authority =
                 parse_prepared_merge_candidate_parts_on(&tx, &authority_commit, &authority_head)?;
             remove_cleaned_merge_authority_on(&tx, &authority)?;
-            let replacement = PreparedStoreWriteState::MergeConcurrent {
+            let replacement = PreparedStoreWriteState::Publication {
                 commit: candidate_commit,
                 head: candidate_head,
                 history_summary: candidate_history_summary,
@@ -517,7 +508,7 @@ impl Database {
             let authority =
                 parse_prepared_merge_candidate_parts_on(&tx, &authority_commit, &authority_head)?;
             remove_cleaned_merge_authority_on(&tx, &authority)?;
-            let replacement = PreparedStoreWriteState::MergeConcurrent {
+            let replacement = PreparedStoreWriteState::Publication {
                 commit: candidate_commit,
                 head: candidate_head,
                 history_summary: candidate_history_summary,
@@ -598,7 +589,7 @@ impl Database {
                 ));
             }
             remove_cleaned_author_excluded_merge_authority_on(&tx, &authority)?;
-            let replacement = PreparedStoreWriteState::MergeConcurrent {
+            let replacement = PreparedStoreWriteState::Publication {
                 commit: candidate_commit,
                 head: candidate_head,
                 history_summary: candidate_history_summary,
@@ -647,15 +638,10 @@ impl Database {
             if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
                 witness.validate().map_err(DbError::Message)?;
                 let candidate = witness.original_position().commit();
-                let StoreCommitCoord::MergeConcurrent {
+                let StoreCommitCoord {
                     stream_id,
                     sequence,
-                } = &candidate.coord
-                else {
-                    return Err(DbError::Message(
-                        "Merge retraction cleanup names a Serial write".to_string(),
-                    ));
-                };
+                } = &candidate.coord;
                 let exists: bool = conn
                     .query_row(
                         "SELECT EXISTS(
@@ -684,9 +670,7 @@ impl Database {
             };
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
-            let Some(candidate) = parse_prepared_merge_candidate_on(conn, &prepared)? else {
-                return Ok(false);
-            };
+            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
             let cleanup_pending = |candidate: &PreparedMergeCandidate| -> Result<bool, DbError> {
                 let remote = load_remote_object_on(
                     conn,
@@ -707,7 +691,7 @@ impl Database {
                 ))
             };
             match &prepared {
-                PreparedStoreWriteState::MergeConcurrent { .. } => cleanup_pending(&candidate),
+                PreparedStoreWriteState::Publication { .. } => cleanup_pending(&candidate),
                 PreparedStoreWriteState::MergeAbandonment {
                     outcome,
                     authority_commit,
@@ -731,8 +715,6 @@ impl Database {
                         ),
                     }
                 }
-                PreparedStoreWriteState::SerialPreparing
-                | PreparedStoreWriteState::Serial { .. } => Ok(false),
             }
         })
         .await
@@ -775,13 +757,9 @@ impl Database {
             })?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
-            let Some(candidate) = parse_prepared_merge_candidate_on(conn, &prepared)? else {
-                return Err(DbError::Message(
-                    "Serial state reached Merge candidate cleanup".to_string(),
-                ));
-            };
+            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
             match &prepared {
-                PreparedStoreWriteState::MergeConcurrent { .. } => {
+                PreparedStoreWriteState::Publication { .. } => {
                     merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, true)
                 }
                 PreparedStoreWriteState::MergeAbandonment {
@@ -828,8 +806,6 @@ impl Database {
                     }
                     Ok(targets)
                 }
-                PreparedStoreWriteState::SerialPreparing
-                | PreparedStoreWriteState::Serial { .. } => unreachable!("parsed Merge cleanup"),
             }
         })
         .await
@@ -950,8 +926,7 @@ impl Database {
                             .map_err(|error| DbError::Message(error.to_string()))?,
                     )
                 }
-                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => {
+                crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
                     return Err(DbError::Message(
                         "Merge retraction cleanup has nonterminal proof".to_string(),
                     ));
@@ -1089,11 +1064,8 @@ impl Database {
                         DbError::Message(format!("prepared Merge cleanup: {error}"))
                     })?;
                 match &prepared {
-                    PreparedStoreWriteState::MergeConcurrent { .. } => {
-                        candidates.push(
-                            parse_prepared_merge_candidate_on(conn, &prepared)?
-                                .expect("matched Merge candidate preparation"),
-                        );
+                    PreparedStoreWriteState::Publication { .. } => {
+                        candidates.push(parse_prepared_merge_candidate_on(conn, &prepared)?);
                     }
                     PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
@@ -1112,12 +1084,6 @@ impl Database {
                             authority_commit,
                             authority_head,
                         )?);
-                    }
-                    PreparedStoreWriteState::SerialPreparing
-                    | PreparedStoreWriteState::Serial { .. } => {
-                        return Err(DbError::Message(
-                            "Serial state reached Merge candidate cleanup verification".to_string(),
-                        ));
                     }
                 }
             }
@@ -1162,8 +1128,7 @@ impl Database {
                                 .map_err(|error| DbError::Message(error.to_string()))?,
                         )
                     }
-                    crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                    | crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor { .. } => continue,
+                    crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => continue,
                 };
                 verifications.push(TerminalCandidateCleanupVerification {
                     authority,
@@ -1225,7 +1190,7 @@ impl Database {
                         DbError::Message(format!("prepared Merge cleanup: {error}"))
                     })?;
                 match &prepared {
-                    PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => {
+                    PreparedStoreWriteState::Publication { commit, head, .. } => {
                         candidates.push(parse_prepared_merge_candidate_parts_on(&tx, commit, head)?)
                     }
                     PreparedStoreWriteState::MergeAbandonment {
@@ -1245,12 +1210,6 @@ impl Database {
                             authority_commit,
                             authority_head,
                         )?);
-                    }
-                    PreparedStoreWriteState::SerialPreparing
-                    | PreparedStoreWriteState::Serial { .. } => {
-                        return Err(DbError::Message(
-                            "Serial state reached excluded-author head reconciliation".to_string(),
-                        ));
                     }
                 }
             }
@@ -1326,12 +1285,7 @@ impl Database {
             }
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge candidate: {error}")))?;
-            let publication =
-                parse_prepared_merge_publication_on(&tx, &prepared)?.ok_or_else(|| {
-                    DbError::Message(
-                        "Serial branch reached alternate Merge head adoption".to_string(),
-                    )
-                })?;
+            let publication = parse_prepared_merge_publication_on(&tx, &prepared)?;
             let root = required_store_root_authority_on(&tx)?;
             let registration = load_activated_registration_on(
                 &tx,
@@ -1363,13 +1317,13 @@ impl Database {
                 prepared: winner_prepared,
             };
             let replacement = match prepared {
-                PreparedStoreWriteState::MergeConcurrent {
+                PreparedStoreWriteState::Publication {
                     commit,
                     history_summary,
                     local_cleanup,
                     completion,
                     ..
-                } => PreparedStoreWriteState::MergeConcurrent {
+                } => PreparedStoreWriteState::Publication {
                     commit,
                     head: replacement_head,
                     history_summary,
@@ -1397,10 +1351,6 @@ impl Database {
                     local_cleanup,
                     completion,
                 },
-                PreparedStoreWriteState::SerialPreparing
-                | PreparedStoreWriteState::Serial { .. } => {
-                    unreachable!("parsed Merge publication")
-                }
             };
             let replacement = serde_json::to_string(&replacement).map_err(|error| {
                 DbError::Message(format!("serialize alternate Merge preparation: {error}"))

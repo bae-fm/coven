@@ -8,7 +8,7 @@ use crate::sync::store_commit::{
     CandidateFamilyId, ObjectHash, StoreCommitCoord, StoreDeviceRegistrationRef,
     STORE_PROTOCOL_VERSION,
 };
-use crate::{WriteId, WritePolicy};
+use crate::WriteId;
 
 /// The Store or Circle whose exact package bytes carry a changeset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,16 +244,6 @@ impl AudiencePackage {
         &self.blob_bindings
     }
 
-    pub fn policy(&self) -> Option<WritePolicy> {
-        match &self.audience {
-            PackageAudience::Store => None,
-            PackageAudience::Circle { control, .. } => Some(match control {
-                CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-                CircleControlCoord::Serial { .. } => WritePolicy::Serial,
-            }),
-        }
-    }
-
     /// Require every exact blob locator in this package to name the registration
     /// that authored the enclosing Store commit.
     pub fn validate_blob_uploader(
@@ -403,7 +393,7 @@ mod tests {
     use crate::sync::store_commit::{
         CandidateFamilyId, ObjectHash, StoreCommitCoord, StoreDeviceRegistrationRef,
     };
-    use crate::{BlobScope, KeyFingerprint, WriteId, WritePolicy};
+    use crate::{BlobScope, KeyFingerprint, WriteId};
 
     fn uploader() -> StoreDeviceRegistrationRef {
         let bytes = b"audience-package uploader registration";
@@ -424,14 +414,23 @@ mod tests {
     }
 
     fn merge_coord() -> StoreCommitCoord {
-        StoreCommitCoord::MergeConcurrent {
+        StoreCommitCoord {
             stream_id: AuthorStreamId::from_bytes([3; 32]),
             sequence: 3,
         }
     }
 
-    fn serial_coord() -> StoreCommitCoord {
-        StoreCommitCoord::Serial { sequence: 4 }
+    fn circle_control_coord() -> CircleControlCoord {
+        CircleControlCoord {
+            device_id: "device-a".to_string(),
+            stream_id: AuthorStreamId::from_bytes([4; 32]),
+            author_pubkey: "22".repeat(32),
+            author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+                "audience-package owner",
+            ),
+            seq: 4,
+            control_hash: ObjectHash::digest(b"control"),
+        }
     }
 
     fn locator(id: &str, audience: RemoteAudience) -> BlobLocator {
@@ -511,7 +510,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(package.to_bytes()).unwrap(),
             format!(
-                "{{\"version\":1,\"store_root_hash\":\"{root}\",\"candidate_family\":\"{}\",\"write_id\":\"write-a\",\"commit_coord\":{{\"merge_concurrent\":{{\"stream_id\":\"{}\",\"sequence\":3}}}},\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}",
+                "{{\"version\":1,\"store_root_hash\":\"{root}\",\"candidate_family\":\"{}\",\"write_id\":\"write-a\",\"commit_coord\":{{\"stream_id\":\"{}\",\"sequence\":3}},\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}",
                 candidate_family().as_hash(),
                 AuthorStreamId::from_bytes([3; 32]),
             )
@@ -574,14 +573,10 @@ mod tests {
                 ObjectHash::digest(b"root"),
                 candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                serial_coord(),
+                merge_coord(),
                 8,
                 circle,
-                CircleControlCoord::Serial {
-                    author_pubkey: "22".repeat(32),
-                    generation: 4,
-                    control_hash: ObjectHash::digest(b"control"),
-                },
+                circle_control_coord(),
                 KeyFingerprint::from_bytes([4; 8]),
                 Vec::new(),
                 vec![binding("row-a", browsable)],
@@ -610,14 +605,10 @@ mod tests {
                 ObjectHash::digest(b"root"),
                 candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                serial_coord(),
+                merge_coord(),
                 8,
                 circle,
-                CircleControlCoord::Serial {
-                    author_pubkey: "22".repeat(32),
-                    generation: 4,
-                    control_hash: ObjectHash::digest(b"control"),
-                },
+                circle_control_coord(),
                 KeyFingerprint::from_bytes([4; 8]),
                 Vec::new(),
                 vec![binding("row-a", wrong_key_locator)],
@@ -669,14 +660,10 @@ mod tests {
             ObjectHash::digest(b"root"),
             candidate_family(),
             WriteId::from_generated("write-a".to_string()),
-            serial_coord(),
+            merge_coord(),
             8,
             circle,
-            CircleControlCoord::Serial {
-                author_pubkey: "22".repeat(32),
-                generation: 4,
-                control_hash: ObjectHash::digest(b"control"),
-            },
+            circle_control_coord(),
             KeyFingerprint::from_bytes([4; 8]),
             b"circle changeset".to_vec(),
             vec![binding(
@@ -686,7 +673,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(package.policy(), Some(WritePolicy::Serial));
         assert_eq!(
             AudiencePackage::parse(&package.to_bytes()).unwrap(),
             package

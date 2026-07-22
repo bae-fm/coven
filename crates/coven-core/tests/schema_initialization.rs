@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use coven_core::database::Database;
-use coven_core::{Migration, RowIdentity, SyncedTable, WritePolicy};
+use coven_core::{Migration, RowIdentity, SyncedTable};
 use rusqlite::Connection;
 
 #[test]
@@ -22,8 +22,7 @@ fn ordinary_open_rejects_coven_schema_without_initialization_marker() {
         &path,
         vec![SyncedTable::new("things", RowIdentity::SharedKey)],
         coven_core::blob::BLOB_TOMBSTONE_GRACE,
-        coven_core::blob::TransferLimits::serial(),
-        WritePolicy::MergeConcurrent,
+        coven_core::blob::TransferLimits::one_at_a_time(),
         "unmarked-schema-open".to_string(),
         &[Migration::sql(
             1,

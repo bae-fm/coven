@@ -21,11 +21,6 @@ name = "exact_founder_graph"
 path = "tests/exact_founder_graph.rs"
 required-features = ["test-utils"]
 
-[[test]]
-name = "serial_control_author"
-path = "tests/serial_control_author.rs"
-required-features = ["test-utils"]
-
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -56,7 +51,6 @@ tokio = { version = "1.0", features = ["fs", "io-util", "macros", "rt", "sync", 
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
-serial_test = "3.4.0"
 tempfile = "3.27.0"
 
 [features]

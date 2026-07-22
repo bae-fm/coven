@@ -12,22 +12,9 @@ your queries through them, so it can capture each change with SQLite's session
 extension, encrypt and sign it, move it through the user's storage, and apply
 remote changes back.
 
-Stores select one signed write policy when opened. `MergeConcurrent` accepts
-offline branches and merges their causally ordered commits. `Serial` preserves a
-single global commit order and exposes stale offline work as a branch conflict;
-the host either discards that branch or reruns its intent against the current
-global state.
-
-The local database also stores this policy as required Coven metadata. Its
-internal schema, policy, and initialization marker commit atomically on first
-open; every writer and read-only open validates the requested policy against
-that persisted value and refuses missing or different metadata.
-
-`Serial` requires provider-backed atomic conditional head updates and strong
-reads. CloudKit and AWS S3 provide the required adapter. A custom S3 endpoint is
-eligible only when configured with
-`CustomS3Serial::ConditionalPutAndStrongReads`; Google Drive, Dropbox, and
-OneDrive are refused for `Serial`.
+Coven gives each device an immutable signed commit stream. Commits carry their
+causal dependencies; devices accept dependency-ready commits and converge by
+merging concurrent row changes deterministically.
 
 Docs: <https://coven.bae.fm>
 
@@ -37,10 +24,9 @@ Open a store, declaring the tables that sync and the migration ladder that
 builds your schema. Tables you don't declare stay local to the device.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable, WritePolicy};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(config)
-    .write_policy(WritePolicy::MergeConcurrent)
     .synced_tables(vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid),
         SyncedTable::new("photos", RowIdentity::IndependentUuid)
@@ -95,10 +81,9 @@ handle.sync_now();
 `handle.pending_writes` reconstructs unpublished write state after restart;
 `blocked_writes`, `retry_blocked_write`, and `discard_blocked_write` expose the
 explicit recovery path for a write stopped by a missing blob or invalid package
-or protocol state. A Serial retry validates its complete ordered branch,
-including writes that were still pending. `handle.subscribe_sync_status`
-exposes the current loop state, and `handle.invite_member` adds a member. The
-whole tour is the [example](https://coven.bae.fm/docs/example).
+or protocol state. `handle.subscribe_sync_status` exposes the current loop
+state, and `handle.invite_member` adds a member. The whole tour is the
+[example](https://coven.bae.fm/docs/example).
 
 `Offline` means a provider or network operation failed. Invalid remote blob
 content and local cache filesystem failures remain typed failed or held work;
@@ -108,22 +93,18 @@ they never masquerade as a connectivity loss.
 
 - **Local first.** Every device has the full database. Writes commit locally;
   a background cycle pushes and pulls sealed changesets through the storage.
-- **Policy-shaped ordering.** `MergeConcurrent` gives each device an append-only
-  stream and merges concurrent edits column by column. `Serial` commits through
-  one conditional global head. Pull validates every visible physical candidate,
-  then follows only the exact signed predecessor chain selected by the
-  authoritative head; it never chooses by provider listing order. Stale local
-  branches require explicit discard or rerun.
+- **Causal ordering.** Each device has an append-only stream. Pull verifies
+  signed predecessors and dependencies, then merges concurrent edits column by
+  column; provider listing order never decides the result.
 - **Pick what syncs.** Undeclared tables never leave the device, and a boolean
   gate column can keep chosen rows of a synced table local; the gate follows
   the schema's foreign keys down to descendants.
 - **Files ride with rows.** A blob commits in its row's transaction and syncs
   encrypted. Bytes can live locally or in the cloud, with per-namespace cache
   budgets and pinning on each device.
-- **Cryptographic membership.** Members are keypairs. `MergeConcurrent` signs
-  causal owner streams; `Serial` puts membership and key rotation in exact
-  global control commits. The store keyring is sealed to each member, and a
-  removed member never receives the replacement generation.
+- **Cryptographic membership.** Members are keypairs. Membership changes are
+  signed causal owner streams. The store keyring is sealed to each member, and
+  a removed member never receives the replacement generation.
 - **Untrusted storage.** The provider holds ciphertext and signed control
   objects; every changeset is verified on pull.
 

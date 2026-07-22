@@ -89,7 +89,6 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
@@ -100,7 +99,6 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             Arc::new(hlc),
             migrations,
             CovenMetadataOpen::Detect,
@@ -113,7 +111,6 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
@@ -124,7 +121,6 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             Arc::new(hlc),
             migrations,
             CovenMetadataOpen::VerifiedSnapshot(Box::new(install)),
@@ -143,7 +139,6 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
@@ -152,7 +147,6 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             hlc,
             migrations,
             CovenMetadataOpen::Detect,
@@ -164,7 +158,6 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen,
@@ -174,7 +167,6 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             hlc,
             migrations,
             metadata_open,
@@ -218,7 +210,6 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
-        write_policy: WritePolicy,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
@@ -229,7 +220,6 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
-            write_policy,
             Arc::new(hlc),
             migrations,
         )?;
@@ -268,10 +258,6 @@ impl Database {
     /// ([`crate::blob::cache::pin`]). Fixed for this handle's life.
     pub fn transfer_limits(&self) -> crate::blob::TransferLimits {
         self.state.transfer_limits
-    }
-
-    pub fn write_policy(&self) -> WritePolicy {
-        self.state.write_policy
     }
 
     /// The gate model resolved from the final synced table set and live schema at

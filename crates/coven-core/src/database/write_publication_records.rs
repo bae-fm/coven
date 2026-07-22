@@ -18,31 +18,6 @@ pub(crate) struct MergeCandidateAbandonmentPreparation {
     pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
-pub(crate) struct SerialCandidateAbandonmentPreparation {
-    pub branch_id: PendingBranchId,
-    pub candidate: StoreBatchCommitRef,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
-    pub head: StoreSerialHead,
-    pub original_head_bytes: Vec<u8>,
-}
-
-pub(crate) struct SerialStoreWritePreparation {
-    pub branch_id: PendingBranchId,
-    pub base: Option<StoreBatchCommitRef>,
-    pub base_head: VersionedObject,
-    pub writes: Vec<SerialStoreWritePreparationEntry>,
-    pub head: StoreSerialHead,
-}
-
-pub(crate) struct SerialStoreWritePreparationEntry {
-    pub write_id: WriteId,
-    pub remote_objects: Vec<RemoteObjectRecord>,
-    pub audiences: PreparedAudienceObjects,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
-    pub local_cleanup: StoreBatchLocalCleanup,
-    pub completion: StoreBatchCompletion,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CandidateCleanupObject {
     pub(crate) object: ExactObjectRef,
@@ -51,7 +26,7 @@ pub(crate) struct CandidateCleanupObject {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum PreparedStoreWriteState {
-    MergeConcurrent {
+    Publication {
         commit: DurablePreparedProtocolObject,
         head: DurablePreparedProtocolObject,
         history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
@@ -69,48 +44,12 @@ pub(super) enum PreparedStoreWriteState {
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
-    SerialPreparing,
-    Serial {
-        base_head: VersionedObject,
-        commit: DurablePreparedProtocolObject,
-        tip_head_bytes: Option<Vec<u8>>,
-        local_cleanup: StoreBatchLocalCleanup,
-        completion: StoreBatchCompletion,
-    },
 }
 
-pub(crate) fn parse_prepared_serial_write_state(
-    raw: &str,
-) -> Result<
-    (
-        DurablePreparedProtocolObject,
-        Option<Vec<u8>>,
-        StoreBatchLocalCleanup,
-    ),
-    DbError,
-> {
-    let PreparedStoreWriteState::Serial {
-        commit,
-        tip_head_bytes,
-        local_cleanup,
-        ..
-    } = serde_json::from_str(raw)
-        .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?
-    else {
-        return Err(DbError::Message(
-            "non-Serial write reached Serial completion".to_string(),
-        ));
-    };
-    Ok((commit, tip_head_bytes, local_cleanup))
-}
-
-pub(crate) enum PreparedWriteMaterialization<'a> {
-    MergeConcurrent {
-        head: &'a StoreDeviceHead,
-        head_object: &'a ExactObjectRef,
-        history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-    },
-    Serial,
+pub(crate) struct PreparedWriteMaterialization<'a> {
+    pub(crate) head: &'a StoreDeviceHead,
+    pub(crate) head_object: &'a ExactObjectRef,
+    pub(crate) history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -152,9 +91,7 @@ impl VerifiedMergeMembershipObjects {
         head_value: &AuthorHead,
         head: MembershipHeadRef,
     ) -> Result<Self, DbError> {
-        let Some(crate::sync::store_commit::StoreControl::MergeMembership { transition }) =
-            commit.control()
-        else {
+        let Some(crate::sync::store_commit::StoreControl { transition }) = commit.control() else {
             return Err(DbError::Message(
                 "Merge membership object closure accompanies another Store control".to_string(),
             ));
@@ -264,11 +201,6 @@ pub(crate) enum RetainedPackageApplication {
 pub(super) struct RetainedMergeMaterializationKey {
     pub(super) commit_ref: String,
     pub(super) input_hash: ObjectHash,
-}
-
-pub(super) enum MaterializedCommitRetention<'a> {
-    MergeConcurrent(&'a RetainedMergeMaterializationKey),
-    Serial,
 }
 
 pub(crate) struct VerifiedMergeMaterialization<'a> {
@@ -511,8 +443,6 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             .validate_shape()
             .map_err(|error| DbError::Message(error.to_string()))?;
         if commit.store_root_hash != root.store_root_hash
-            || commit.policy() != WritePolicy::MergeConcurrent
-            || commit_ref.coord.policy() != WritePolicy::MergeConcurrent
             || history_summary.store_root_hash != root.store_root_hash
             || history_summary.digest() != activation_head.history_summary
             || history_summary.causal_cut.get(&commit_ref.coord) != Some(commit_ref)
@@ -525,10 +455,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 .zip(commit.circle_controls())
                 .any(|(activation, reference)| activation.reference != *reference)
             || packages.is_empty() != package_application.is_none()
-            || matches!(
-                commit.control(),
-                Some(crate::sync::store_commit::StoreControl::MergeMembership { .. })
-            ) != membership_objects.is_some()
+            || commit.control().is_some() != membership_objects.is_some()
         {
             return Err(DbError::Message(
                 "verified Merge materialization differs from its exact Store commit".to_string(),
@@ -552,15 +479,10 @@ impl<'a> VerifiedMergeMaterialization<'a> {
     }
 }
 
-pub(crate) enum LocalRetirementMaterialization {
-    MergeConcurrent {
-        head: StoreDeviceHead,
-        head_object: ExactObjectRef,
-        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-    },
-    Serial {
-        authorization: SerialAuthorizationState,
-    },
+pub(crate) struct LocalRetirementMaterialization {
+    pub(crate) head: StoreDeviceHead,
+    pub(crate) head_object: ExactObjectRef,
+    pub(crate) history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -579,36 +501,6 @@ pub(super) enum MergeAbandonmentOutcome {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DurableSerialCandidateAbandonment {
-    pub(super) branch_id: PendingBranchId,
-    pub(super) base: Option<StoreBatchCommitRef>,
-    pub(super) base_head: VersionedObject,
-    pub(super) candidate: StoreBatchCommitRef,
-    pub(super) commit: DurablePreparedProtocolObject,
-    pub(super) head_bytes: Vec<u8>,
-    pub(super) original_head_bytes: Vec<u8>,
-}
-
-pub(crate) struct PreparedSerialCandidate {
-    pub(super) commit: StoreBatchCommit,
-    pub(super) reference: StoreBatchCommitRef,
-    pub(super) canonical_signed_bytes: Vec<u8>,
-}
-
-impl PreparedSerialCandidate {
-    pub(crate) fn commit(&self) -> &StoreBatchCommit {
-        &self.commit
-    }
-
-    pub(crate) fn reference(&self) -> &StoreBatchCommitRef {
-        &self.reference
-    }
-
-    pub(crate) fn into_parts(self) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>) {
-        (self.commit, self.reference, self.canonical_signed_bytes)
-    }
-}
-
 pub(super) struct PreparedMergeCandidate {
     pub(super) commit: StoreBatchCommit,
     pub(super) reference: StoreBatchCommitRef,

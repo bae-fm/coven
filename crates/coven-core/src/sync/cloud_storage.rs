@@ -14,14 +14,13 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
 use super::storage::{
-    CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef, PreparedExactObject,
-    ProtocolObjectContext, ProtocolObjectProtection, ReplaceHeadError, ResolvedProviderBinding,
-    StorageError, SyncStorage, VersionToken, VersionedObject,
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
+    ResolvedProviderBinding, StorageError, SyncStorage,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{
-    BlobBody, CloudFileReadError, CloudHeadStorage, CloudHome, ExactSlotStorage, ObjectSlot,
+    BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage, ObjectSlot,
 };
 #[cfg(test)]
 use crate::sync::storage::ProtocolObjectDomain;
@@ -834,8 +833,6 @@ pub struct CloudSyncStorage {
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
     store_id: String,
-    coordination: Option<Arc<dyn CloudHeadStorage>>,
-    coordination_probe_peer: Option<Arc<dyn CloudHeadStorage>>,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
     /// attribute and verify them; the at-rest cipher proves confidentiality, not
@@ -870,73 +867,13 @@ impl CloudSyncStorage {
             blob_paths,
             store_id: store_id.into(),
             keypair,
-            coordination: None,
-            coordination_probe_peer: None,
         })
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_test_serial_coordination(
-        mut self,
-        coordination: Arc<dyn CloudHeadStorage>,
-    ) -> Self {
-        self.coordination = Some(coordination.clone());
-        self.coordination_probe_peer = Some(coordination);
-        self
-    }
-
-    pub fn with_serial_coordination_clients(
-        mut self,
-        coordination: Arc<dyn CloudHeadStorage>,
-        probe_peer: Arc<dyn CloudHeadStorage>,
-    ) -> Self {
-        self.coordination = Some(coordination);
-        self.coordination_probe_peer = Some(probe_peer);
-        self
-    }
-
-    pub fn serial_coordination(&self) -> Result<&dyn CoordinationStorage, CoordinationError> {
-        self.coordination.as_ref().ok_or_else(|| {
-            CoordinationError::Unavailable(
-                "configured storage adapter has no documented coordination capability".to_string(),
-            )
-        })?;
-        Ok(self)
-    }
-
-    pub(crate) fn serial_coordination_probe_clients(
-        &self,
-    ) -> Result<(CloudCoordinationClient<'_>, CloudCoordinationClient<'_>), CoordinationError> {
-        let primary = self.primary_coordination_client()?;
-        let peer = self.coordination_probe_peer.as_deref().ok_or_else(|| {
-            CoordinationError::Unavailable(
-                "Serial coordination probe peer is not configured".to_string(),
-            )
-        })?;
-        Ok((
-            primary,
-            CloudCoordinationClient {
-                storage: self,
-                raw: peer,
-            },
-        ))
     }
 
     pub(crate) fn exact_slot_probe_clients(
         &self,
     ) -> (&dyn ExactSlotStorage, &dyn ExactSlotStorage) {
         (self.exact.as_ref(), self.exact_probe_peer.as_ref())
-    }
-
-    fn primary_coordination_client(
-        &self,
-    ) -> Result<CloudCoordinationClient<'_>, CoordinationError> {
-        let raw = self.coordination.as_deref().ok_or_else(|| {
-            CoordinationError::Unavailable(
-                "configured storage adapter has no documented coordination capability".to_string(),
-            )
-        })?;
-        Ok(CloudCoordinationClient { storage: self, raw })
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -1130,39 +1067,6 @@ impl CloudSyncStorage {
                 crate::store_dir::validate_cloud_path(path)?;
                 Ok(format!("{namespace}/{path}"))
             }
-        }
-    }
-}
-
-pub(crate) struct CloudCoordinationClient<'a> {
-    storage: &'a CloudSyncStorage,
-    raw: &'a dyn CloudHeadStorage,
-}
-
-fn coordination_home_error(error: crate::storage::cloud::CloudHomeError) -> CoordinationError {
-    match error {
-        crate::storage::cloud::CloudHomeError::NotFound(key) => CoordinationError::NotFound(key),
-        crate::storage::cloud::CloudHomeError::Configuration(message) => {
-            CoordinationError::Unavailable(message)
-        }
-        crate::storage::cloud::CloudHomeError::Transport(message) => {
-            CoordinationError::Storage(message)
-        }
-        crate::storage::cloud::CloudHomeError::Io(error) => {
-            CoordinationError::Storage(format!("I/O error: {error}"))
-        }
-        error @ (crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
-        | crate::storage::cloud::CloudHomeError::UnresolvedOutcome { .. })
-            if error.is_retryable() =>
-        {
-            CoordinationError::Storage(error.to_string())
-        }
-        crate::storage::cloud::CloudHomeError::AlreadyExists(key) => {
-            CoordinationError::Unavailable(format!("coordination object already exists: {key}"))
-        }
-        error @ (crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
-        | crate::storage::cloud::CloudHomeError::UnresolvedOutcome { .. }) => {
-            CoordinationError::Unavailable(error.to_string())
         }
     }
 }
@@ -1715,134 +1619,6 @@ impl BlobRangeReader {
                 })
             })
             .await
-    }
-}
-
-#[async_trait]
-impl CoordinationStorage for CloudCoordinationClient<'_> {
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError> {
-        SyncStorage::provider_binding(self.storage)
-            .await
-            .map_err(|error| CoordinationError::Storage(error.to_string()))
-    }
-
-    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-        let raw = self.raw.read_head(key).await.map_err(|error| match error {
-            crate::storage::cloud::CloudHomeError::NotFound(_) => {
-                CoordinationError::NotFound(key.to_string())
-            }
-            other => coordination_home_error(other),
-        })?;
-        Ok(VersionedObject {
-            bytes: raw.bytes,
-            version: VersionToken::from_cloud(raw.version),
-        })
-    }
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, CreateHeadError> {
-        let created =
-            self.raw
-                .create_head(key, bytes.to_vec())
-                .await
-                .map_err(|error| match error {
-                    crate::storage::cloud::CloudHeadCreateError::AlreadyExists => {
-                        CreateHeadError::AlreadyExists
-                    }
-                    crate::storage::cloud::CloudHeadCreateError::Storage(error) => {
-                        CreateHeadError::Coordination(coordination_home_error(error))
-                    }
-                })?;
-        if created.bytes != bytes {
-            return Err(CreateHeadError::Coordination(CoordinationError::Integrity(
-                "created coordination head readback differs".to_string(),
-            )));
-        }
-        Ok(VersionedObject {
-            bytes: created.bytes,
-            version: VersionToken::from_cloud(created.version),
-        })
-    }
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &VersionToken,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, ReplaceHeadError> {
-        let replaced = self
-            .raw
-            .replace_head(key, expected.cloud(), bytes.to_vec())
-            .await
-            .map_err(|error| match error {
-                crate::storage::cloud::CloudHeadReplaceError::VersionMismatch => {
-                    ReplaceHeadError::VersionMismatch
-                }
-                crate::storage::cloud::CloudHeadReplaceError::Storage(error) => {
-                    ReplaceHeadError::Coordination(coordination_home_error(error))
-                }
-            })?;
-        if replaced.bytes != bytes {
-            return Err(ReplaceHeadError::Coordination(
-                CoordinationError::Integrity(
-                    "replaced coordination head readback differs".to_string(),
-                ),
-            ));
-        }
-        Ok(VersionedObject {
-            bytes: replaced.bytes,
-            version: VersionToken::from_cloud(replaced.version),
-        })
-    }
-
-    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-        self.raw
-            .delete_head(key)
-            .await
-            .map_err(coordination_home_error)
-    }
-}
-
-#[async_trait]
-impl CoordinationStorage for CloudSyncStorage {
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError> {
-        SyncStorage::provider_binding(self)
-            .await
-            .map_err(|error| CoordinationError::Storage(error.to_string()))
-    }
-
-    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
-        self.primary_coordination_client()?.read_head(key).await
-    }
-
-    async fn create_head(
-        &self,
-        key: &str,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, CreateHeadError> {
-        self.primary_coordination_client()
-            .map_err(CreateHeadError::Coordination)?
-            .create_head(key, bytes)
-            .await
-    }
-
-    async fn replace_head(
-        &self,
-        key: &str,
-        expected: &VersionToken,
-        bytes: &[u8],
-    ) -> Result<VersionedObject, ReplaceHeadError> {
-        self.primary_coordination_client()
-            .map_err(ReplaceHeadError::Coordination)?
-            .replace_head(key, expected, bytes)
-            .await
-    }
-
-    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
-        self.primary_coordination_client()?.delete_head(key).await
     }
 }
 
@@ -2438,11 +2214,9 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::storage::{BlobWriteAuthority, ExactObjectRef};
     use crate::sync::store_commit::{
-        DeviceStreamAnchor, ObjectHash, StoreCommitAnchor, StoreCreationId,
-        StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
-        StoreRootRef,
+        DeviceStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
+        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
     };
-    use crate::sync::test_helpers::open_serial_test_db;
 
     #[test]
     fn peer_rotation_cannot_stand_in_for_the_exact_local_candidate() {
@@ -2553,10 +2327,8 @@ mod tests {
                 creation_id: StoreCreationId::from_nonce(label),
             },
             provider,
-            StoreCommitAnchor::MergeConcurrent {
-                announcements: DeviceStreamAnchor::StoreAnnouncements {
-                    first_slot: anchor_slot("announcements"),
-                },
+            DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: anchor_slot("announcements"),
             },
             DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: anchor_slot("acknowledgements"),
@@ -3150,136 +2922,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordination_values_are_stored_as_exact_control_bytes() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([23; 32])),
-            BlobPathScheme::Hashed,
-            "coordination-control-bytes",
-            UserKeypair::generate(),
-        )
-        .expect("construct encrypted storage")
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let coordination = storage
-            .serial_coordination()
-            .expect("serial coordination is configured");
-
-        let created = coordination
-            .create_head("store-head", b"signed head one")
-            .await
-            .expect("create coordination value");
-        assert_eq!(home.get("store-head"), Some(b"signed head one".to_vec()));
-        let replaced = coordination
-            .replace_head("store-head", &created.version, b"signed head two")
-            .await
-            .expect("replace coordination value");
-        assert_eq!(home.get("store-head"), Some(b"signed head two".to_vec()));
-        assert_eq!(replaced.bytes, b"signed head two");
-        assert_eq!(
-            coordination
-                .read_head("store-head")
-                .await
-                .expect("read coordination value")
-                .bytes,
-            b"signed head two",
-        );
-    }
-
-    #[tokio::test]
-    async fn pending_rotation_allows_coordination_compare_and_swap() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([24; 32])),
-            BlobPathScheme::Hashed,
-            "coordination-during-rotation",
-            UserKeypair::generate(),
-        )
-        .expect("construct encrypted storage")
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let coordination = storage
-            .serial_coordination()
-            .expect("serial coordination is configured");
-        let created = coordination
-            .create_head("store-head", b"signed head one")
-            .await
-            .expect("create coordination value");
-        storage
-            .shared_pending_rotation()
-            .mark_candidate(2, ObjectHash::digest(b"member removal"))
-            .expect("arm candidate rotation gate");
-
-        let replaced = coordination
-            .replace_head("store-head", &created.version, b"signed head two")
-            .await
-            .expect("replace coordination value while rotation is pending");
-
-        assert_eq!(replaced.bytes, b"signed head two");
-        assert_eq!(home.get("store-head"), Some(b"signed head two".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn coordination_probe_observes_one_create_and_replace_winner() {
-        let home = InMemoryCloudHome::new();
-        let first = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "coordination-probe",
-            UserKeypair::generate(),
-        )
-        .expect("test cloud storage supports immutable copies")
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let second = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "coordination-probe",
-            UserKeypair::generate(),
-        )
-        .expect("test cloud storage supports immutable copies")
-        .with_test_serial_coordination(Arc::new(home.clone()));
-
-        let db = open_serial_test_db();
-        let binding = SyncStorage::provider_binding(&first).await.unwrap();
-        let probe_id = crate::sync::provider::ProviderProbeId::from_bytes([31; 32]);
-        crate::sync::provider::probe_serial_coordination_receipt(
-            first.serial_coordination().unwrap(),
-            second.serial_coordination().unwrap(),
-            &db,
-            probe_id,
-            &binding,
-        )
-        .await
-        .expect("coordination race probe");
-
-        let key = format!(
-            "__coven_probe__/serial/{}",
-            hex::encode(probe_id.as_bytes())
-        );
-        assert!(home.get(&key).is_none());
-        assert_eq!(home.deletes_seen(), vec![key]);
-    }
-
-    #[test]
-    fn storage_without_provider_capability_refuses_serial_coordination() {
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "unsupported-coordination",
-            UserKeypair::generate(),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        assert!(matches!(
-            storage.serial_coordination(),
-            Err(CoordinationError::Unavailable(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn malformed_durable_pending_rotation_blocks_session_reopen() {
         let directory = tempfile::tempdir().expect("pending-rotation database directory");
         let path = directory.path().join("store.sqlite3");
@@ -3288,8 +2930,7 @@ mod tests {
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
+                crate::blob::TransferLimits::one_at_a_time(),
                 "pending-rotation-reopen-device".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
             )
@@ -3350,43 +2991,5 @@ mod tests {
             result,
             Err(crate::sync::cycle::InitSyncError::PendingRotationRestore(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn coordination_probe_cleanup_failure_reports_remaining_key() {
-        let home = InMemoryCloudHome::new();
-        home.fail_coordination_probe_cleanup();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "coordination-cleanup",
-            UserKeypair::generate(),
-        )
-        .expect("test cloud storage supports immutable copies")
-        .with_test_serial_coordination(Arc::new(home.clone()));
-        let db = open_serial_test_db();
-        let binding = SyncStorage::provider_binding(&storage).await.unwrap();
-        let probe_id = crate::sync::provider::ProviderProbeId::from_bytes([37; 32]);
-        let key = format!(
-            "__coven_probe__/serial/{}",
-            hex::encode(probe_id.as_bytes())
-        );
-
-        let error = crate::sync::provider::probe_serial_coordination_receipt(
-            storage.serial_coordination().unwrap(),
-            storage.serial_coordination().unwrap(),
-            &db,
-            probe_id,
-            &binding,
-        )
-        .await
-        .expect_err("cleanup failure must abort the probe");
-
-        assert!(matches!(
-            error,
-            crate::sync::provider::ProviderProbeError::Storage(_)
-        ));
-        assert!(home.get(&key).is_some());
     }
 }

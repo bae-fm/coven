@@ -12,7 +12,6 @@ use crate::database::remote_object_records::validate_prepared_package_on;
 use crate::database::remote_object_records::validate_remote_object_on;
 use crate::database::remote_object_records::RemoteStoredRepresentationRef;
 use crate::database::store_device_exclusion_records::store_device_exclusion_journal_error;
-use crate::database::store_reclaim_records::store_reclaim_journal_error;
 
 use super::*;
 
@@ -243,72 +242,6 @@ impl Database {
         )
     }
 
-    pub(super) fn validate_loaded_write_objects(
-        write_id: &WriteId,
-        commit_ref: &StoreBatchCommitRef,
-        commit: &StoreBatchCommit,
-        partitions: &PreparedStoreWritePartitions,
-        audiences: &PreparedAudienceObjects,
-    ) -> Result<(), DbError> {
-        let expected_package_count = usize::from(commit.store_package().is_some())
-            .checked_add(commit.circle_packages().len())
-            .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
-        let partition_count = usize::from(partitions.store.is_some())
-            .checked_add(partitions.circles.len())
-            .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
-        if audiences.packages.len() != expected_package_count
-            || audiences.packages.len() != partition_count
-        {
-            return Err(DbError::Message(
-                "prepared package indexes do not exactly cover commit audiences".to_string(),
-            ));
-        }
-        for package in &audiences.packages {
-            let value = package.package();
-            if value.write_id() != write_id
-                || value.commit_coord() != &commit_ref.coord
-                || value.candidate_family() != commit.candidate_family()
-            {
-                return Err(DbError::Message(
-                    "indexed audience package differs from its exact commit".to_string(),
-                ));
-            }
-            let expected_object = match value.audience() {
-                crate::sync::audience_package::PackageAudience::Store => {
-                    commit
-                        .verify_store_package(package.semantic_bytes())
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                    &commit
-                        .store_package()
-                        .as_ref()
-                        .expect("verified present")
-                        .object
-                }
-                crate::sync::audience_package::PackageAudience::Circle { circle_id, .. } => {
-                    commit
-                        .verify_circle_package(*circle_id, package.semantic_bytes())
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                    &commit
-                        .circle_packages()
-                        .iter()
-                        .find(|entry| entry.circle_id == *circle_id)
-                        .expect("verified present")
-                        .package
-                        .object
-                }
-            };
-            if package.object() != expected_object {
-                return Err(DbError::Message(
-                    "indexed audience package exact object differs from its commit".to_string(),
-                ));
-            }
-            value
-                .validate_blob_uploader(&commit.author_registration)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        validate_prepared_audience_blob_bindings(audiences)
-    }
-
     pub(crate) fn activate_prepared_write_on(
         conn: &rusqlite::Transaction<'_>,
         root: &crate::sync::store_commit::StoreRootRef,
@@ -374,12 +307,8 @@ impl Database {
         let activation = BlobActivation {
             coord: commit_ref.coord.clone(),
         };
-        let apply_schema = crate::sync::conflict::TableSchema::for_apply(
-            conn,
-            synced_tables,
-            gates,
-            commit.order.policy(),
-        )?;
+        let apply_schema =
+            crate::sync::conflict::TableSchema::for_apply(conn, synced_tables, gates)?;
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
             let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
@@ -430,43 +359,18 @@ impl Database {
             }
             None => {}
         }
-        match materialization {
-            PreparedWriteMaterialization::MergeConcurrent {
-                head,
-                head_object,
-                history_summary,
-            } => {
-                Self::record_materialized_merge_commit_on(
-                    conn,
-                    root,
-                    commit,
-                    commit_ref,
-                    &[],
-                    head,
-                    head_object,
-                    history_summary,
-                    &retained_packages,
-                    (!retained_packages.is_empty())
-                        .then_some(RetainedPackageApplication::LocallyAuthored),
-                )?;
-            }
-            PreparedWriteMaterialization::Serial => {
-                let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                let stream_activations = VerifiedStreamActivations::none(commit, commit_ref)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                Self::record_materialized_commit_with_device_operations_on(
-                    conn,
-                    commit,
-                    commit_ref,
-                    &device_operations,
-                    &stream_activations,
-                    MaterializedCommitRetention::Serial,
-                    &ReclaimCommitActivation::serial(commit_ref.clone())
-                        .map_err(store_reclaim_journal_error)?,
-                )?;
-            }
-        }
+        Self::record_materialized_merge_commit_on(
+            conn,
+            root,
+            commit,
+            commit_ref,
+            &[],
+            materialization.head,
+            materialization.head_object,
+            materialization.history_summary,
+            &retained_packages,
+            (!retained_packages.is_empty()).then_some(RetainedPackageApplication::LocallyAuthored),
+        )?;
         for drop in local_cleanup.drops {
             conn.execute(
                 "INSERT INTO published_blob_drop_intents
@@ -475,12 +379,7 @@ impl Database {
                  ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
                 rusqlite::params![
                     Self::sequence_to_sqlite(
-                        &match &commit_ref.coord {
-                            StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-                                stream_id.to_string()
-                            }
-                            StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-                        },
+                        &commit_ref.coord.stream_id.to_string(),
                         commit_ref.coord.sequence(),
                     )?,
                     drop.namespace,
@@ -553,30 +452,7 @@ impl Database {
                 .map_err(DbError::from)?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared remote graph: {error}")))?;
-            let commit = match &prepared {
-                PreparedStoreWriteState::MergeConcurrent { .. }
-                | PreparedStoreWriteState::MergeAbandonment { .. } => {
-                    parse_prepared_merge_candidate_on(conn, &prepared)?
-                        .ok_or_else(|| {
-                            DbError::Message("prepared Merge candidate graph is absent".to_string())
-                        })?
-                        .commit
-                }
-                PreparedStoreWriteState::Serial { .. } => {
-                    parse_prepared_serial_candidate(&raw_prepared)?
-                        .ok_or_else(|| {
-                            DbError::Message(
-                                "prepared Serial candidate graph is absent".to_string(),
-                            )
-                        })?
-                        .commit
-                }
-                PreparedStoreWriteState::SerialPreparing => {
-                    return Err(DbError::Message(
-                        "Serial write has no prepared candidate graph".to_string(),
-                    ));
-                }
-            };
+            let commit = parse_prepared_merge_candidate_on(conn, &prepared)?.commit;
             let mut ids = candidate_graph_exact_objects(&commit)?
                 .iter()
                 .map(|object| (remote_object_id(object).to_string(), None))

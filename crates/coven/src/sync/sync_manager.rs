@@ -86,7 +86,7 @@ impl From<crate::sync::membership_ops::MembershipOpsError> for SyncError {
 /// High-level sync manager.
 ///
 /// Holds the store's master-key custody. The at-rest cipher is resolved from
-/// it per [`start_sync`](Self::start_sync) call for an opaque home; a Merge
+/// it per [`start_sync`](Self::start_sync) call for an opaque home; a
 /// store with scoped rows also loads generation 1 for stable row routing,
 /// independent of the home's storage representation.
 pub(crate) struct SyncManager {
@@ -125,14 +125,6 @@ pub(crate) struct SyncManager {
 }
 
 impl SyncManager {
-    fn require_configured_coordination(&self, config: &Config) -> Result<(), SyncError> {
-        crate::storage::cloud::setup::require_serial_coordination_config(
-            config,
-            self.db.write_policy(),
-        )
-        .map_err(SyncError::StorageSetup)
-    }
-
     async fn storage_for_command(
         &self,
         config: &Config,
@@ -211,67 +203,6 @@ impl SyncManager {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
-    pub(crate) async fn prepare_serial_resolution(
-        &self,
-        branch_base: Option<crate::sync::store_commit::StoreBatchCommitRef>,
-        store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<crate::sync::store_engine::SerialResolutionPlan, SyncError> {
-        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        crate::sync::store_engine::prepare_serial_resolution(
-            &self.db,
-            Arc::clone(loop_handle.storage()),
-            store_dir,
-            branch_base,
-            &identity,
-        )
-        .await
-        .map_err(|error| SyncError::Protocol(error.to_string()))
-    }
-
-    pub(crate) async fn cleanup_serial_candidates(
-        &self,
-        branch_id: coven_core::PendingBranchId,
-        plan: &crate::sync::store_engine::SerialResolutionPlan,
-    ) -> Result<(), SyncError> {
-        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        crate::sync::store_engine::cleanup_serial_resolution_candidates(
-            &self.db,
-            Arc::clone(loop_handle.storage()),
-            branch_id,
-            plan,
-        )
-        .await
-        .map_err(|error| SyncError::Protocol(error.to_string()))
-    }
-
-    pub(crate) async fn abandon_serial_branch(
-        &self,
-        branch_id: coven_core::PendingBranchId,
-        store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<coven_core::sync::store_engine::SerialBranchAbandonment, SyncError> {
-        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        let storage = loop_handle.storage();
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let device_id = self
-            .db
-            .get_protocol_state(coven_core::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await?
-            .ok_or_else(|| {
-                SyncError::Protocol("local Store device identity is absent".to_string())
-            })?;
-        coven_core::sync::store_engine::abandon_serial_branch(
-            &self.db,
-            Arc::clone(storage),
-            &device_id,
-            &identity,
-            store_dir,
-            branch_id,
-        )
-        .await
-        .map_err(|error| SyncError::Protocol(error.to_string()))
-    }
-
     pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_core::WriteId,
@@ -318,11 +249,12 @@ impl SyncManager {
     }
 
     fn routing_encryption(&self) -> Result<Option<EncryptionService>, SyncError> {
-        (self.db.write_policy() == crate::WritePolicy::MergeConcurrent
-            && self.db.gates().has_scoped_graph())
-        .then(|| crate::handle::routing_encryption_from_custody(self.custody.as_ref()))
-        .transpose()
-        .map_err(SyncError::from)
+        self.db
+            .gates()
+            .has_scoped_graph()
+            .then(|| crate::handle::routing_encryption_from_custody(self.custody.as_ref()))
+            .transpose()
+            .map_err(SyncError::from)
     }
 
     /// Initialize cloud home and sync loop from current config.
@@ -345,7 +277,6 @@ impl SyncManager {
             return Ok(());
         }
 
-        self.require_configured_coordination(&config)?;
         crate::storage::cloud::setup::require_exact_slot_capabilities_config(&config)
             .map_err(SyncError::StorageSetup)?;
 
@@ -464,18 +395,7 @@ impl SyncManager {
         home: std::sync::Arc<dyn CloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
-        self.start_sync_with_home_parts(home, cipher, None).await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn start_sync_with_home_and_coordination(
-        &self,
-        home: std::sync::Arc<dyn CloudHome>,
-        coordination: std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>,
-        cipher: CloudCipher,
-    ) -> Result<(), SyncError> {
-        self.start_sync_with_home_parts(home, cipher, Some(coordination))
-            .await
+        self.start_sync_with_home_parts(home, cipher).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -483,7 +403,6 @@ impl SyncManager {
         &self,
         home: std::sync::Arc<dyn CloudHome>,
         cipher: CloudCipher,
-        coordination: Option<std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>>,
     ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
         crate::storage::cloud::setup::require_exact_slot_capabilities_home(
@@ -500,17 +419,13 @@ impl SyncManager {
         } else {
             BlobPathScheme::Hashed
         };
-        let mut storage = CloudSyncStorage::new(
+        let storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
             blob_paths,
             config.store_id.clone(),
             keypair,
         )?;
-        if let Some(coordination) = coordination {
-            storage = storage.with_test_serial_coordination(coordination);
-        }
-
         let initialization = self.store_initialization().await?;
         let components = crate::sync::cycle::init_sync_over_storage(
             &self.db,
@@ -716,7 +631,6 @@ impl SyncManager {
             info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
         }
-        self.require_configured_coordination(&config)?;
         let storage = self
             .storage_for_command(&config, active_loop.as_ref())
             .await?;
@@ -747,7 +661,6 @@ impl SyncManager {
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
-        self.require_configured_coordination(&config)?;
         let storage = self
             .storage_for_command(&config, active_loop.as_ref())
             .await?;
@@ -763,30 +676,16 @@ impl SyncManager {
             self.db.local_store_root_ref().await?.ok_or_else(|| {
                 SyncError::Protocol("store protocol root hash is absent".to_string())
             })?;
-        let membership_floor = match self.db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => {
-                crate::join_code::MembershipFloor::MergeConcurrent(
-                    crate::sync::membership_ops::current_membership_floor(
-                        &*storage,
-                        &store_root,
-                        pinned_owner.as_deref(),
-                        Some(&self.db),
-                    )
-                    .await
-                    .map_err(SyncError::from)?,
-                )
-            }
-            crate::WritePolicy::Serial => {
-                let coordination = storage.serial_coordination().map_err(|error| {
-                    SyncError::Protocol(format!("Serial coordination: {error}"))
-                })?;
-                let reference =
-                    crate::sync::store_engine::current_serial_head_ref(&self.db, coordination)
-                        .await
-                        .map_err(|error| SyncError::Protocol(error.to_string()))?;
-                crate::join_code::MembershipFloor::Serial(reference)
-            }
-        };
+        let membership_floor = crate::join_code::MembershipFloor(
+            crate::sync::membership_ops::current_membership_floor(
+                &*storage,
+                &store_root,
+                pinned_owner.as_deref(),
+                Some(&self.db),
+            )
+            .await
+            .map_err(SyncError::from)?,
+        );
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authority = crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(
             self.db
@@ -1059,7 +958,6 @@ mod tests {
             "store",
             &join_info,
             &CloudCipher::Plaintext,
-            None,
         );
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
@@ -1074,10 +972,10 @@ mod tests {
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
-        let error = manager
-            .get_members()
-            .await
-            .expect_err("malformed stored credentials must fail");
+        let error = match manager.get_members().await {
+            Ok(_) => panic!("malformed stored credentials must fail"),
+            Err(error) => error,
+        };
         // The typed CloudHomeError survives up through StorageSetup to the public
         // SyncError surface — not flattened into a string — so its retryability
         // verdict is still readable: malformed credentials are a configuration
@@ -1128,44 +1026,6 @@ mod tests {
             matches!(error, SyncError::MasterKeyNotEstablished),
             "expected MasterKeyNotEstablished, got {error:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn start_sync_refuses_a_known_unsupported_serial_provider_before_provider_access() {
-        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
-        let mut config = Config::with_defaults(
-            "serial-google-drive".to_string(),
-            "test-device".to_string(),
-            store_dir,
-            "Serial Store".to_string(),
-        );
-        config.cloud_home.provider = Some(CloudProvider::GoogleDrive);
-        let manager = SyncManager::new(
-            Arc::new(move || config.clone()),
-            StoreKeys::new("serial-google-drive".to_string()),
-            Arc::new(NoKeyCustody),
-            Arc::new(NoIdentityCustody),
-            crate::sync::test_helpers::open_serial_test_db(),
-            Arc::new(SystemClock),
-            None,
-            None,
-            open_guard,
-            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
-        );
-
-        let error = manager
-            .start_sync()
-            .await
-            .expect_err("Google Drive cannot coordinate a Serial Store");
-        assert!(matches!(
-            error,
-            SyncError::StorageSetup(StorageSetupError::SerialCoordinationUnavailable {
-                provider: CloudProvider::GoogleDrive,
-            })
-        ));
-        assert!(manager.sync_loop_handle().is_none());
-        assert!(manager.cloud_home().is_none());
     }
 
     #[tokio::test]

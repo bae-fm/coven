@@ -12,14 +12,12 @@ use super::{
 };
 
 use super::audience_package::{AudiencePackage, PackageAudience};
-use super::circle_activation::{
-    CircleMembershipAuthority, VerifiedCircleActivations, VerifiedStreamActivationPrefix,
-};
+use super::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivationPrefix};
 use super::circle_control::StoreMembershipStateRef;
-use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
+use super::membership::{MembershipChain, MembershipStatus};
 use super::storage::{
-    BlobSpoolProtection, CoordinationError, ExactObjectRef, ProtocolObjectContext,
-    ProtocolObjectDomain, StorageError, SyncStorage,
+    BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+    SyncStorage,
 };
 use super::store_commit::{
     ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier, DeviceJoinAttempt,
@@ -31,16 +29,15 @@ use super::store_commit::{
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, StoreSerialHead, StoreSerialPredecessor,
-    VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
+    StoreProtocolError, StoreRootRef, VerifiedStoreDeviceOperations,
 };
 use super::store_objects::{
-    load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
-    load_device_exclusion_proposal_ref, load_device_join_outcome_ref, load_founder_registration,
-    load_owner_recovery_node_ref, load_owner_signed_device_join_attempt_ref,
-    load_reclaim_authorization_ref, load_reclaim_receipt_ref, load_registration_ref,
-    load_registration_ref_with_root, load_store_ack_predecessor, load_store_ack_ref,
-    load_store_protocol_root, run_blocking_object_verification, StoreObjectError, VerifiedObject,
+    load_circle_package, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
+    load_device_join_outcome_ref, load_founder_registration, load_owner_recovery_node_ref,
+    load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
+    load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
+    load_store_ack_predecessor, load_store_ack_ref, load_store_protocol_root,
+    run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
@@ -175,7 +172,6 @@ pub struct StorePullResult {
     pub devices_pulled: u64,
     pub held_positions: Vec<HeldStorePosition>,
     pub visible_heads: Vec<VerifiedStoreDeviceHead>,
-    pub serial_head: Option<StoreSerialHead>,
     pub row_changes: Vec<RowChange>,
     pub asset_downloads_failed: bool,
     pub local_blob_cleanup_pending: bool,
@@ -202,10 +198,6 @@ pub enum StorePullError {
     SnapshotAuthorNotOwner,
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
-    #[error("Serial Store: {0}")]
-    Serial(String),
-    #[error("Serial coordination: {0}")]
-    Coordination(#[source] CoordinationError),
     #[error("{0}")]
     BlobDownloads(#[source] super::pull::BlobDownloadFailures),
     #[error("storage: {0}")]
@@ -309,22 +301,6 @@ pub(crate) fn parse_candidate_circle_package(
     Ok(package)
 }
 
-pub(crate) struct AuthorizedSerialCommit {
-    pub(crate) commit_ref: StoreBatchCommitRef,
-    pub(crate) commit: StoreBatchCommit,
-    pub(crate) author: StoreDeviceRegistration,
-    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    pub(crate) device_operations: VerifiedStoreDeviceOperations,
-    pub(crate) device_state_before: ResolvedStoreDeviceState,
-    pub(crate) device_state_after: ResolvedStoreDeviceState,
-    pub(crate) acknowledgement: Option<(
-        super::store_commit::StoreAckRef,
-        super::store_commit::StoreAck,
-    )>,
-    pub(crate) authorization_before: SerialAuthorizationState,
-    pub(crate) authorization_after: SerialAuthorizationState,
-}
-
 pub(crate) fn held_commit(
     reference: &StoreBatchCommitRef,
     reason: HeldStorePositionReason,
@@ -374,10 +350,7 @@ pub(crate) fn held_dependency(
 }
 
 pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {
-    match coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    }
+    coord.stream_id.to_string()
 }
 
 #[cfg(test)]

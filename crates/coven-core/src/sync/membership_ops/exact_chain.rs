@@ -161,7 +161,7 @@ async fn validate_membership_head_activation(
     head: &AuthorHead,
     entry: &MembershipEntry,
     verified_activations: Option<
-        &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
+        &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix,
     >,
 ) -> Result<bool, AnchoredChainError> {
     match (
@@ -187,7 +187,7 @@ async fn validate_membership_head_activation(
                 return Ok(true);
             }
             Box::pin(
-                crate::sync::store_engine::merge::pull::verify_merge_membership_head_activation(
+                crate::sync::store_engine::engine::pull::verify_merge_membership_head_activation(
                     storage, root, reference, head, commit,
                 ),
             )
@@ -388,14 +388,7 @@ pub(crate) async fn load_exact_anchored_chain(
             });
         }
     }
-    let crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent {
-        founder_membership: anchor,
-    } = &root_value.descriptor.membership
-    else {
-        return Err(AnchoredChainError::LoadFailed(
-            "Serial Store has no Merge membership stream".to_string(),
-        ));
-    };
+    let anchor = &root_value.descriptor.founder_membership;
     let founder_stream = crate::sync::membership::derive_founder_stream_id(
         &root.store_root_id.to_string(),
         &root_value.descriptor.founder_pubkey,
@@ -623,9 +616,9 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
     owner_pubkey: &str,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: &crate::sync::store_engine::merge::pull::VerifiedMergeMembershipPrefix,
+    verified_activations: &crate::sync::store_engine::engine::pull::VerifiedMergeMembershipPrefix,
     pending_resolution: Option<
-        &crate::sync::store_engine::merge::pull::VerifiedMergeConflictResolutionActivation,
+        &crate::sync::store_engine::engine::pull::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> Result<MembershipChain, AnchoredChainError> {
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(

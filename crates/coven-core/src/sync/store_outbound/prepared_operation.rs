@@ -1,13 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum PreparedStoreOperationCommit {
-    MergeConcurrent(PreparedMergeStoreOperationCommit),
-    Serial(PreparedSerialStoreOperationCommit),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedStoreOperationCommon {
     pub(crate) commit: StoreBatchCommit,
@@ -18,67 +11,24 @@ pub(crate) struct PreparedStoreOperationCommon {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PreparedMergeStoreOperationCommit {
+pub(crate) struct PreparedStoreOperationCommit {
     pub(crate) common: PreparedStoreOperationCommon,
     pub(crate) head: StoreDeviceHead,
     pub(crate) prepared_head: PreparedExactObject,
     pub(crate) history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PreparedSerialStoreOperationCommit {
-    pub(crate) common: PreparedStoreOperationCommon,
-    pub(crate) base_head: VersionedObject,
-    pub(crate) head: StoreSerialHead,
-    pub(crate) authorization_after: SerialAuthorizationState,
-}
-
-impl std::ops::Deref for PreparedMergeStoreOperationCommit {
-    type Target = PreparedStoreOperationCommon;
-
-    fn deref(&self) -> &Self::Target {
-        &self.common
-    }
-}
-
-impl std::ops::DerefMut for PreparedMergeStoreOperationCommit {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.common
-    }
-}
-
-impl std::ops::Deref for PreparedSerialStoreOperationCommit {
-    type Target = PreparedStoreOperationCommon;
-
-    fn deref(&self) -> &Self::Target {
-        &self.common
-    }
-}
-
-impl std::ops::DerefMut for PreparedSerialStoreOperationCommit {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.common
-    }
-}
-
 impl std::ops::Deref for PreparedStoreOperationCommit {
     type Target = PreparedStoreOperationCommon;
 
     fn deref(&self) -> &Self::Target {
-        match self {
-            Self::MergeConcurrent(candidate) => &candidate.common,
-            Self::Serial(candidate) => &candidate.common,
-        }
+        &self.common
     }
 }
 
 impl std::ops::DerefMut for PreparedStoreOperationCommit {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::MergeConcurrent(candidate) => &mut candidate.common,
-            Self::Serial(candidate) => &mut candidate.common,
-        }
+        &mut self.common
     }
 }
 
@@ -92,20 +42,18 @@ impl PreparedStoreOperationCommit {
             self.prepared.stored_bytes().to_vec(),
         )
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?];
-        if let Some((head, prepared)) = self.merge_publication() {
-            objects.push(
-                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                    super::store_commit::StoreDeviceHeadRef {
-                        head_hash: head.head_hash(),
-                        object: prepared.reference().clone(),
-                    },
-                    head.to_bytes(),
-                    prepared.stored_bytes().to_vec(),
-                    self.reference.clone(),
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
-            );
-        }
+        objects.push(
+            super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                super::store_commit::StoreDeviceHeadRef {
+                    head_hash: self.head.head_hash(),
+                    object: self.prepared_head.reference().clone(),
+                },
+                self.head.to_bytes(),
+                self.prepared_head.stored_bytes().to_vec(),
+                self.reference.clone(),
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+        );
         Ok(objects)
     }
 
@@ -121,11 +69,10 @@ impl PreparedStoreOperationCommit {
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
-            || self.commit.control()
-                != Some(&StoreControl::MergeMembership {
-                    transition: transition.transition.clone(),
-                })
+        if self.commit.control()
+            != Some(&StoreControl {
+                transition: transition.transition.clone(),
+            })
             || !transition
                 .transition
                 .matches_head(&publication.head, &publication.head_ref)
@@ -175,11 +122,10 @@ impl PreparedStoreOperationCommit {
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
-            || self.commit.control()
-                != Some(&StoreControl::MergeMembership {
-                    transition: transition.transition.clone(),
-                })
+        if self.commit.control()
+            != Some(&StoreControl {
+                transition: transition.transition.clone(),
+            })
             || !transition
                 .transition
                 .matches_head(&publication.head, &publication.head_ref)
@@ -237,11 +183,10 @@ impl PreparedStoreOperationCommit {
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         super::invite::validate_prepared_publication(publication)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
-            || self.commit.control()
-                != Some(&StoreControl::MergeMembership {
-                    transition: transition.transition.clone(),
-                })
+        if self.commit.control()
+            != Some(&StoreControl {
+                transition: transition.transition.clone(),
+            })
             || !transition
                 .transition
                 .matches_head(&publication.head, &publication.head_ref)
@@ -349,46 +294,20 @@ impl PreparedStoreOperationCommit {
                 "prepared Store operation does not bind its exact commit bytes".to_string(),
             );
         }
-        match self {
-            Self::MergeConcurrent(candidate) => {
-                let head = &candidate.head;
-                let prepared = &candidate.prepared_head;
-                let history_summary = &candidate.history_summary;
-                if self.reference.coord.policy() != crate::WritePolicy::MergeConcurrent
-                    || head.commit != self.reference
-                    || prepared.stored_bytes() != head.to_bytes()
-                    || head.history_summary != history_summary.digest()
-                    || history_summary.causal_cut.get(&self.reference.coord)
-                        != Some(&self.reference)
-                    || history_summary.validate_shape().is_err()
-                    || matches!(
-                        self.commit.control(),
-                        Some(StoreControl::MergeMembership { .. })
-                    ) != history_summary
-                        .membership_proofs
-                        .contains_key(&self.reference)
-                {
-                    return Err(
-                        "prepared Merge operation does not bind its exact activation head"
-                            .to_string(),
-                    );
-                }
-            }
-            Self::Serial(candidate) => {
-                let head = &candidate.head;
-                if self.reference.coord.policy() != crate::WritePolicy::Serial
-                    || !matches!(
-                        &head.state,
-                        StoreSerialHeadState::Commit { commit, .. }
-                            if commit == &self.reference
-                    )
-                {
-                    return Err(
-                        "prepared Serial operation does not bind its exact coordination head"
-                            .to_string(),
-                    );
-                }
-            }
+        if self.head.commit != self.reference
+            || self.prepared_head.stored_bytes() != self.head.to_bytes()
+            || self.head.history_summary != self.history_summary.digest()
+            || self.history_summary.causal_cut.get(&self.reference.coord) != Some(&self.reference)
+            || self.history_summary.validate_shape().is_err()
+            || self.commit.control().is_some()
+                != self
+                    .history_summary
+                    .membership_proofs
+                    .contains_key(&self.reference)
+        {
+            return Err(
+                "prepared Store operation does not bind its exact activation head".to_string(),
+            );
         }
         Ok(())
     }
@@ -398,51 +317,25 @@ impl PreparedStoreOperationCommit {
             && self.commit.to_bytes() == other.commit.to_bytes()
             && self.prepared.reference() == other.prepared.reference()
             && self.registration_activation == other.registration_activation
-            && match (self, other) {
-                (Self::MergeConcurrent(candidate), Self::MergeConcurrent(other_candidate)) => {
-                    candidate.head.to_bytes() == other_candidate.head.to_bytes()
-                        && candidate.prepared_head.reference()
-                            == other_candidate.prepared_head.reference()
-                        && candidate.history_summary == other_candidate.history_summary
-                }
-                (Self::Serial(candidate), Self::Serial(other_candidate)) => {
-                    candidate.base_head == other_candidate.base_head
-                        && candidate.head.to_bytes() == other_candidate.head.to_bytes()
-                        && candidate.authorization_after == other_candidate.authorization_after
-                }
-                _ => false,
-            }
+            && self.head.to_bytes() == other.head.to_bytes()
+            && self.prepared_head.reference() == other.prepared_head.reference()
+            && self.history_summary == other.history_summary
     }
 
-    pub(crate) fn merge_publication(&self) -> Option<(&StoreDeviceHead, &PreparedExactObject)> {
-        match self {
-            Self::MergeConcurrent(candidate) => Some((&candidate.head, &candidate.prepared_head)),
-            Self::Serial(_) => None,
-        }
+    pub(crate) fn publication(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
+        (&self.head, &self.prepared_head)
     }
 
-    pub(crate) fn serial_authorization_after(&self) -> Option<&SerialAuthorizationState> {
-        match self {
-            Self::Serial(candidate) => Some(&candidate.authorization_after),
-            Self::MergeConcurrent(_) => None,
+    pub(crate) fn head_ref(&self) -> StoreDeviceHeadRef {
+        StoreDeviceHeadRef {
+            head_hash: self.head.head_hash(),
+            object: self.prepared_head.reference().clone(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn merge_publication_for_test(
-        &self,
-    ) -> Option<(&StoreDeviceHead, &PreparedExactObject)> {
-        self.merge_publication()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn serial_publication_for_test(
-        &self,
-    ) -> Option<(&VersionedObject, &StoreSerialHead)> {
-        match self {
-            Self::MergeConcurrent(_) => None,
-            Self::Serial(candidate) => Some((&candidate.base_head, &candidate.head)),
-        }
+    pub(crate) fn publication_for_test(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
+        self.publication()
     }
 
     pub(crate) fn acknowledgement_remote_objects(
@@ -472,52 +365,6 @@ impl PreparedStoreOperationCommit {
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         self.retained_authority_remote_objects(vec![authority])
-    }
-
-    pub(crate) fn membership_control_remote_objects(
-        &self,
-        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
-    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreOutboundError> {
-        let control = self.commit.control().ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "membership-wrap ownership requires a signed Store control".to_string(),
-            )
-        })?;
-        let expected = control.introduced_wrapped_keys();
-        if expected.is_empty() {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "signed Store control introduces no membership wraps".to_string(),
-            ));
-        }
-        if expected.len() != wraps.len()
-            || expected
-                .iter()
-                .zip(wraps)
-                .any(|(reference, prepared)| **reference != prepared.reference)
-        {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "prepared membership wraps differ from the signed Store control".to_string(),
-            ));
-        }
-        let authorities = wraps
-            .iter()
-            .map(|prepared| {
-                let value = prepared.validate().map_err(StoreObjectError::from)?;
-                let canonical = serde_json::to_vec(&value).map_err(|error| {
-                    StoreOutboundError::InvalidOutbound(format!(
-                        "serialize prepared membership wrap: {error}"
-                    ))
-                })?;
-                super::remote_object::RemoteObjectRecord::candidate_activated_membership_control_wrapped_store_key(
-                    prepared.reference.clone(),
-                    canonical,
-                    prepared.object.stored_bytes().to_vec(),
-                    self.reference.clone(),
-                )
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.retained_authority_remote_objects(authorities)
     }
 
     pub(crate) fn retained_authority_remote_objects(
@@ -554,48 +401,15 @@ impl PreparedStoreOperationCommit {
         Ok(objects)
     }
 
-    pub(crate) fn merge_head_ref(&self) -> Option<StoreDeviceHeadRef> {
-        match self {
-            Self::MergeConcurrent(candidate) => Some(StoreDeviceHeadRef {
-                head_hash: candidate.head.head_hash(),
-                object: candidate.prepared_head.reference().clone(),
-            }),
-            Self::Serial(_) => None,
-        }
-    }
-
-    pub(crate) fn adopt_serial_base_head(
-        &mut self,
-        observed: VersionedObject,
-    ) -> Result<(), StoreOutboundError> {
-        let Self::Serial(candidate) = self else {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Merge Store operation cannot adopt a Serial head receipt".to_string(),
-            ));
-        };
-        if candidate.base_head == observed {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Serial Store operation already carries the observed head receipt".to_string(),
-            ));
-        }
-        candidate.base_head = observed;
-        Ok(())
-    }
-
     pub(crate) fn adopt_merge_head(
         &mut self,
         winner: StoreDeviceHead,
         prepared: PreparedExactObject,
     ) -> Result<(), StoreOutboundError> {
-        let Self::MergeConcurrent(candidate) = self else {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Serial Store operation cannot adopt a Merge head".to_string(),
-            ));
-        };
-        let current = &mut candidate.head;
-        let current_prepared = &mut candidate.prepared_head;
-        let history_summary = &candidate.history_summary;
-        if winner.commit != candidate.common.reference
+        let current = &mut self.head;
+        let current_prepared = &mut self.prepared_head;
+        let history_summary = &self.history_summary;
+        if winner.commit != self.common.reference
             || prepared.reference().slot() != current_prepared.reference().slot()
             || prepared.reference() == current_prepared.reference()
             || winner.author_registration != current.author_registration
@@ -621,17 +435,12 @@ impl PreparedStoreOperationCommit {
     ) -> Result<(), StoreOutboundError> {
         super::invite::validate_prepared_publication(publication)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let Self::MergeConcurrent(candidate) = self else {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "Serial Store operation cannot carry a Merge membership proof".to_string(),
-            ));
-        };
-        let reference = candidate.common.reference.clone();
-        let commit = candidate.common.commit.clone();
-        let head = &mut candidate.head;
-        let prepared = &mut candidate.prepared_head;
-        let history_summary = &mut candidate.history_summary;
-        let Some(StoreControl::MergeMembership { transition }) = commit.control() else {
+        let reference = self.common.reference.clone();
+        let commit = self.common.commit.clone();
+        let head = &mut self.head;
+        let prepared = &mut self.prepared_head;
+        let history_summary = &mut self.history_summary;
+        let Some(StoreControl { transition }) = commit.control() else {
             return Err(StoreOutboundError::InvalidOutbound(
                 "Merge membership proof accompanies another Store control".to_string(),
             ));

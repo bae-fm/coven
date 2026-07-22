@@ -482,7 +482,6 @@ pub(crate) async fn registration_activation(
     activated: &ActivatedStoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     activating_author: &StoreDeviceRegistration,
-    serial_recovery_activation: Option<&super::store_commit::SerialRecoveryActivation>,
     predecessor: &RegistrationPredecessorAuthority<'_>,
     verified_join_outcomes: &BTreeMap<
         super::store_commit::DeviceJoinOutcomeRef,
@@ -516,7 +515,7 @@ pub(crate) async fn registration_activation(
             let owner = &verified.owner;
             if attempt.expected_registration != *registration
                 || attempt.registration_slot != *activated.registration.object.slot()
-                || !predecessor.verifies_owner_at_ancestor(
+                || !predecessor.verifies_owner(
                     &attempt.membership,
                     &owner.author_pubkey,
                     &attempt.owner_grant,
@@ -566,13 +565,6 @@ pub(crate) async fn registration_activation(
             },
             StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
         ) if origin_recovery == recovery_id && recovery_slot == node.slot() => {
-            if matches!(predecessor, RegistrationPredecessorAuthority::Serial { .. })
-                && serial_recovery_activation.is_none_or(|body| &body.registration != activated)
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "Serial recovery activation differs from its closed commit body".to_string(),
-                ));
-            }
             let node_value = load_owner_recovery_node_ref(storage, root, node)
                 .await
                 .map_err(RegistrationLoadError::Object)?
@@ -696,25 +688,12 @@ pub(super) async fn predecessor_commit_matching_at_root(
     order: &super::store_commit::StoreCommitOrder,
     mut matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<(StoreBatchCommitRef, StoreBatchCommit)>, RegistrationLoadError> {
-    let mut pending = match order {
-        super::store_commit::StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => predecessor
-            .iter()
-            .chain(dependencies.values())
-            .cloned()
-            .collect::<Vec<_>>(),
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: super::store_commit::StoreSerialPredecessor::Commit(predecessor),
-            ..
-        } => vec![predecessor.clone()],
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: super::store_commit::StoreSerialPredecessor::Genesis { .. },
-            ..
-        } => Vec::new(),
-    };
+    let mut pending = order
+        .predecessor
+        .iter()
+        .chain(order.dependencies.values())
+        .cloned()
+        .collect::<Vec<_>>();
     let mut visited = BTreeSet::new();
     while let Some(reference) = pending.pop() {
         if !visited.insert(reference.clone()) {
@@ -726,24 +705,8 @@ pub(super) async fn predecessor_commit_matching_at_root(
         if matches(&reference, &commit) {
             return Ok(Some((reference, commit)));
         }
-        match commit.order {
-            super::store_commit::StoreCommitOrder::MergeConcurrent {
-                predecessor,
-                dependencies,
-                ..
-            } => {
-                pending.extend(predecessor);
-                pending.extend(dependencies.into_values());
-            }
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: super::store_commit::StoreSerialPredecessor::Commit(predecessor),
-                ..
-            } => pending.push(predecessor),
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: super::store_commit::StoreSerialPredecessor::Genesis { .. },
-                ..
-            } => {}
-        }
+        pending.extend(commit.order.predecessor);
+        pending.extend(commit.order.dependencies.into_values());
     }
     Ok(None)
 }

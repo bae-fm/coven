@@ -322,9 +322,8 @@ impl CovenHandle {
             .map_err(crate::CovenError::from)
     }
 
-    /// Requeue one blocked write for full production validation. Serial writes
-    /// requeue their whole ordered branch. A connected sync loop is woken after
-    /// the durable transition.
+    /// Requeue one blocked write for full production validation. A connected
+    /// sync loop is woken after the durable transition.
     pub async fn retry_blocked_write(
         &self,
         write_id: &coven_core::WriteId,
@@ -383,15 +382,6 @@ impl CovenHandle {
         }
         self.db
             .discard_blocked_write(write_id)
-            .await
-            .map_err(crate::CovenError::from)
-    }
-
-    pub async fn pending_branches(
-        &self,
-    ) -> Result<Option<coven_core::PendingBranch>, crate::CovenError> {
-        self.db
-            .pending_branches()
             .await
             .map_err(crate::CovenError::from)
     }
@@ -521,23 +511,6 @@ impl CovenHandle {
         })
         .await?;
         info!("coven handle: sync manager connected over an injected test cloud home");
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn connect_sync_with_test_home_and_coordination(
-        &self,
-        home: Arc<dyn CloudHome>,
-        coordination: Arc<dyn crate::storage::cloud::CloudHeadStorage>,
-        cipher: CloudCipher,
-    ) -> Result<(), SyncError> {
-        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
-            manager
-                .start_sync_with_home_and_coordination(home, coordination, cipher)
-                .await
-        })
-        .await?;
-        info!("coven handle: sync manager connected over an injected coordinated test home");
         Ok(())
     }
 
@@ -1006,10 +979,12 @@ impl CovenHandle {
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
         let manager = self.sync_manager().ok_or(MakeLocalError::SyncNotReady)?;
-        let routing_encryption = (self.db.write_policy() == crate::WritePolicy::MergeConcurrent
-            && self.db.gates().has_scoped_graph())
-        .then(|| self.routing_encryption())
-        .transpose()?;
+        let routing_encryption = self
+            .db
+            .gates()
+            .has_scoped_graph()
+            .then(|| self.routing_encryption())
+            .transpose()?;
         manager
             .make_local(root_table, root_id, dest, cancel, routing_encryption)
             .await
@@ -1095,11 +1070,9 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::abandon_device_join(
             &self.db,
             storage.as_ref(),
-            coordination,
             &authorization,
             &signer,
             offer,
@@ -1116,11 +1089,9 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         let exact = self.device_join_exact_storage()?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::authorize_device_provider_access(
             &self.db,
             storage.as_ref(),
-            coordination,
             Some(exact.as_ref()),
             access_administrator,
             &authorization,
@@ -1137,12 +1108,10 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(
             crate::sync::device_join::accept_device_registration_request(
                 &self.db,
                 storage.as_ref(),
-                coordination,
                 &authorization,
                 &signer,
                 request,
@@ -1190,11 +1159,9 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::finalize_device_join(
             &self.db,
             storage.as_ref(),
-            coordination,
             &authorization,
             &signer,
             completion,
@@ -1209,11 +1176,9 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::cancel_device_join(
             &self.db,
             storage.as_ref(),
-            coordination,
             &authorization,
             &signer,
             attempt,
@@ -1292,11 +1257,9 @@ impl CovenHandle {
         let exact = self.device_join_exact_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::prepare_device_join_cleanup(
             &self.db,
             storage.as_ref(),
-            coordination,
             exact.as_ref(),
             &authorization,
             &signer,
@@ -1315,11 +1278,9 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        let coordination = self.device_join_coordination(&storage)?;
         Ok(crate::sync::device_join::activate_device_join_cleanup(
             &self.db,
             storage.as_ref(),
-            coordination,
             &authorization,
             &signer,
             attempt_id,
@@ -1372,31 +1333,13 @@ impl CovenHandle {
             .ok_or_else(|| SyncError::Protocol("provider has no exact-slot adapter".to_string()))
     }
 
-    fn device_join_coordination<'a>(
-        &self,
-        storage: &'a CloudSyncStorage,
-    ) -> Result<Option<&'a dyn crate::sync::storage::CoordinationStorage>, SyncError> {
-        match self.db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => Ok(None),
-            crate::WritePolicy::Serial => storage
-                .serial_coordination()
-                .map(Some)
-                .map_err(|error| SyncError::Protocol(error.to_string())),
-        }
-    }
-
     async fn device_join_authorization(
         &self,
         storage: &CloudSyncStorage,
-    ) -> Result<crate::DeviceJoinAuthorization, SyncError> {
-        let coordination = self.device_join_coordination(storage)?;
+    ) -> Result<crate::sync::membership::MembershipChain, SyncError> {
         Ok(
-            crate::sync::device_join::load_current_device_join_authorization(
-                &self.db,
-                storage,
-                coordination,
-            )
-            .await?,
+            crate::sync::device_join::load_current_device_join_authorization(&self.db, storage)
+                .await?,
         )
     }
 
@@ -1843,37 +1786,16 @@ mod tests {
             &self,
             scope: &CloudKitScope,
             key: &str,
-        ) -> Result<crate::storage::cloud::CloudVersionedHead, CloudHomeError> {
+        ) -> Result<crate::storage::cloud::CloudVersionedObject, CloudHomeError> {
             let store = self.store.lock().unwrap();
             let (bytes, version) = store
                 .get(&(scope.clone(), key.to_string()))
                 .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-            Ok(crate::storage::cloud::CloudVersionedHead {
+            Ok(crate::storage::cloud::CloudVersionedObject {
                 bytes: bytes.clone(),
-                version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                version: crate::storage::cloud::CloudObjectVersion::from_provider(
                     version.to_string(),
                 )?,
-            })
-        }
-
-        fn create_record(
-            &self,
-            scope: &CloudKitScope,
-            key: &str,
-            data: Vec<u8>,
-        ) -> Result<
-            crate::storage::cloud::CloudVersionedHead,
-            crate::storage::cloud::CloudHeadCreateError,
-        > {
-            let mut store = self.store.lock().unwrap();
-            let coordinate = (scope.clone(), key.to_string());
-            if store.contains_key(&coordinate) {
-                return Err(crate::storage::cloud::CloudHeadCreateError::AlreadyExists);
-            }
-            store.insert(coordinate, (data.clone(), 1));
-            Ok(crate::storage::cloud::CloudVersionedHead {
-                bytes: data,
-                version: crate::storage::cloud::CloudHeadVersion::from_provider("1".to_string())?,
             })
         }
 
@@ -1930,7 +1852,7 @@ mod tests {
                 store.insert((scope.clone(), create.key.clone()), (create.data, 1));
                 created.push(CloudKitRecordVersion {
                     key: create.key,
-                    version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                    version: crate::storage::cloud::CloudObjectVersion::from_provider(
                         "1".to_string(),
                     )?,
                 });
@@ -1945,36 +1867,6 @@ mod tests {
         ) -> Result<(), CloudHomeError> {
             self.batches.lock().unwrap().remove(batch.as_provider());
             Ok(())
-        }
-
-        fn replace_record(
-            &self,
-            scope: &CloudKitScope,
-            key: &str,
-            expected: &crate::storage::cloud::CloudHeadVersion,
-            data: Vec<u8>,
-        ) -> Result<
-            crate::storage::cloud::CloudVersionedHead,
-            crate::storage::cloud::CloudHeadReplaceError,
-        > {
-            let mut store = self.store.lock().unwrap();
-            let coordinate = (scope.clone(), key.to_string());
-            let Some((_, current)) = store.get(&coordinate) else {
-                return Err(
-                    crate::storage::cloud::CloudHomeError::NotFound(key.to_string()).into(),
-                );
-            };
-            if expected.as_provider() != current.to_string() {
-                return Err(crate::storage::cloud::CloudHeadReplaceError::VersionMismatch);
-            }
-            let version = current + 1;
-            store.insert(coordinate, (data.clone(), version));
-            Ok(crate::storage::cloud::CloudVersionedHead {
-                bytes: data,
-                version: crate::storage::cloud::CloudHeadVersion::from_provider(
-                    version.to_string(),
-                )?,
-            })
         }
 
         fn delete_record_versions(
@@ -2843,12 +2735,15 @@ mod tests {
 
             assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
             assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
-            assert!(matches!(
-                circle,
-                Err(SyncError::Circle(
-                    crate::sync::circle_ops::CircleOperationError::BrowsableStorage
-                ))
-            ));
+            assert!(
+                matches!(
+                    &circle,
+                    Err(SyncError::Circle(
+                        crate::sync::circle_ops::CircleOperationError::BrowsableStorage
+                    ))
+                ),
+                "{circle:?}"
+            );
         }))
         .await;
     }
@@ -2949,83 +2844,6 @@ mod tests {
             })
             .await
             .expect("read activated circle state");
-        }))
-        .await;
-    }
-
-    #[tokio::test]
-    async fn create_circle_returns_after_serial_activation_is_materialized() {
-        await_test_orchestration(tokio::spawn(async {
-            test_keyring::install();
-
-            let (_tmp, store_dir) = temp_store_dir();
-            let db = crate::sync::test_helpers::open_serial_test_db();
-            let keyring = crate::encryption::MasterKeyring::generate();
-            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-                .resolve("lib-create-circle-serial", &store_dir);
-            let handle = test_handle_with_custody(
-                "lib-create-circle-serial",
-                store_dir,
-                db.clone(),
-                custody,
-            );
-            let home = Arc::new(InMemoryCloudHome::new());
-            handle
-                .connect_sync_with_test_home_and_coordination(
-                    home.clone(),
-                    home,
-                    CloudCipher::Encrypted(EncryptionService::from(keyring)),
-                )
-                .await
-                .expect("connect encrypted Serial home");
-
-            let circle_id = handle
-                .create_circle("Household")
-                .await
-                .expect("create and activate Serial circle");
-
-            handle
-                .rename_circle(&circle_id, "Household money")
-                .await
-                .expect("rename and activate Serial circle");
-
-            assert_eq!(
-                handle.get_circles().await.expect("read active circles"),
-                vec![crate::CircleInfo {
-                    id: circle_id,
-                    name: "Household money".to_string(),
-                    role: crate::CircleRole::Owner,
-                }]
-            );
-            assert!(handle
-                .get_circle_operations()
-                .await
-                .expect("read completed circle operations")
-                .is_empty());
-
-            let circle = circle_id.to_string();
-            db.call(move |conn| {
-                let activated: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                    [&circle],
-                    |row| row.get(0),
-                )?;
-                let pending: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
-                    [&circle],
-                    |row| row.get(0),
-                )?;
-                let serial_positions: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM materialized_commits WHERE device_id = 'serial'",
-                    [],
-                    |row| row.get(0),
-                )?;
-                assert_eq!((activated, pending), (2, 0));
-                assert!(serial_positions >= 1);
-                Ok::<_, crate::DbError>(())
-            })
-            .await
-            .expect("read activated Serial circle state");
         }))
         .await;
     }

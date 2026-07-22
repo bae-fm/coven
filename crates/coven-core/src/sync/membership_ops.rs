@@ -10,7 +10,6 @@ use crate::encryption::EncryptionService;
 #[cfg(test)]
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
-use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState};
 
 use super::cloud_storage::{CloudCipherAccess, PendingRotation};
 use super::hlc::Hlc;
@@ -20,12 +19,8 @@ use super::membership::{
     MembershipCoord, MembershipEntry, MembershipGrantId, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
-use super::storage::{
-    CoordinationStorage, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
-};
-use super::store_commit::{
-    GrantStreamAnchor, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreControl, StoreRootRef,
-};
+use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
+use super::store_commit::{GrantStreamAnchor, ResolvedStoreDeviceState, StoreRootRef};
 use super::store_objects::StoreObjectError;
 use crate::database::Database;
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,8 +75,6 @@ pub enum MembershipOpsError {
     SemanticConflict(Box<MembershipConflict>),
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
-    #[error(transparent)]
-    Serial(#[from] super::store_outbound::StoreOutboundError),
 }
 
 pub(crate) fn require_resolved_membership(
@@ -126,7 +119,6 @@ mod exact_chain;
 mod key_rotation;
 mod listing;
 mod merge;
-mod serial;
 
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
@@ -137,6 +129,8 @@ pub use merge::{invite_member, remove_member};
 pub(crate) use cursors::{
     load_and_persist_owner_anchor, upsert_head_cursor_on, validate_membership_floor,
 };
+use cursors::{persist_head_cursors, read_head_cursors};
+use exact_chain::map_membership_object_error;
 pub(crate) use exact_chain::{
     authorize_loaded_membership_author, load_anchored_chain_at_exact_heads,
     load_anchored_chain_at_exact_heads_with_root,
@@ -144,12 +138,6 @@ pub(crate) use exact_chain::{
     load_current_exact_chain, load_exact_anchored_chain, load_exact_membership_head,
     project_anchored_chain_to_verified_store_prefix, MembershipAuthorRequirement,
 };
-pub(crate) use serial::{
-    invite_serial_member, publish_serial_membership_wraps, remove_serial_member_and_adopt,
-};
-
-use cursors::{persist_head_cursors, read_head_cursors};
-use exact_chain::map_membership_object_error;
 
 #[cfg(test)]
 use cursors::head_cursor_key;

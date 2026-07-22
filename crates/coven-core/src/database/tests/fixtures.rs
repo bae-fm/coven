@@ -15,7 +15,7 @@ pub(super) fn reclaim_test_activation(
     commit: StoreBatchCommitRef,
     label: &str,
 ) -> ReclaimCommitActivation {
-    ReclaimCommitActivation::merge_concurrent(
+    ReclaimCommitActivation::new(
         commit,
         crate::sync::store_commit::StoreDeviceHeadRef {
             head_hash: ObjectHash::digest(format!("{label} reclaim head").as_bytes()),
@@ -159,8 +159,7 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         &[],
     )
@@ -175,7 +174,7 @@ pub(super) fn test_candidate_family() -> crate::sync::store_commit::CandidateFam
 }
 
 pub(super) fn test_commit_coord() -> StoreCommitCoord {
-    StoreCommitCoord::MergeConcurrent {
+    StoreCommitCoord {
         stream_id: crate::sync::membership::AuthorStreamId::from_bytes([7; 32]),
         sequence: 1,
     }
@@ -184,9 +183,7 @@ pub(super) fn test_commit_coord() -> StoreCommitCoord {
 pub(super) fn test_commit_ref() -> StoreBatchCommitRef {
     let coord = test_commit_coord();
     let commit_hash = ObjectHash::digest(b"database test commit");
-    let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &coord else {
-        unreachable!("database test coordinate is MergeConcurrent")
-    };
+    let StoreCommitCoord { stream_id, .. } = &coord;
     let slot = crate::storage::cloud::ObjectSlot::logical(format!(
         "{}.json",
         commit_semantic_prefix(

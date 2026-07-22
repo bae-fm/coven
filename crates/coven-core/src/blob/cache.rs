@@ -893,7 +893,7 @@ pub async fn pin(
     blobs: &[RowBlobRef],
 ) -> Result<(), BlobCacheError> {
     // Fetch up to `max_concurrent_downloads` blobs at once, admitting in the given
-    // order and refilling as each completes. At limit 1 this is the serial loop:
+    // order and refilling as each completes. At limit 1 this is the one-at-a-time loop:
     // pin one blob fully, then the next, returning the first error. Each blob is
     // independent — its own `pinned/<ns>/<id>` destination and its own metadata reads
     // (serialized on the connection thread) — so concurrent pins touch no shared

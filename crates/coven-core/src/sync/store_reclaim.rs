@@ -5,15 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::circle_control::StoreMembershipStateRef;
-use super::membership::{MembershipChain, MembershipGrantId, SerialMembershipState};
+use super::membership::{MembershipChain, MembershipGrantId};
 use super::storage::{
-    CoordinationStorage, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-    SyncStorage,
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
-    StoreCommitCoord, StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef,
-    StoreProtocolError, StoreRootRef, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError,
+    StoreRootRef, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
 };
 use super::store_objects::StoreObjectError;
 use crate::keys::{self, UserKeypair};
@@ -512,8 +511,6 @@ pub enum StoreReclaimError {
     NoSnapshot,
     #[error("snapshot authorization history is invalid: {0}")]
     Authorization(String),
-    #[error("Store reclamation proof uses the wrong write policy: {0}")]
-    PolicyMismatch(String),
     #[error("active member {member:?} has no exact Store device registration")]
     MissingRegisteredDevice { member: String },
     #[error(
@@ -541,54 +538,24 @@ pub enum StoreReclaimError {
 }
 
 #[derive(Clone, Copy)]
-pub enum ReclaimMembership<'a> {
-    MergeConcurrent {
-        membership: &'a MembershipChain,
-        discovery_proof: super::pull::MembershipDiscoveryProof,
-    },
-    Serial(&'a SerialMembershipState),
+pub struct ReclaimMembership<'a> {
+    pub membership: &'a MembershipChain,
+    pub discovery_proof: super::pull::MembershipDiscoveryProof,
 }
 
 impl<'a> ReclaimMembership<'a> {
-    fn write_policy(self) -> crate::WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
-            Self::Serial(_) => crate::WritePolicy::Serial,
-        }
-    }
-
     fn is_owner(self, pubkey: &str) -> bool {
-        match self {
-            Self::MergeConcurrent { membership, .. } => membership.is_owner_now(pubkey),
-            Self::Serial(membership) => membership.is_owner(pubkey),
-        }
+        self.membership.is_owner_now(pubkey)
     }
 
-    fn store_operation_preparation(
-        self,
-        coordination: Option<&'a dyn CoordinationStorage>,
-    ) -> Result<super::store_outbound::StoreOperationPreparation<'a>, StoreReclaimError> {
-        match (self, coordination) {
-            (Self::MergeConcurrent { membership, .. }, None) => Ok(
-                super::store_outbound::StoreOperationPreparation::MergeConcurrent { membership },
-            ),
-            (Self::Serial(_), Some(coordination)) => {
-                Ok(super::store_outbound::StoreOperationPreparation::Serial { coordination })
-            }
-            (Self::MergeConcurrent { .. }, Some(_)) => Err(StoreReclaimError::PolicyMismatch(
-                "Merge reclamation received Serial coordination".to_string(),
-            )),
-            (Self::Serial(_), None) => Err(StoreReclaimError::Outbound(
-                super::store_outbound::StoreOutboundError::MissingSerialCoordination,
-            )),
-        }
+    fn store_operation_preparation(self) -> super::store_outbound::StoreOperationPreparation<'a> {
+        super::store_outbound::StoreOperationPreparation::new(self.membership)
     }
 }
 
 pub async fn reclaim_store_packages(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     device_id: &str,
     identity_signer: &UserKeypair,
     store_root_hash: ObjectHash,
@@ -607,7 +574,6 @@ pub async fn reclaim_store_packages(
     let mut packages_deleted = Box::pin(resume_store_reclaim_operations(
         db,
         storage,
-        coordination,
         device_id,
         identity_signer,
         membership,
@@ -623,14 +589,7 @@ pub async fn reclaim_store_packages(
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    let snapshot = Box::pin(choose_snapshot(
-        storage,
-        coordination,
-        &root,
-        membership,
-        &registrations,
-    ))
-    .await?;
+    let snapshot = Box::pin(choose_snapshot(storage, &root, &registrations)).await?;
 
     let targets = exact_package_targets(storage, &root, &snapshot.snapshot.meta.coverage).await?;
     for (commit, package) in targets {
@@ -646,7 +605,6 @@ pub async fn reclaim_store_packages(
         Box::pin(prepare_reclaim_authorization(
             db,
             storage,
-            coordination,
             device_id,
             identity_signer,
             membership,
@@ -670,7 +628,6 @@ pub async fn reclaim_store_packages(
             Box::pin(resume_store_reclaim_operations(
                 db,
                 storage,
-                coordination,
                 device_id,
                 identity_signer,
                 membership,
@@ -701,7 +658,6 @@ async fn reclaim_target_is_recorded(
 async fn prepare_reclaim_authorization(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: ReclaimMembership<'_>,
@@ -711,7 +667,7 @@ async fn prepare_reclaim_authorization(
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        membership.store_operation_preparation(coordination)?,
+        membership.store_operation_preparation(),
         device_id,
         identity_signer,
     ))
@@ -723,7 +679,7 @@ async fn prepare_reclaim_authorization(
     })?;
     let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, identity_signer)
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    verify_store_package_reclaim_evidence(storage, coordination, root, &evidence).await?;
+    verify_store_package_reclaim_evidence(storage, root, &evidence).await?;
     let evidence_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreReclaimEvidence,
@@ -799,7 +755,6 @@ async fn prepare_reclaim_authorization(
 async fn resume_store_reclaim_operations(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: ReclaimMembership<'_>,
@@ -819,7 +774,6 @@ async fn resume_store_reclaim_operations(
                     Box::pin(drive_reclaim_candidate(
                         db,
                         storage,
-                        coordination,
                         device_id,
                         identity_signer,
                         membership,
@@ -841,12 +795,7 @@ async fn resume_store_reclaim_operations(
                     progressed = true;
                 }
                 super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized { .. } => {
-                    Box::pin(execute_reclaim_delete(
-                        db,
-                        storage,
-                        coordination,
-                        operation,
-                    ))
+                    Box::pin(execute_reclaim_delete(db, storage, operation))
                     .await?;
                     completed = completed.checked_add(1).ok_or_else(|| {
                         StoreReclaimError::Authorization(
@@ -861,7 +810,6 @@ async fn resume_store_reclaim_operations(
                     Box::pin(prepare_reclaim_receipt(
                         db,
                         storage,
-                        coordination,
                         device_id,
                         identity_signer,
                         membership,
@@ -882,7 +830,6 @@ async fn resume_store_reclaim_operations(
 async fn execute_reclaim_delete(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     operation: super::store_reclaim_journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
     let super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
@@ -898,15 +845,9 @@ async fn execute_reclaim_delete(
         .local_store_root_ref()
         .await?
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
-    let verified = verify_authorized_store_package_reclaim(
-        db,
-        storage,
-        coordination,
-        &root,
-        authorization,
-        activation,
-    )
-    .await?;
+    let verified =
+        verify_authorized_store_package_reclaim(db, storage, &root, authorization, activation)
+            .await?;
     let target = verified.target;
     if db
         .store_package_is_retained_for_replay(target.package.clone(), target.activation.clone())
@@ -936,7 +877,6 @@ struct VerifiedAuthorizedStorePackageReclaim {
 async fn verify_authorized_store_package_reclaim(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
     authorization_ref: &ReclaimAuthorizationRef,
     activation: &super::store_reclaim_journal::ReclaimCommitActivation,
@@ -944,18 +884,10 @@ async fn verify_authorized_store_package_reclaim(
     let opened =
         super::store_objects::load_reclaim_authorization_ref(storage, root, authorization_ref)
             .await?;
-    verify_reclaim_authorization_activation(
-        db,
-        storage,
-        coordination,
-        root,
-        authorization_ref,
-        activation,
-    )
-    .await?;
+    verify_reclaim_authorization_activation(db, storage, root, authorization_ref, activation)
+        .await?;
     let verified =
-        verify_store_package_reclaim_evidence(storage, coordination, root, &opened.evidence.value)
-            .await?;
+        verify_store_package_reclaim_evidence(storage, root, &opened.evidence.value).await?;
     Ok(VerifiedAuthorizedStorePackageReclaim {
         target: verified.target,
     })
@@ -964,7 +896,6 @@ async fn verify_authorized_store_package_reclaim(
 async fn verify_reclaim_authorization_activation(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
     authorization: &ReclaimAuthorizationRef,
     activation: &super::store_reclaim_journal::ReclaimCommitActivation,
@@ -982,63 +913,34 @@ async fn verify_reclaim_authorization_activation(
             "reclaim activation commit names another authorization".to_string(),
         ));
     }
-    match activation {
-        super::store_reclaim_journal::ReclaimCommitActivation::MergeConcurrent { commit, head } => {
-            if coordination.is_some() {
-                return Err(StoreReclaimError::PolicyMismatch(
-                    "Merge reclaim activation received Serial coordination".to_string(),
-                ));
-            }
-            let opened = super::store_objects::load_head_ref(
-                storage,
-                root.store_root_hash,
-                head,
-                &author,
-                commit,
-            )
+    let commit = &activation.commit;
+    let head = &activation.head;
+    let opened =
+        super::store_objects::load_head_ref(storage, root.store_root_hash, head, &author, commit)
             .await?;
-            if opened.value.commit != *commit {
-                return Err(StoreReclaimError::Authorization(
-                    "Merge reclaim head activates another commit".to_string(),
-                ));
-            }
-            let (_, accepted_head) = super::store_outbound::exact_next_announcement_slot(
-                storage,
-                root,
-                &commit_value.author_registration,
-                &author,
-                Some(commit),
-            )
-            .await?;
-            if accepted_head.as_ref() != Some(head) {
-                return Err(StoreReclaimError::Authorization(
-                    "Merge reclaim activation head is not the exact accepted stream position"
-                        .to_string(),
-                ));
-            }
-            super::store_engine::merge::pull::verify_merge_commit_currently_materialized(
-                db, storage, root, commit,
-            )
-            .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
-        }
-        super::store_reclaim_journal::ReclaimCommitActivation::Serial { commit } => {
-            let coordination = coordination.ok_or_else(|| {
-                StoreReclaimError::PolicyMismatch(
-                    "Serial reclaim activation requires coordination".to_string(),
-                )
-            })?;
-            super::store_engine::serial::pull::observe_serial_successors_after(
-                storage,
-                coordination,
-                root,
-                &super::store_commit::StoreSerialPredecessor::Commit(commit.clone()),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
-        }
+    if opened.value.commit != *commit {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim head activates another commit".to_string(),
+        ));
     }
+    let (_, accepted_head) = super::store_outbound::exact_next_announcement_slot(
+        storage,
+        root,
+        &commit_value.author_registration,
+        &author,
+        Some(commit),
+    )
+    .await?;
+    if accepted_head.as_ref() != Some(head) {
+        return Err(StoreReclaimError::Authorization(
+            "reclaim activation head is not the exact accepted stream position".to_string(),
+        ));
+    }
+    super::store_engine::engine::pull::verify_merge_commit_currently_materialized(
+        db, storage, root, commit,
+    )
+    .await
+    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
 }
 
 struct VerifiedStorePackageReclaimEvidence {
@@ -1047,7 +949,6 @@ struct VerifiedStorePackageReclaimEvidence {
 
 async fn verify_store_package_reclaim_evidence(
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
     evidence: &ReclaimEvidence,
 ) -> Result<VerifiedStorePackageReclaimEvidence, StoreReclaimError> {
@@ -1081,10 +982,7 @@ async fn verify_store_package_reclaim_evidence(
         meta: metadata,
     };
     let authority = match super::store_engine::verify_store_snapshot_stability(
-        storage,
-        coordination,
-        root,
-        &snapshot,
+        storage, root, &snapshot,
     )
     .await
     {
@@ -1145,14 +1043,7 @@ async fn snapshot_covers_target(
     coverage: &CommitFrontier,
     target: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
-    let covering = match (coverage, &target.coord) {
-        (
-            CommitFrontier::MergeConcurrent(frontier),
-            StoreCommitCoord::MergeConcurrent { stream_id, .. },
-        ) => frontier.get(stream_id),
-        (CommitFrontier::Serial(covering), StoreCommitCoord::Serial { .. }) => covering.as_ref(),
-        _ => None,
-    };
+    let covering = coverage.0.get(&target.coord.stream_id);
     match covering {
         Some(covering) => position_covers(storage, root, covering, target).await,
         None => Ok(false),
@@ -1162,7 +1053,6 @@ async fn snapshot_covers_target(
 async fn drive_reclaim_candidate(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: ReclaimMembership<'_>,
@@ -1206,13 +1096,7 @@ async fn drive_reclaim_candidate(
             }
         }
         match Box::pin(super::store_outbound::publish_prepared_store_operation(
-            db,
-            storage,
-            super::store_outbound::StoreOperationPublicationMode::from_dependencies(
-                db.write_policy(),
-                coordination,
-            )?,
-            candidate,
+            db, storage, candidate,
         ))
         .await?
         {
@@ -1232,7 +1116,7 @@ async fn drive_reclaim_candidate(
                 let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
                     db,
                     storage,
-                    membership.store_operation_preparation(coordination)?,
+                    membership.store_operation_preparation(),
                     device_id,
                     identity_signer,
                 ))
@@ -1295,7 +1179,6 @@ async fn finish_reclaim_candidate_replacement(
 async fn prepare_reclaim_receipt(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: ReclaimMembership<'_>,
@@ -1326,32 +1209,18 @@ async fn prepare_reclaim_receipt(
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        membership.store_operation_preparation(coordination)?,
+        membership.store_operation_preparation(),
         device_id,
         identity_signer,
     ))
     .await?;
-    let provider_admin = match membership {
-        ReclaimMembership::MergeConcurrent { membership, .. } => {
-            let super::membership::MembershipStatus::Resolved(resolved) = membership.status()
-            else {
-                return Err(StoreReclaimError::Authorization(
-                    "provider execution requires resolved Store membership".to_string(),
-                ));
-            };
-            resolved.provider_admin.combined_state().clone()
-        }
-        ReclaimMembership::Serial(_) => {
-            db.serial_authorization_state()
-                .await?
-                .ok_or_else(|| {
-                    StoreReclaimError::Authorization(
-                        "Serial provider administrator state is absent".to_string(),
-                    )
-                })?
-                .provider_admin
-        }
+    let super::membership::MembershipStatus::Resolved(resolved) = membership.membership.status()
+    else {
+        return Err(StoreReclaimError::Authorization(
+            "provider execution requires resolved Store membership".to_string(),
+        ));
     };
+    let provider_admin = resolved.provider_admin.combined_state().clone();
     let provider_admin_grant = provider_admin
         .active()
         .into_iter()
@@ -1406,10 +1275,7 @@ async fn verify_reclaim_target_absent(
     root: &StoreRootRef,
     target: &StorePackageReclaimTarget,
 ) -> Result<(), StoreReclaimError> {
-    let stream_id = match &target.activation.coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => super::store_commit::SERIAL_STREAM_ID.to_string(),
-    };
+    let stream_id = target.activation.coord.stream_id.to_string();
     let prefix = super::store_commit::package_semantic_prefix(
         target.package.candidate_family,
         &stream_id,
@@ -1439,9 +1305,7 @@ struct VerifiedReclaimSnapshot {
 
 async fn choose_snapshot(
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     root: &StoreRootRef,
-    membership: ReclaimMembership<'_>,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
     let mut authorized = Vec::new();
@@ -1455,21 +1319,11 @@ async fn choose_snapshot(
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
         {
-            if snapshot.meta.coverage.policy() != membership.write_policy() {
-                return Err(StoreReclaimError::PolicyMismatch(format!(
-                    "snapshot coverage uses {:?}, Store uses {:?}",
-                    snapshot.meta.coverage.policy(),
-                    membership.write_policy()
-                )));
-            }
             authorized.push(snapshot);
         }
     }
     let selected = match super::store_snapshot::select_maximal_stable_store_snapshot(
-        storage,
-        coordination,
-        root,
-        authorized,
+        storage, root, authorized,
     )
     .await
     {
@@ -1527,11 +1381,7 @@ async fn choose_snapshot(
 }
 
 fn frontier_refs(frontier: &CommitFrontier) -> Vec<&StoreBatchCommitRef> {
-    match frontier {
-        CommitFrontier::MergeConcurrent(values) => values.values().collect(),
-        CommitFrontier::Serial(Some(value)) => vec![value],
-        CommitFrontier::Serial(None) => Vec::new(),
-    }
+    frontier.0.values().collect()
 }
 
 async fn position_covers(
@@ -1580,6 +1430,7 @@ async fn exact_package_targets(
 mod tests {
     use super::*;
     use crate::storage::cloud::ObjectSlot;
+    use crate::sync::store_commit::StoreCommitCoord;
 
     fn proof_object(path: &str) -> ExactObjectRef {
         let bytes = path.as_bytes();
@@ -1614,11 +1465,8 @@ mod tests {
             .publish_changeset("founder", 1, &first_changeset, db.schema_version())
             .await
             .expect("publish first Store position");
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = first_commit.coord else {
-            unreachable!("fixture uses Merge")
-        };
-        let first_coverage =
-            CommitFrontier::MergeConcurrent(BTreeMap::from([(stream_id, first_commit.clone())]));
+        let StoreCommitCoord { stream_id, .. } = first_commit.coord;
+        let first_coverage = CommitFrontier(BTreeMap::from([(stream_id, first_commit.clone())]));
         let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load Store membership");
@@ -1632,7 +1480,7 @@ mod tests {
             b"stable reclaim snapshot".to_vec(),
             first_coverage.clone(),
             &signer,
-            Some(chain),
+            chain,
             &db,
         )
         .await
@@ -1668,9 +1516,9 @@ mod tests {
             &store.storage,
             &store.root,
             b"unacknowledged reclaim snapshot".to_vec(),
-            CommitFrontier::MergeConcurrent(BTreeMap::from([(stream_id, second_commit)])),
+            CommitFrontier(BTreeMap::from([(stream_id, second_commit)])),
             &signer,
-            Some(chain),
+            chain,
             &db,
         )
         .await
@@ -1680,18 +1528,9 @@ mod tests {
             .await
             .expect("load active registrations");
 
-        let selected = choose_snapshot(
-            &store.storage,
-            None,
-            &store.root,
-            ReclaimMembership::MergeConcurrent {
-                membership: chain,
-                discovery_proof: membership.discovery_proof,
-            },
-            &registrations,
-        )
-        .await
-        .expect("select the stable reclaim snapshot");
+        let selected = choose_snapshot(&store.storage, &store.root, &registrations)
+            .await
+            .expect("select the stable reclaim snapshot");
 
         assert_eq!(selected.snapshot.reference, stable.reference);
     }
@@ -1924,11 +1763,8 @@ mod tests {
         .await
         .expect("release retained replay package ownership");
         let mut authorization_activation = opened.evidence.value.claim.target.activation.clone();
-        authorization_activation.coord = StoreCommitCoord::MergeConcurrent {
-            stream_id: match &authorization_activation.coord {
-                StoreCommitCoord::MergeConcurrent { stream_id, .. } => *stream_id,
-                StoreCommitCoord::Serial { .. } => unreachable!("fixture uses Merge"),
-            },
+        authorization_activation.coord = StoreCommitCoord {
+            stream_id: authorization_activation.coord.stream_id,
             sequence: authorization_activation.coord.sequence() + 1,
         };
         authorization_activation.commit_hash = ObjectHash::digest(b"reclaim authorization commit");
@@ -1937,25 +1773,22 @@ mod tests {
         let operation =
             super::super::store_reclaim_journal::DurableStoreReclaimOperation::Authorized {
                 authorization: receipt.authorization.clone(),
-                activation:
-                    super::super::store_reclaim_journal::ReclaimCommitActivation::merge_concurrent(
-                        authorization_activation,
-                        super::super::store_commit::StoreDeviceHeadRef {
-                            head_hash: ObjectHash::digest(b"reclaim authorization head"),
-                            object: proof_object("store-v1/heads/reclaim-authorization.json"),
-                        },
-                    )
-                    .expect("valid reclaim activation"),
+                activation: super::super::store_reclaim_journal::ReclaimCommitActivation::new(
+                    authorization_activation,
+                    super::super::store_commit::StoreDeviceHeadRef {
+                        head_hash: ObjectHash::digest(b"reclaim authorization head"),
+                        object: proof_object("store-v1/heads/reclaim-authorization.json"),
+                    },
+                )
+                .expect("valid reclaim activation"),
             };
-        let deletion = execute_reclaim_delete(&db, &store.storage, None, operation).await;
+        let deletion = execute_reclaim_delete(&db, &store.storage, operation).await;
         assert!(
             deletion.is_err(),
             "nonexistent snapshot and acknowledgement refs must not authorize deletion"
         );
         let target = &opened.evidence.value.claim.target;
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = target.activation.coord else {
-            unreachable!("fixture uses Merge")
-        };
+        let StoreCommitCoord { stream_id, .. } = target.activation.coord;
         store
             .storage
             .read_protocol_object(
@@ -2010,13 +1843,8 @@ mod tests {
             .store_package()
             .expect("target activation carries a Store package")
             .clone();
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = target_activation.coord else {
-            unreachable!("fixture uses Merge")
-        };
-        let coverage = CommitFrontier::MergeConcurrent(BTreeMap::from([(
-            stream_id,
-            target_activation.clone(),
-        )]));
+        let StoreCommitCoord { stream_id, .. } = target_activation.coord;
+        let coverage = CommitFrontier(BTreeMap::from([(stream_id, target_activation.clone())]));
         let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load reclaim membership");
@@ -2030,7 +1858,7 @@ mod tests {
             b"reclaim activation snapshot".to_vec(),
             coverage.clone(),
             &signer,
-            Some(chain),
+            chain,
             &db,
         )
         .await
@@ -2070,14 +1898,13 @@ mod tests {
             .await
             .expect("load local device id")
             .expect("local device id exists");
-        let reclaim_membership = ReclaimMembership::MergeConcurrent {
+        let reclaim_membership = ReclaimMembership {
             membership: chain,
             discovery_proof: membership.discovery_proof,
         };
         prepare_reclaim_authorization(
             &db,
             &store.storage,
-            None,
             &device_id,
             &signer,
             reclaim_membership,
@@ -2106,17 +1933,14 @@ mod tests {
         let prepared_candidate = candidate
             .candidate()
             .expect("reclaim operation has a candidate");
-        let activation_head = prepared_candidate
-            .merge_head_ref()
-            .expect("Merge reclaim candidate has an activation head");
-        let (_, activation_head_prepared) = prepared_candidate
-            .merge_publication_for_test()
-            .expect("Merge reclaim candidate has a prepared activation head");
-        let activation_head_prepared = activation_head_prepared.clone();
+        let activation_head = super::super::store_commit::StoreDeviceHeadRef {
+            head_hash: prepared_candidate.head.head_hash(),
+            object: prepared_candidate.prepared_head.reference().clone(),
+        };
+        let activation_head_prepared = prepared_candidate.prepared_head.clone();
         drive_reclaim_candidate(
             &db,
             &store.storage,
-            None,
             &device_id,
             &signer,
             reclaim_membership,
@@ -2137,7 +1961,7 @@ mod tests {
             .next()
             .expect("activated reclaim exists");
 
-        let deletion = execute_reclaim_delete(&db, &store.storage, None, authorized.clone()).await;
+        let deletion = execute_reclaim_delete(&db, &store.storage, authorized.clone()).await;
 
         assert!(
             deletion.is_err(),
@@ -2173,13 +1997,10 @@ mod tests {
             } => activation.commit().clone(),
             _ => unreachable!("fixture has an activated reclaim"),
         };
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id: activation_stream,
             sequence: activation_sequence,
-        } = activation_commit.coord
-        else {
-            unreachable!("fixture uses Merge")
-        };
+        } = activation_commit.coord;
         db.call(move |connection| {
             let removed = connection
                 .execute(
@@ -2203,7 +2024,7 @@ mod tests {
         .expect("retract reclaim activation materialization");
 
         assert!(
-            execute_reclaim_delete(&db, &store.storage, None, authorized)
+            execute_reclaim_delete(&db, &store.storage, authorized)
                 .await
                 .is_err(),
             "a retracted Merge reclaim activation must not delete"
@@ -2225,245 +2046,5 @@ mod tests {
             )
             .await
             .expect("retracted activation authority leaves target readable");
-    }
-
-    #[tokio::test]
-    async fn serial_reclaim_activation_requires_the_live_coordinated_chain() {
-        let db = crate::sync::test_helpers::open_serial_test_db();
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            "serial-reclaim-activation",
-            signer.clone(),
-        )
-        .await
-        .expect("create Serial Store");
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .expect("load Serial device id")
-            .expect("Serial device id exists");
-        let changeset = crate::sync::test_helpers::capture_bytes(
-            &crate::sync::test_helpers::open_test_db(),
-            &[
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('serial-reclaim-row', 'reclaim', NULL, \
-                 '0000000001000-0000-serial-reclaim', '2026-01-01')",
-            ],
-        )
-        .await;
-        db.enqueue_store_changeset_for_test(changeset)
-            .await
-            .expect("enqueue Serial target package");
-        let (_directory, store_dir) = crate::sync::test_helpers::temp_store_dir();
-        super::super::store_engine::serial::publication::prepare_serial_store_branch(
-            &db,
-            &store.storage,
-            &store.storage,
-            &device_id,
-            &signer,
-            &store_dir,
-        )
-        .await
-        .expect("prepare Serial target package");
-        assert_eq!(
-            super::super::store_engine::serial::publication::drain_store_writes(
-                &db,
-                &store.storage,
-                &store.storage,
-            )
-            .await
-            .expect("publish Serial target package"),
-            1
-        );
-        let target_activation = db
-            .latest_local_store_position()
-            .await
-            .expect("load Serial target activation")
-            .expect("Serial target activation exists");
-        let (target_commit, _) = super::super::store_pull::load_commit_with_author(
-            &store.storage,
-            &store.root,
-            &target_activation,
-        )
-        .await
-        .expect("load Serial target commit");
-        let target = target_commit
-            .store_package()
-            .expect("Serial target commit carries a Store package")
-            .clone();
-        let (founder_ref, _, _) = store
-            .founder_device_authority()
-            .await
-            .expect("load Serial founder authority");
-        let plan = super::super::store_outbound::prepare_store_operation_commit(
-            &db,
-            &store.storage,
-            super::super::store_outbound::StoreOperationPreparation::Serial {
-                coordination: &store.storage,
-            },
-            &device_id,
-            &signer,
-        )
-        .await
-        .expect("prepare Serial reclaim activation");
-        let evidence = ReclaimEvidence::signed(
-            store.root.store_root_hash,
-            StorePackageReclaimClaim {
-                target: StorePackageReclaimTarget {
-                    package: target.clone(),
-                    activation: target_activation,
-                },
-                covering_snapshot: StoreSnapshotLocator {
-                    author_registration: founder_ref.clone(),
-                    snapshot: super::super::store_commit::StoreSnapshotRef {
-                        generation: 0,
-                        snapshot_hash: ObjectHash::digest(b"Serial reclaim snapshot"),
-                        object: proof_object("store-v1/snapshots/serial/reclaim.json"),
-                    },
-                },
-                acknowledgements: vec![StoreAckRef {
-                    registration: founder_ref,
-                    sequence: 1,
-                    ack_hash: ObjectHash::digest(b"Serial reclaim acknowledgement"),
-                    object: proof_object("store-v1/acks/serial/reclaim.json"),
-                }],
-            },
-            &signer,
-        )
-        .expect("sign Serial reclaim evidence");
-        let evidence_context = ProtocolObjectContext::store_encrypted(
-            store.root.store_root_hash,
-            ProtocolObjectDomain::StoreReclaimEvidence,
-        );
-        let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
-        let evidence_slot = store
-            .storage
-            .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
-            .await
-            .expect("allocate Serial reclaim evidence");
-        let evidence_prepared = store
-            .storage
-            .prepare_protocol_object(
-                &evidence_context,
-                evidence_slot,
-                &evidence_prefix,
-                evidence.to_bytes(),
-            )
-            .expect("prepare Serial reclaim evidence");
-        store
-            .storage
-            .create_protocol_object(&evidence_prepared)
-            .await
-            .expect("publish Serial reclaim evidence");
-        let evidence_ref =
-            ReclaimEvidenceRef::from_evidence(&evidence, evidence_prepared.reference().clone());
-        let authorization = ReclaimAuthorization::signed(
-            store.root.store_root_hash,
-            target,
-            evidence_ref,
-            StoreReclaimAuthority {
-                membership: plan.membership_state().clone(),
-                owner_grant: plan
-                    .owner_grant()
-                    .expect("Serial reclaim plan has an Owner grant")
-                    .clone(),
-            },
-            &signer,
-        );
-        let authorization_context = ProtocolObjectContext::signed_plaintext(
-            store.root.store_root_hash,
-            ProtocolObjectDomain::StoreReclaimAuthorization,
-        );
-        let authorization_prefix =
-            reclaim_authorization_semantic_prefix(authorization.authorization_hash());
-        let authorization_slot = store
-            .storage
-            .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
-            .await
-            .expect("allocate Serial reclaim authorization");
-        let authorization_prepared = store
-            .storage
-            .prepare_protocol_object(
-                &authorization_context,
-                authorization_slot,
-                &authorization_prefix,
-                authorization.to_bytes(),
-            )
-            .expect("prepare Serial reclaim authorization");
-        store
-            .storage
-            .create_protocol_object(&authorization_prepared)
-            .await
-            .expect("publish Serial reclaim authorization");
-        let authorization_ref = ReclaimAuthorizationRef::from_authorization(
-            &authorization,
-            authorization_prepared.reference().clone(),
-        );
-        let candidate = super::super::store_outbound::prepare_store_operation_candidate(
-            &db,
-            &store.storage,
-            plan,
-            super::super::store_outbound::StoreOperationBatch::ReclaimAuthorization(Box::new(
-                authorization_ref.clone(),
-            )),
-        )
-        .await
-        .expect("prepare Serial reclaim candidate");
-        let (base_head, accepted_head) = candidate
-            .serial_publication_for_test()
-            .expect("Serial reclaim candidate has coordinated publication");
-        let base_head = base_head.clone();
-        let accepted_head = accepted_head.clone();
-        store
-            .storage
-            .create_protocol_object(&candidate.prepared)
-            .await
-            .expect("publish Serial reclaim commit");
-        let accepted = CoordinationStorage::replace_head(
-            &store.storage,
-            super::super::store_commit::serial_head_key(),
-            &base_head.version,
-            &accepted_head.to_bytes(),
-        )
-        .await
-        .expect("activate Serial reclaim commit");
-        let activation = super::super::store_reclaim_journal::ReclaimCommitActivation::serial(
-            candidate.reference.clone(),
-        )
-        .expect("valid Serial reclaim activation");
-
-        verify_reclaim_authorization_activation(
-            &db,
-            &store.storage,
-            Some(&store.storage),
-            &store.root,
-            &authorization_ref,
-            &activation,
-        )
-        .await
-        .expect("live coordinated chain accepts reclaim activation");
-
-        CoordinationStorage::replace_head(
-            &store.storage,
-            super::super::store_commit::serial_head_key(),
-            &accepted.version,
-            &base_head.bytes,
-        )
-        .await
-        .expect("replace Serial head with branch omitting reclaim activation");
-        assert!(
-            verify_reclaim_authorization_activation(
-                &db,
-                &store.storage,
-                Some(&store.storage),
-                &store.root,
-                &authorization_ref,
-                &activation,
-            )
-            .await
-            .is_err(),
-            "a Serial reclaim commit absent from the live coordinated chain is not authority"
-        );
     }
 }

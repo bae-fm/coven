@@ -163,8 +163,8 @@ impl Default for ContentHasher {
 ///
 /// Each bound is a [`NonZeroUsize`], so a zero — which would leave a loop admitting
 /// nothing and never completing — is unrepresentable rather than clamped or rejected
-/// at open. `serial()` (both `1`) is the default and reproduces the fully-serial
-/// loops: one transfer at a time, in queue order.
+/// at open. `one_at_a_time()` (both `1`) is the default: transfers run one at a
+/// time in queue order.
 ///
 /// [`NonZeroUsize`]: std::num::NonZeroUsize
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,8 +176,8 @@ pub struct TransferLimits {
 }
 
 impl TransferLimits {
-    /// One at a time in each loop — the fully-serial default.
-    pub fn serial() -> Self {
+    /// One at a time in each loop.
+    pub fn one_at_a_time() -> Self {
         Self {
             uploads: std::num::NonZeroUsize::MIN,
             downloads: std::num::NonZeroUsize::MIN,

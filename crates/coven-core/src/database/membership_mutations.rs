@@ -45,58 +45,6 @@ impl Database {
         .await
     }
 
-    async fn terminal_membership_mutation(
-        &self,
-        kind: &'static str,
-    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
-        self.call(move |conn| {
-            conn.query_row(
-                "SELECT intent_hash, plan_bytes, result_bytes \
-                 FROM terminal_membership_mutation \
-                 WHERE singleton = 1 AND kind = ?1",
-                [kind],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(hash, plan_bytes, result_bytes)| {
-                let intent_hash: ObjectHash = hash.parse().map_err(|error| {
-                    DbError::Message(format!("terminal membership intent hash: {error}"))
-                })?;
-                if ObjectHash::digest(&plan_bytes) != intent_hash {
-                    return Err(DbError::Message(
-                        "terminal membership intent hash differs from its exact plan bytes"
-                            .to_string(),
-                    ));
-                }
-                Ok(TerminalMembershipMutation {
-                    plan_bytes,
-                    result_bytes,
-                })
-            })
-            .transpose()
-        })
-        .await
-    }
-
-    pub(crate) async fn terminal_serial_invite_mutation(
-        &self,
-    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
-        self.terminal_membership_mutation("serial_invite").await
-    }
-
-    pub(crate) async fn terminal_serial_removal_mutation(
-        &self,
-    ) -> Result<Option<TerminalMembershipMutation>, DbError> {
-        self.terminal_membership_mutation("serial_removal").await
-    }
-
     pub(crate) async fn select_membership_author_stream(
         &self,
         author_pubkey: &str,
@@ -233,7 +181,7 @@ impl Database {
                     let stored = load_remote_object_on(&tx, remote.object_id())?;
                     if stored != *remote {
                         return Err(DbError::Message(
-                            "persisted Serial membership ownership differs from its durable plan"
+                            "persisted membership ownership differs from its durable plan"
                                 .to_string(),
                         ));
                     }
@@ -267,32 +215,6 @@ impl Database {
             tx.commit().map_err(DbError::from)?;
             Ok(intent_hash)
         })
-        .await
-    }
-
-    pub(crate) async fn stage_serial_invite_candidate_mutation(
-        &self,
-        plan_bytes: Vec<u8>,
-        progress_bytes: Vec<u8>,
-        remote_objects: Vec<RemoteObjectRecord>,
-    ) -> Result<ObjectHash, DbError> {
-        self.stage_membership_candidate_mutation(plan_bytes, progress_bytes, remote_objects, None)
-            .await
-    }
-
-    pub(crate) async fn stage_serial_removal_candidate_mutation(
-        &self,
-        plan_bytes: Vec<u8>,
-        progress_bytes: Vec<u8>,
-        remote_objects: Vec<RemoteObjectRecord>,
-        generation: u64,
-    ) -> Result<ObjectHash, DbError> {
-        self.stage_membership_candidate_mutation(
-            plan_bytes,
-            progress_bytes,
-            remote_objects,
-            Some(generation),
-        )
         .await
     }
 
@@ -478,113 +400,6 @@ impl Database {
         .await
     }
 
-    fn terminalize_membership_mutation_on(
-        tx: &rusqlite::Transaction<'_>,
-        kind: &'static str,
-        intent_hash: ObjectHash,
-        result_bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        let plan_bytes = tx
-            .query_row(
-                "SELECT plan_bytes FROM outbound_membership_mutation \
-                 WHERE singleton = 1 AND intent_hash = ?1",
-                [intent_hash.to_string()],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .ok_or_else(|| {
-                DbError::Message(
-                    "membership mutation changed before terminal receipt recording".to_string(),
-                )
-            })?;
-        if ObjectHash::digest(&plan_bytes) != intent_hash {
-            return Err(DbError::Message(
-                "terminal membership plan differs from its immutable identity".to_string(),
-            ));
-        }
-        tx.execute(
-            "INSERT INTO terminal_membership_mutation \
-             (singleton, kind, intent_hash, plan_bytes, result_bytes) \
-             VALUES (1, ?1, ?2, ?3, ?4) \
-             ON CONFLICT(singleton) DO UPDATE SET \
-                 kind = excluded.kind, \
-                 intent_hash = excluded.intent_hash, \
-                 plan_bytes = excluded.plan_bytes, \
-                 result_bytes = excluded.result_bytes",
-            rusqlite::params![kind, intent_hash.to_string(), plan_bytes, result_bytes],
-        )
-        .map_err(DbError::from)?;
-        if tx
-            .execute(
-                "DELETE FROM outbound_membership_mutation \
-                 WHERE singleton = 1 AND intent_hash = ?1",
-                [intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
-            return Err(DbError::Message(
-                "membership mutation changed during terminal receipt recording".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn complete_serial_invite_mutation(
-        &self,
-        intent_hash: ObjectHash,
-        result_bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::terminalize_membership_mutation_on(
-                &tx,
-                "serial_invite",
-                intent_hash,
-                result_bytes,
-            )?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn complete_serial_removal_mutation(
-        &self,
-        intent_hash: ObjectHash,
-        generation: u64,
-        result_bytes: Vec<u8>,
-    ) -> Result<Option<crate::sync::cloud_storage::RotationGate>, DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
-                DbError::Message(
-                    "rotation gate is absent during Serial removal completion".to_string(),
-                )
-            })?;
-            let next = existing
-                .1
-                .clone()
-                .complete_local_adoption(generation, intent_hash)
-                .map_err(DbError::Message)?;
-            Self::terminalize_membership_mutation_on(
-                &tx,
-                "serial_removal",
-                intent_hash,
-                result_bytes,
-            )?;
-            Self::replace_rotation_gate_on(
-                &tx,
-                Some(&existing),
-                next.clone(),
-                "Serial removal completion",
-            )?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
-        })
-        .await
-    }
-
     pub(crate) async fn update_membership_mutation_progress(
         &self,
         intent_hash: ObjectHash,
@@ -604,80 +419,6 @@ impl Database {
                 ));
             }
             Ok(())
-        })
-        .await
-    }
-
-    pub(crate) async fn replace_membership_candidate(
-        &self,
-        intent_hash: ObjectHash,
-        plan_bytes: Vec<u8>,
-    ) -> Result<ObjectHash, DbError> {
-        self.call(move |conn| {
-            let replacement_hash = ObjectHash::digest(&plan_bytes);
-            let updated = conn
-                .execute(
-                    "UPDATE outbound_membership_mutation \
-                     SET intent_hash = ?1, plan_bytes = ?2 \
-                     WHERE singleton = 1 AND intent_hash = ?3",
-                    rusqlite::params![
-                        replacement_hash.to_string(),
-                        plan_bytes,
-                        intent_hash.to_string()
-                    ],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "membership candidate mutation changed before candidate receipt adoption"
-                        .to_string(),
-                ));
-            }
-            Ok(replacement_hash)
-        })
-        .await
-    }
-
-    pub(crate) async fn replace_serial_removal_candidate(
-        &self,
-        previous_intent_hash: ObjectHash,
-        previous_generation: u64,
-        plan_bytes: Vec<u8>,
-    ) -> Result<ObjectHash, DbError> {
-        let replacement_hash = ObjectHash::digest(&plan_bytes);
-        if replacement_hash == previous_intent_hash {
-            return Err(DbError::Message(
-                "reprepared Serial removal has the same immutable identity".to_string(),
-            ));
-        }
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            if tx
-                .execute(
-                    "UPDATE outbound_membership_mutation \
-                     SET intent_hash = ?1, plan_bytes = ?2 \
-                     WHERE singleton = 1 AND intent_hash = ?3",
-                    rusqlite::params![
-                        replacement_hash.to_string(),
-                        plan_bytes,
-                        previous_intent_hash.to_string()
-                    ],
-                )
-                .map_err(DbError::from)?
-                != 1
-            {
-                return Err(DbError::Message(
-                    "Serial removal changed before candidate replacement".to_string(),
-                ));
-            }
-            Self::replace_rotation_candidate_mutation_on(
-                &tx,
-                previous_intent_hash,
-                replacement_hash,
-                previous_generation,
-            )?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(replacement_hash)
         })
         .await
     }

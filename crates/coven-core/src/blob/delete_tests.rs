@@ -45,8 +45,7 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         &[],
     )
@@ -104,7 +103,6 @@ async fn gc_tombstones_as(
         store_id,
         self_pubkey,
         membership.chain.as_ref(),
-        None,
         clock,
         grace,
     )
@@ -201,8 +199,7 @@ fn create_exact_blob_as<'a>(
             "test-store",
             identity.clone(),
         )
-        .expect("construct exact member blob storage")
-        .with_test_serial_coordination(storage.home.clone());
+        .expect("construct exact member blob storage");
         create_exact_blob_with_authority(&member_storage, &authority, namespace, id, bytes).await
     })
 }
@@ -301,7 +298,6 @@ async fn insert_local_blob_row(
     bytes: &[u8],
 ) {
     let tables = db.synced_tables().to_vec();
-    let write_policy = db.write_policy();
     let write_id = db.new_write_id();
     let root_id = root_id.to_string();
     let row_id = row_id.to_string();
@@ -310,31 +306,24 @@ async fn insert_local_blob_row(
     let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
     let hash = crate::sync::store_commit::ObjectHash::digest(bytes).to_string();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
-            conn,
-            &tables,
-            write_policy,
-            None,
-            write_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO notes
+        Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
+            tx.execute(
+                "INSERT INTO notes
                      (id, title, body, shared, _updated_at, created_at)
                      VALUES (?1, 'blob root', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-                    [root_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT INTO note_photos
+                [root_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO note_photos
                      (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at)
                      VALUES (?1, ?2, 'cover', ?3, ?4, ?5, ?6,
                              '0000000001000-0000-dev1', '2026-01-01')",
-                    rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
-                )
-                .map_err(DbError::from)?;
-                Ok(())
-            },
-        )
+                rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
     })
     .await
     .expect("insert journaled Local blob row");
@@ -1840,11 +1829,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
         .expect("load exact founder graph")
         .expect("created Store has a founder graph");
     let stored = create_exact_blob(&storage, "delete-tests", "wiped", b"contents").await;
-    let crate::database::DurableFounderMembership::MergeConcurrent { head, .. } =
-        founder_graph.membership
-    else {
-        panic!("MergeConcurrent test Store has Serial founder membership");
-    };
+    let crate::database::DurableFounderMembership { head, .. } = founder_graph.membership;
     storage
         .delete_protocol_object(&head.object)
         .await

@@ -189,10 +189,7 @@ impl Database {
                 ));
             }
             if let Some(position) = &continuation.latest_position {
-                let stream_id = match &position.coord {
-                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-                };
+                let stream_id = position.coord.stream_id.to_string();
                 let restored_position = Self::latest_position_for_device_on(&tx, &stream_id)?;
                 if restored_position.as_ref() != Some(position) {
                     return Err(DbError::Message(
@@ -450,27 +447,6 @@ impl Database {
                 &[],
                 None,
             )?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn complete_serial_owner_recovery(
-        &self,
-        commit: StoreBatchCommit,
-        commit_ref: StoreBatchCommitRef,
-        registration: StoreDeviceRegistration,
-        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
-        authorization: SerialAuthorizationState,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::record_activated_store_device_registrations_on(
-                &tx,
-                &commit,
-                &[(registration, authority)],
-            )?;
-            Self::record_materialized_serial_commit_on(&tx, &commit, &commit_ref, &authorization)?;
             tx.commit().map_err(DbError::from)
         })
         .await

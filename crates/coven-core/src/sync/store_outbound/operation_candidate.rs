@@ -24,20 +24,6 @@ pub(crate) async fn prepare_store_operation_candidate_common(
         _ => None,
     };
     let commit = match batch {
-        StoreOperationBatch::Control(control) => StoreBatchCommit::signed_with_control(
-            store_root_hash,
-            db.new_write_id(),
-            plan.coord.clone(),
-            plan.registration_ref.clone(),
-            &plan.registration,
-            plan.order.clone(),
-            plan.membership_state.clone(),
-            plan.device_state.clone(),
-            plan.membership_authority.clone(),
-            Some(control),
-            None,
-            &plan.device_signer,
-        ),
         StoreOperationBatch::Acknowledgement {
             reference: acknowledgement,
             value: _,
@@ -236,7 +222,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
             plan.membership_authority.clone(),
             StoreCommitOperationsInput {
                 acknowledgement: None,
-                control: Some(StoreControl::MergeMembership { transition }),
+                control: Some(StoreControl { transition }),
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
@@ -256,10 +242,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
-    let stream_id = match plan.coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    };
+    let stream_id = plan.coord.stream_id.to_string();
     let prefix = commit_semantic_prefix(
         commit.candidate_family(),
         &stream_id,
@@ -290,20 +273,5 @@ pub(crate) async fn prepare_store_operation_candidate(
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<PreparedStoreOperationCommit, StoreOutboundError> {
-    match plan {
-        StoreOperationCommitPlan::MergeConcurrent(plan) => {
-            crate::sync::store_engine::merge::operations::prepare_candidate(
-                db, storage, plan, batch,
-            )
-            .await
-            .map(PreparedStoreOperationCommit::MergeConcurrent)
-        }
-        StoreOperationCommitPlan::Serial(plan) => {
-            crate::sync::store_engine::serial::operations::prepare_candidate(
-                db, storage, plan, batch,
-            )
-            .await
-            .map(PreparedStoreOperationCommit::Serial)
-        }
-    }
+    crate::sync::store_engine::engine::operations::prepare_candidate(db, storage, plan, batch).await
 }

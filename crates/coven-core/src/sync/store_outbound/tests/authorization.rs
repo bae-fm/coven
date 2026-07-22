@@ -80,7 +80,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     let plan = prepare_store_operation_commit(
         &writer_db,
         &store.storage,
-        StoreOperationPreparation::MergeConcurrent {
+        StoreOperationPreparation {
             membership: &candidate,
         },
         &local_device_id(&writer_db).await,
@@ -88,18 +88,14 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     )
     .await
     .expect("authorize operation at its predecessor cut");
-    let super::super::super::circle_control::StoreMembershipStateRef::MergeConcurrent(state) =
-        &plan.membership_state
-    else {
-        panic!("Merge operation produced Serial membership state")
-    };
+    let state = &plan.membership_state;
 
     assert_eq!(state.heads, before_removal.head_refs());
     assert_eq!(state.resolutions, before_removal.resolution_refs());
     assert_ne!(state.heads, candidate.head_refs());
     assert_eq!(
         plan.membership_authority,
-        StoreOperationMembershipAuthority::MergeConcurrent {
+        StoreOperationMembershipAuthority {
             predecessor: predecessor_authority,
         }
     );
@@ -208,12 +204,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .await
         .expect("load removal-witnessing predecessor")
         .expect("removal-witnessing predecessor exists");
-    let super::super::super::circle_control::StoreMembershipStateRef::MergeConcurrent(
-        predecessor_membership,
-    ) = &prepared.commit.value.membership_state
-    else {
-        panic!("Merge predecessor produced Serial membership state")
-    };
+    let predecessor_membership = &prepared.commit.value.membership_state;
     assert_eq!(predecessor_membership.heads, after_removal.head_refs());
     let predecessor = prepared.head.value.commit.clone();
     assert_eq!(
@@ -225,18 +216,14 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         load_local_store_authority(&writer_db, &local_device_id(&writer_db).await, &writer)
             .await
             .expect("load removed writer registration");
-    let super::super::super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
-        predecessor.coord
-    else {
-        panic!("Merge predecessor has Serial coordinate")
-    };
-    let order = super::super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+    let super::super::super::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = super::super::super::store_commit::StoreCommitOrder {
         seq: 1,
         predecessor: None,
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let result =
-        crate::sync::store_engine::merge::pull::load_retained_merge_outbound_authorization(
+        crate::sync::store_engine::engine::pull::load_retained_merge_outbound_authorization(
             &writer_db,
             &store.storage,
             &root,
@@ -337,18 +324,14 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         load_local_store_authority(&owner_db, &local_device_id(&owner_db).await, &owner)
             .await
             .expect("load owner registration");
-    let super::super::super::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
-        predecessor.coord
-    else {
-        panic!("Merge predecessor has Serial coordinate")
-    };
-    let order = super::super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+    let super::super::super::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = super::super::super::store_commit::StoreCommitOrder {
         seq: predecessor.coord.sequence() + 1,
         predecessor: Some(predecessor.clone()),
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let authorization =
-        crate::sync::store_engine::merge::pull::load_retained_merge_outbound_authorization(
+        crate::sync::store_engine::engine::pull::load_retained_merge_outbound_authorization(
             &owner_db,
             &store.storage,
             &root,

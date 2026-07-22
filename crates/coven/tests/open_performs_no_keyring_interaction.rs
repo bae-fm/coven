@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use coven::{Config, Coven, Migration, StoreDir, SyncedTable, WritePolicy};
+use coven::{Config, Coven, Migration, StoreDir, SyncedTable};
 
 /// A keyring store that panics on any credential-build call. Every keyring
 /// operation in this crate — a read, a write, a delete — goes through
@@ -68,7 +68,6 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     // trait object over the panicking store above and must still succeed —
     // resolving a policy is not consulting it.
     Coven::builder(config)
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![SyncedTable::new(
             "notes",
             coven_core::RowIdentity::SharedKey,
@@ -85,7 +84,6 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
         "Test".to_string(),
     );
     let invalid = Coven::builder(invalid_config)
-        .write_policy(WritePolicy::MergeConcurrent)
         .synced_tables(vec![SyncedTable::new(
             "notes",
             coven_core::RowIdentity::IndependentUuid,

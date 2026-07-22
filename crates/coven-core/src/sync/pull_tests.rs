@@ -338,14 +338,7 @@ async fn replace_stored_remote_object(
 }
 
 fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) -> String {
-    match &reference.coord {
-        crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
-            stream_id.to_string()
-        }
-        crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
-            crate::sync::store_commit::SERIAL_STREAM_ID.to_string()
-        }
-    }
+    reference.coord.stream_id.to_string()
 }
 
 async fn local_announcement_stream(
@@ -467,7 +460,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     let membership = crate::sync::pull::load_cycle_membership(storage.sync_storage(), db)
         .await
         .map_err(|error| error.to_string())?;
-    let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
+    let prepared = crate::sync::store_engine::engine::preparation::prepare_store_write(
         db,
         storage.sync_storage(),
         &device_id,
@@ -484,7 +477,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     if !prepared {
         return Ok(None);
     }
-    crate::sync::store_engine::merge::publication::drain_store_writes(db, storage.sync_storage())
+    crate::sync::store_engine::engine::publication::drain_store_writes(db, storage.sync_storage())
         .await
         .map_err(|error| error.to_string())?;
     db.latest_local_store_position()
@@ -525,10 +518,12 @@ async fn pull_exact_store_into(
         destination,
         destination.synced_tables(),
         storage,
-        None,
         root.store_root_hash,
         store_dir,
-        membership.chain.as_ref(),
+        membership
+            .chain
+            .as_ref()
+            .expect("opened Store has membership"),
         None,
     )
     .await
@@ -610,8 +605,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
         path,
         test_synced_tables_with_blob(decl),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
         &test_migrations(),
     )
@@ -812,7 +806,7 @@ async fn exact_membership_registration(
 
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
-        DeviceRecoveryId, DeviceStreamAnchor, StoreCommitAnchor, StoreDeviceRegistration,
+        DeviceRecoveryId, DeviceStreamAnchor, StoreDeviceRegistration,
         StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
     };
 
@@ -882,10 +876,8 @@ async fn exact_membership_registration(
         storage.root.clone(),
         origin,
         founder_registration.provider,
-        StoreCommitAnchor::MergeConcurrent {
-            announcements: DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: announcement_slot,
-            },
+        DeviceStreamAnchor::StoreAnnouncements {
+            first_slot: announcement_slot,
         },
         DeviceStreamAnchor::StoreAcknowledgements {
             first_slot: acknowledgement_slot,
@@ -1075,9 +1067,7 @@ async fn load_exact_published_commit_as(
     identity: &UserKeypair,
 ) -> ExactPublishedCommit {
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-    use crate::sync::store_commit::{
-        head_slot_prefix, StoreCommitAnchor, StoreDeviceHead, StoreDeviceRegistration,
-    };
+    use crate::sync::store_commit::{head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration};
 
     let context = ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
@@ -1117,11 +1107,8 @@ async fn load_exact_published_commit_as(
     let device_signer = registration
         .device_signer(identity)
         .expect("derive exact published Store device signer");
-    let StoreCommitAnchor::MergeConcurrent { announcements } = &registration.store_commits else {
-        panic!("pull test exact commit uses MergeConcurrent storage")
-    };
     let crate::sync::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
-        announcements
+        &registration.store_commits
     else {
         panic!("pull test registration has a Store announcement anchor")
     };
@@ -1180,7 +1167,7 @@ async fn replace_exact_commit_bytes(
     let reference =
         publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
     let history_summary =
-        crate::sync::store_engine::merge::pull::prepare_merge_abandonment_history_summary(
+        crate::sync::store_engine::engine::pull::prepare_merge_abandonment_history_summary(
             &candidate_summary,
             &graph.reference,
             &graph.commit,
@@ -1376,9 +1363,7 @@ async fn resign_exact_commit(
     let mut commit = sign_exact_commit_with_package(
         graph,
         schema_version,
-        crate::sync::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
-            predecessor,
-        },
+        crate::sync::store_commit::StoreOperationMembershipAuthority { predecessor },
         &package_bytes,
         package.object.clone(),
     );
@@ -2100,7 +2085,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
         .call(|conn| {
             conn.execute(
                 "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
-                 VALUES ('serial', -1, '{}')",
+                 VALUES ('invalid-device', -1, '{}')",
                 [],
             )
             .map(|_| ())
@@ -2111,7 +2096,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
     assert!(target.materialized_frontier().await.unwrap().is_empty());
     assert_eq!(
         target.snapshot_coverage_frontier().await.unwrap(),
-        crate::CommitFrontier::MergeConcurrent(std::collections::BTreeMap::new()),
+        crate::CommitFrontier(std::collections::BTreeMap::new()),
     );
 }
 
@@ -2391,13 +2376,10 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     replace_stored_remote_object(&target, &first_package.object, &invented).await;
     let crate::sync::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
         &second_owner;
-    let crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+    let crate::sync::store_commit::StoreCommitCoord {
         stream_id,
         sequence,
-    } = &commit.coord
-    else {
-        unreachable!("retained replay fixture is MergeConcurrent")
-    };
+    } = &commit.coord;
     let stream_id = stream_id.to_string();
     let sequence = i64::try_from(*sequence).expect("invented replay sequence fits SQLite");
     let commit_ref = serde_json::to_string(commit).expect("serialize invented replay owner");
@@ -2464,8 +2446,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         &target_path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         &test_migrations(),
     )
@@ -2565,7 +2546,6 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 write_id,
                 |tx| {
@@ -3414,12 +3394,8 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         .await
         .expect("publish exact Store changeset");
     let graph = load_exact_published_commit(&storage, reference).await;
-    let crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } =
-        &graph.reference.coord
-    else {
-        panic!("pull test uses MergeConcurrent commits")
-    };
-    let relocated_coord = crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+    let crate::sync::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
+    let relocated_coord = crate::sync::store_commit::StoreCommitCoord {
         stream_id: *stream_id,
         sequence: 2,
     };
@@ -3518,7 +3494,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     .await
     .expect("publish relocated exact Store commit");
     let relocated_ref = crate::sync::store_commit::StoreBatchCommitRef {
-        coord: crate::sync::store_commit::StoreCommitCoord::MergeConcurrent {
+        coord: crate::sync::store_commit::StoreCommitCoord {
             stream_id: relocated_stream,
             sequence: 1,
         },
@@ -3925,10 +3901,9 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         &db2,
         db2.synced_tables(),
         &failing,
-        None,
         storage.root.store_root_hash,
         &ld,
-        Some(&membership),
+        &membership,
         None,
     )
     .await
@@ -3992,271 +3967,6 @@ fn open_scoped_circle_test_db() -> crate::database::Database {
     )
 }
 
-fn open_serial_scoped_circle_test_db_at(path: &std::path::Path) -> crate::database::Database {
-    let (db, _stamper) = crate::database::Database::open(
-        path,
-        vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
-                .scoped_by("audience"),
-            SyncedTable::new(
-                "comments",
-                crate::sync::session::RowIdentity::IndependentUuid,
-            ),
-        ],
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::Serial,
-        "serial-circle-test".to_string(),
-        &[crate::migration::Migration::sql(
-            1,
-            "scoped Serial Circle schema",
-            "CREATE TABLE notes (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 body TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;
-             CREATE TABLE comments (
-                 id TEXT PRIMARY KEY,
-                 note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-                 body TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
-    )
-    .expect("open Serial scoped Circle database");
-    db
-}
-
-#[allow(clippy::too_many_arguments)]
-fn publish_serial_circle_move<'a>(
-    source: &'a crate::database::Database,
-    storage: &'a TestStore,
-    owner: &'a UserKeypair,
-    device_id: &'a str,
-    note_id: &'a str,
-    source_dir: &'a crate::store_dir::StoreDir,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::sync::circle::CircleId> + 'a>> {
-    Box::pin(async move {
-        let coordination = storage
-            .storage
-            .serial_coordination()
-            .expect("Serial test Store exposes coordination");
-        let second_circle_id = crate::sync::circle_ops::create_circle(
-            source,
-            &storage.storage,
-            Some(coordination),
-            device_id,
-            "0000000003000-0000-owner",
-            "Editors",
-            owner,
-        )
-        .await
-        .expect("create second Serial Circle");
-        host_exec(
-            source,
-            &format!(
-                "UPDATE notes SET audience = '{second_circle_id}', _updated_at = '0000000004000-0000-owner'
-                 WHERE id = '{note_id}';"
-            ),
-        )
-        .await;
-        let prepared = crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-            source,
-            &storage.storage,
-            coordination,
-            device_id,
-            owner,
-            source_dir,
-        )
-        .await
-        .expect("prepare cross-Circle Serial move");
-        assert!(prepared);
-        crate::sync::store_engine::serial::publication::drain_store_writes(
-            source,
-            &storage.storage,
-            coordination,
-        )
-        .await
-        .expect("publish cross-Circle Serial move");
-        second_circle_id
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assert_serial_circle_move<'a>(
-    target: &'a crate::database::Database,
-    storage: &'a TestStore,
-    owner: &'a UserKeypair,
-    note_id: &'a str,
-    comment_id: &'a str,
-    second_circle_id: crate::sync::circle::CircleId,
-    target_dir: &'a crate::store_dir::StoreDir,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
-    Box::pin(async move {
-        let coordination = storage
-            .storage
-            .serial_coordination()
-            .expect("Serial test Store exposes coordination");
-        let moved = crate::sync::store_engine::pull_store_commits(
-            target,
-            target.synced_tables(),
-            &storage.storage,
-            Some(coordination),
-            storage.root.store_root_hash,
-            target_dir,
-            None,
-            Some(owner),
-        )
-        .await
-        .expect("pull cross-Circle Serial move");
-        assert!(moved.held_positions.is_empty(), "{moved:?}");
-        let note_id_for_query = note_id.to_string();
-        let current_audience = target
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT audience FROM notes WHERE id = ?1",
-                    [note_id_for_query],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(crate::database::DbError::from)
-            })
-            .await
-            .expect("read moved Serial row audience");
-        assert_eq!(current_audience, second_circle_id.to_string(), "{moved:?}");
-        assert!(
-            row_exists(
-                target,
-                &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
-            )
-            .await
-        );
-    })
-}
-
-fn prepare_conflicting_serial_branch<'a>(
-    db: &'a crate::database::Database,
-    storage: &'a TestStore,
-    owner: &'a UserKeypair,
-    device_id: &'a str,
-    store_dir: &'a crate::store_dir::StoreDir,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::PendingBranchId> + 'a>> {
-    Box::pin(async move {
-        let local_id = "550e8400-e29b-41d4-a716-446655440000";
-        host_exec(
-            db,
-            &format!(
-                "INSERT INTO notes VALUES ('{local_id}', NULL, 'losing local write', '0000000000500-0000-owner');"
-            ),
-        )
-        .await;
-        let pending = db
-            .pending_writes()
-            .await
-            .expect("read pending Serial branch");
-        let [pending] = pending.as_slice() else {
-            panic!("expected one pending Serial write, found {}", pending.len());
-        };
-        let branch_id = crate::PendingBranchId::from_first_write(pending.write_id.clone());
-        let coordination = storage
-            .storage
-            .serial_coordination()
-            .expect("Serial test Store exposes coordination");
-        assert!(
-            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-                db,
-                &storage.storage,
-                coordination,
-                device_id,
-                owner,
-                store_dir
-            )
-            .await
-            .expect("prepare losing Serial branch")
-        );
-        branch_id
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_conflicting_serial_branch<'a>(
-    db: &'a crate::database::Database,
-    storage: &'a TestStore,
-    owner: &'a UserKeypair,
-    branch_id: crate::PendingBranchId,
-    store_dir: &'a crate::store_dir::StoreDir,
-    note_id: &'a str,
-    comment_id: &'a str,
-    expected_circle: crate::sync::circle::CircleId,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
-    Box::pin(async move {
-        let coordination = storage
-            .storage
-            .serial_coordination()
-            .expect("Serial test Store exposes coordination");
-        assert_eq!(
-            crate::sync::store_engine::serial::publication::drain_store_writes(
-                db,
-                &storage.storage,
-                coordination,
-            )
-            .await
-            .expect("detect losing Serial branch"),
-            0
-        );
-        let pending = db.pending_writes().await.expect("read conflicted branch");
-        assert!(matches!(
-            pending.as_slice(),
-            [pending] if matches!(pending.status, crate::WriteStatus::Conflict(_))
-        ));
-        let plan = crate::sync::store_engine::serial::pull::prepare_serial_resolution(
-            db,
-            &storage.storage,
-            coordination,
-            storage.root.store_root_hash,
-            store_dir,
-            None,
-            owner,
-        )
-        .await
-        .expect("prepare Serial Circle conflict resolution");
-        crate::sync::store_engine::serial::pull::cleanup_serial_candidates(
-            db,
-            &storage.storage,
-            branch_id.clone(),
-            &plan,
-        )
-        .await
-        .expect("clean losing Serial candidate");
-        plan.discard_pending_branch(db, branch_id)
-            .await
-            .expect("materialize accepted Serial Circle history");
-        assert!(
-            row_exists(
-                db,
-                &format!(
-                    "SELECT 1 FROM notes WHERE id = '{note_id}' AND audience = '{expected_circle}'"
-                )
-            )
-            .await
-        );
-        assert!(
-            row_exists(
-                db,
-                &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
-            )
-            .await
-        );
-        assert!(
-            !row_exists(
-                db,
-                "SELECT 1 FROM notes WHERE id = '550e8400-e29b-41d4-a716-446655440000'"
-            )
-            .await
-        );
-    })
-}
-
 #[tokio::test]
 async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     let owner = UserKeypair::generate();
@@ -4274,7 +3984,6 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     let circle_id = crate::sync::circle_ops::create_circle(
         &source,
         &storage.storage,
-        None,
         &device_id,
         "0000000001000-0000-owner",
         "Readers",
@@ -4291,7 +4000,6 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     let tables = source.synced_tables().to_vec();
     let gates = source.gates();
     let blob_decls = source.blob_decls();
-    let write_policy = source.write_policy();
     let write_id = source.new_write_id();
     source
         .call(move |conn| {
@@ -4301,7 +4009,6 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
                 &tables,
                 &gates,
                 &blob_decls,
-                write_policy,
                 Some(&routing),
                 write_id,
                 |tx| {
@@ -4328,10 +4035,9 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         &target,
         target.synced_tables(),
         &storage.storage,
-        None,
         storage.root.store_root_hash,
         &target_dir,
-        Some(&target_membership),
+        &target_membership,
         Some(&owner),
     )
     .await
@@ -4429,7 +4135,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     let circle_id = crate::sync::circle_ops::create_circle(
         activator,
         &storage.storage,
-        None,
         &activator_device,
         "0000000001000-0000-owner",
         "Readers",
@@ -4447,10 +4152,9 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         successor,
         successor.synced_tables(),
         &storage.storage,
-        None,
         storage.root.store_root_hash,
         &successor_dir,
-        Some(&successor_membership),
+        &successor_membership,
         Some(&owner),
     )
     .await
@@ -4463,7 +4167,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     crate::sync::circle_ops::rename_circle(
         successor,
         &storage.storage,
-        None,
         &successor_device,
         "0000000002000-0000-owner",
         circle_id,
@@ -4482,10 +4185,9 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         &receiver,
         receiver.synced_tables(),
         &storage.storage,
-        None,
         storage.root.store_root_hash,
         &receiver_dir,
-        Some(&receiver_membership),
+        &receiver_membership,
         Some(&owner),
     )
     .await
@@ -4500,203 +4202,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
             .into_iter()
             .find(|circle| circle.id == circle_id)
             .expect("Circle exists after ordered pull")
-            .name,
-        "Renamed readers"
-    );
-}
-
-#[test]
-fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
-    std::thread::Builder::new()
-        .name("serial-circle-pull-stack".to_string())
-        // Linux test workers provide a 2 MiB stack. Keep the complete Store and
-        // Circle path below that limit with room for the test harness.
-        .stack_size(1_572_864)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build Serial Circle pull runtime")
-                .block_on(serial_circle_pull_scenario());
-        })
-        .expect("spawn constrained Serial Circle pull thread")
-        .join()
-        .expect("constrained Serial Circle pull thread joins");
-}
-
-async fn serial_circle_pull_scenario() {
-    let owner = UserKeypair::generate();
-    let databases = tempfile::tempdir().expect("create Serial database directory");
-    let source = open_serial_scoped_circle_test_db_at(&databases.path().join("source.sqlite"));
-    let storage = create_store(&source, owner.clone()).await;
-    let coordination = storage
-        .storage
-        .serial_coordination()
-        .expect("Serial test Store exposes coordination");
-    let device_id = source
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read Serial scoped source device")
-        .expect("Serial scoped source device exists");
-    let target_path = databases.path().join("target.sqlite");
-    let target_path_string = target_path.to_string_lossy().into_owned();
-    source
-        .call(move |conn| {
-            conn.execute("VACUUM INTO ?1", [target_path_string])
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("clone founder Serial database");
-    let conflict_path = databases.path().join("conflict.sqlite");
-    let conflict_path_string = conflict_path.to_string_lossy().into_owned();
-    source
-        .call(move |conn| {
-            conn.execute("VACUUM INTO ?1", [conflict_path_string])
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("clone conflicting founder Serial database");
-    let conflict = open_serial_scoped_circle_test_db_at(&conflict_path);
-    let (_conflict_temp, conflict_dir) = temp_store_dir();
-    let conflict_branch =
-        prepare_conflicting_serial_branch(&conflict, &storage, &owner, &device_id, &conflict_dir)
-            .await;
-    let circle_id = crate::sync::circle_ops::create_circle(
-        &source,
-        &storage.storage,
-        Some(coordination),
-        &device_id,
-        "0000000001000-0000-owner",
-        "Readers",
-        &owner,
-    )
-    .await
-    .expect("create Serial Circle");
-    crate::sync::circle_ops::rename_circle(
-        &source,
-        &storage.storage,
-        Some(coordination),
-        &device_id,
-        "0000000001500-0000-owner",
-        circle_id,
-        "Renamed readers",
-        &owner,
-    )
-    .await
-    .expect("rename Serial Circle before another device materializes its activation");
-    let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
-    let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    host_exec(
-        &source,
-        &format!(
-            "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
-             INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
-        ),
-    )
-    .await;
-    let (_source_temp, source_dir) = temp_store_dir();
-    let prepared = crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-        &source,
-        &storage.storage,
-        coordination,
-        &device_id,
-        &owner,
-        &source_dir,
-    )
-    .await
-    .expect("prepare Serial Circle-only write");
-    assert!(prepared);
-    crate::sync::store_engine::serial::publication::drain_store_writes(
-        &source,
-        &storage.storage,
-        coordination,
-    )
-    .await
-    .expect("publish Serial Circle-only write");
-
-    let target = open_serial_scoped_circle_test_db_at(&target_path);
-    let (_target_temp, target_dir) = temp_store_dir();
-    let result = crate::sync::store_engine::pull_store_commits(
-        &target,
-        target.synced_tables(),
-        &storage.storage,
-        Some(coordination),
-        storage.root.store_root_hash,
-        &target_dir,
-        None,
-        Some(&owner),
-    )
-    .await
-    .expect("pull Serial Circle-only write");
-
-    assert!(result.changesets_applied >= 1);
-    assert_eq!(
-        target
-            .get_circles(&crate::keys::public_key_hex(&owner))
-            .await
-            .expect("read pulled Serial Circles")
-            .into_iter()
-            .find(|circle| circle.id == circle_id)
-            .expect("pulled Serial Circle exists")
-            .name,
-        "Renamed readers"
-    );
-    assert!(
-        row_exists(
-            &target,
-            &format!("SELECT 1 FROM notes WHERE id = '{note_id}'")
-        )
-        .await
-    );
-    assert!(
-        row_exists(
-            &target,
-            &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
-        )
-        .await
-    );
-    assert!(
-        stored_remote_objects(&target)
-            .await
-            .iter()
-            .any(|remote| is_external_circle_package(remote, false)),
-        "pulled Serial Circle package must carry external exact commit ownership"
-    );
-
-    let second_circle_id =
-        publish_serial_circle_move(&source, &storage, &owner, &device_id, note_id, &source_dir)
-            .await;
-    assert_serial_circle_move(
-        &target,
-        &storage,
-        &owner,
-        note_id,
-        comment_id,
-        second_circle_id,
-        &target_dir,
-    )
-    .await;
-    resolve_conflicting_serial_branch(
-        &conflict,
-        &storage,
-        &owner,
-        conflict_branch,
-        &conflict_dir,
-        note_id,
-        comment_id,
-        second_circle_id,
-    )
-    .await;
-    assert_eq!(
-        conflict
-            .get_circles(&crate::keys::public_key_hex(&owner))
-            .await
-            .expect("read resolved Serial Circles")
-            .into_iter()
-            .find(|circle| circle.id == circle_id)
-            .expect("resolved Serial Circle exists")
             .name,
         "Renamed readers"
     );
@@ -6377,7 +5882,6 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 insert_write_id,
                 |tx| {
@@ -6399,7 +5903,6 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &update_tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 update_write_id,
                 |tx| {
@@ -6503,7 +6006,6 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 write_id,
                 |tx| {
@@ -7007,10 +6509,12 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         &target,
         target.synced_tables(),
         &storage.storage,
-        None,
         storage.store_root_hash(),
         &store_dir,
-        cycle_membership.chain.as_ref(),
+        cycle_membership
+            .chain
+            .as_ref()
+            .expect("opened Store has membership"),
         None,
     )
     .await
@@ -7232,7 +6736,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     );
 }
 
-/// A MergeConcurrent operations commit cannot substitute current membership
+/// An operations commit cannot substitute current membership
 /// for its exact predecessor grant authority.
 #[tokio::test]
 async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
@@ -7745,7 +7249,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     pull_into_result(&member_db, &storage, &pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
-    crate::sync::store_engine::merge::pull::cleanup_merge_candidate(
+    crate::sync::store_engine::engine::pull::cleanup_merge_candidate(
         &member_db,
         &storage.storage,
         write_id.clone(),
@@ -8080,10 +7584,9 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         &db2,
         db2.synced_tables(),
         &failing,
-        None,
         storage.root.store_root_hash,
         &temp_store_dir().1,
-        Some(&loaded),
+        &loaded,
         None,
     )
     .await
@@ -8570,12 +8073,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
             .expect("load updater Store commit")
             .expect("updater Store commit is materialized");
     assert_eq!(
-        update_commit
-            .value
-            .order
-            .dependencies()
-            .expect("MergeConcurrent update carries dependencies")
-            .get(&insert_stream),
+        update_commit.value.order.dependencies().get(&insert_stream),
         Some(&insert_position),
         "the update commit captures the exact insert dependency",
     );
@@ -8591,83 +8089,76 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
 }
 
 #[tokio::test]
-async fn provider_blob_download_failure_remains_typed_for_both_write_policies() {
-    for policy in [
-        crate::WritePolicy::MergeConcurrent,
-        crate::WritePolicy::Serial,
-    ] {
-        let (db, _) = crate::database::Database::open(
-            std::path::Path::new(":memory:"),
-            test_synced_tables_with_blob(BlobDecl::new(
-                "photos",
-                Provenance::HostProvided,
-                CacheFill::CacheEager,
-            )),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            policy,
-            format!("download-{policy:?}"),
-            &test_migrations(),
-        )
-        .expect("open policy-shaped blob database");
-        let bytes = b"provider-down";
-        let hash = crate::blob::content_hash(bytes);
-        host_exec(
-            &db,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+async fn provider_blob_download_failure_remains_typed() {
+    let (db, _) = crate::database::Database::open(
+        std::path::Path::new(":memory:"),
+        test_synced_tables_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "download-provider-failure".to_string(),
+        &test_migrations(),
+    )
+    .expect("open blob database");
+    let bytes = b"provider-down";
+    let hash = crate::blob::content_hash(bytes);
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('download-root', 'download', NULL, 1, \
                      '0000000001000-0000-source', '2026-01-01')",
-        )
-        .await;
-        host_exec(
-            &db,
-            &format!(
-                "INSERT INTO note_photos \
+    )
+    .await;
+    host_exec(
+        &db,
+        &format!(
+            "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('download-blob', 'download-root', 'cover', {}, '{}', \
                          '0000000001000-0000-source', '2026-01-01')",
-                bytes.len(),
-                hash,
-            ),
-        )
-        .await;
-        let storage = create_store(&db, UserKeypair::generate()).await;
-        let stored = create_exact_blob(&db, &storage, "photos", "download-blob", None, bytes).await;
-        let local = db
-            .row_blob_ref("note_photos", "download-blob")
-            .await
-            .expect("load exact download row blob reference");
-        let remote = crate::blob::RowBlobRef::new(
-            local.table().to_string(),
-            local.row_id().to_string(),
-            local.row_stamp().to_string(),
-            local.column().to_string(),
-            local.blob().clone(),
-            local.plaintext_size(),
-            local.plaintext_hash(),
-            crate::blob::RowBlobAuthority::Remote(
-                crate::sync::audience_package::PackageAudience::Store,
-            ),
-            Some(stored),
-        )
-        .expect("attach exact stored blob publication to row");
-        let failing = FaultingStorage::blob(&storage.storage);
-        let (_temp, store_dir) = temp_store_dir();
-
-        let failures = crate::sync::pull::download_blobs(
-            &db,
-            vec![crate::sync::pull::BlobDownload::from_row(remote)
-                .expect("build exact blob download")],
-            &failing,
-            &store_dir,
-        )
+            bytes.len(),
+            hash,
+        ),
+    )
+    .await;
+    let storage = create_store(&db, UserKeypair::generate()).await;
+    let stored = create_exact_blob(&db, &storage, "photos", "download-blob", None, bytes).await;
+    let local = db
+        .row_blob_ref("note_photos", "download-blob")
         .await
-        .expect_err("provider download failure remains a typed batch failure");
-        assert_eq!(failures.failures().len(), 1);
-        assert!(failures.has_transport_failure());
-        assert!(
-            crate::sync::cycle::SyncCycleFailure::operation("pull Store commits", failures,)
-                .is_offline()
-        );
-    }
+        .expect("load exact download row blob reference");
+    let remote = crate::blob::RowBlobRef::new(
+        local.table().to_string(),
+        local.row_id().to_string(),
+        local.row_stamp().to_string(),
+        local.column().to_string(),
+        local.blob().clone(),
+        local.plaintext_size(),
+        local.plaintext_hash(),
+        crate::blob::RowBlobAuthority::Remote(
+            crate::sync::audience_package::PackageAudience::Store,
+        ),
+        Some(stored),
+    )
+    .expect("attach exact stored blob publication to row");
+    let failing = FaultingStorage::blob(&storage.storage);
+    let (_temp, store_dir) = temp_store_dir();
+
+    let failures = crate::sync::pull::download_blobs(
+        &db,
+        vec![crate::sync::pull::BlobDownload::from_row(remote).expect("build exact blob download")],
+        &failing,
+        &store_dir,
+    )
+    .await
+    .expect_err("provider download failure remains a typed batch failure");
+    assert_eq!(failures.failures().len(), 1);
+    assert!(failures.has_transport_failure());
+    assert!(
+        crate::sync::cycle::SyncCycleFailure::operation("pull Store commits", failures,)
+            .is_offline()
+    );
 }

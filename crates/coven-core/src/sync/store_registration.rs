@@ -6,21 +6,19 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 
 use super::membership::MembershipChain;
-use super::storage::{CoordinationStorage, PreparedExactObject, ProtocolObjectDomain, SyncStorage};
+use super::storage::{PreparedExactObject, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, device_self_retirement_semantic_prefix,
     head_slot_prefix, owner_recovery_semantic_prefix, registration_semantic_prefix,
     snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId, CommitFrontier,
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptRef, DeviceReadinessProof,
     DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
-    OwnerRecoveryNodeRef, OwnerRecoveryPosition, SerialRecoveryActivation, StoreAck,
-    StoreAckExclusionState, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
-    StoreCommitCoord, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceSelfRetirement,
-    StoreDeviceSelfRetirementRef, StoreDeviceStateRef, StoreHistoryCut,
-    StoreOperationMembershipAuthority, StoreSerialHead, StoreSerialHeadState,
-    StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    OwnerRecoveryNodeRef, OwnerRecoveryPosition, StoreAck, StoreAckExclusionState, StoreAckRef,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef,
+    StoreDeviceStateRef, StoreHistoryCut, StoreOperationMembershipAuthority, SuccessorLink,
 };
 use super::store_objects::StoreObjectError;
 
@@ -50,30 +48,9 @@ struct DurableRetirement {
     commit_bytes: Vec<u8>,
     commit_prepared: PreparedExactObject,
     commit_ref: StoreBatchCommitRef,
-    publication: RetirementPublication,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum RetirementPublication {
-    MergeConcurrent {
-        head_bytes: Vec<u8>,
-        head_prepared: PreparedExactObject,
-        history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
-    },
-    Serial {
-        base_head: super::storage::VersionedObject,
-        head_bytes: Vec<u8>,
-        authorization_after: super::membership::SerialAuthorizationState,
-    },
-}
-
-enum RetirementPolicyPreparation {
-    MergeConcurrent {
-        membership: MembershipChain,
-        predecessor_state: super::store_commit::ResolvedStoreDeviceState,
-    },
-    Serial(Box<super::store_engine::serial::publication::SerialAuthorizationSnapshot>),
+    head_bytes: Vec<u8>,
+    head_prepared: PreparedExactObject,
+    history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 impl DurableRetirement {
@@ -106,27 +83,20 @@ impl DurableRetirement {
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
         );
-        if let RetirementPublication::MergeConcurrent {
-            head_bytes,
-            head_prepared,
-            ..
-        } = &self.publication
-        {
-            let head: StoreDeviceHead = serde_json::from_slice(head_bytes)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            remotes.push(
-                super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                    super::store_commit::StoreDeviceHeadRef {
-                        head_hash: head.head_hash(),
-                        object: head_prepared.reference().clone(),
-                    },
-                    head_bytes.clone(),
-                    head_prepared.stored_bytes().to_vec(),
-                    self.commit_ref.clone(),
-                )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
-            );
-        }
+        let head: StoreDeviceHead = serde_json::from_slice(&self.head_bytes)
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        remotes.push(
+            super::remote_object::RemoteObjectRecord::candidate_activated_store_head(
+                super::store_commit::StoreDeviceHeadRef {
+                    head_hash: head.head_hash(),
+                    object: self.head_prepared.reference().clone(),
+                },
+                self.head_bytes.clone(),
+                self.head_prepared.stored_bytes().to_vec(),
+                self.commit_ref.clone(),
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
+        );
         Ok(remotes)
     }
 }
@@ -266,12 +236,11 @@ pub(crate) async fn install_existing_founder_device(
     .map_err(database_error)
 }
 
-pub async fn retire_registration_with_coordination(
+pub async fn retire_registration(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     signer: &UserKeypair,
-    membership: Option<&MembershipChain>,
+    membership: &MembershipChain,
     _published_at: &str,
 ) -> Result<bool, StoreRegistrationError> {
     drain_registration_outbox(db, storage).await?;
@@ -296,8 +265,7 @@ pub async fn retire_registration_with_coordination(
                 "retired local registration has no exact retirement journal".into(),
             ));
         }
-        let durable =
-            prepare_self_retirement(db, storage, coordination, signer, membership).await?;
+        let durable = prepare_self_retirement(db, storage, signer, membership).await?;
         let payload = serde_json::to_vec(&durable)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let remotes = durable.closed_remote_objects()?;
@@ -305,16 +273,15 @@ pub async fn retire_registration_with_coordination(
             .await
             .map_err(database_error)?;
     }
-    publish_self_retirement(db, storage, coordination).await?;
+    publish_self_retirement(db, storage).await?;
     Ok(true)
 }
 
 async fn prepare_self_retirement(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
     signer: &UserKeypair,
-    membership: Option<&MembershipChain>,
+    membership: &MembershipChain,
 ) -> Result<DurableRetirement, StoreRegistrationError> {
     let device_id = db
         .latest_local_store_device_registration()
@@ -326,168 +293,67 @@ async fn prepare_self_retirement(
     let (root, registration_ref, registration, device_signer) =
         super::store_outbound::load_local_store_authority(db, &device_id, signer).await?;
     let write_id = db.new_write_id();
-    let (coord, order, membership_state, device_state, policy) = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let previous = db
-                .latest_local_store_position()
-                .await
-                .map_err(database_error)?;
-            let dependencies = CommitFrontier::from_refs(
-                crate::WritePolicy::MergeConcurrent,
-                db.materialized_frontier().await.map_err(database_error)?,
-            )
-            .and_then(|frontier| frontier.merge_commits().cloned())
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let seq = previous
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-            let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
-                root.store_root_hash,
-                &registration_ref,
-                super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-            );
-            let coord = StoreCommitCoord::MergeConcurrent {
-                stream_id,
-                sequence: seq,
-            };
-            let order = StoreCommitOrder::MergeConcurrent {
-                seq,
-                predecessor: previous.clone(),
-                dependencies,
-            };
-            let (device_state, resolved_devices) = db
-                .store_device_state_for_order(&order)
-                .await
-                .map_err(database_error)?;
-            if !resolved_devices
-                .devices
-                .get(&registration_ref.device_id)
-                .is_some_and(|record| {
-                    record.registration == registration_ref
-                        && matches!(
-                            record.status,
-                            super::store_commit::StoreDeviceStatus::Active
-                        )
-                })
-            {
-                return Err(StoreRegistrationError::Invalid(
-                    "local registration is not active at the exact retirement cut".into(),
-                ));
-            }
-            let chain = membership.ok_or_else(|| {
-                StoreRegistrationError::Invalid(
-                    "Merge self-retirement has no exact membership state".into(),
-                )
-            })?;
-            let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
-                return Err(StoreRegistrationError::Invalid(
-                    "Merge self-retirement requires resolved membership".into(),
-                ));
-            };
-            let membership_state =
-                super::circle_control::StoreMembershipStateRef::merge_concurrent(
-                    chain.head_refs().to_vec(),
-                    chain.resolution_refs().to_vec(),
-                    resolved_devices.recovery.clone(),
-                    resolved.state_hash,
-                )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            (
-                coord,
-                order,
-                membership_state,
-                device_state,
-                RetirementPolicyPreparation::MergeConcurrent {
-                    membership: chain.clone(),
-                    predecessor_state: resolved_devices,
-                },
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let coordination = coordination.ok_or_else(|| {
-                StoreRegistrationError::Invalid(
-                    "Serial self-retirement requires coordination".into(),
-                )
-            })?;
-            let snapshot =
-                super::store_engine::serial::publication::current_serial_authorization_snapshot(
-                    db,
-                    storage,
-                    coordination,
-                )
-                .await?;
-            let seq = snapshot
-                .base
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
-            let predecessor = snapshot.base.clone().map_or_else(
-                || StoreSerialPredecessor::Genesis {
-                    root: root.clone(),
-                    founder_registration: registration_ref.clone(),
-                },
-                StoreSerialPredecessor::Commit,
-            );
-            let order = StoreCommitOrder::Serial {
-                seq,
-                predecessor: predecessor.clone(),
-            };
-            let (device_state, resolved_devices) = db
-                .store_device_state_for_order(&order)
-                .await
-                .map_err(database_error)?;
-            if !resolved_devices
-                .devices
-                .get(&registration_ref.device_id)
-                .is_some_and(|record| {
-                    record.registration == registration_ref
-                        && matches!(
-                            record.status,
-                            super::store_commit::StoreDeviceStatus::Active
-                        )
-                })
-            {
-                return Err(StoreRegistrationError::Invalid(
-                    "local registration is not active at the exact retirement cut".into(),
-                ));
-            }
-            let membership_state = super::circle_control::StoreMembershipStateRef::serial(
-                predecessor,
-                resolved_devices.recovery,
-                &snapshot.authorization,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            (
-                StoreCommitCoord::Serial { sequence: seq },
-                order,
-                membership_state,
-                device_state,
-                RetirementPolicyPreparation::Serial(Box::new(snapshot)),
-            )
-        }
+    let previous = db
+        .latest_local_store_position()
+        .await
+        .map_err(database_error)?;
+    let dependencies =
+        CommitFrontier::from_refs(db.materialized_frontier().await.map_err(database_error)?)
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+            .0;
+    let seq = previous
+        .as_ref()
+        .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+    let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        &registration_ref,
+        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
+    let coord = StoreCommitCoord {
+        stream_id,
+        sequence: seq,
     };
+    let order = StoreCommitOrder {
+        seq,
+        predecessor: previous.clone(),
+        dependencies,
+    };
+    let (device_state, predecessor_state) = db
+        .store_device_state_for_order(&order)
+        .await
+        .map_err(database_error)?;
+    if !predecessor_state
+        .devices
+        .get(&registration_ref.device_id)
+        .is_some_and(|record| {
+            record.registration == registration_ref
+                && matches!(
+                    record.status,
+                    super::store_commit::StoreDeviceStatus::Active
+                )
+        })
+    {
+        return Err(StoreRegistrationError::Invalid(
+            "local registration is not active at the exact retirement cut".into(),
+        ));
+    }
+    let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+        return Err(StoreRegistrationError::Invalid(
+            "self-retirement requires resolved membership".into(),
+        ));
+    };
+    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        predecessor_state.recovery.clone(),
+        resolved.state_hash,
+    )
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let candidate_family =
         CandidateFamilyId::derive(root.store_root_hash, &registration_ref, &write_id, &order);
-    let retiring_cut = match &order {
-        StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => {
-            let mut cut = dependencies.clone();
-            if let Some(predecessor) = predecessor {
-                let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord else {
-                    return Err(StoreRegistrationError::Invalid(
-                        "Merge predecessor is Serial".into(),
-                    ));
-                };
-                cut.insert(stream_id, predecessor.clone());
-            }
-            StoreHistoryCut::MergeConcurrent(cut)
-        }
-        StoreCommitOrder::Serial { predecessor, .. } => {
-            StoreHistoryCut::Serial(predecessor.clone())
-        }
-    };
+    let retiring_cut = order
+        .predecessor_cut()
+        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let retirement = StoreDeviceSelfRetirement::signed(
         root.store_root_hash,
         candidate_family,
@@ -525,10 +391,7 @@ async fn prepare_self_retirement(
         root.store_root_hash,
         ProtocolObjectDomain::StoreCommit,
     );
-    let stream = match coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    };
+    let stream = coord.stream_id.to_string();
     let commit = StoreBatchCommit::signed_with_self_retirement(
         root.store_root_hash,
         write_id,
@@ -564,106 +427,74 @@ async fn prepare_self_retirement(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let publication = match policy {
-        RetirementPolicyPreparation::MergeConcurrent {
-            membership,
-            predecessor_state,
-        } => {
-            let state_after = predecessor_state
-                .self_retire(retirement_ref.clone())
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let history = super::store_engine::merge::pull::prepare_merge_history_successor(
-                db,
-                &root,
-                &commit,
-                &commit_ref,
-                &membership,
-                &registration,
-                None,
-                state_after,
-                super::store_engine::merge::pull::MergeHistorySuccessorEvidence::none(),
-            )
-            .await
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            );
-            let next_prefix = head_slot_prefix(
-                &registration_ref.device_id.to_string(),
-                commit.seq().saturating_add(1),
-            );
-            let next_slot = storage
-                .allocate_protocol_slot(&head_context, &next_prefix, ".json")
-                .await
-                .map_err(StoreObjectError::from)?;
-            let head = StoreDeviceHead::signed(
-                root.store_root_hash,
-                registration_ref.clone(),
-                commit_ref.clone(),
-                history.summary.digest(),
-                SuccessorLink {
-                    activation: registration
-                        .store_announcement_activation(&registration_ref)
-                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
-                        .activation_id(),
-                    predecessor: history.predecessor_head.map(|head| head.object),
-                    next_slot,
-                },
-                &device_signer,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let head_prefix =
-                head_slot_prefix(&registration_ref.device_id.to_string(), commit.seq());
-            let head_prepared = storage
-                .prepare_protocol_object(
-                    &head_context,
-                    history.head_slot,
-                    &head_prefix,
-                    head.to_bytes(),
-                )
-                .map_err(StoreObjectError::from)?;
-            RetirementPublication::MergeConcurrent {
-                head_bytes: head.to_bytes(),
-                head_prepared,
-                history_summary: history.summary,
-            }
-        }
-        RetirementPolicyPreparation::Serial(snapshot) => {
-            let authorization_after = snapshot
-                .authorization
-                .authorize_and_apply(&commit_ref, &commit, &registration)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let head = StoreSerialHead::signed(
-                root.store_root_hash,
-                StoreSerialHeadState::Commit {
-                    author_registration: registration_ref,
-                    commit: commit_ref.clone(),
-                },
-                &device_signer,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            RetirementPublication::Serial {
-                base_head: snapshot.base_head,
-                head_bytes: head.to_bytes(),
-                authorization_after,
-            }
-        }
-    };
+    let state_after = predecessor_state
+        .self_retire(retirement_ref.clone())
+        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let history = super::store_engine::engine::pull::prepare_merge_history_successor(
+        db,
+        &root,
+        &commit,
+        &commit_ref,
+        membership,
+        &registration,
+        None,
+        state_after,
+        super::store_engine::engine::pull::MergeHistorySuccessorEvidence::none(),
+    )
+    .await
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
+    let next_prefix = head_slot_prefix(
+        &registration_ref.device_id.to_string(),
+        commit.seq().saturating_add(1),
+    );
+    let next_slot = storage
+        .allocate_protocol_slot(&head_context, &next_prefix, ".json")
+        .await
+        .map_err(StoreObjectError::from)?;
+    let head = StoreDeviceHead::signed(
+        root.store_root_hash,
+        registration_ref.clone(),
+        commit_ref.clone(),
+        history.summary.digest(),
+        SuccessorLink {
+            activation: registration
+                .store_announcement_activation(&registration_ref)
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                .activation_id(),
+            predecessor: history.predecessor_head.map(|head| head.object),
+            next_slot,
+        },
+        &device_signer,
+    )
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let head_prefix = head_slot_prefix(&registration_ref.device_id.to_string(), commit.seq());
+    let head_prepared = storage
+        .prepare_protocol_object(
+            &head_context,
+            history.head_slot,
+            &head_prefix,
+            head.to_bytes(),
+        )
+        .map_err(StoreObjectError::from)?;
     Ok(DurableRetirement {
         retirement_bytes: retirement.to_bytes(),
         retirement_prepared,
         commit_bytes: commit.to_bytes(),
         commit_prepared,
         commit_ref,
-        publication,
+        head_bytes: head.to_bytes(),
+        head_prepared,
+        history_summary: history.summary,
     })
 }
 
 async fn publish_self_retirement(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
 ) -> Result<(), StoreRegistrationError> {
     let Some((payload, published)) = db
         .local_store_device_retirement()
@@ -755,131 +586,77 @@ async fn publish_self_retirement(
     db.mark_remote_object_uploaded(retirement_remote)
         .await
         .map_err(database_error)?;
-    let materialization = match &durable.publication {
-        RetirementPublication::MergeConcurrent {
-            head_bytes,
-            head_prepared,
-            history_summary,
-        } => {
-            storage
-                .create_protocol_object(&durable.commit_prepared)
-                .await
-                .map_err(StoreObjectError::from)?;
-            storage
-                .create_protocol_object(head_prepared)
-                .await
-                .map_err(StoreObjectError::from)?;
-            let StoreCommitCoord::MergeConcurrent { stream_id, .. } = durable.commit_ref.coord
-            else {
-                return Err(StoreRegistrationError::Invalid(
-                    "Merge retirement journal carries a Serial commit".into(),
-                ));
-            };
-            let opened_commit = storage
-                .read_protocol_object(
-                    &super::storage::ProtocolObjectContext::signed_plaintext(
-                        root.store_root_hash,
-                        ProtocolObjectDomain::StoreCommit,
-                    ),
-                    &durable.commit_ref.object,
-                    &commit_semantic_prefix(
-                        commit.candidate_family(),
-                        &stream_id.to_string(),
-                        commit.seq(),
-                        commit.commit_hash(),
-                    ),
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
-            let opened_head = storage
-                .read_protocol_object(
-                    &super::storage::ProtocolObjectContext::signed_plaintext(
-                        root.store_root_hash,
-                        ProtocolObjectDomain::StoreHead,
-                    ),
-                    head_prepared.reference(),
-                    &head_slot_prefix(
-                        &commit.author_registration.device_id.to_string(),
-                        commit.seq(),
-                    ),
-                )
-                .await
-                .map_err(StoreObjectError::from)?;
-            if opened_commit != durable.commit_bytes || opened_head != *head_bytes {
-                return Err(StoreRegistrationError::Invalid(
-                    "retirement commit or head exact readback differs".into(),
-                ));
-            }
-            let head = StoreDeviceHead::parse_at(
-                head_bytes,
+    storage
+        .create_protocol_object(&durable.commit_prepared)
+        .await
+        .map_err(StoreObjectError::from)?;
+    storage
+        .create_protocol_object(&durable.head_prepared)
+        .await
+        .map_err(StoreObjectError::from)?;
+    let opened_commit = storage
+        .read_protocol_object(
+            &super::storage::ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,
-                &registration,
-                &durable.commit_ref,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            for object in [
-                durable.commit_prepared.reference(),
-                head_prepared.reference(),
-            ] {
-                let remote = closed_remotes
-                    .iter()
-                    .find(|remote| remote.object() == object)
-                    .cloned()
-                    .ok_or_else(|| {
-                        StoreRegistrationError::Invalid(
-                            "retirement publication object is absent from its closed graph"
-                                .to_string(),
-                        )
-                    })?;
-                db.mark_remote_object_uploaded(remote)
-                    .await
-                    .map_err(database_error)?;
-            }
-            crate::database::LocalRetirementMaterialization::MergeConcurrent {
-                head,
-                head_object: head_prepared.reference().clone(),
-                history_summary: history_summary.clone(),
-            }
-        }
-        RetirementPublication::Serial {
-            base_head,
-            head_bytes,
-            authorization_after,
-        } => {
-            let coordination = coordination.ok_or_else(|| {
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &durable.commit_ref.object,
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &durable.commit_ref.coord.stream_id.to_string(),
+                commit.seq(),
+                commit.commit_hash(),
+            ),
+        )
+        .await
+        .map_err(StoreObjectError::from)?;
+    let opened_head = storage
+        .read_protocol_object(
+            &super::storage::ProtocolObjectContext::signed_plaintext(
+                root.store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            ),
+            durable.head_prepared.reference(),
+            &head_slot_prefix(
+                &commit.author_registration.device_id.to_string(),
+                commit.seq(),
+            ),
+        )
+        .await
+        .map_err(StoreObjectError::from)?;
+    if opened_commit != durable.commit_bytes || opened_head != durable.head_bytes {
+        return Err(StoreRegistrationError::Invalid(
+            "retirement commit or head exact readback differs".into(),
+        ));
+    }
+    let head = StoreDeviceHead::parse_at(
+        &durable.head_bytes,
+        root.store_root_hash,
+        &registration,
+        &durable.commit_ref,
+    )
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    for object in [
+        durable.commit_prepared.reference(),
+        durable.head_prepared.reference(),
+    ] {
+        let remote = closed_remotes
+            .iter()
+            .find(|remote| remote.object() == object)
+            .cloned()
+            .ok_or_else(|| {
                 StoreRegistrationError::Invalid(
-                    "Serial self-retirement requires coordination".into(),
+                    "retirement publication object is absent from its closed graph".to_string(),
                 )
             })?;
-            let head = StoreSerialHead::parse(head_bytes, root.store_root_hash, &registration)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            super::store_engine::serial::publication::activate_serial_commit_head(
-                db,
-                storage,
-                coordination,
-                base_head,
-                &commit,
-                &durable.commit_prepared,
-                &durable.commit_ref,
-                &head,
-            )
-            .await?;
-            let commit_remote = closed_remotes
-                .iter()
-                .find(|remote| remote.object() == durable.commit_prepared.reference())
-                .cloned()
-                .ok_or_else(|| {
-                    StoreRegistrationError::Invalid(
-                        "retirement commit is absent from its closed candidate graph".to_string(),
-                    )
-                })?;
-            db.mark_remote_object_uploaded(commit_remote)
-                .await
-                .map_err(database_error)?;
-            crate::database::LocalRetirementMaterialization::Serial {
-                authorization: authorization_after.clone(),
-            }
-        }
+        db.mark_remote_object_uploaded(remote)
+            .await
+            .map_err(database_error)?;
+    }
+    let materialization = crate::database::LocalRetirementMaterialization {
+        head,
+        head_object: durable.head_prepared.reference().clone(),
+        history_summary: durable.history_summary.clone(),
     };
     db.complete_local_store_device_retirement(
         payload,
@@ -899,12 +676,11 @@ async fn publish_self_retirement(
 pub(crate) async fn prepare_registration_for_origin(
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
-    write_policy: crate::WritePolicy,
     store_root: super::store_commit::StoreRootRef,
     origin: StoreDeviceRegistrationOrigin,
     reserved_slot: crate::storage::cloud::ObjectSlot,
     expected_provider: super::storage::ProviderDeviceBinding,
-    store_commits: StoreCommitAnchor,
+    store_commits: DeviceStreamAnchor,
     acknowledgements: DeviceStreamAnchor,
     snapshots: DeviceStreamAnchor,
 ) -> Result<(StoreDeviceRegistration, PreparedExactObject), StoreRegistrationError> {
@@ -916,16 +692,6 @@ pub(crate) async fn prepare_registration_for_origin(
     if provider != expected_provider {
         return Err(StoreRegistrationError::Invalid(
             "live provider principal differs from the reserved founder authority".to_string(),
-        ));
-    }
-    if write_policy
-        != match &store_commits {
-            StoreCommitAnchor::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
-            StoreCommitAnchor::Serial => crate::WritePolicy::Serial,
-        }
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "reserved registration commit anchor differs from the Store policy".to_string(),
         ));
     }
     let registration = StoreDeviceRegistration::signed(
@@ -1109,13 +875,8 @@ async fn prepare_or_load_initial_recovery_ack(
                 store_cut,
                 device_state,
                 None,
-                match &registration.store_commits {
-                    StoreCommitAnchor::MergeConcurrent { .. } => {
-                        StoreAckExclusionState::MergeConcurrent {
-                            proposal_freezes: Vec::new(),
-                        }
-                    }
-                    StoreCommitAnchor::Serial => StoreAckExclusionState::Serial,
+                StoreAckExclusionState {
+                    proposal_freezes: Vec::new(),
                 },
                 published_at.to_string(),
                 SuccessorLink {
@@ -1609,10 +1370,8 @@ pub async fn recover_owner_device_merge(
             root.clone(),
             origin.clone(),
             provider,
-            StoreCommitAnchor::MergeConcurrent {
-                announcements: DeviceStreamAnchor::StoreAnnouncements {
-                    first_slot: first_head,
-                },
+            DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: first_head,
             },
             DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: first_ack.clone(),
@@ -1651,7 +1410,7 @@ pub async fn recover_owner_device_merge(
         let device_signer = registration
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let bootstrap_cut = StoreHistoryCut::MergeConcurrent(dependencies);
+        let bootstrap_cut = StoreHistoryCut(dependencies);
         let (device_state, _) = db
             .store_device_state_for_history_cut(&bootstrap_cut)
             .await
@@ -1686,14 +1445,7 @@ pub async fn recover_owner_device_merge(
             initial_ack_exists,
         )
     };
-    let dependencies = match initial_ack.store_cut.clone() {
-        StoreHistoryCut::MergeConcurrent(dependencies) => dependencies,
-        StoreHistoryCut::Serial(_) => {
-            return Err(StoreRegistrationError::Invalid(
-                "Merge Owner recovery acknowledgement carries a Serial cut".into(),
-            ));
-        }
-    };
+    let dependencies = initial_ack.store_cut.0.clone();
     let device_signer = registration
         .device_signer(identity_signer)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
@@ -1703,7 +1455,7 @@ pub async fn recover_owner_device_merge(
             "Owner recovery requires resolved membership".into(),
         ));
     };
-    let membership_state = super::circle_control::StoreMembershipStateRef::merge_concurrent(
+    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
         membership.head_refs().to_vec(),
         membership.resolution_refs().to_vec(),
         vec![authority.recovery.clone()],
@@ -1796,7 +1548,7 @@ pub async fn recover_owner_device_merge(
         &registration_ref,
         super::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
-    let order = StoreCommitOrder::MergeConcurrent {
+    let order = StoreCommitOrder {
         seq: 1,
         predecessor: None,
         dependencies,
@@ -1805,7 +1557,7 @@ pub async fn recover_owner_device_merge(
         .store_device_state_for_order(&order)
         .await
         .map_err(database_error)?;
-    let coord = StoreCommitCoord::MergeConcurrent {
+    let coord = StoreCommitCoord {
         stream_id,
         sequence: 1,
     };
@@ -1825,7 +1577,7 @@ pub async fn recover_owner_device_merge(
         order,
         membership_state,
         device_state,
-        StoreOperationMembershipAuthority::MergeConcurrent {
+        StoreOperationMembershipAuthority {
             predecessor: membership
                 .active_grant(&authority.owner_grant)
                 .ok_or_else(|| {
@@ -1872,7 +1624,7 @@ pub async fn recover_owner_device_merge(
             }),
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let history = super::store_engine::merge::pull::prepare_merge_history_successor(
+    let history = super::store_engine::engine::pull::prepare_merge_history_successor(
         db,
         &root,
         &commit,
@@ -1881,7 +1633,7 @@ pub async fn recover_owner_device_merge(
         &registration,
         Some(&registration_ref),
         state_after,
-        super::store_engine::merge::pull::MergeHistorySuccessorEvidence {
+        super::store_engine::engine::pull::MergeHistorySuccessorEvidence {
             registrations: vec![super::store_commit::RetainedVerifiedRegistration {
                 reference: registration_ref.clone(),
                 value: registration.clone(),
@@ -1893,9 +1645,7 @@ pub async fn recover_owner_device_merge(
     .await
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let head_context = context(super::storage::ProtocolObjectDomain::StoreHead);
-    let StoreCommitAnchor::MergeConcurrent {
-        announcements: DeviceStreamAnchor::StoreAnnouncements { first_slot: _ },
-    } = &registration.store_commits
+    let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } = &registration.store_commits
     else {
         return Err(StoreRegistrationError::Invalid(
             "Merge Owner recovery registration has no announcement stream anchor".into(),
@@ -1955,393 +1705,6 @@ pub async fn recover_owner_device_merge(
     Ok(registration_ref)
 }
 
-pub async fn recover_owner_device_serial(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    identity_signer: &UserKeypair,
-    authority: &super::restore_code::OwnerRecoveryAuthority,
-) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
-    let root = db
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(StoreRegistrationError::ExactRootAuthorityMissing)?;
-    let protocol = super::store_objects::load_store_protocol_root(storage, &root)
-        .await?
-        .value;
-    if protocol.descriptor.write_policy != crate::WritePolicy::Serial {
-        return Err(StoreRegistrationError::Invalid(
-            "Serial Owner recovery requires a Serial Store root".into(),
-        ));
-    }
-    let owner_pubkey = crate::keys::public_key_hex(identity_signer);
-    if owner_pubkey != protocol.descriptor.founder_pubkey
-        || authority.owner_grant != protocol.descriptor.founder_grant
-        || authority.recovery.owner_grant != authority.owner_grant
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "Owner recovery authority differs from the root founder grant".into(),
-        ));
-    }
-    let super::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
-        &protocol.descriptor.founder_recovery
-    else {
-        return Err(StoreRegistrationError::Invalid(
-            "Store root has no founder recovery stream".into(),
-        ));
-    };
-    let (recovery_slot, predecessor_node, recovery_sequence) = match &authority.recovery.position {
-        OwnerRecoveryPosition::BeforeFirst { activation } => {
-            let expected = super::store_commit::OwnerRecoveryActivationId::derive(
-                &root,
-                &owner_pubkey,
-                &authority.owner_grant,
-                &protocol.descriptor.founder_recovery,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            if activation != &expected {
-                return Err(StoreRegistrationError::Invalid(
-                    "Owner recovery activation differs from the root anchor".into(),
-                ));
-            }
-            (first_slot.clone(), None, 1)
-        }
-        OwnerRecoveryPosition::At { node } => {
-            let loaded =
-                super::store_objects::load_owner_recovery_node_ref(storage, &root, node).await?;
-            if loaded.value.owner_pubkey != owner_pubkey
-                || loaded.value.owner_grant != authority.owner_grant
-            {
-                return Err(StoreRegistrationError::Invalid(
-                    "Owner recovery cursor belongs to another authority".into(),
-                ));
-            }
-            let recovery_sequence = node.sequence.checked_add(1).ok_or_else(|| {
-                StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
-            })?;
-            (
-                loaded.value.next_slot,
-                Some(node.clone()),
-                recovery_sequence,
-            )
-        }
-    };
-    let recovery_hash = ObjectHash::digest(
-        &serde_json::to_vec(&(
-            &root,
-            &owner_pubkey,
-            &authority.owner_grant,
-            &authority.recovery,
-        ))
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
-    );
-    let recovery_id = DeviceRecoveryId::from_hash(recovery_hash);
-    let origin = StoreDeviceRegistrationOrigin::Recovery {
-        recovery_id,
-        recovery_slot: recovery_slot.clone(),
-        owner_grant: authority.owner_grant.clone(),
-    };
-    let device_id = super::store_commit::StoreDeviceId::derive(&root, &origin);
-    if let Some(registration) = install_activated_owner_recovery(
-        db,
-        storage,
-        &root,
-        &origin,
-        device_id,
-        recovery_id,
-        &recovery_slot,
-        &owner_pubkey,
-        &authority.owner_grant,
-        recovery_sequence,
-        &predecessor_node,
-    )
-    .await?
-    {
-        return Ok(registration);
-    }
-    let context = |domain| {
-        super::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
-    };
-    let ack_context = context(ProtocolObjectDomain::StoreAck);
-    let snapshot_context = context(super::storage::ProtocolObjectDomain::StoreSnapshotMeta);
-    let registration_context =
-        context(super::storage::ProtocolObjectDomain::StoreDeviceRegistration);
-    let commit_context = context(super::storage::ProtocolObjectDomain::StoreCommit);
-    let first_ack = storage
-        .allocate_protocol_slot(
-            &ack_context,
-            &ack_slot_prefix(&device_id.to_string(), 1),
-            ".json",
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    let first_snapshot = storage
-        .allocate_protocol_slot(
-            &snapshot_context,
-            &snapshot_slot_prefix(&device_id.to_string(), 0),
-            ".json",
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    let registration_prefix = registration_semantic_prefix(&device_id.to_string());
-    let registration_slot = storage
-        .allocate_protocol_slot(&registration_context, &registration_prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let provider = storage
-        .provider_binding()
-        .await
-        .map_err(StoreObjectError::from)?
-        .device;
-    let expected_registration = StoreDeviceRegistration::signed(
-        root.clone(),
-        origin,
-        provider,
-        StoreCommitAnchor::Serial,
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: first_ack.clone(),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: first_snapshot,
-        },
-        identity_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let (registration, registration_ref, registration_prepared, registration_exists) =
-        prepare_or_load_recovery_registration(
-            storage,
-            &root,
-            expected_registration,
-            registration_slot,
-            &registration_prefix,
-        )
-        .await?;
-    let snapshot = super::store_engine::serial::publication::current_serial_authorization_snapshot(
-        db,
-        storage,
-        coordination,
-    )
-    .await?;
-    if !snapshot
-        .authorization
-        .membership
-        .authorizes_owner_grant_id(&owner_pubkey, &authority.owner_grant)
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "Owner recovery grant is not active at the Serial head".into(),
-        ));
-    }
-    let founder = super::store_objects::load_founder_registration(storage, &root).await?;
-    let founder_ref =
-        StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-    let serial_predecessor = snapshot.base.clone().map_or_else(
-        || StoreSerialPredecessor::Genesis {
-            root: root.clone(),
-            founder_registration: founder_ref,
-        },
-        StoreSerialPredecessor::Commit,
-    );
-    let serial_sequence = snapshot.base.as_ref().map_or(Ok(1), |reference| {
-        reference
-            .coord
-            .sequence()
-            .checked_add(1)
-            .ok_or_else(|| StoreRegistrationError::Invalid("Serial sequence overflow".into()))
-    })?;
-    let order = StoreCommitOrder::Serial {
-        seq: serial_sequence,
-        predecessor: serial_predecessor.clone(),
-    };
-    let (device_state, resolved_devices) = db
-        .store_device_state_for_order(&order)
-        .await
-        .map_err(database_error)?;
-    if !resolved_devices.recovery.contains(&authority.recovery) {
-        return Err(StoreRegistrationError::Invalid(
-            "Owner recovery cursor differs from the exact Serial device state".into(),
-        ));
-    }
-    let membership_state = super::circle_control::StoreMembershipStateRef::serial(
-        serial_predecessor.clone(),
-        resolved_devices.recovery,
-        &snapshot.authorization,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let bootstrap_cut = StoreHistoryCut::Serial(serial_predecessor);
-    let device_signer = registration
-        .device_signer(identity_signer)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let (initial_ack, initial_ack_bytes, initial_ack_ref, initial_ack_prepared, initial_ack_exists) =
-        prepare_or_load_initial_recovery_ack(
-            storage,
-            &root,
-            &registration,
-            &registration_ref,
-            first_ack,
-            bootstrap_cut.clone(),
-            device_state.clone(),
-            &authority.published_at,
-            &device_signer,
-        )
-        .await?;
-    let bootstrap_cut = initial_ack.store_cut.clone();
-    let readiness = DeviceRecoveryReadiness {
-        registration: registration_ref.clone(),
-        initial_ack: initial_ack_ref.clone(),
-        bootstrap_cut,
-    };
-    let (_node, node_ref, node_prepared, node_exists) = prepare_or_load_owner_recovery_node(
-        storage,
-        &root,
-        recovery_slot,
-        &owner_pubkey,
-        &authority.owner_grant,
-        recovery_sequence,
-        recovery_id,
-        &membership_state,
-        &predecessor_node,
-        &readiness,
-        identity_signer,
-    )
-    .await?;
-    let registration_activation = StoreDeviceRegistrationActivation::Recovery {
-        recovery_id,
-        node: node_ref.clone(),
-    };
-    let already_activated = db
-        .stage_owner_recovery_registration(
-            crate::database::ExactProtocolObject {
-                value: registration.clone(),
-                bytes: registration.to_bytes(),
-                object: registration_prepared.reference().clone(),
-                prepared: registration_prepared.clone(),
-            },
-            initial_ack_ref.clone(),
-            crate::database::ExactProtocolObject {
-                value: initial_ack.clone(),
-                bytes: initial_ack_bytes.clone(),
-                object: initial_ack_prepared.reference().clone(),
-                prepared: initial_ack_prepared.clone(),
-            },
-            registration_activation.clone(),
-        )
-        .await
-        .map_err(database_error)?;
-    if already_activated {
-        return Ok(registration_ref);
-    }
-    for (exists, prepared) in [
-        (registration_exists, &registration_prepared),
-        (initial_ack_exists, &initial_ack_prepared),
-        (node_exists, &node_prepared),
-    ] {
-        if !exists {
-            storage
-                .create_protocol_object(prepared)
-                .await
-                .map_err(StoreObjectError::from)?;
-        }
-    }
-    db.mark_local_store_device_registration_created(
-        crate::database::ExactProtocolObject {
-            value: registration.clone(),
-            bytes: registration.to_bytes(),
-            object: registration_prepared.reference().clone(),
-            prepared: registration_prepared,
-        },
-        initial_ack_ref,
-        crate::database::ExactProtocolObject {
-            value: initial_ack,
-            bytes: initial_ack_bytes,
-            object: initial_ack_prepared.reference().clone(),
-            prepared: initial_ack_prepared,
-        },
-    )
-    .await
-    .map_err(database_error)?;
-    let activation = ActivatedStoreDeviceRegistrationRef {
-        registration: registration_ref.clone(),
-        authority: StoreDeviceRegistrationActivationRef::Recovery {
-            recovery_id,
-            node: node_ref.clone(),
-        },
-    };
-    let coord = StoreCommitCoord::Serial {
-        sequence: serial_sequence,
-    };
-    let commit = StoreBatchCommit::signed_with_serial_recovery(
-        root.store_root_hash,
-        crate::WriteId::from_generated(format!("owner-recovery-{recovery_hash}")),
-        coord.clone(),
-        registration_ref.clone(),
-        &registration,
-        order,
-        membership_state,
-        device_state,
-        SerialRecoveryActivation {
-            registration: activation,
-        },
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let commit_prefix = commit_semantic_prefix(
-        commit.candidate_family(),
-        SERIAL_STREAM_ID,
-        serial_sequence,
-        commit.commit_hash(),
-    );
-    let commit_slot = storage
-        .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let commit_prepared = storage
-        .prepare_protocol_object(
-            &commit_context,
-            commit_slot,
-            &commit_prefix,
-            commit.to_bytes(),
-        )
-        .map_err(StoreObjectError::from)?;
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let authorization_after = snapshot
-        .authorization
-        .authorize_and_apply(&commit_ref, &commit, &registration)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let head = StoreSerialHead::signed(
-        root.store_root_hash,
-        StoreSerialHeadState::Commit {
-            author_registration: registration_ref.clone(),
-            commit: commit_ref.clone(),
-        },
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    super::store_engine::serial::publication::activate_serial_commit_head(
-        db,
-        storage,
-        coordination,
-        &snapshot.base_head,
-        &commit,
-        &commit_prepared,
-        &commit_ref,
-        &head,
-    )
-    .await?;
-    db.complete_serial_owner_recovery(
-        commit,
-        commit_ref,
-        registration,
-        registration_activation,
-        authorization_after,
-    )
-    .await
-    .map_err(database_error)?;
-    Ok(registration_ref)
-}
-
 pub(crate) async fn bootstrap_pending_device(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -2361,10 +1724,7 @@ pub(crate) async fn bootstrap_pending_device(
         ));
     }
     let attempt = verified_attempt.value;
-    let activation_stream = match attempt_activation.coord {
-        StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
-        StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
-    };
+    let activation_stream = attempt_activation.coord.stream_id.to_string();
     Box::pin(db.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
         .await
         .map_err(database_error)?;
@@ -2474,13 +1834,8 @@ pub(crate) async fn bootstrap_pending_device(
             attempt.bootstrap_cut.clone(),
             device_state,
             None,
-            match &expected_registration.store_commits {
-                StoreCommitAnchor::MergeConcurrent { .. } => {
-                    StoreAckExclusionState::MergeConcurrent {
-                        proposal_freezes: Vec::new(),
-                    }
-                }
-                StoreCommitAnchor::Serial => StoreAckExclusionState::Serial,
+            StoreAckExclusionState {
+                proposal_freezes: Vec::new(),
             },
             published_at.to_string(),
             SuccessorLink {
@@ -2704,7 +2059,7 @@ fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_serial_test_db, open_test_db, TestStore};
+    use crate::sync::test_helpers::{open_test_db, TestStore};
 
     fn founder_recovery_authority(
         store: &TestStore,
@@ -2753,7 +2108,7 @@ mod tests {
         let registration =
             recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
                 .await
-                .expect("recover MergeConcurrent Owner device");
+                .expect("recover Owner device");
         for reference in db
             .materialized_frontier()
             .await
@@ -2785,13 +2140,10 @@ mod tests {
         reference: &StoreBatchCommitRef,
         tamper: RetainedRegistrationTamper,
     ) {
-        let StoreCommitCoord::MergeConcurrent {
+        let StoreCommitCoord {
             stream_id,
             sequence,
-        } = &reference.coord
-        else {
-            panic!("recovery commit uses MergeConcurrent ordering")
-        };
+        } = &reference.coord;
         let stream_id = stream_id.to_string();
         let sequence = i64::try_from(*sequence).expect("recovery sequence fits SQLite");
         db.call(move |conn| {
@@ -2896,7 +2248,7 @@ mod tests {
         let registration =
             recover_owner_device_merge(&db, &store.storage, &store.signer, &authority, &membership)
                 .await
-                .expect("recover MergeConcurrent Owner device");
+                .expect("recover Owner device");
 
         let durable = db
             .latest_local_store_device_registration()
@@ -2932,9 +2284,7 @@ mod tests {
             .materialized_frontier()
             .await
             .expect("retained recovery author does not depend on mutable registration rows");
-        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &reference.coord else {
-            panic!("recovery commit uses MergeConcurrent ordering")
-        };
+        let StoreCommitCoord { stream_id, .. } = &reference.coord;
         assert_eq!(frontier.get(&stream_id.to_string()), Some(&reference));
     }
 
@@ -3109,60 +2459,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serial_owner_recovery_head_is_accepted_from_its_closed_activation() {
-        let signer = UserKeypair::generate();
-        let db = open_serial_test_db();
-        let store = TestStore::create(&db, "serial-recovery-store", signer)
-            .await
-            .expect("create Serial recovery Store");
-        let authority = founder_recovery_authority(&store);
-        let coordination = store
-            .storage
-            .serial_coordination()
-            .expect("Serial test coordination");
-        let registration = recover_owner_device_serial(
-            &db,
-            &store.storage,
-            coordination,
-            &store.signer,
-            &authority,
-        )
-        .await
-        .expect("recover Serial Owner device");
-
-        let observed = crate::sync::store_engine::serial::pull::load_serial_cycle_authorization(
-            &store.storage,
-            coordination,
-            &store.root,
-        )
-        .await
-        .expect("verify Serial recovery head");
-        assert_eq!(
-            observed.head.as_ref().map(|head| head.coord.sequence()),
-            Some(1)
-        );
-        let durable = db
-            .latest_local_store_device_registration()
-            .await
-            .expect("load replacement registration")
-            .expect("replacement registration exists");
-        assert_eq!(durable.device_id, registration.device_id);
-        assert!(durable.is_activated());
-    }
-
-    #[tokio::test]
     async fn failed_retirement_create_retries_the_owned_exact_graph() {
         let (store, db) = initialized().await;
         let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
             .await
-            .expect("load exact membership");
+            .expect("load exact membership")
+            .chain
+            .expect("resolved membership");
         store.home.fail_exact_create_before_call(1);
-        assert!(retire_registration_with_coordination(
+        assert!(retire_registration(
             &db,
             &store.storage,
-            None,
             &store.signer,
-            membership.chain.as_ref(),
+            &membership,
             "2026-07-16T00:00:00Z",
         )
         .await
@@ -3175,12 +2484,11 @@ mod tests {
         assert!(!pending.1);
         let owned = pending.0;
 
-        retire_registration_with_coordination(
+        retire_registration(
             &db,
             &store.storage,
-            None,
             &store.signer,
-            membership.chain.as_ref(),
+            &membership,
             "2026-07-16T00:00:00Z",
         )
         .await
@@ -3201,14 +2509,15 @@ mod tests {
         let (store, db) = initialized().await;
         let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
             .await
-            .expect("load exact membership");
+            .expect("load exact membership")
+            .chain
+            .expect("resolved membership");
         for _ in 0..2 {
-            assert!(retire_registration_with_coordination(
+            assert!(retire_registration(
                 &db,
                 &store.storage,
-                None,
                 &store.signer,
-                membership.chain.as_ref(),
+                &membership,
                 "2026-07-16T00:00:00Z",
             )
             .await

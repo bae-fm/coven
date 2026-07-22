@@ -4,71 +4,49 @@ use super::validation::{
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreDeviceStateRef {
-    MergeConcurrent {
-        frontier: CommitFrontier,
-        recovery: Vec<OwnerRecoveryCursor>,
-        state_hash: ObjectHash,
-    },
-    Serial {
-        position: SerialStorePosition,
-        recovery: Vec<OwnerRecoveryCursor>,
-        state_hash: ObjectHash,
-    },
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceStateRef {
+    frontier: CommitFrontier,
+    recovery: Vec<OwnerRecoveryCursor>,
+    state_hash: ObjectHash,
 }
 
 impl StoreDeviceStateRef {
-    pub fn merge_concurrent(
+    pub fn from_resolved(
         frontier: CommitFrontier,
         state: &ResolvedStoreDeviceState,
     ) -> Result<Self, StoreProtocolError> {
         validate_commit_frontier(&frontier)?;
-        if !matches!(frontier, CommitFrontier::MergeConcurrent(_)) {
-            return Err(StoreProtocolError::WritePolicyMismatch {
-                expected: WritePolicy::MergeConcurrent,
-                actual: WritePolicy::Serial,
-            });
-        }
         validate_recovery_cursors(&state.recovery)?;
-        Ok(Self::MergeConcurrent {
+        Ok(Self {
             frontier,
             recovery: state.recovery.clone(),
             state_hash: state.state_hash,
         })
     }
 
-    pub fn serial(
-        position: SerialStorePosition,
-        state: &ResolvedStoreDeviceState,
-    ) -> Result<Self, StoreProtocolError> {
-        validate_recovery_cursors(&state.recovery)?;
-        Ok(Self::Serial {
-            position,
-            recovery: state.recovery.clone(),
-            state_hash: state.state_hash,
-        })
-    }
-
     pub fn state_hash(&self) -> ObjectHash {
-        match self {
-            Self::MergeConcurrent { state_hash, .. } | Self::Serial { state_hash, .. } => {
-                *state_hash
-            }
-        }
+        self.state_hash
     }
 
     pub fn recovery(&self) -> &[OwnerRecoveryCursor] {
-        match self {
-            Self::MergeConcurrent { recovery, .. } | Self::Serial { recovery, .. } => recovery,
-        }
+        &self.recovery
     }
 
-    pub fn write_policy(&self) -> WritePolicy {
-        match self {
-            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => WritePolicy::Serial,
-        }
+    pub fn frontier(&self) -> &CommitFrontier {
+        &self.frontier
+    }
+
+    pub(crate) fn with_frontier(
+        &self,
+        frontier: CommitFrontier,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_frontier(&frontier)?;
+        Ok(Self {
+            frontier,
+            recovery: self.recovery.clone(),
+            state_hash: self.state_hash,
+        })
     }
 }
 
@@ -263,7 +241,7 @@ impl VerifiedStoreDeviceOperations {
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
         let outcomes = outcomes
             .into_iter()
-            .map(|source| source.verify(root, commit))
+            .map(|source| source.verify(root))
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
         let verified = Self {
             proposals,
@@ -596,7 +574,6 @@ impl RetainedStoreDeviceExclusionOutcome {
     fn verify(
         self,
         root: &StoreRootRef,
-        commit: &StoreBatchCommit,
     ) -> Result<VerifiedStoreDeviceExclusionOutcome, StoreProtocolError> {
         let (reference, canonical_outcome, proposal_source, canonical_owner_registration) =
             match &self {
@@ -652,34 +629,12 @@ impl RetainedStoreDeviceExclusionOutcome {
         )?;
         match (&self, outcome) {
             (Self::Excluded { .. }, StoreDeviceExclusionOutcome::Excluded(exclusion)) => {
-                if matches!(
-                    &exclusion.proof,
-                    StoreDeviceExclusionProof::MergeConcurrent {
-                        frozen_device_state,
-                        ..
-                    } if frozen_device_state != &proposal.frozen_device_state
-                ) {
+                if exclusion.proof.frozen_device_state != proposal.frozen_device_state {
                     return Err(StoreProtocolError::DeviceStateMismatch);
                 }
-                let proof_policy = match &exclusion.proof {
-                    StoreDeviceExclusionProof::MergeConcurrent { .. } => {
-                        WritePolicy::MergeConcurrent
-                    }
-                    StoreDeviceExclusionProof::Serial => WritePolicy::Serial,
-                };
-                if proof_policy != commit.policy() {
-                    return Err(StoreProtocolError::WritePolicyMismatch {
-                        expected: commit.policy(),
-                        actual: proof_policy,
-                    });
-                }
-                let accepted_cut = match exclusion.proof {
-                    StoreDeviceExclusionProof::MergeConcurrent { cutoff, .. } => cutoff,
-                    StoreDeviceExclusionProof::Serial => commit.order.predecessor_cut()?,
-                };
                 Ok(VerifiedStoreDeviceExclusionOutcome::Excluded {
                     source: self,
-                    accepted_cut,
+                    accepted_cut: exclusion.proof.cutoff,
                 })
             }
             (Self::Cancelled { .. }, StoreDeviceExclusionOutcome::Cancelled(_)) => {
@@ -829,14 +784,11 @@ pub struct StoreDeviceExclusion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum StoreDeviceExclusionProof {
-    MergeConcurrent {
-        frozen_device_state: StoreDeviceStateRef,
-        remaining_device_acks: Vec<StoreAckRef>,
-        cutoff: StoreHistoryCut,
-    },
-    Serial,
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceExclusionProof {
+    pub frozen_device_state: StoreDeviceStateRef,
+    pub remaining_device_acks: Vec<StoreAckRef>,
+    pub cutoff: StoreHistoryCut,
 }
 
 impl StoreDeviceExclusionProposal {
@@ -1223,25 +1175,15 @@ impl StoreDeviceExclusionOutcomeRef {
 fn validate_device_exclusion_proof(
     proof: &StoreDeviceExclusionProof,
 ) -> Result<(), StoreProtocolError> {
-    match proof {
-        StoreDeviceExclusionProof::MergeConcurrent {
-            frozen_device_state,
-            remaining_device_acks,
-            cutoff,
-        } => {
-            if frozen_device_state.write_policy() != WritePolicy::MergeConcurrent
-                || cutoff.policy() != WritePolicy::MergeConcurrent
-                || remaining_device_acks
-                    .windows(2)
-                    .any(|pair| pair[0] >= pair[1])
-            {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            }
-            validate_store_device_state_ref(frozen_device_state)?;
-            validate_store_history_cut(cutoff)
-        }
-        StoreDeviceExclusionProof::Serial => Ok(()),
+    if proof
+        .remaining_device_acks
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(StoreProtocolError::DeviceStateMismatch);
     }
+    validate_store_device_state_ref(&proof.frozen_device_state)?;
+    validate_store_history_cut(&proof.cutoff)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1824,31 +1766,27 @@ pub(super) fn merge_history_cuts(
     left: StoreHistoryCut,
     right: StoreHistoryCut,
 ) -> Result<StoreHistoryCut, StoreProtocolError> {
-    match (left, right) {
-        (StoreHistoryCut::MergeConcurrent(mut left), StoreHistoryCut::MergeConcurrent(right)) => {
-            for (stream, reference) in right {
-                match left.entry(stream) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
+    {
+        let StoreHistoryCut(mut left) = left;
+        let StoreHistoryCut(right) = right;
+        for (stream, reference) in right {
+            match left.entry(stream) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(reference);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get();
+                    if reference.coord.sequence() > current.coord.sequence() {
                         entry.insert(reference);
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        let current = entry.get();
-                        if reference.coord.sequence() > current.coord.sequence() {
-                            entry.insert(reference);
-                        } else if reference.coord.sequence() == current.coord.sequence()
-                            && reference != *current
-                        {
-                            return Err(StoreProtocolError::DeviceStateMismatch);
-                        }
+                    } else if reference.coord.sequence() == current.coord.sequence()
+                        && reference != *current
+                    {
+                        return Err(StoreProtocolError::DeviceStateMismatch);
                     }
                 }
             }
-            Ok(StoreHistoryCut::MergeConcurrent(left))
         }
-        (StoreHistoryCut::Serial(left), StoreHistoryCut::Serial(right)) if left == right => {
-            Ok(StoreHistoryCut::Serial(left))
-        }
-        _ => Err(StoreProtocolError::DeviceStateMismatch),
+        Ok(StoreHistoryCut(left))
     }
 }
 
@@ -1856,32 +1794,28 @@ fn intersect_terminal_history_cuts(
     left: StoreHistoryCut,
     right: StoreHistoryCut,
 ) -> Result<StoreHistoryCut, StoreProtocolError> {
-    match (left, right) {
-        (StoreHistoryCut::MergeConcurrent(left), StoreHistoryCut::MergeConcurrent(right)) => {
-            let mut intersection = BTreeMap::new();
-            for (stream, left_reference) in left {
-                let Some(right_reference) = right.get(&stream) else {
-                    continue;
-                };
-                let left_sequence = left_reference.coord.sequence();
-                let right_sequence = right_reference.coord.sequence();
-                let reference = if left_sequence < right_sequence {
-                    left_reference
-                } else if right_sequence < left_sequence {
-                    right_reference.clone()
-                } else if left_reference == *right_reference {
-                    left_reference
-                } else {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                };
-                intersection.insert(stream, reference);
-            }
-            Ok(StoreHistoryCut::MergeConcurrent(intersection))
+    {
+        let StoreHistoryCut(left) = left;
+        let StoreHistoryCut(right) = right;
+        let mut intersection = BTreeMap::new();
+        for (stream, left_reference) in left {
+            let Some(right_reference) = right.get(&stream) else {
+                continue;
+            };
+            let left_sequence = left_reference.coord.sequence();
+            let right_sequence = right_reference.coord.sequence();
+            let reference = if left_sequence < right_sequence {
+                left_reference
+            } else if right_sequence < left_sequence {
+                right_reference.clone()
+            } else if left_reference == *right_reference {
+                left_reference
+            } else {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            };
+            intersection.insert(stream, reference);
         }
-        (StoreHistoryCut::Serial(left), StoreHistoryCut::Serial(right)) if left == right => {
-            Ok(StoreHistoryCut::Serial(left))
-        }
-        _ => Err(StoreProtocolError::DeviceStateMismatch),
+        Ok(StoreHistoryCut(intersection))
     }
 }
 

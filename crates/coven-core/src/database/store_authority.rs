@@ -39,7 +39,6 @@ impl Database {
                 "Store founder registration author differs from the owner anchor".to_string(),
             ));
         }
-        let write_policy = self.write_policy();
         let schema_version = self.schema_version();
         let routing_hash = self.sync_routing_hash();
         self.call(move |conn| {
@@ -58,31 +57,11 @@ impl Database {
                 rusqlite::params![crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner,],
             )
             .map_err(DbError::from)?;
-            match membership {
-                InitialStoreMembershipAuthority::MergeConcurrent { head_refs } => {
-                    if write_policy != crate::WritePolicy::MergeConcurrent {
-                        return Err(DbError::Message(
-                            "Merge founder membership cannot initialize a Serial database"
-                                .to_string(),
-                        ));
-                    }
-                    for reference in &head_refs {
-                        crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
-                    }
-                }
-                InitialStoreMembershipAuthority::Serial { authorization } => {
-                    if write_policy != crate::WritePolicy::Serial {
-                        return Err(DbError::Message(
-                            "Serial founder membership cannot initialize a Merge database"
-                                .to_string(),
-                        ));
-                    }
-                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
-                }
+            for reference in &membership.head_refs {
+                crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
             }
             ensure_founder_replay_baseline_on(
                 &tx,
-                write_policy,
                 schema_version,
                 routing_hash,
                 RetainedReplayGenesisAuthority {
@@ -183,7 +162,6 @@ impl Database {
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
     ) -> Result<(), DbError> {
-        let write_policy = self.write_policy();
         let schema_version = self.schema_version();
         let routing_hash = self.sync_routing_hash();
         self.call(move |conn| {
@@ -203,20 +181,8 @@ impl Database {
             if root != expected_root
                 || registration != expected_registration
                 || graph.initial_ack_ref != expected_initial_ack
-                || match (&graph.membership, &expected_membership) {
-                    (
-                        DurableFounderMembership::MergeConcurrent {
-                            entry_ref,
-                            head_ref,
-                            ..
-                        },
-                        FounderMembershipRefs::MergeConcurrent { entry, head },
-                    ) => entry_ref != entry || head_ref != head,
-                    (DurableFounderMembership::Serial { .. }, FounderMembershipRefs::Serial) => {
-                        false
-                    }
-                    _ => true,
-                }
+                || graph.membership.entry_ref != expected_membership.entry
+                || graph.membership.head_ref != expected_membership.head
             {
                 return Err(DbError::Message(
                     "verified founder graph differs from its durable exact references".to_string(),
@@ -318,7 +284,6 @@ impl Database {
                         )
                     })?;
                     if baseline.generation != GENERATION_ZERO
-                        || baseline.write_policy != write_policy
                         || baseline.schema_version != schema_version
                         || baseline.routing_hash != routing_hash
                         || baseline.authority
@@ -435,24 +400,9 @@ impl Database {
                 ),
             )
             .map_err(DbError::from)?;
-            match &graph.membership {
-                DurableFounderMembership::MergeConcurrent { head_ref, .. } => {
-                    crate::sync::membership_ops::upsert_head_cursor_on(&tx, head_ref)?;
-                }
-                DurableFounderMembership::Serial { .. } => {
-                    let authorization = SerialAuthorizationState::from_founder(
-                        &root,
-                        &graph.root.value,
-                        &registration,
-                        &graph.registration.value,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                    Self::install_serial_root_authorization_on(&tx, &authorization)?;
-                }
-            }
+            crate::sync::membership_ops::upsert_head_cursor_on(&tx, &graph.membership.head_ref)?;
             install_generation_zero_replay_baseline_on(
                 &tx,
-                write_policy,
                 schema_version,
                 routing_hash,
                 RetainedReplayGenesisAuthority {

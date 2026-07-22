@@ -122,23 +122,6 @@ impl RemoteObjectRecord {
         )
     }
 
-    pub(crate) fn candidate_activated_membership_control_wrapped_store_key(
-        reference: super::wrapped_store_key::WrappedStoreKeyRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
-        owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let object = reference.object.clone();
-        Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
-            object,
-            canonical_signed_bytes,
-            stored_bytes,
-            owner,
-        )
-    }
-
     pub(crate) fn candidate_activated_store_membership_resolution(
         reference: super::membership::StoreMembershipConflictResolutionRef,
         canonical_semantic_bytes: Vec<u8>,
@@ -2251,7 +2234,7 @@ impl CandidateExclusiveObjectDomain {
                 })
             }
             Self::MergeMembershipWrappedStoreKey { reference, .. } => Some(
-                RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey {
+                RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey {
                     reference: reference.clone(),
                 },
             ),
@@ -2508,7 +2491,7 @@ fn validate_candidate_exclusive_identity(
         CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { reference, .. } => {
             validate_retained_authority_identity(
                 &RetainedAuthorityObjectRef {
-                    domain: RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey {
+                    domain: RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey {
                         reference: reference.clone(),
                     },
                     semantic_hash: identity.semantic_hash,
@@ -2817,7 +2800,7 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
     },
-    MembershipControlWrappedStoreKey {
+    MergeMembershipWrappedStoreKey {
         reference: super::wrapped_store_key::WrappedStoreKeyRef,
     },
     StoreMembershipResolution {
@@ -2896,7 +2879,7 @@ fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { reference } => {
+        RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey { reference } => {
             let wrapped: super::wrapped_store_key::WrappedStoreKey =
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
@@ -3136,9 +3119,7 @@ impl CandidateNonactivation {
         let commit: super::store_commit::StoreBatchCommit =
             serde_json::from_slice(&self.candidate.canonical_signed_bytes)
                 .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        if commit.policy() != self.candidate.coord.policy()
-            || commit.seq() != self.candidate.coord.sequence()
-        {
+        if commit.seq() != self.candidate.coord.sequence() {
             return Err(RemoteObjectRecordError::InvalidProof(
                 "candidate coordinate differs from its signed bytes".to_string(),
             ));
@@ -3198,9 +3179,6 @@ enum VerifiedCandidateNonactivationEvidence {
         durable: CandidateNonactivation,
         winner_commit: StoreBatchCommitRef,
     },
-    Serial {
-        durable: CandidateNonactivation,
-    },
     AuthorExclusion {
         durable: CandidateNonactivation,
         head_nonactivation: VerifiedCandidateHeadNonactivation,
@@ -3228,26 +3206,6 @@ impl VerifiedCandidateNonactivation {
                     proof: CandidateNonactivationProof::MergeWinner { winner_head },
                 },
                 winner_commit,
-            }),
-        };
-        value.durable().validate()?;
-        Ok(value)
-    }
-
-    pub(crate) fn from_verified_serial_successor(
-        candidate: StoreBatchCommitDeletionTarget,
-        accepted_suffix: SerialAcceptedSuffix,
-        losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            evidence: Box::new(VerifiedCandidateNonactivationEvidence::Serial {
-                durable: CandidateNonactivation {
-                    candidate,
-                    proof: CandidateNonactivationProof::SerialImmediateSuccessor {
-                        accepted_suffix,
-                        losing_prefix,
-                    },
-                },
             }),
         };
         value.durable().validate()?;
@@ -3407,11 +3365,6 @@ impl VerifiedCandidateNonactivation {
             VerifiedCandidateNonactivationEvidence::Merge { winner_commit, .. } => {
                 Ok(winner_commit)
             }
-            VerifiedCandidateNonactivationEvidence::Serial { .. } => {
-                Err(RemoteObjectRecordError::InvalidProof(
-                    "Serial candidate nonactivation has no Merge winner".to_string(),
-                ))
-            }
             VerifiedCandidateNonactivationEvidence::AuthorExclusion { .. } => {
                 Err(RemoteObjectRecordError::InvalidProof(
                     "author-exclusion nonactivation has no Merge slot winner".to_string(),
@@ -3433,7 +3386,6 @@ impl VerifiedCandidateNonactivation {
     pub(crate) fn into_durable(self) -> CandidateNonactivation {
         match *self.evidence {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::Serial { durable }
             | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
             | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
                 durable, ..
@@ -3461,8 +3413,7 @@ impl VerifiedCandidateNonactivation {
                 durable,
                 head_nonactivation,
             } => Ok((durable, head_nonactivation)),
-            VerifiedCandidateNonactivationEvidence::Merge { .. }
-            | VerifiedCandidateNonactivationEvidence::Serial { .. } => {
+            VerifiedCandidateNonactivationEvidence::Merge { .. } => {
                 Err(RemoteObjectRecordError::InvalidProof(
                     "candidate nonactivation is not verified by an excluded-author head observation"
                         .to_string(),
@@ -3474,7 +3425,6 @@ impl VerifiedCandidateNonactivation {
     fn durable(&self) -> &CandidateNonactivation {
         match self.evidence.as_ref() {
             VerifiedCandidateNonactivationEvidence::Merge { durable, .. }
-            | VerifiedCandidateNonactivationEvidence::Serial { durable }
             | VerifiedCandidateNonactivationEvidence::AuthorExclusion { durable, .. }
             | VerifiedCandidateNonactivationEvidence::MembershipGrantRevocation {
                 durable, ..
@@ -3492,10 +3442,6 @@ pub(crate) enum CandidateNonactivationProof {
     MergeWinner {
         winner_head: super::store_commit::StoreDeviceHeadRef,
     },
-    SerialImmediateSuccessor {
-        accepted_suffix: SerialAcceptedSuffix,
-        losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
-    },
     AuthorExclusion {
         exclusion: super::store_commit::StoreDeviceExclusionRef,
         accepted_cut: BTreeMap<super::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
@@ -3503,7 +3449,7 @@ pub(crate) enum CandidateNonactivationProof {
     },
     MergeMembershipGrantRevocation {
         grant_id: super::membership::MembershipGrantId,
-        membership: super::circle_control::MergeStoreMembershipStateRef,
+        membership: super::circle_control::StoreMembershipStateRef,
         activation_commit: StoreBatchCommitRef,
         activation_head: super::store_commit::StoreDeviceHeadRef,
     },
@@ -3517,22 +3463,15 @@ impl CandidateNonactivationProof {
     pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         match self {
             Self::MergeWinner { .. } => Ok(()),
-            Self::SerialImmediateSuccessor {
-                accepted_suffix,
-                losing_prefix,
-            } => {
-                accepted_suffix.validate()?;
-                validate_losing_prefix(accepted_suffix, losing_prefix)
-            }
             Self::AuthorExclusion { accepted_cut, .. } => {
                 super::store_commit::validate_store_history_cut(
-                    &super::store_commit::StoreHistoryCut::merge_concurrent(accepted_cut.clone()),
+                    &super::store_commit::StoreHistoryCut::from_commits(accepted_cut.clone()),
                 )
                 .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
             }
             Self::MergeMembershipGrantRevocation {
                 membership,
-                activation_commit,
+                activation_commit: _,
                 ..
             } => {
                 if !membership.heads.windows(2).all(|pair| pair[0] < pair[1])
@@ -3540,7 +3479,6 @@ impl CandidateNonactivationProof {
                         .resolutions
                         .windows(2)
                         .all(|pair| pair[0] < pair[1])
-                    || activation_commit.coord.policy() != crate::WritePolicy::MergeConcurrent
                 {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "membership-grant revocation names a noncanonical membership state"
@@ -3554,9 +3492,7 @@ impl CandidateNonactivationProof {
                 dependency_nonactivation,
             } => {
                 dependency_nonactivation.validate()?;
-                if dependency.coord.policy() != crate::WritePolicy::MergeConcurrent
-                    || dependency_nonactivation.reference()? != *dependency
-                {
+                if dependency_nonactivation.reference()? != *dependency {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "dependent retraction names another exact dependency".to_string(),
                     ));
@@ -3573,42 +3509,13 @@ impl CandidateNonactivationProof {
     ) -> Result<(), RemoteObjectRecordError> {
         self.validate()?;
         match self {
-            Self::MergeWinner { .. } => {
-                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "Merge winner proof names a non-Merge candidate".to_string(),
-                    ));
-                }
-                Ok(())
-            }
-            Self::SerialImmediateSuccessor {
-                accepted_suffix: _,
-                losing_prefix,
-            } => {
-                if candidate.coord.policy() != crate::WritePolicy::Serial {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "Serial successor proof names a non-Serial candidate".to_string(),
-                    ));
-                }
-                let last = losing_prefix.last().expect("validated nonempty");
-                if last.coord != candidate.coord
-                    || last.object != candidate.object
-                    || last.canonical_signed_bytes != commit.to_bytes()
-                {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "losing Serial prefix does not end at the discarded candidate".to_string(),
-                    ));
-                }
-                Ok(())
-            }
+            Self::MergeWinner { .. } => Ok(()),
             Self::AuthorExclusion {
                 exclusion,
                 accepted_cut,
                 ..
             } => {
-                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent
-                    || commit.author_registration != exclusion.proposal.target
-                {
+                if commit.author_registration != exclusion.proposal.target {
                     return Err(RemoteObjectRecordError::InvalidProof(
                         "author exclusion names another candidate author or policy".to_string(),
                     ));
@@ -3619,13 +3526,10 @@ impl CandidateNonactivationProof {
                         &commit.author_registration,
                         super::store_commit::StreamAnchorDomain::StoreAnnouncements,
                     );
-                let super::store_commit::StoreCommitCoord::MergeConcurrent {
+                let super::store_commit::StoreCommitCoord {
                     stream_id,
                     sequence,
-                } = candidate.coord
-                else {
-                    unreachable!("checked Merge candidate policy")
-                };
+                } = candidate.coord;
                 let beyond_cutoff = match accepted_cut.get(&expected_stream) {
                     Some(reference) => sequence > reference.coord.sequence(),
                     None => true,
@@ -3637,25 +3541,12 @@ impl CandidateNonactivationProof {
                 }
                 Ok(())
             }
-            Self::MergeMembershipGrantRevocation { .. } => {
-                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "membership-grant revocation names a non-Merge candidate".to_string(),
-                    ));
-                }
-                Ok(())
-            }
+            Self::MergeMembershipGrantRevocation { .. } => Ok(()),
             Self::MergeDependencyRetraction { dependency, .. } => {
-                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
-                    return Err(RemoteObjectRecordError::InvalidProof(
-                        "dependent retraction names a non-Merge candidate".to_string(),
-                    ));
-                }
                 let mut direct = commit
                     .order
                     .dependencies()
-                    .into_iter()
-                    .flat_map(|dependencies| dependencies.values())
+                    .values()
                     .collect::<BTreeSet<_>>();
                 if let Some(predecessor) = commit.order.predecessor() {
                     direct.insert(predecessor);
@@ -3668,117 +3559,6 @@ impl CandidateNonactivationProof {
                 Ok(())
             }
         }
-    }
-}
-
-fn validate_losing_prefix(
-    accepted: &SerialAcceptedSuffix,
-    losing: &[StoreBatchCommitDeletionTarget],
-) -> Result<(), RemoteObjectRecordError> {
-    let accepted_first = accepted.commits.first().expect("validated nonempty");
-    if losing.is_empty() {
-        return Err(RemoteObjectRecordError::InvalidProof(
-            "losing Serial prefix is empty".to_string(),
-        ));
-    }
-    let mut predecessor = accepted.predecessor.clone();
-    let mut previous = None;
-    let mut first = None;
-    for target in losing {
-        let commit: super::store_commit::StoreBatchCommit =
-            serde_json::from_slice(&target.canonical_signed_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let reference =
-            StoreBatchCommitRef::from_commit(&commit, target.coord.clone(), target.object.clone())
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        if commit.order.predecessor() != predecessor.as_ref() {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "losing Serial prefix has a broken exact predecessor chain".to_string(),
-            ));
-        }
-        let expected_sequence = previous
-            .as_ref()
-            .map(|previous: &StoreBatchCommitRef| previous.coord.sequence().checked_add(1))
-            .unwrap_or(Some(accepted_first.coord.sequence()));
-        if expected_sequence != Some(reference.coord.sequence()) {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "losing Serial prefix coordinates are not consecutive".to_string(),
-            ));
-        }
-        first.get_or_insert_with(|| reference.clone());
-        predecessor = Some(reference.clone());
-        previous = Some(reference);
-    }
-    let first_ref = first.expect("checked nonempty");
-    if &first_ref == accepted_first || first_ref.coord.sequence() != accepted_first.coord.sequence()
-    {
-        return Err(RemoteObjectRecordError::InvalidProof(
-            "accepted and losing Serial branches do not have different immediate successors"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SerialAcceptedSuffix {
-    pub(crate) predecessor: Option<StoreBatchCommitRef>,
-    pub(crate) commits: Vec<StoreBatchCommitRef>,
-    pub(crate) canonical_signed_head_bytes: Vec<u8>,
-    pub(crate) observed_version_hash: ObjectHash,
-}
-
-impl SerialAcceptedSuffix {
-    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
-        if self.commits.is_empty() {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "accepted Serial suffix is empty".to_string(),
-            ));
-        }
-        let head: super::store_commit::StoreSerialHead =
-            serde_json::from_slice(&self.canonical_signed_head_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let Some(last) = self.commits.last() else {
-            unreachable!("checked nonempty")
-        };
-        if !matches!(head.state, super::store_commit::StoreSerialHeadState::Commit { commit, .. } if commit == *last)
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "accepted Serial head does not name the suffix tip".to_string(),
-            ));
-        }
-        if self
-            .commits
-            .iter()
-            .any(|commit| commit.coord.policy() != crate::WritePolicy::Serial)
-            || self
-                .predecessor
-                .as_ref()
-                .is_some_and(|predecessor| predecessor.coord.policy() != crate::WritePolicy::Serial)
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "accepted Serial suffix contains a non-Serial coordinate".to_string(),
-            ));
-        }
-        let expected_first_sequence = match &self.predecessor {
-            Some(predecessor) => predecessor.coord.sequence().checked_add(1),
-            None => Some(1),
-        };
-        if expected_first_sequence != self.commits.first().map(|commit| commit.coord.sequence()) {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "accepted Serial suffix does not begin immediately after its predecessor"
-                    .to_string(),
-            ));
-        }
-        for pair in self.commits.windows(2) {
-            if pair[0].coord.sequence().checked_add(1) != Some(pair[1].coord.sequence()) {
-                return Err(RemoteObjectRecordError::InvalidProof(
-                    "accepted Serial suffix coordinates are not consecutive".to_string(),
-                ));
-            }
-        }
-        Ok(())
     }
 }
 
@@ -3910,8 +3690,14 @@ mod tests {
     fn test_commit_ref(label: &str, sequence: u64) -> StoreBatchCommitRef {
         let commit_hash = ObjectHash::digest(format!("{label} semantic commit").as_bytes());
         let stored = format!("{label} stored commit");
+        let stream_id = super::super::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+            format!("{label} author stream").as_bytes(),
+        ));
         StoreBatchCommitRef {
-            coord: super::super::store_commit::StoreCommitCoord::Serial { sequence },
+            coord: super::super::store_commit::StoreCommitCoord {
+                stream_id,
+                sequence,
+            },
             commit_hash,
             object: ExactObjectRef::new(
                 ObjectSlot::logical(format!("store-v1/commits/{label}.json"))
@@ -4048,13 +3834,15 @@ mod tests {
                 },
                 membership,
                 recovery,
-                device_state: super::super::store_commit::StoreDeviceStateRef::MergeConcurrent {
-                    frontier: super::super::store_commit::CommitFrontier::MergeConcurrent(
-                        BTreeMap::new(),
-                    ),
-                    recovery: Vec::new(),
-                    state_hash: ObjectHash::digest(b"resolution device state"),
-                },
+                device_state: super::super::store_commit::StoreDeviceStateRef::from_resolved(
+                    super::super::store_commit::CommitFrontier(BTreeMap::new()),
+                    &super::super::store_commit::ResolvedStoreDeviceState {
+                        devices: BTreeMap::new(),
+                        recovery: Vec::new(),
+                        state_hash: ObjectHash::digest(b"resolution device state"),
+                    },
+                )
+                .expect("construct resolution device state"),
                 signature: "resolution acceptance signature".to_string(),
             },
             signature: "resolution signature".to_string(),
@@ -4226,57 +4014,6 @@ mod tests {
     }
 
     #[test]
-    fn serial_accepted_suffix_rejects_merge_commit_coordinates() {
-        let commit_bytes = b"accepted commit";
-        let commit = StoreBatchCommitRef {
-            coord: super::super::store_commit::StoreCommitCoord::MergeConcurrent {
-                stream_id: super::super::causal_grants::AuthorStreamId::from_digest(
-                    ObjectHash::digest(b"accepted stream"),
-                ),
-                sequence: 1,
-            },
-            commit_hash: ObjectHash::digest(commit_bytes),
-            object: ExactObjectRef::new(
-                ObjectSlot::logical("store-v1/commits/accepted.json".to_string())
-                    .expect("valid accepted commit slot"),
-                commit_bytes.len() as u64,
-                ObjectHash::digest(commit_bytes),
-            ),
-        };
-        let registration_bytes = b"accepted author registration";
-        let author_registration = super::super::store_commit::StoreDeviceRegistrationRef {
-            device_id: "11".repeat(32).parse().expect("valid test device id"),
-            registration_hash: ObjectHash::digest(registration_bytes),
-            object: ExactObjectRef::new(
-                ObjectSlot::logical("store-v1/registrations/accepted.json".to_string())
-                    .expect("valid accepted registration slot"),
-                registration_bytes.len() as u64,
-                ObjectHash::digest(registration_bytes),
-            ),
-        };
-        let head = super::super::store_commit::StoreSerialHead {
-            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
-            store_root_hash: ObjectHash::digest(b"accepted Store root"),
-            state: super::super::store_commit::StoreSerialHeadState::Commit {
-                author_registration,
-                commit: commit.clone(),
-            },
-            signature: "test signature".to_string(),
-        };
-        let suffix = SerialAcceptedSuffix {
-            predecessor: None,
-            commits: vec![commit],
-            canonical_signed_head_bytes: head.to_bytes(),
-            observed_version_hash: ObjectHash::digest(b"observed version"),
-        };
-
-        assert!(matches!(
-            suffix.validate(),
-            Err(RemoteObjectRecordError::InvalidProof(_))
-        ));
-    }
-
-    #[test]
     fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {
         let uploader_bytes = b"uploader registration";
         let uploader = super::super::store_commit::StoreDeviceRegistrationRef {
@@ -4307,8 +4044,14 @@ mod tests {
             stored_bytes.len() as u64,
             ObjectHash::digest(&stored_bytes),
         );
+        let stream_id = super::super::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+            b"remote object test author stream",
+        ));
         let owner = StoreBatchCommitRef {
-            coord: super::super::store_commit::StoreCommitCoord::Serial { sequence: 1 },
+            coord: super::super::store_commit::StoreCommitCoord {
+                stream_id,
+                sequence: 1,
+            },
             commit_hash: ObjectHash::digest(b"commit semantic bytes"),
             object: ExactObjectRef::new(
                 ObjectSlot::logical(format!(
@@ -4317,7 +4060,7 @@ mod tests {
                         super::super::store_commit::CandidateFamilyId::from_hash(
                             ObjectHash::digest(b"remote object test candidate family"),
                         ),
-                        super::super::store_commit::SERIAL_STREAM_ID,
+                        &stream_id.to_string(),
                         1,
                         ObjectHash::digest(b"commit semantic bytes"),
                     )
@@ -4347,60 +4090,6 @@ mod tests {
         assert!(matches!(
             record.validate(),
             Err(RemoteObjectRecordError::InvalidDomain(_))
-        ));
-    }
-
-    #[test]
-    fn serial_membership_wrap_is_candidate_activated_retained_authority() {
-        let owner_key = crate::keys::UserKeypair::generate();
-        let recipient_key = crate::keys::UserKeypair::generate();
-        let owner_pubkey = hex::encode(owner_key.public_key());
-        let recipient_pubkey = hex::encode(recipient_key.public_key());
-        let wrapped = super::super::wrapped_store_key::WrappedStoreKey::signed(
-            "remote-object-test-store",
-            &recipient_pubkey,
-            1,
-            vec![7; 32],
-            &owner_key,
-        );
-        let canonical = serde_json::to_vec(&wrapped).expect("serialize wrapped Store key");
-        let wrap_hash = ObjectHash::digest(&canonical);
-        let object = ExactObjectRef::new(
-            ObjectSlot::logical(format!(
-                "keys/{owner_pubkey}/{recipient_pubkey}/1/{wrap_hash}.json"
-            ))
-            .expect("valid wrapped-key slot"),
-            canonical.len() as u64,
-            ObjectHash::digest(&canonical),
-        );
-        let reference = super::super::wrapped_store_key::WrappedStoreKeyRef {
-            owner_pubkey,
-            recipient_pubkey,
-            generation: 1,
-            wrap_hash,
-            object,
-        };
-        let candidate = test_commit_ref("membership-wrap-owner", 1);
-
-        let record = RemoteObjectRecord::candidate_activated_membership_control_wrapped_store_key(
-            reference,
-            canonical.clone(),
-            canonical,
-            candidate.clone(),
-        )
-        .expect("close wrapped-key ownership");
-
-        assert!(record.validate().is_ok());
-        assert!(matches!(
-            record,
-            RemoteObjectRecord::RetainedAuthority(RetainedAuthorityRecord {
-                identity: RetainedAuthorityObjectRef {
-                    domain: RetainedAuthorityObjectDomain::MembershipControlWrappedStoreKey { .. },
-                    ..
-                },
-                state: RetainedAuthorityObjectState::Prepared { ownership },
-                ..
-            }) if ownership.pending == BTreeSet::from([candidate])
         ));
     }
 

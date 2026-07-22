@@ -9,7 +9,6 @@ use super::fixtures::*;
 fn assert_coven_schema_mutation_is_rejected(
     name: &str,
     tables: Vec<SyncedTable>,
-    write_policy: crate::WritePolicy,
     migrations: Vec<Migration>,
     mutate: impl FnOnce(&Connection),
 ) {
@@ -19,8 +18,7 @@ fn assert_coven_schema_mutation_is_rejected(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        write_policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         "schema-seed".to_string(),
         &migrations,
     )
@@ -35,8 +33,7 @@ fn assert_coven_schema_mutation_is_rejected(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        write_policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         "schema-writer".to_string(),
         &migrations,
     ) {
@@ -52,8 +49,7 @@ fn assert_coven_schema_mutation_is_rejected(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        write_policy,
+        crate::blob::TransferLimits::one_at_a_time(),
         "schema-reader".to_string(),
         &migrations,
     ) {
@@ -85,8 +81,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             crate::sync::session::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "required-store-root".to_string(),
         &[notes_migration()],
     )
@@ -142,7 +137,6 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         },
         schema_version: db.schema_version(),
         sync_routing_hash: db.sync_routing_hash(),
-        write_policy: crate::WritePolicy::MergeConcurrent,
         founder_pubkey: crate::keys::public_key_hex(&signer),
         founder_grant: crate::sync::test_helpers::test_membership_grant_id(
             "required-store-root founder",
@@ -156,13 +150,11 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         )
         .expect("valid founder registration slot"),
         founder_provider_admin,
-        membership: crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent {
-            founder_membership: crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
-                first_slot: crate::storage::cloud::ObjectSlot::logical(
-                    "store-v1/test/required-store-root/membership/1.json".to_string(),
-                )
-                .expect("valid membership slot"),
-            },
+        founder_membership: crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
+            first_slot: crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/test/required-store-root/membership/1.json".to_string(),
+            )
+            .expect("valid membership slot"),
         },
         founder_recovery: crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery {
             first_slot: crate::storage::cloud::ObjectSlot::logical(
@@ -201,8 +193,7 @@ fn fresh_open_rolls_back_host_schema_and_coven_metadata_when_routing_is_invalid(
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "fresh-routing-failure".to_string(),
         &[Migration::sql(
             1,
@@ -245,8 +236,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         &migrations,
     )
@@ -267,8 +257,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         &migrations,
     )
@@ -311,8 +300,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         &path,
         vec![table()],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         &[v1()],
     )
@@ -335,8 +323,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         &path,
         vec![table()],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         &[v1(), v2],
     );
@@ -406,26 +393,12 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
         assert_coven_schema_mutation_is_rejected(
             name,
             vec![scoped_things_table()],
-            crate::WritePolicy::MergeConcurrent,
             vec![scoped_things_migration()],
             |conn| {
                 conn.execute_batch(mutation).expect("mutate Coven schema");
             },
         );
     }
-}
-
-#[test]
-fn writer_and_read_only_open_reject_unexpected_policy_specific_coven_tables() {
-    assert_coven_schema_mutation_is_rejected(
-        "unexpected-routing",
-        vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
-        crate::WritePolicy::Serial,
-        vec![things_migration()],
-        |conn| {
-            crate::db::apply_coven_routing_schema(conn).expect("add inapplicable routing tables");
-        },
-    );
 }
 
 #[test]
@@ -460,8 +433,7 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "invalid-gate-open".to_string(),
         &[migration],
     ) {
@@ -554,8 +526,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
             crate::sync::session::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-writer".to_string(),
         &[Migration::sql(
             1,
@@ -582,8 +553,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-seed".to_string(),
         &[Migration::sql(
             1,
@@ -605,8 +575,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
             crate::sync::session::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-reader".to_string(),
         &[things_migration()],
     ) {
@@ -628,8 +597,7 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
             things_table(crate::sync::session::RowIdentity::IndependentUuid),
         ],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "duplicate-things".to_string(),
         &[things_migration()],
     ) {
@@ -651,8 +619,7 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "invalid-host-identity".to_string(),
         &[things_migration()],
     )
@@ -665,7 +632,7 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
              (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
              VALUES (
                 'existing-write', '\"pending\"', '[]', ?1, ?1,
-                '{\"merge_concurrent\":{\"dependencies\":{}}}',
+                '{\"dependencies\":{}}',
                 '{\"blobs\":[]}'
              )",
             [existing_for_insert],
@@ -679,24 +646,17 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let write_id = db.new_write_id();
     let result = db
         .call(move |conn| {
-            Database::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                crate::WritePolicy::MergeConcurrent,
-                None,
-                write_id,
-                |tx| {
-                    tx.execute(
-                        "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
-                        ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
-                        [],
-                    )?;
-                    Ok::<_, DbError>(())
-                },
-            )
+            Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
+                tx.execute(
+                    "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
+                    ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+                )?;
+                tx.execute(
+                    "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
+                    [],
+                )?;
+                Ok::<_, DbError>(())
+            })
         })
         .await;
     let error = result.expect_err("invalid UUID must reject the host transaction");
@@ -731,8 +691,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "host-identity-changes".to_string(),
         &[things_migration()],
     )
@@ -756,7 +715,6 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         Database::run_internal_store_write_transaction_on(
             conn,
             &update_tables,
-            crate::WritePolicy::MergeConcurrent,
             None,
             update_write_id,
             |tx| {
@@ -778,7 +736,6 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         Database::run_internal_store_write_transaction_on(
             conn,
             &replace_tables,
-            crate::WritePolicy::MergeConcurrent,
             None,
             replace_write_id,
             |tx| {
@@ -800,7 +757,6 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         Database::run_internal_store_write_transaction_on(
             conn,
             &ordinary_tables,
-            crate::WritePolicy::MergeConcurrent,
             None,
             ordinary_write_id,
             |tx| {
@@ -841,7 +797,6 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
             Database::run_internal_store_write_transaction_on(
                 conn,
                 &invalid_tables,
-                crate::WritePolicy::MergeConcurrent,
                 None,
                 invalid_write_id,
                 |tx| {
@@ -885,8 +840,7 @@ async fn database_open_rejects_empty_device_id() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         String::new(),
         &[],
     );
@@ -944,8 +898,7 @@ async fn database_open_rejects_host_declared_reserved_tables() {
                 crate::sync::session::RowIdentity::SharedKey,
             )],
             BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::MergeConcurrent,
+            crate::blob::TransferLimits::one_at_a_time(),
             format!("reserved-{table_name}"),
             &[notes_migration()],
         );
@@ -970,8 +923,7 @@ async fn database_open_rejects_empty_synced_table_name() {
             crate::sync::session::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "empty-synced-table".to_string(),
         &[notes_migration()],
     );
@@ -995,8 +947,7 @@ async fn database_open_accepts_normal_host_synced_table() {
             crate::sync::session::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "normal-synced-table".to_string(),
         &[notes_migration()],
     )
@@ -1015,8 +966,7 @@ fn open_contract_error(
         Path::new(":memory:"),
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         &[Migration::sql(1, "contract", migration_sql)],
     );
@@ -1181,8 +1131,7 @@ async fn database_open_accepts_strict_synced_table() {
             crate::sync::session::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "strict-synced-table".to_string(),
         &[Migration::sql(
             1,
@@ -1205,8 +1154,7 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
             crate::sync::session::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        crate::WritePolicy::MergeConcurrent,
+        crate::blob::TransferLimits::one_at_a_time(),
         "undeclared-local-table".to_string(),
         &[Migration::sql(
             1,
