@@ -200,7 +200,9 @@ pub(crate) async fn cleanup_serial_candidates(
     branch_id: crate::PendingBranchId,
     plan: &SerialResolutionPlan,
 ) -> Result<(), StorePullError> {
-    let targets = db.prepare_serial_candidate_cleanup(branch_id, plan).await?;
+    let targets = SerialDatabase::new(db)
+        .prepare_candidate_cleanup(branch_id, plan)
+        .await?;
     for target in targets {
         super::store_objects::delete_exact_object(storage, &target.object).await?;
         db.mark_candidate_cleanup_absent(target.object).await?;
@@ -213,8 +215,8 @@ pub(crate) async fn cleanup_serial_abandonment_authority(
     storage: &dyn SyncStorage,
     plan: &SerialResolutionPlan,
 ) -> Result<(), StorePullError> {
-    let target = db
-        .prepare_serial_abandonment_authority_cleanup(plan)
+    let target = SerialDatabase::new(db)
+        .prepare_abandonment_authority_cleanup(plan)
         .await?;
     if let Some(target) = target {
         super::store_objects::delete_exact_object(storage, &target.object).await?;

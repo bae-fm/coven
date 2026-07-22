@@ -104,7 +104,7 @@ pub(super) fn parse_prepared_merge_publication_on(
     }
 }
 
-pub(super) fn parse_prepared_serial_candidate(
+pub(crate) fn parse_prepared_serial_candidate(
     raw: &str,
 ) -> Result<Option<PreparedSerialCandidate>, DbError> {
     let prepared: PreparedStoreWriteState = serde_json::from_str(raw)

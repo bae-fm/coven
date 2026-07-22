@@ -564,10 +564,16 @@ pub(super) struct DurableSerialCandidateAbandonment {
     pub(super) original_head_bytes: Vec<u8>,
 }
 
-pub(super) struct PreparedSerialCandidate {
+pub(crate) struct PreparedSerialCandidate {
     pub(super) commit: StoreBatchCommit,
     pub(super) reference: StoreBatchCommitRef,
     pub(super) canonical_signed_bytes: Vec<u8>,
+}
+
+impl PreparedSerialCandidate {
+    pub(crate) fn into_parts(self) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>) {
+        (self.commit, self.reference, self.canonical_signed_bytes)
+    }
 }
 
 pub(super) struct PreparedMergeCandidate {

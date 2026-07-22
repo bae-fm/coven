@@ -8,7 +8,7 @@ pub(super) enum RemoteStoredRepresentationRef<'a> {
     Blob,
 }
 
-pub(super) fn candidate_graph_exact_objects(
+pub(crate) fn candidate_graph_exact_objects(
     commit: &StoreBatchCommit,
 ) -> Result<Vec<ExactObjectRef>, DbError> {
     crate::sync::remote_object::CandidateObjectGraph::from_commit(commit)
@@ -43,7 +43,7 @@ pub(super) fn validate_remote_object_on(
     Ok(())
 }
 
-pub(super) fn load_remote_object_on(
+pub(crate) fn load_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
 ) -> Result<RemoteObjectRecord, DbError> {
@@ -463,7 +463,7 @@ pub(super) fn persist_exact_remote_object_on(
     Ok(())
 }
 
-pub(super) fn update_remote_object_on(
+pub(crate) fn update_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
     remote: &RemoteObjectRecord,
@@ -492,7 +492,7 @@ pub(super) fn update_remote_object_on(
     Ok(())
 }
 
-pub(super) fn begin_remote_candidate_nonactivation_on(
+pub(crate) fn begin_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     nonactivation: crate::sync::remote_object::CandidateNonactivation,
@@ -1065,4 +1065,26 @@ pub(super) fn validate_prepared_blob_on(
         )));
     }
     Ok(())
+}
+
+impl Database {
+    pub(crate) async fn mark_candidate_cleanup_absent(
+        &self,
+        object: ExactObjectRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let object_id = remote_object_id(&object);
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            if remote.cleanup_target() != Some(&object) {
+                return Err(DbError::Message(format!(
+                    "remote object {object_id} is not awaiting exact cleanup"
+                )));
+            }
+            remote.mark_absent_verified().map_err(|error| {
+                DbError::Message(format!("mark candidate {object_id} absent: {error}"))
+            })?;
+            update_remote_object_on(conn, object_id, &remote)
+        })
+        .await
+    }
 }

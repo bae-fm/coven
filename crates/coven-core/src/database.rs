@@ -8,7 +8,7 @@
 //! Hosts open coven with [`crate::Coven::builder`] and run app SQL through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
-use crate::database::blob_records::load_activated_registration_on;
+pub(crate) use crate::database::blob_records::load_activated_registration_on;
 use crate::database::connection_io::open_connection;
 use crate::database::connection_io::open_connection_read_only;
 use crate::database::connection_io::scan_max_updated_at;
@@ -16,11 +16,12 @@ use crate::database::connection_io::seed_from;
 use crate::database::local_store_identity::local_activated_registration_ref_on;
 use crate::database::local_store_identity::pin_host_device_id_on;
 use crate::database::local_store_identity::validate_host_device_id_on;
-use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
+pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
 use crate::database::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
-use crate::database::remote_object_records::candidate_graph_exact_objects;
+pub(crate) use crate::database::remote_object_records::candidate_graph_exact_objects;
 use crate::database::remote_object_records::load_protocol_inert_object_on;
-use crate::database::remote_object_records::load_remote_object_on;
+pub(crate) use crate::database::remote_object_records::load_remote_object_on;
+pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -120,7 +121,6 @@ mod retained_merge_replay;
 mod schema_contract;
 mod serial_authorization;
 mod serial_branch_resolution;
-mod serial_candidate_cleanup;
 mod snapshot_objects;
 mod snapshot_publication;
 mod snapshot_records;
@@ -145,6 +145,7 @@ mod write_publication_records;
 pub(crate) use blob_records::previous_row_blob_for_write_on;
 use circle_operation_records::*;
 use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
+pub(crate) use merge_candidate_records::parse_prepared_serial_candidate;
 use merge_candidate_records::*;
 pub(crate) use operation_models::{
     DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
@@ -162,13 +163,13 @@ pub(crate) use prepared_audience_objects::{
 };
 use schema_contract::{validate_host_synced_tables, DurablePreparedProtocolObject};
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+pub(crate) use store_authority_records::required_store_root_authority_on;
 use store_authority_records::{
     consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
     install_store_founder_state_on, install_store_root_authority_on,
     load_generation_zero_replay_baseline_on, load_local_store_founder_graph_on,
-    load_store_root_authority_on, required_store_root_authority_on, validate_founder_graph,
-    DurableFounderMembershipJournal,
+    load_store_root_authority_on, validate_founder_graph, DurableFounderMembershipJournal,
 };
 pub(crate) use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
@@ -213,7 +214,7 @@ pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
 pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
 pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
 pub const SERIAL_WRAPPED_KEYS_STATE_KEY: &str = "serial_wrapped_keys";
-const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
+pub(crate) const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
 pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 

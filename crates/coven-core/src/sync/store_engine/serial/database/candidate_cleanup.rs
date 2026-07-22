@@ -1,14 +1,8 @@
-use crate::database::blob_records::load_activated_registration_on;
-use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
-use crate::database::remote_object_records::candidate_graph_exact_objects;
-use crate::database::remote_object_records::load_remote_object_on;
-use crate::database::remote_object_records::update_remote_object_on;
-
 use super::*;
 
-impl Database {
-    pub(crate) async fn prepare_serial_candidate_cleanup(
-        &self,
+impl SerialDatabase<'_> {
+    pub(in crate::sync::store_engine::serial) async fn prepare_candidate_cleanup(
+        self,
         branch_id: PendingBranchId,
         plan: &crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
@@ -27,7 +21,7 @@ impl Database {
         let verified_suffix = plan
             .verified_suffix()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.call(move |conn| {
+        self.database.call(move |conn| {
             if head.to_bytes() != head_bytes {
                 return Err(DbError::Message(
                     "Serial cleanup head bytes differ from the verified head".to_string(),
@@ -97,11 +91,12 @@ impl Database {
                     continue;
                 };
                 if let Some(candidate) = parse_prepared_serial_candidate(&raw_prepared)? {
+                    let (commit, reference, canonical_signed_bytes) = candidate.into_parts();
                     prepared.push((
                         WriteId::from_generated(write_id),
-                        candidate.commit,
-                        candidate.reference,
-                        candidate.canonical_signed_bytes,
+                        commit,
+                        reference,
+                        canonical_signed_bytes,
                     ));
                 }
             }
@@ -246,11 +241,12 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn prepare_serial_abandonment_authority_cleanup(
-        &self,
+    pub(in crate::sync::store_engine::serial) async fn prepare_abandonment_authority_cleanup(
+        self,
         plan: &crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
         let prepared = self
+            .database
             .prepared_serial_candidate_abandonment()
             .await?
             .ok_or_else(|| {
@@ -318,47 +314,51 @@ impl Database {
                 "verified Serial suffix differs from the abandonment branch".to_string(),
             ));
         }
-        let expected_state = prepared.durable_state;
-        self.call(move |conn| {
-            let state_matches: bool = conn
-                .query_row(
-                    "SELECT EXISTS(
+        let expected_state = prepared.durable_state().to_string();
+        self.database
+            .call(move |conn| {
+                let state_matches: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(
                          SELECT 1 FROM protocol_state WHERE key = ?1 AND value = ?2
                      )",
-                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if !state_matches {
-                return Err(DbError::Message(
-                    "Serial abandonment durable state changed before authority cleanup".to_string(),
-                ));
-            }
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let object_id = remote_object_id(&authority_ref.object);
-            let root = required_store_root_authority_on(&tx)?;
-            let author = load_activated_registration_on(
-                &tx,
-                &root,
-                &prepared.authority.value.author_registration,
-            )?;
-            let nonactivation = verified_suffix
-                .verify_candidate_nonactivation(vec![(authority_target, author)])
-                .map_err(|error| DbError::Message(error.to_string()))?
-                .into_durable();
-            let target = begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(target.map(|object| CandidateCleanupObject { object }))
-        })
-        .await
+                        rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if !state_matches {
+                    return Err(DbError::Message(
+                        "Serial abandonment durable state changed before authority cleanup"
+                            .to_string(),
+                    ));
+                }
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let object_id = remote_object_id(&authority_ref.object);
+                let root = required_store_root_authority_on(&tx)?;
+                let author = load_activated_registration_on(
+                    &tx,
+                    &root,
+                    &prepared.authority.value.author_registration,
+                )?;
+                let nonactivation = verified_suffix
+                    .verify_candidate_nonactivation(vec![(authority_target, author)])
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .into_durable();
+                let target =
+                    begin_remote_candidate_nonactivation_on(&tx, object_id, nonactivation)?;
+                tx.commit().map_err(DbError::from)?;
+                Ok(target.map(|object| CandidateCleanupObject { object }))
+            })
+            .await
     }
 
-    pub(crate) async fn discard_serial_branch_after_abandonment(
-        &self,
+    pub(in crate::sync::store_engine::serial) async fn discard_branch_after_abandonment(
+        self,
         branch_id: PendingBranchId,
         plan: crate::sync::store_engine::SerialResolutionPlan,
     ) -> Result<(), DbError> {
         let prepared = self
+            .database
             .prepared_serial_candidate_abandonment()
             .await?
             .ok_or_else(|| {
@@ -381,70 +381,74 @@ impl Database {
             .commits()
             .first()
             .is_some_and(|commit| commit.commit_ref == authority_ref);
-        let expected_state = prepared.durable_state;
-        let synced_tables = self.synced_tables().to_vec();
-        let statuses = self.state.write_statuses.clone();
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let write_ids =
-                Self::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
-            let object_id = remote_object_id(&authority_ref.object);
-            let remote = load_remote_object_on(&tx, object_id)?;
-            if authority_accepted {
-                let retained = remote.into_activated(&authority_ref).map_err(|error| {
-                    DbError::Message(format!("activate Serial abandonment authority: {error}"))
-                })?;
-                update_remote_object_on(&tx, object_id, &retained)?;
-            } else {
-                if !remote
-                    .candidate_cleanup_complete(&authority_ref)
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "validate Serial abandonment authority cleanup: {error}"
-                        ))
-                    })?
-                {
-                    return Err(DbError::Message(
-                        "Serial abandonment authority cleanup is incomplete".to_string(),
-                    ));
+        let expected_state = prepared.durable_state().to_string();
+        let synced_tables = self.database.synced_tables().to_vec();
+        let database = self.database.clone();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let write_ids =
+                    Database::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
+                let object_id = remote_object_id(&authority_ref.object);
+                let remote = load_remote_object_on(&tx, object_id)?;
+                if authority_accepted {
+                    let retained = remote.into_activated(&authority_ref).map_err(|error| {
+                        DbError::Message(format!("activate Serial abandonment authority: {error}"))
+                    })?;
+                    update_remote_object_on(&tx, object_id, &retained)?;
+                } else {
+                    if !remote
+                        .candidate_cleanup_complete(&authority_ref)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "validate Serial abandonment authority cleanup: {error}"
+                            ))
+                        })?
+                    {
+                        return Err(DbError::Message(
+                            "Serial abandonment authority cleanup is incomplete".to_string(),
+                        ));
+                    }
+                    let removed = tx
+                        .execute(
+                            "DELETE FROM remote_objects WHERE object_id = ?1",
+                            [object_id.to_string()],
+                        )
+                        .map_err(DbError::from)?;
+                    if removed != 1 {
+                        return Err(DbError::Message(
+                            "Serial abandonment authority disappeared during removal".to_string(),
+                        ));
+                    }
                 }
                 let removed = tx
                     .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
+                        "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
+                        rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
                     )
                     .map_err(DbError::from)?;
                 if removed != 1 {
                     return Err(DbError::Message(
-                        "Serial abandonment authority disappeared during removal".to_string(),
+                        "Serial abandonment durable state disappeared".to_string(),
                     ));
                 }
-            }
-            let removed = tx
-                .execute(
-                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
-                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
-                )
-                .map_err(DbError::from)?;
-            if removed != 1 {
-                return Err(DbError::Message(
-                    "Serial abandonment durable state disappeared".to_string(),
-                ));
-            }
-            let resolution = WriteResolution::Discarded;
-            Self::resolve_unpublished_writes_on(&tx, &write_ids, &resolution)?;
-            tx.commit().map_err(DbError::from)?;
-            let status = WriteStatus::Resolved(resolution);
-            for write_id in write_ids {
-                Self::notify_write_status_in(&statuses, &write_id, status.clone());
-            }
-            Ok(())
-        })
-        .await
+                let resolution = WriteResolution::Discarded;
+                Database::resolve_unpublished_writes_on(&tx, &write_ids, &resolution)?;
+                tx.commit().map_err(DbError::from)?;
+                let status = WriteStatus::Resolved(resolution);
+                for write_id in write_ids {
+                    database.notify_write_status(write_id, status.clone());
+                }
+                Ok(())
+            })
+            .await
     }
 
-    pub(crate) async fn remove_losing_serial_abandonment_authority(&self) -> Result<(), DbError> {
+    pub(in crate::sync::store_engine::serial) async fn remove_losing_abandonment_authority(
+        self,
+    ) -> Result<(), DbError> {
         let prepared = self
+            .database
             .prepared_serial_candidate_abandonment()
             .await?
             .ok_or_else(|| {
@@ -458,67 +462,48 @@ impl Database {
             prepared.authority.object.clone(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
-        let expected_state = prepared.durable_state;
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let object_id = remote_object_id(&authority_ref.object);
-            let remote = load_remote_object_on(&tx, object_id)?;
-            if !remote
-                .candidate_cleanup_complete(&authority_ref)
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "validate losing Serial abandonment cleanup: {error}"
-                    ))
-                })?
-            {
-                return Err(DbError::Message(
-                    "losing Serial abandonment cleanup is incomplete".to_string(),
-                ));
-            }
-            let removed = tx
-                .execute(
-                    "DELETE FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                )
-                .map_err(DbError::from)?;
-            if removed != 1 {
-                return Err(DbError::Message(
-                    "losing Serial abandonment authority disappeared".to_string(),
-                ));
-            }
-            let removed = tx
-                .execute(
-                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
-                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
-                )
-                .map_err(DbError::from)?;
-            if removed != 1 {
-                return Err(DbError::Message(
-                    "Serial abandonment durable state disappeared".to_string(),
-                ));
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn mark_candidate_cleanup_absent(
-        &self,
-        object: ExactObjectRef,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let object_id = remote_object_id(&object);
-            let mut remote = load_remote_object_on(conn, object_id)?;
-            if remote.cleanup_target() != Some(&object) {
-                return Err(DbError::Message(format!(
-                    "remote object {object_id} is not awaiting exact cleanup"
-                )));
-            }
-            remote.mark_absent_verified().map_err(|error| {
-                DbError::Message(format!("mark candidate {object_id} absent: {error}"))
-            })?;
-            update_remote_object_on(conn, object_id, &remote)
-        })
-        .await
+        let expected_state = prepared.durable_state().to_string();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let object_id = remote_object_id(&authority_ref.object);
+                let remote = load_remote_object_on(&tx, object_id)?;
+                if !remote
+                    .candidate_cleanup_complete(&authority_ref)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "validate losing Serial abandonment cleanup: {error}"
+                        ))
+                    })?
+                {
+                    return Err(DbError::Message(
+                        "losing Serial abandonment cleanup is incomplete".to_string(),
+                    ));
+                }
+                let removed = tx
+                    .execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(
+                        "losing Serial abandonment authority disappeared".to_string(),
+                    ));
+                }
+                let removed = tx
+                    .execute(
+                        "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
+                        rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(
+                        "Serial abandonment durable state disappeared".to_string(),
+                    ));
+                }
+                tx.commit().map_err(DbError::from)
+            })
+            .await
     }
 }

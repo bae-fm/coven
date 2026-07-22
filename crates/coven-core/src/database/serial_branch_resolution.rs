@@ -330,7 +330,7 @@ impl Database {
         Ok(())
     }
 
-    pub(super) fn apply_serial_resolution_on(
+    pub(crate) fn apply_serial_resolution_on(
         tx: &rusqlite::Transaction<'_>,
         synced_tables: &[SyncedTable],
         branch_id: &PendingBranchId,
@@ -483,7 +483,7 @@ impl Database {
         Ok(branch.into_iter().map(|(write_id, _)| write_id).collect())
     }
 
-    pub(super) fn resolve_unpublished_writes_on(
+    pub(crate) fn resolve_unpublished_writes_on(
         tx: &rusqlite::Transaction<'_>,
         write_ids: &[WriteId],
         resolution: &WriteResolution,

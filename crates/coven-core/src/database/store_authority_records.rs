@@ -199,7 +199,7 @@ pub(super) fn load_store_root_authority_on(
     .transpose()
 }
 
-pub(super) fn required_store_root_authority_on(
+pub(crate) fn required_store_root_authority_on(
     conn: &Connection,
 ) -> Result<crate::sync::store_commit::StoreRootRef, DbError> {
     load_store_root_authority_on(conn)?

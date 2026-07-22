@@ -245,6 +245,12 @@ pub(crate) struct PreparedSerialCandidateAbandonment {
     pub(super) durable_state: String,
 }
 
+impl PreparedSerialCandidateAbandonment {
+    pub(crate) fn durable_state(&self) -> &str {
+        &self.durable_state
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerialBranchDiscardState {
     Local,

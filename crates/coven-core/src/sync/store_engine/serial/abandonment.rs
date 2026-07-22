@@ -287,7 +287,9 @@ pub(crate) async fn abandon_serial_branch(
             )
             .await?;
             super::pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
-            db.remove_losing_serial_abandonment_authority().await?;
+            SerialDatabase::new(db)
+                .remove_losing_abandonment_authority()
+                .await?;
             db.complete_prepared_serial_branch(accepted).await?;
             Ok(SerialBranchAbandonment::OriginalBranchActivated)
         }
@@ -359,7 +361,8 @@ async fn finish_serial_branch_abandonment(
     .await?;
     super::pull::cleanup_serial_candidates(db, storage, branch_id.clone(), &plan).await?;
     super::pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
-    db.discard_serial_branch_after_abandonment(branch_id, plan)
+    SerialDatabase::new(db)
+        .discard_branch_after_abandonment(branch_id, plan)
         .await?;
     Ok(SerialBranchAbandonment::Discarded)
 }

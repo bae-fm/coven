@@ -257,7 +257,7 @@ pub(super) fn load_prepared_audience_objects_on(
     Ok(PreparedAudienceObjects { packages, blobs })
 }
 
-pub(super) fn load_activated_registration_on(
+pub(crate) fn load_activated_registration_on(
     conn: &Connection,
     root: &crate::sync::store_commit::StoreRootRef,
     reference: &StoreDeviceRegistrationRef,
