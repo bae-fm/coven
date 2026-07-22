@@ -6,7 +6,7 @@ use crate::sync::storage::{
 };
 use crate::sync::store_commit::{
     commit_semantic_prefix, StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef,
-    StoreCommitOrder, StoreSerialHead, SERIAL_STREAM_ID,
+    StoreCommitOrder, StoreSerialHead, StoreSerialPredecessor, SERIAL_STREAM_ID,
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::{
@@ -15,6 +15,77 @@ use crate::sync::store_outbound::{
     StoreMembershipJournalCompletion, StoreOperationBatch, StoreOperationPublicationOutcome,
     StoreOutboundError,
 };
+
+pub(crate) async fn prepare_plan(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    keypair: &UserKeypair,
+) -> Result<SerialStoreOperationCommitPlan, StoreOutboundError> {
+    let snapshot = Box::pin(super::publication::current_serial_authorization_snapshot(
+        db,
+        storage,
+        coordination,
+    ))
+    .await?;
+    prepare_plan_from_snapshot(db, device_id, keypair, snapshot).await
+}
+
+pub(crate) async fn prepare_plan_from_snapshot(
+    db: &Database,
+    device_id: &str,
+    keypair: &UserKeypair,
+    snapshot: super::publication::SerialAuthorizationSnapshot,
+) -> Result<SerialStoreOperationCommitPlan, StoreOutboundError> {
+    if db.write_policy() != crate::WritePolicy::Serial {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial Store operation preparation requires Serial policy".to_string(),
+        ));
+    }
+    let (root, registration_ref, registration, device_signer) =
+        crate::sync::store_outbound::load_local_store_authority(db, device_id, keypair).await?;
+    let seq = crate::sync::store_outbound::next_store_sequence(snapshot.base.as_ref())?;
+    let predecessor = snapshot.base.clone().map_or_else(
+        || StoreSerialPredecessor::Genesis {
+            root: root.clone(),
+            founder_registration: registration_ref.clone(),
+        },
+        StoreSerialPredecessor::Commit,
+    );
+    let coord = crate::sync::store_commit::StoreCommitCoord::Serial { sequence: seq };
+    let order = StoreCommitOrder::Serial {
+        seq,
+        predecessor: predecessor.clone(),
+    };
+    let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
+    let membership_state = crate::sync::circle_control::StoreMembershipStateRef::serial(
+        predecessor,
+        resolved_devices.recovery,
+        &snapshot.authorization,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let owner_grant = snapshot
+        .authorization
+        .membership
+        .active_owner_grant(&registration.author_pubkey);
+    Ok(SerialStoreOperationCommitPlan::new(
+        crate::sync::store_outbound::StoreOperationPlanCommon::new(
+            root,
+            registration_ref,
+            registration,
+            device_signer,
+            coord,
+            order,
+            membership_state,
+            device_state,
+            crate::sync::store_commit::StoreOperationMembershipAuthority::Serial,
+            owner_grant,
+        ),
+        snapshot.base_head,
+        snapshot.authorization,
+    ))
+}
 
 pub(crate) async fn prepare_candidate(
     db: &Database,

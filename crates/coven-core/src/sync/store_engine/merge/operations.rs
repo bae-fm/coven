@@ -19,6 +19,83 @@ use crate::sync::store_outbound::{
 use std::future::Future;
 use std::pin::Pin;
 
+pub(crate) async fn prepare_plan(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    candidate_membership: &crate::sync::membership::MembershipChain,
+    device_id: &str,
+    keypair: &UserKeypair,
+) -> Result<MergeStoreOperationCommitPlan, StoreOutboundError> {
+    if db.write_policy() != crate::WritePolicy::MergeConcurrent {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Merge Store operation preparation requires MergeConcurrent policy".to_string(),
+        ));
+    }
+    let (root, registration_ref, registration, device_signer) =
+        crate::sync::store_outbound::load_local_store_authority(db, device_id, keypair).await?;
+    let previous = db.latest_local_store_position().await?;
+    let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
+        crate::WritePolicy::MergeConcurrent,
+        db.materialized_frontier().await?,
+    )
+    .and_then(|frontier| frontier.merge_commits().cloned())
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let seq = crate::sync::store_outbound::next_store_sequence(previous.as_ref())?;
+    let coord = StoreCommitCoord::MergeConcurrent {
+        stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &registration_ref,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        ),
+        sequence: seq,
+    };
+    let order = crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
+        seq,
+        predecessor: previous,
+        dependencies,
+    };
+    let authorization = crate::sync::store_pull::load_retained_merge_outbound_authorization(
+        db,
+        storage,
+        &root,
+        &order,
+        candidate_membership.head_refs(),
+        &registration_ref,
+    )
+    .await
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let owner_grant = authorization
+        .membership
+        .active_owner_grant(&registration.author_pubkey);
+    let predecessor = authorization
+        .membership
+        .write_grant_authority(&registration.author_pubkey)
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(format!(
+                "Merge Store operation author {} has no active write grant",
+                registration.author_pubkey
+            ))
+        })?;
+    Ok(MergeStoreOperationCommitPlan::new(
+        crate::sync::store_outbound::StoreOperationPlanCommon::new(
+            root,
+            registration_ref,
+            registration,
+            device_signer,
+            coord,
+            order,
+            authorization.membership_state,
+            authorization.device_state_ref,
+            crate::sync::store_commit::StoreOperationMembershipAuthority::MergeConcurrent {
+                predecessor,
+            },
+            owner_grant,
+        ),
+        authorization.membership,
+        authorization.device_state,
+    ))
+}
+
 pub(crate) async fn prepare_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
