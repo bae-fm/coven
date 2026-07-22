@@ -21,7 +21,7 @@ use crate::store_dir::StoreDir;
 /// can't disagree mid-cycle. Because [`load_anchored_chain`] writes the reader's
 /// per-author-stream head watermark, loading once also writes each watermark once.
 ///
-/// [`load_anchored_chain`]: super::membership_ops::load_anchored_chain
+/// [`load_anchored_chain`]: super::store::membership::load_anchored_chain
 pub struct CycleMembership {
     /// The owner-anchored, committed chain. `None` is representable for
     /// pre-initialization bootstrap callers; initialized cycles always carry one.
@@ -47,7 +47,7 @@ pub async fn load_cycle_membership(
     db: &Database,
 ) -> Result<CycleMembership, PullError> {
     let pinned_owner = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
     let root = db
@@ -62,10 +62,10 @@ pub async fn load_cycle_membership(
     let owner = pinned_owner
         .clone()
         .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
-    let chain = super::membership_ops::load_and_persist_owner_anchor(storage, &root, &owner, db)
+    let chain = super::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, db)
         .await
         .map_err(|error| match error {
-            super::membership_ops::AnchoredChainError::StorageUnavailable { .. } => {
+            super::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
                 PullError::MembershipLoad(error)
             }
             _ => PullError::MembershipTampered(error.to_string()),
@@ -531,7 +531,7 @@ async fn cached_exact_in_either_folder(
 pub enum PullError {
     Storage(super::storage::StorageError),
     MembershipObject(super::store_objects::StoreObjectError),
-    MembershipLoad(super::membership_ops::AnchoredChainError),
+    MembershipLoad(super::store::membership::AnchoredChainError),
     Apply(String),
     /// The sync storage requires a schema version newer than ours.
     /// The client must upgrade before syncing.

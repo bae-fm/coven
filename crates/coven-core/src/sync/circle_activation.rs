@@ -2690,13 +2690,15 @@ async fn verify_control_membership(
     founder_pubkey: &str,
 ) -> Result<Vec<(String, super::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.value.active_epoch.store_membership;
-    let chain = Box::pin(super::membership_ops::load_anchored_chain_at_exact_heads(
-        storage,
-        root,
-        founder_pubkey,
-        &state.heads,
-        &state.resolutions,
-    ))
+    let chain = Box::pin(
+        super::store::membership::load_anchored_chain_at_exact_heads(
+            storage,
+            root,
+            founder_pubkey,
+            &state.heads,
+            &state.resolutions,
+        ),
+    )
     .await
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     if !chain.authorizes_write_authority(

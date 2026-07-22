@@ -5,9 +5,9 @@ use crate::encryption::EncryptionService;
 use crate::keys::{self, UserKeypair};
 
 use super::circle_control::StoreMembershipStateRef;
-use super::invite::{PreparedMembershipPublication, PreparedMembershipTransition};
 use super::membership::{MembershipChain, MembershipGrantId, StoreMembershipRoleGrant};
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use super::store::membership::{PreparedMembershipPublication, PreparedMembershipTransition};
 use super::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
@@ -283,7 +283,7 @@ fn transition_matches_acceptance(
     let entry = &transition.entry;
     let expected_replacements =
         std::collections::BTreeSet::from([acceptance.request.member_grant.clone()]);
-    super::invite::validate_prepared_transition(transition).is_ok()
+    super::store::membership::validate_prepared_transition(transition).is_ok()
         && transition.transition.body.author_registration
             == acceptance.request.promoter_registration
         && transition.transition.body.resolutions == entry.resolution_dependencies
@@ -390,7 +390,7 @@ fn finalization_receipt_matches_acceptance(
             entry_object: publication.entry_object.clone(),
             transition: transition.clone(),
         };
-        super::invite::validate_prepared_publication(publication).is_ok()
+        super::store::membership::validate_prepared_publication(publication).is_ok()
             && transition_matches_acceptance(&prepared_transition, wrapped_key, acceptance)
             && merge_candidate_matches_finalization(candidate, &prepared_transition, acceptance)
             && prepared_transition
@@ -591,7 +591,7 @@ impl OwnerPromotionJournal {
                     && wrapped_key_matches_acceptance(wrapped_key, acceptance)
                     && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
                     && merge_candidate_matches_finalization(candidate, transition, acceptance)
-                    && super::invite::validate_prepared_publication(publication).is_ok()
+                    && super::store::membership::validate_prepared_publication(publication).is_ok()
                     && transition.entry == publication.entry
                     && transition.entry_ref == publication.entry_ref
                     && transition
@@ -1008,11 +1008,11 @@ async fn load_current_merge_membership(
     root: &StoreRootRef,
 ) -> Result<MembershipChain, OwnerPromotionError> {
     let founder = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or_else(|| OwnerPromotionError::Protocol("Store founder is absent".to_string()))?;
     let loaded =
-        super::membership_ops::load_current_exact_chain(storage, root, Some(&founder), Some(db))
+        super::store::membership::load_current_exact_chain(storage, root, Some(&founder), Some(db))
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()));
     loaded
@@ -1352,7 +1352,7 @@ fn prepare_promotion_wrap<'a>(
         let refs = membership
             .wrapped_key_authority_for(&keys::public_key_hex(identity))
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let authorized = Box::pin(super::invite::load_authorized_owner_keyring(
+        let authorized = Box::pin(super::store::membership::load_authorized_owner_keyring(
             storage,
             root.store_root_hash,
             identity,
@@ -1362,9 +1362,9 @@ fn prepare_promotion_wrap<'a>(
         ))
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let recipient_key = super::invite::ed25519_hex_to_x25519(recipient)
+        let recipient_key = super::store::membership::ed25519_hex_to_x25519(recipient)
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let value = super::invite::signed_wrapped_key(
+        let value = super::store::membership::signed_wrapped_key(
             store_id,
             recipient,
             &recipient_key,
@@ -1600,7 +1600,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
                 db.hlc().now().to_string(),
             )
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let transition = Box::pin(super::invite::prepare_membership_transition(
+        let transition = Box::pin(super::store::membership::prepare_membership_transition(
             storage,
             db,
             root.store_root_hash,
@@ -1641,7 +1641,7 @@ fn prepare_merge_store_candidate<'a>(
     >,
 > {
     Box::pin(async move {
-        super::invite::publish_prepared_merge_membership_authority(
+        super::store::membership::publish_prepared_merge_membership_authority(
             storage,
             root.store_root_hash,
             &transition,
@@ -1687,7 +1687,7 @@ fn prepare_merge_store_candidate<'a>(
             },
         ))
         .await?;
-        let publication = super::invite::finish_membership_transition(
+        let publication = super::store::membership::finish_membership_transition(
             storage,
             db,
             root.store_root_hash,
@@ -1785,7 +1785,7 @@ fn activate_owner_promotion_merge_head<'a>(
         let candidate_ref = candidate.reference.clone();
         let candidate_commit = Box::new(candidate.commit.clone());
         let receipt_candidate = candidate.clone();
-        super::invite::publish_prepared_merge_membership_authority(
+        super::store::membership::publish_prepared_merge_membership_authority(
             storage,
             root.store_root_hash,
             &transition,
@@ -1848,19 +1848,21 @@ fn activate_owner_promotion_merge_head<'a>(
                     ))
                 })?;
         }
-        let outcome = Box::pin(super::invite::publish_prepared_merge_membership_activation(
-            db,
-            storage,
-            root,
-            promoter,
-            &transition,
-            &publication,
-            candidate,
-            crate::sync::store::operations::StoreMembershipJournalCompletion::OwnerPromotion {
-                transition: journal_transition,
-                remote_objects,
-            },
-        ))
+        let outcome = Box::pin(
+            super::store::membership::publish_prepared_merge_membership_activation(
+                db,
+                storage,
+                root,
+                promoter,
+                &transition,
+                &publication,
+                candidate,
+                crate::sync::store::operations::StoreMembershipJournalCompletion::OwnerPromotion {
+                    transition: journal_transition,
+                    remote_objects,
+                },
+            ),
+        )
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         match outcome {
@@ -2119,7 +2121,7 @@ fn finalized_merge_membership_ref<'a>(
             .await
             .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?
             .value;
-        let mut membership = super::membership_ops::load_anchored_chain_at_exact_heads(
+        let mut membership = super::store::membership::load_anchored_chain_at_exact_heads(
             storage,
             root,
             &root_value.descriptor.founder_pubkey,
@@ -2229,7 +2231,7 @@ mod tests {
         let second_owner = UserKeypair::generate();
         let encryption = EncryptionService::from_key([42; 32]);
         for member in [&first_owner, &second_owner] {
-            super::super::membership_ops::invite_member(
+            crate::sync::store::membership::invite_member(
                 &store.storage,
                 store.home.as_ref(),
                 &founder,
@@ -2329,7 +2331,7 @@ mod tests {
         .expect("create Merge Store");
         let member = UserKeypair::generate();
         let encryption = EncryptionService::from_key([42; 32]);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &owner,
@@ -2397,7 +2399,7 @@ mod tests {
             .iter()
             .find(|reference| reference.coord.author_pubkey == keys::public_key_hex(&owner))
             .expect("promoter stream head");
-        let opened = super::super::membership_ops::load_exact_membership_head(
+        let opened = crate::sync::store::membership::load_exact_membership_head(
             &store.storage,
             &store.root,
             promoted_head,
@@ -2462,7 +2464,7 @@ mod tests {
         .expect("create Merge Store");
         let member = UserKeypair::generate();
         let encryption = EncryptionService::from_key([42; 32]);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &owner,

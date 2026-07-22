@@ -20,11 +20,11 @@ use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::invite::{unwrap_store_keyring, InviteError};
 use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::membership::{unwrap_store_keyring, InviteError};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -1090,14 +1090,14 @@ pub(crate) async fn open_db_and_pull(
     // head — including an older one a storage provider chooses to serve, e.g.
     // from before a removal the floor already reflects. Seeding it here makes
     // that first load monotonic from the start, exactly like every later cycle.
-    crate::sync::membership_ops::seed_head_watermark(&db, &membership_floor.0)
+    crate::sync::store::membership::seed_head_watermark(&db, &membership_floor.0)
         .await
         .map_err(|e| {
             BootstrapError::Database(format!("Failed to seed membership head watermark: {e}"))
         })?;
 
     db.set_protocol_state(
-        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+        crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
         owner_pubkey,
     )
     .await

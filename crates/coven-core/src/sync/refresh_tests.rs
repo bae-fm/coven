@@ -20,14 +20,14 @@ use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::invite::{
-    revoke_member_durable, signed_wrapped_keyring_for_test, unwrap_store_keyring_for_refs,
-};
 use crate::sync::membership::{MemberRole, MembershipChain};
-use crate::sync::membership_ops::{
+use crate::sync::storage::SyncStorage;
+use crate::sync::store::membership::{
     apply_key_rotation, invite_member, remove_member, MembershipOpsError,
 };
-use crate::sync::storage::SyncStorage;
+use crate::sync::store::membership::{
+    revoke_member_durable, signed_wrapped_keyring_for_test, unwrap_store_keyring_for_refs,
+};
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore,
 };
@@ -554,7 +554,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     .expect("remove member and rotate the Store key");
     apply_key_rotation(rotated.clone(), &custody, &cipher)
         .expect("owner adopts the activated rotation");
-    super::invite::complete_revoke_rotation_adoption(
+    super::store::membership::complete_revoke_rotation_adoption(
         &owner_db,
         &pending_rotation,
         rotated.current_generation(),
@@ -1049,7 +1049,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     let founder_cipher = RwLock::new(CloudCipher::Encrypted(initial.clone()));
     apply_key_rotation(founder_rotation.clone(), &founder_custody, &founder_cipher)
         .expect("founder adopts its activated rotation fork");
-    super::invite::complete_revoke_rotation_adoption(
+    super::store::membership::complete_revoke_rotation_adoption(
         &founder_db,
         &founder_pending_rotation,
         founder_rotation.current_generation(),
@@ -1273,7 +1273,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
     activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
-    let head = crate::sync::membership_ops::load_exact_membership_head(
+    let head = crate::sync::store::membership::load_exact_membership_head(
         &storage.storage,
         &storage.root,
         chain

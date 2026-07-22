@@ -17,6 +17,7 @@ pub(crate) mod device_exclusion;
 #[doc(hidden)]
 pub mod device_join;
 mod error;
+pub mod membership;
 pub(crate) mod operations;
 mod owner;
 pub(crate) mod package_preparation;

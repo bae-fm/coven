@@ -227,7 +227,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     .expect("create Merge Store");
     let candidate = crate::sync::test_helpers::user_keypair_from_seed([43; 32]);
     let encryption = crate::encryption::EncryptionService::from_key([73; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &store.storage,
         store.home.as_ref(),
         &founder,
@@ -295,7 +295,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             .expect("load earlier Owner membership")
             .chain
             .expect("initialized Store has membership");
-    let _rotated = crate::sync::invite::revoke_member_durable(
+    let _rotated = crate::sync::store::membership::revoke_member_durable(
         &store.storage,
         store.home.as_ref(),
         store.root.store_root_hash,
@@ -349,7 +349,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .find(|head| head.coord == transition.body.entry.coord)
         .expect("caller membership contains the concurrent control")
         .clone();
-    let earlier_head = crate::sync::membership_ops::load_exact_membership_head(
+    let earlier_head = crate::sync::store::membership::load_exact_membership_head(
         &store.storage,
         &store.root,
         &earlier_head_ref,

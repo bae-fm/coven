@@ -48,10 +48,10 @@ use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome};
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::membership::MembershipChain;
-use crate::sync::membership_ops::{
+use crate::sync::storage::{StorageError, SyncStorage};
+use crate::sync::store::membership::{
     authorize_loaded_membership_author, MembershipAuthorRequirement,
 };
-use crate::sync::storage::{StorageError, SyncStorage};
 
 /// The default convergence window a host gets if it configures none: how long a
 /// deleted blob is kept after its tombstone is written, before a GC pass reclaims

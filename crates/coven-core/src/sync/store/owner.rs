@@ -174,8 +174,9 @@ impl Store {
         encryption: &crate::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, crate::sync::membership_ops::MembershipOpsError> {
-        crate::sync::membership_ops::invite_member(
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
+    {
+        crate::sync::store::membership::invite_member(
             &**self.storage(),
             self.storage().cloud_home(),
             identity,
@@ -201,8 +202,8 @@ impl Store {
         custody: &dyn crate::keys::MasterKeyCustody,
         cipher: &crate::sync::cloud_storage::CloudCipherState,
         pending_rotation: &crate::sync::cloud_storage::PendingRotation,
-    ) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
-        crate::sync::membership_ops::remove_member(
+    ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
+        crate::sync::store::membership::remove_member(
             &**self.storage(),
             self.storage().cloud_home(),
             identity,
@@ -401,10 +402,10 @@ impl AuthorizedStore<'_> {
     }
 
     pub(crate) fn may_author_snapshot(&self, author_pubkey: &str) -> Result<(), String> {
-        crate::sync::membership_ops::authorize_loaded_membership_author(
+        crate::sync::store::membership::authorize_loaded_membership_author(
             Some(&self.membership),
             author_pubkey,
-            crate::sync::membership_ops::MembershipAuthorRequirement::Owner,
+            crate::sync::store::membership::MembershipAuthorRequirement::Owner,
         )
         .map_err(|error| error.to_string())
     }

@@ -54,11 +54,14 @@ impl Database {
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner,],
+                rusqlite::params![
+                    crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
+                    owner,
+                ],
             )
             .map_err(DbError::from)?;
             for reference in &membership.head_refs {
-                crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
+                crate::sync::store::membership::upsert_head_cursor_on(&tx, reference)?;
             }
             ensure_founder_replay_baseline_on(
                 &tx,
@@ -390,12 +393,12 @@ impl Database {
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (
-                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                    crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
                     &graph.root.value.descriptor.founder_pubkey,
                 ),
             )
             .map_err(DbError::from)?;
-            crate::sync::membership_ops::upsert_head_cursor_on(&tx, &graph.membership.head_ref)?;
+            crate::sync::store::membership::upsert_head_cursor_on(&tx, &graph.membership.head_ref)?;
             install_generation_zero_replay_baseline_on(
                 &tx,
                 schema_version,

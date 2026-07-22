@@ -17,8 +17,8 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
-use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::pull::PullError;
+use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::store::pull::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
@@ -783,7 +783,7 @@ async fn exact_membership_registration(
         &entry.author_owner_grant,
         entry.stream_id,
     ) {
-        let head = crate::sync::membership_ops::load_exact_membership_head(
+        let head = crate::sync::store::membership::load_exact_membership_head(
             &storage.storage,
             &storage.root,
             predecessor,
@@ -938,7 +938,7 @@ async fn publish_exact_membership_entry(
         .clone();
     let current_slot = match predecessor.as_ref() {
         Some(reference) => {
-            crate::sync::membership_ops::load_exact_membership_head(
+            crate::sync::store::membership::load_exact_membership_head(
                 &storage.storage,
                 &storage.root,
                 reference,
@@ -6303,7 +6303,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     let db = open_test_db();
     let storage = create_store(&db, founder.clone()).await;
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &founder,
@@ -6645,7 +6645,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await
         .expect("activate a separate founder-identity Store producer");
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6704,7 +6704,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     let second_owner_custody = TestCustody::default();
     second_owner_custody.set_initial_key(encryption.key_bytes());
     let second_owner_cipher = std::sync::RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    crate::sync::membership_ops::remove_member(
+    crate::sync::store::membership::remove_member(
         &storage.storage,
         storage.home.as_ref(),
         &second_owner,
@@ -7691,7 +7691,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
             coord.stream_id,
         )
         .expect("exact founder head reference");
-    let head = crate::sync::membership_ops::load_exact_membership_head(
+    let head = crate::sync::store::membership::load_exact_membership_head(
         &storage.storage,
         &storage.root,
         head_ref,

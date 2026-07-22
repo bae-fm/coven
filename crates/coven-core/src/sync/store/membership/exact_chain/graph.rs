@@ -1,17 +1,17 @@
 use super::*;
 
 #[derive(Clone)]
-pub(in crate::sync::membership_ops) struct LoadedExactMembershipHead {
-    pub(in crate::sync::membership_ops) reference: MembershipHeadRef,
-    pub(in crate::sync::membership_ops) head: AuthorHead,
-    pub(in crate::sync::membership_ops) entry: MembershipEntry,
+pub(in crate::sync::store::membership) struct LoadedExactMembershipHead {
+    pub(in crate::sync::store::membership) reference: MembershipHeadRef,
+    pub(in crate::sync::store::membership) head: AuthorHead,
+    pub(in crate::sync::store::membership) entry: MembershipEntry,
 }
 
 #[derive(Clone)]
-pub(in crate::sync::membership_ops) struct LoadedExactMembershipGraph {
-    pub(in crate::sync::membership_ops) entries: BTreeMap<MembershipCoord, MembershipEntry>,
-    pub(in crate::sync::membership_ops) heads: Vec<(MembershipHeadRef, AuthorHead)>,
-    pub(in crate::sync::membership_ops) path_heads:
+pub(in crate::sync::store::membership) struct LoadedExactMembershipGraph {
+    pub(in crate::sync::store::membership) entries: BTreeMap<MembershipCoord, MembershipEntry>,
+    pub(in crate::sync::store::membership) heads: Vec<(MembershipHeadRef, AuthorHead)>,
+    pub(in crate::sync::store::membership) path_heads:
         BTreeMap<MembershipCoord, LoadedExactMembershipHead>,
 }
 
@@ -174,7 +174,7 @@ fn validate_exact_membership_stream_anchors(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::sync::membership_ops) enum MembershipProjectionStatus {
+pub(in crate::sync::store::membership) enum MembershipProjectionStatus {
     Included,
     OutsidePrefix,
 }
@@ -279,7 +279,7 @@ fn membership_projection_dependencies(
     Ok(dependencies)
 }
 
-pub(in crate::sync::membership_ops) fn membership_projection_statuses(
+pub(in crate::sync::store::membership) fn membership_projection_statuses(
     graph: &LoadedExactMembershipGraph,
     prefix: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
     resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
@@ -487,7 +487,7 @@ fn load_exact_membership_graph<'a>(
     })
 }
 
-pub(in crate::sync::membership_ops) fn load_exact_membership_graph_objects<'a>(
+pub(in crate::sync::store::membership) fn load_exact_membership_graph_objects<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     root_value: &'a crate::sync::store_commit::StoreProtocolRoot,

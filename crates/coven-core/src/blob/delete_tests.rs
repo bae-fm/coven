@@ -392,7 +392,7 @@ async fn storage_with_chain(db: &Database) -> (TestStore, UserKeypair, UserKeypa
     let storage = TestStore::create(db, "test-store", founder.clone())
         .await
         .expect("create exact Store membership fixture");
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &founder,

@@ -75,22 +75,20 @@ async fn invite_merge_member_impl(
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
-    let (join_info, wrapped_key) = Box::pin(
-        crate::sync::invite::create_invitation_with_encryption_durable(
-            storage,
-            cloud_home,
-            store_root_hash,
-            &mut chain,
-            user_keypair,
-            public_key_hex,
-            invitee_email,
-            role,
-            encryption,
-            &protocol_store_id,
-            &invite_ts,
-            db,
-        ),
-    )
+    let (join_info, wrapped_key) = Box::pin(super::create_invitation_with_encryption_durable(
+        storage,
+        cloud_home,
+        store_root_hash,
+        &mut chain,
+        user_keypair,
+        public_key_hex,
+        invitee_email,
+        role,
+        encryption,
+        &protocol_store_id,
+        &invite_ts,
+        db,
+    ))
     .await?;
 
     info!(
@@ -191,7 +189,7 @@ async fn remove_merge_member_impl(
     // Revoke the member and rotate the cloud key. On return the rotation is
     // committed for every remaining member.
     let revoke_ts = hlc.now().to_string();
-    let new_key = crate::sync::invite::revoke_member_durable(
+    let new_key = super::revoke_member_durable(
         storage,
         cloud_home,
         store_root_hash,
@@ -217,7 +215,6 @@ async fn remove_merge_member_impl(
     let generation = new_key.current_generation();
     let fingerprint = apply_key_rotation(new_key, custody, cipher)
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })?;
-    crate::sync::invite::complete_revoke_rotation_adoption(db, pending_rotation, generation)
-        .await?;
+    super::complete_revoke_rotation_adoption(db, pending_rotation, generation).await?;
     Ok(fingerprint)
 }

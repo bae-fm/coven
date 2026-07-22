@@ -778,7 +778,7 @@ pub(crate) async fn select_store_snapshot(
     let mut resolutions = std::collections::BTreeSet::new();
     for reference in heads {
         let head =
-            crate::sync::membership_ops::load_exact_membership_head(storage, root, reference)
+            crate::sync::store::membership::load_exact_membership_head(storage, root, reference)
                 .await
                 .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
         resolutions.extend(head.body.resolutions.iter().cloned());
@@ -793,7 +793,7 @@ pub(crate) async fn select_store_snapshot(
         registrations.insert(head.body.author_registration.clone(), registration);
     }
     let resolutions = resolutions.into_iter().collect::<Vec<_>>();
-    let membership = crate::sync::membership_ops::load_anchored_chain_at_exact_heads(
+    let membership = crate::sync::store::membership::load_anchored_chain_at_exact_heads(
         storage,
         root,
         &root_value.descriptor.founder_pubkey,

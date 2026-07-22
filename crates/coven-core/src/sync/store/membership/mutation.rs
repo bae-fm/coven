@@ -1092,9 +1092,8 @@ pub async fn unwrap_store_keyring(
     // Store membership is a signed plaintext control plane: a device must read
     // the authority that selects its current recipient-sealed keys before it has
     // those keys. The joiner reads only, so `watermark_db` is None.
-    super::membership_ops::validate_membership_floor(membership_floor)
-        .map_err(InviteError::Crypto)?;
-    let chain = super::membership_ops::load_exact_anchored_chain(
+    super::validate_membership_floor(membership_floor).map_err(InviteError::Crypto)?;
+    let chain = super::load_exact_anchored_chain(
         bootstrap_storage,
         store_root,
         membership_floor,
@@ -2180,7 +2179,7 @@ async fn execute_revoke_mutation(
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            super::store::operations::upload_commit(storage, &candidate)
+            crate::sync::store::operations::upload_commit(storage, &candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
             persistence
@@ -2546,7 +2545,7 @@ async fn execute_resolution_mutation(
             &plan.transition.entry_ref.object,
         )?)
         .await?;
-    super::store::operations::upload_commit(storage, &plan.candidate)
+    crate::sync::store::operations::upload_commit(storage, &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence
@@ -2968,7 +2967,7 @@ mod tests {
         )
         .await
         .expect("create Merge Store");
-        let chain = super::super::membership_ops::load_current_exact_chain(
+        let chain = crate::sync::store::membership::load_current_exact_chain(
             &store.storage,
             &store.root,
             Some(&keys::public_key_hex(&owner)),
@@ -3018,12 +3017,12 @@ mod tests {
 
         let mut substituted_entry = prepared.clone();
         let substituted_bytes = b"substituted exact membership entry".to_vec();
-        let substituted_ref = super::super::storage::ExactObjectRef::new(
+        let substituted_ref = crate::sync::storage::ExactObjectRef::new(
             substituted_entry.entry_object.reference().slot().clone(),
             substituted_bytes.len() as u64,
             ObjectHash::digest(&substituted_bytes),
         );
-        substituted_entry.entry_object = super::super::storage::PreparedExactObject::new(
+        substituted_entry.entry_object = crate::sync::storage::PreparedExactObject::new(
             substituted_ref.clone(),
             substituted_bytes,
         )
@@ -3037,19 +3036,19 @@ mod tests {
             &db,
             store.root.store_root_hash,
             prepared,
-            super::super::membership::MembershipHeadActivation::Direct,
+            crate::sync::membership::MembershipHeadActivation::Direct,
             &owner,
         )
         .await
         .expect("finish membership transition");
         let mut substituted_head = publication;
         let substituted_bytes = b"substituted exact membership head".to_vec();
-        let substituted_ref = super::super::storage::ExactObjectRef::new(
+        let substituted_ref = crate::sync::storage::ExactObjectRef::new(
             substituted_head.head_object.reference().slot().clone(),
             substituted_bytes.len() as u64,
             ObjectHash::digest(&substituted_bytes),
         );
-        substituted_head.head_object = super::super::storage::PreparedExactObject::new(
+        substituted_head.head_object = crate::sync::storage::PreparedExactObject::new(
             substituted_ref.clone(),
             substituted_bytes,
         )

@@ -902,7 +902,7 @@ async fn reclaim_cycle_packages(
 #[derive(Debug, thiserror::Error)]
 enum AuthorizationRefreshError {
     #[error("read this device's wrapped key: {0}")]
-    WrappedKey(#[source] super::invite::InviteError),
+    WrappedKey(#[source] super::store::membership::InviteError),
     #[error("refresh state is invalid: {0}")]
     InvalidState(String),
     #[error("rotation gate database state: {0}")]
@@ -947,7 +947,7 @@ async fn refresh_authorization_state(
         debug!("refresh: no activated wrapped key for this device; keeping the live key");
         return Ok(());
     }
-    match super::invite::unwrap_store_keyring_for_refs(
+    match super::store::membership::unwrap_store_keyring_for_refs(
         storage,
         store_root_hash,
         user_keypair,
@@ -993,7 +993,7 @@ async fn refresh_authorization_state(
                         );
                     }
                     Some(custody) => {
-                        let fingerprint = super::membership_ops::apply_key_rotation(
+                        let fingerprint = super::store::membership::apply_key_rotation(
                             new_encryption,
                             custody,
                             cipher,
@@ -1181,7 +1181,7 @@ pub async fn ensure_owner_anchored_chain(
     if root.store_root_hash != store_protocol_root.object_hash() {
         return Err("local Store root reference differs from the opened Store root".to_string());
     }
-    let chain = super::membership_ops::load_and_persist_owner_anchor(
+    let chain = super::store::membership::load_and_persist_owner_anchor(
         storage,
         root,
         &crate::keys::public_key_hex(owner_keypair),
@@ -1274,10 +1274,10 @@ impl SyncComponents {
         invitee_email: Option<&str>,
         role: super::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, super::membership_ops::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, super::store::membership::MembershipOpsError> {
         let encryption = self
             .current_encryption()
-            .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
+            .ok_or(super::store::membership::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .invite_member(
                 &self.user_keypair,
@@ -1296,10 +1296,10 @@ impl SyncComponents {
         &self,
         public_key_hex: &str,
         custody: &dyn MasterKeyCustody,
-    ) -> Result<String, super::membership_ops::MembershipOpsError> {
+    ) -> Result<String, super::store::membership::MembershipOpsError> {
         let encryption = self
             .current_encryption()
-            .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
+            .ok_or(super::store::membership::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .remove_member(
                 &self.user_keypair,
@@ -1318,7 +1318,7 @@ impl SyncComponents {
         encryption: crate::encryption::EncryptionService,
         custody: &dyn MasterKeyCustody,
     ) -> Result<String, crate::keys::KeyError> {
-        super::membership_ops::apply_key_rotation(encryption, custody, &self.cipher)
+        super::store::membership::apply_key_rotation(encryption, custody, &self.cipher)
     }
 
     pub async fn create_circle(

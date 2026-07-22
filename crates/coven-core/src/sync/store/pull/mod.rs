@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+use super::membership as membership_ops;
 use super::reclaim as store_reclaim;
 use super::*;
 use crate::blob::decl::BlobDecls;
@@ -56,8 +57,8 @@ use crate::sync::store_objects::{
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::sync::{
-    causal_grants, circle, circle_activation, circle_ops, gate, hlc, membership, membership_ops,
-    provider, remote_object, retained_replay, session, store_commit, store_objects,
+    causal_grants, circle, circle_activation, circle_ops, gate, hlc, membership, provider,
+    remote_object, retained_replay, session, store_commit, store_objects,
 };
 
 mod ancestry;

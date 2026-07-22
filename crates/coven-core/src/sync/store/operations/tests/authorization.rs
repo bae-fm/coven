@@ -10,7 +10,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     let store = TestStore::create(&owner_db, "operation-predecessor-membership", owner.clone())
         .await
         .expect("create Merge Store");
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -38,7 +38,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     promote_active_member_fixture(&store, &owner_db, &writer_db, &owner, &writer, &encryption)
         .await
         .expect("promote operation author to Owner");
-    let before_removal = crate::sync::membership_ops::load_current_exact_chain(
+    let before_removal = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -53,7 +53,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
 
     let custody = TestCustody::default();
     let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    crate::sync::membership_ops::remove_member(
+    crate::sync::store::membership::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -67,7 +67,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     )
     .await
     .expect("remove operation author after its predecessor cut");
-    let candidate = crate::sync::membership_ops::load_current_exact_chain(
+    let candidate = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -117,7 +117,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("create Merge Store");
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -142,7 +142,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("activate operation author device");
-    let before_removal = crate::sync::membership_ops::load_current_exact_chain(
+    let before_removal = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -154,7 +154,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 
     let custody = TestCustody::default();
     let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    crate::sync::membership_ops::remove_member(
+    crate::sync::store::membership::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -168,7 +168,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("remove operation author directly");
-    let after_removal = crate::sync::membership_ops::load_current_exact_chain(
+    let after_removal = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -249,7 +249,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await
     .expect("create Merge Store");
-    let predecessor_membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+    let predecessor_membership = crate::sync::store::membership::load_and_persist_owner_anchor(
         &store.storage,
         &store.root,
         &owner_pubkey,
@@ -291,7 +291,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
 
     let new_member = UserKeypair::generate();
     let new_member_pubkey = pubkey_hex(&new_member);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -306,7 +306,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await
     .expect("publish new Direct membership");
-    let candidate = crate::sync::membership_ops::load_current_exact_chain(
+    let candidate = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&owner_pubkey),

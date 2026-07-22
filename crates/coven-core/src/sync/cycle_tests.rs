@@ -1703,7 +1703,7 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     retain_store_packages_for_assertion(&db, &storage, b"existing-pending-upload-snapshot").await;
     let peer = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &keypair,
@@ -1807,7 +1807,7 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
     )));
     let hlc = Arc::new(Hlc::new("M".to_string()));
     let peer = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &keypair,
@@ -2712,7 +2712,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
 #[tokio::test]
 async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     use crate::sync::cycle::ensure_owner_anchored_chain;
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -2832,7 +2832,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
 #[tokio::test]
 async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     use crate::sync::cycle::ensure_owner_anchored_chain;
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -2894,7 +2894,7 @@ fn cloud_objects(home: &InMemoryCloudHome) -> BTreeMap<String, Vec<u8>> {
 
 #[tokio::test]
 async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2958,7 +2958,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 
 #[tokio::test]
 async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root() {
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -3012,7 +3012,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
 
 #[tokio::test]
 async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() {
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
@@ -3066,7 +3066,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
 
 #[tokio::test]
 async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -3124,7 +3124,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
 
 #[tokio::test]
 async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mutation() {
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
@@ -5032,7 +5032,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         );
 
         let unregistered_member = UserKeypair::generate();
-        crate::sync::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &storage.storage,
             storage.home.as_ref(),
             &owner,
@@ -5589,7 +5589,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         .expect("publish first exact Store changeset");
 
     let behind = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -5704,7 +5704,7 @@ async fn member_device_does_not_create_a_snapshot() {
     let (_tmp, ld) = temp_store_dir();
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -5767,7 +5767,7 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([43; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -5810,7 +5810,7 @@ async fn prepare_same_principal_approval_fixture(
     member: &UserKeypair,
     hlc_node: &str,
 ) -> SamePrincipalApprovalFixture {
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         owner,
@@ -6095,7 +6095,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         let storage = cycle_test_store(&founder_db, &founder).await;
         let excluding_owner = UserKeypair::generate();
         let encryption = EncryptionService::from_key([62; 32]);
-        crate::sync::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &storage.storage,
             storage.home.as_ref(),
             &founder,
@@ -6415,7 +6415,7 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([44; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6441,7 +6441,7 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
     let owner_db = open_test_db();
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6474,7 +6474,7 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
     let owner_db = open_test_db();
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6526,7 +6526,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     .await
     .expect("create cross-principal test Store");
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6553,7 +6553,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
     let owner_db = open_test_db();
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6579,7 +6579,7 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
     let owner_db = open_test_db();
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6612,7 +6612,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
     let owner_db = open_test_db();
     let storage = cycle_test_store(&owner_db, &owner).await;
     let member = UserKeypair::generate();
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -6665,7 +6665,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     .expect("create exact cross-principal test Store");
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([43; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,

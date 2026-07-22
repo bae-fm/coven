@@ -1313,7 +1313,7 @@ async fn prepare_circle_operation_request(
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let founder = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let author_pubkey = keys::public_key_hex(signer);
@@ -1324,12 +1324,12 @@ async fn prepare_circle_operation_request(
     let name = request.name();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
         let current =
-            super::membership_ops::load_and_persist_owner_anchor(storage, &root, &founder, db)
+            super::store::membership::load_and_persist_owner_anchor(storage, &root, &founder, db)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let heads = current.head_refs().to_vec();
         let resolutions = current.resolution_refs().to_vec();
-        let exact = super::membership_ops::load_anchored_chain_at_exact_heads(
+        let exact = super::store::membership::load_anchored_chain_at_exact_heads(
             storage,
             &root,
             &founder,
@@ -1863,7 +1863,7 @@ async fn publish_circle_operation(
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;
     let founder = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let verified = load_circle_activations(
@@ -1967,7 +1967,7 @@ async fn has_current_merge_authority(
     author: &StoreDeviceRegistration,
 ) -> Result<bool, CircleOperationError> {
     let founder = db
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let root = db
@@ -1980,7 +1980,7 @@ async fn has_current_merge_authority(
         ));
     }
     let current =
-        super::membership_ops::load_and_persist_owner_anchor(storage, &root, &founder, db)
+        super::store::membership::load_and_persist_owner_anchor(storage, &root, &founder, db)
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     Ok(commit
@@ -3522,7 +3522,7 @@ mod tests {
             .expect("create exact Circle test Store");
         let peer = UserKeypair::generate();
         let peer_pubkey = keys::public_key_hex(&peer);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &founder,
@@ -3695,7 +3695,7 @@ mod tests {
             .expect("create Circle Store");
         let peer = UserKeypair::generate();
         let peer_pubkey = keys::public_key_hex(&peer);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &founder,
@@ -3926,7 +3926,7 @@ mod tests {
         let successor = UserKeypair::generate();
         let successor_pubkey = keys::public_key_hex(&successor);
         let encryption = EncryptionService::from_key([42; 32]);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &founder,
@@ -3971,7 +3971,7 @@ mod tests {
         custody.set_initial_key([42; 32]);
         let cipher = store.storage.cipher_state().clone();
         let pending_rotation = store.storage.shared_pending_rotation();
-        super::super::membership_ops::remove_member(
+        crate::sync::store::membership::remove_member(
             &store.storage,
             store.home.as_ref(),
             &founder,
@@ -3989,7 +3989,7 @@ mod tests {
             CloudCipher::Encrypted(encryption) => encryption,
             CloudCipher::Plaintext => panic!("member removal requires encrypted storage"),
         };
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &founder,
@@ -4083,7 +4083,7 @@ mod tests {
             .expect("create retained Circle Store");
         let peer = UserKeypair::generate();
         let peer_pubkey = keys::public_key_hex(&peer);
-        super::super::membership_ops::invite_member(
+        crate::sync::store::membership::invite_member(
             &store.storage,
             store.home.as_ref(),
             &founder,

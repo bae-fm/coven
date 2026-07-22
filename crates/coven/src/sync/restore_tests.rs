@@ -1526,7 +1526,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
 
     let pinned_owner_sql = format!(
         "SELECT value FROM protocol_state WHERE key = '{}'",
-        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY
+        crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY
     );
     assert_eq!(
         crate::sync::test_helpers::query_text(&db_b, &pinned_owner_sql).await,
@@ -1552,7 +1552,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -1576,7 +1576,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
     let live_cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    crate::sync::membership_ops::remove_member(
+    crate::sync::store::membership::remove_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,

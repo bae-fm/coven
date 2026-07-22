@@ -10,19 +10,24 @@ use crate::encryption::EncryptionService;
 #[cfg(test)]
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
+use crate::sync::{
+    blocking, cloud_storage, membership, remote_object, storage, store_commit, store_objects,
+    wrapped_store_key,
+};
 
-use super::cloud_storage::{CloudCipherAccess, PendingRotation};
-use super::hlc::Hlc;
-use super::invite::InviteError;
-use super::membership::{
+use crate::database::Database;
+use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
+use crate::sync::hlc::Hlc;
+use crate::sync::membership::{
     AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipChange, MembershipConflict,
     MembershipCoord, MembershipEntry, MembershipGrantId, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
-use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
-use super::store_commit::{GrantStreamAnchor, ResolvedStoreDeviceState, StoreRootRef};
-use super::store_objects::StoreObjectError;
-use crate::database::Database;
+use crate::sync::storage::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
+use crate::sync::store_commit::{GrantStreamAnchor, ResolvedStoreDeviceState, StoreRootRef};
+use crate::sync::store_objects::StoreObjectError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -39,7 +44,7 @@ pub enum MembershipOpsError {
     #[error("membership storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[from] super::store_objects::StoreObjectError),
+    StoreObject(#[from] crate::sync::store_objects::StoreObjectError),
     #[error("membership database state error: {0}")]
     Database(String),
     #[error("{0}")]
@@ -105,7 +110,7 @@ fn validate_invitation(
 ) -> Result<(), MembershipOpsError> {
     if *role == MemberRole::Owner {
         return Err(MembershipOpsError::Invite(InviteError::Membership(
-            super::membership::MembershipError::OwnerPromotionRequired,
+            crate::sync::membership::MembershipError::OwnerPromotionRequired,
         )));
     }
     if public_key_hex == hex::encode(user_keypair.public_key()) {
@@ -119,12 +124,25 @@ mod exact_chain;
 mod key_rotation;
 mod listing;
 mod merge;
+mod mutation;
 
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
 pub use key_rotation::apply_key_rotation;
 pub use listing::{current_membership_floor, get_members};
 pub use merge::{invite_member, remove_member};
+pub use mutation::{resolve_membership_conflict, unwrap_store_keyring, InviteError};
+
+#[cfg(test)]
+pub(crate) use mutation::signed_wrapped_keyring_for_test;
+pub(crate) use mutation::{
+    complete_revoke_rotation_adoption, create_invitation_with_encryption_durable,
+    ed25519_hex_to_x25519, finish_membership_transition, load_authorized_owner_keyring,
+    prepare_membership_transition, publish_prepared_merge_membership_activation,
+    publish_prepared_merge_membership_authority, revoke_member_durable, signed_wrapped_key,
+    unwrap_store_keyring_for_refs, validate_prepared_publication, validate_prepared_transition,
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
 
 pub(crate) use cursors::{
     load_and_persist_owner_anchor, upsert_head_cursor_on, validate_membership_floor,

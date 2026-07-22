@@ -30,7 +30,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         let db = open_test_db();
         let (root, device_id) =
             initialize_exact_store(&db, &storage, "outbound-crash-test", &keypair).await;
-        let membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+        let membership = crate::sync::store::membership::load_and_persist_owner_anchor(
             &storage,
             &root,
             &crate::keys::public_key_hex(&keypair),

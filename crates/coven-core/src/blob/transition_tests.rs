@@ -129,7 +129,7 @@ async fn invite_and_activate_peer(
     peer_db: &Database,
     peer: &UserKeypair,
 ) {
-    crate::sync::membership_ops::invite_member(
+    crate::sync::store::membership::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &storage.signer,

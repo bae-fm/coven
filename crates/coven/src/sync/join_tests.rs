@@ -45,7 +45,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("decode join request")
         .public_key;
     let invitation_home = GrantingCloudHome(store.home.as_ref().clone());
-    let invite = crate::sync::membership_ops::invite_member(
+    let invite = crate::sync::store::membership::invite_member(
         &store.storage,
         &invitation_home,
         &owner,

@@ -64,7 +64,7 @@ pub enum SyncError {
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
-    Membership(Box<crate::sync::membership_ops::MembershipOpsError>),
+    Membership(Box<crate::sync::store::membership::MembershipOpsError>),
     #[error("circle operation: {0}")]
     Circle(#[from] crate::sync::circle_ops::CircleOperationError),
     #[error("device join: {0}")]
@@ -77,8 +77,8 @@ pub enum SyncError {
     Loop(SyncLoopError),
 }
 
-impl From<crate::sync::membership_ops::MembershipOpsError> for SyncError {
-    fn from(error: crate::sync::membership_ops::MembershipOpsError) -> Self {
+impl From<crate::sync::store::membership::MembershipOpsError> for SyncError {
+    fn from(error: crate::sync::store::membership::MembershipOpsError) -> Self {
         Self::Membership(Box::new(error))
     }
 }
@@ -636,7 +636,7 @@ impl SyncManager {
             .await?;
 
         let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
-        crate::sync::membership_ops::get_members(
+        crate::sync::store::membership::get_members(
             &*storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
             &self.db,
@@ -667,17 +667,17 @@ impl SyncManager {
 
         let pinned_owner = self
             .db
-            .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
             .await?;
         let founder_pubkey = pinned_owner.clone().ok_or_else(|| {
-            SyncError::from(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
+            SyncError::from(crate::sync::store::membership::MembershipOpsError::NoFounderChain)
         })?;
         let store_root =
             self.db.local_store_root_ref().await?.ok_or_else(|| {
                 SyncError::Protocol("store protocol root hash is absent".to_string())
             })?;
         let membership_floor = crate::join_code::MembershipFloor(
-            crate::sync::membership_ops::current_membership_floor(
+            crate::sync::store::membership::current_membership_floor(
                 &*storage,
                 &store_root,
                 pinned_owner.as_deref(),
@@ -1340,7 +1340,7 @@ mod tests {
         assert!(manager.sync_loop_handle().is_none());
         assert!(manager.cloud_home().is_none());
         assert_eq!(
-            db.get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            db.get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
                 .await
                 .unwrap(),
             None,

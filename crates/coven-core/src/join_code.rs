@@ -77,7 +77,7 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     if code.membership_floor.0.is_empty() {
         return Err(JoinCodeError::EmptyMembershipFloor);
     }
-    crate::sync::membership_ops::validate_membership_floor(&code.membership_floor.0)
+    crate::sync::store::membership::validate_membership_floor(&code.membership_floor.0)
         .map_err(JoinCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }

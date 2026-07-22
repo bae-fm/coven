@@ -495,7 +495,7 @@ async fn history_with_member_removal() -> (
     let store = TestStore::create(&db, "retained-removal-proof", owner.clone())
         .await
         .expect("create removal-proof Store");
-    super::membership_ops::invite_member(
+    super::store::membership::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -534,7 +534,7 @@ async fn history_with_member_removal() -> (
     let cipher = RwLock::new(super::cloud_storage::CloudCipher::Encrypted(
         encryption.clone(),
     ));
-    super::membership_ops::remove_member(
+    super::store::membership::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,

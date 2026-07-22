@@ -89,7 +89,7 @@ fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
     ExactObjectRef::new(
         reference.slot().clone(),
         label.len() as u64,
-        super::super::store_commit::ObjectHash::digest(label),
+        crate::sync::store_commit::ObjectHash::digest(label),
     )
 }
 
@@ -120,7 +120,7 @@ async fn overwrite_head(fixture: &MergeFixture, reference: &MembershipHeadRef, h
             serde_json::to_vec(head).expect("serialize replacement head"),
         )
         .expect("prepare replacement head");
-    super::super::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
         .await
         .expect("write replacement head");
 }
@@ -288,7 +288,7 @@ async fn forked_membership_cursor_preserves_the_accepted_reference() {
         .await
         .unwrap();
     let mut fork = current.clone();
-    fork.head_hash = super::super::store_commit::ObjectHash::digest(b"forked head");
+    fork.head_hash = crate::sync::store_commit::ObjectHash::digest(b"forked head");
     fork.object = altered_exact(&current.object, b"forked object");
 
     assert!(persist_head_cursors(&fixture.db, &[fork]).await.is_err());
@@ -333,14 +333,14 @@ async fn entry_beyond_membership_head_is_not_committed() {
             "unheaded member".to_string(),
         )
         .expect("sign entry after exact head");
-    let (prepared, _) = super::super::store_objects::prepare_membership_entry(
+    let (prepared, _) = crate::sync::store_objects::prepare_membership_entry(
         &fixture.store.storage,
         fixture.store.root.store_root_hash,
         &entry,
     )
     .await
     .expect("prepare unheaded entry");
-    super::super::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
         .await
         .expect("publish unheaded entry");
 
@@ -460,7 +460,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         fixture.store.root.store_root_hash,
         ProtocolObjectDomain::StoreMembershipHead,
     );
-    let prefix = super::super::store_commit::membership_head_slot_prefix(
+    let prefix = crate::sync::store_commit::membership_head_slot_prefix(
         &founder_ref.coord.author_pubkey,
         &founder_ref.coord.author_owner_grant,
         AuthorStreamId::from_bytes([99; 32]),
@@ -482,7 +482,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
             serde_json::to_vec(&relocated).expect("serialize relocated membership head"),
         )
         .expect("prepare relocated membership head");
-    super::super::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
         .await
         .expect("publish relocated membership head");
     let relocated_ref = MembershipHeadRef {
@@ -634,13 +634,13 @@ async fn head_cursor_persist_never_regresses() {
         .clone();
     let mut higher = current.clone();
     higher.coord.seq = 10;
-    higher.coord.entry_hash = super::super::store_commit::ObjectHash::digest(b"entry 10");
-    higher.head_hash = super::super::store_commit::ObjectHash::digest(b"head 10");
+    higher.coord.entry_hash = crate::sync::store_commit::ObjectHash::digest(b"entry 10");
+    higher.head_hash = crate::sync::store_commit::ObjectHash::digest(b"head 10");
     higher.object = altered_exact(&current.object, b"object 10");
     let mut lower = higher.clone();
     lower.coord.seq = 9;
-    lower.coord.entry_hash = super::super::store_commit::ObjectHash::digest(b"entry 9");
-    lower.head_hash = super::super::store_commit::ObjectHash::digest(b"head 9");
+    lower.coord.entry_hash = crate::sync::store_commit::ObjectHash::digest(b"entry 9");
+    lower.head_hash = crate::sync::store_commit::ObjectHash::digest(b"head 9");
     lower.object = altered_exact(&current.object, b"object 9");
 
     persist_head_cursors(&fixture.db, std::slice::from_ref(&higher))
@@ -676,7 +676,7 @@ async fn head_cursor_rejects_a_reference_from_another_author_stream() {
 async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let db = open_test_db();
     let author = hex::encode([3; crate::keys::SIGN_PUBLICKEYBYTES]);
-    let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
+    let grant = MembershipGrantId(crate::sync::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
     let first = db
@@ -697,13 +697,13 @@ async fn pruned_membership_author_stream_is_replaced_and_persisted() {
 
 #[test]
 fn membership_floor_rejects_unsorted_author_streams() {
-    let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
+    let grant = MembershipGrantId(crate::sync::store_commit::ObjectHash::digest(
         b"floor ordering grant",
     ));
     let object = ExactObjectRef::new(
         ObjectSlot::logical("test/floor/head.json".to_string()).unwrap(),
         1,
-        super::super::store_commit::ObjectHash::digest(b"x"),
+        crate::sync::store_commit::ObjectHash::digest(b"x"),
     );
     let make = |author: &str, stream: u8| MembershipHeadRef {
         coord: MembershipCoord {
@@ -711,9 +711,9 @@ fn membership_floor_rejects_unsorted_author_streams() {
             author_owner_grant: grant.clone(),
             stream_id: AuthorStreamId::from_bytes([stream; 32]),
             seq: 1,
-            entry_hash: super::super::store_commit::ObjectHash::digest(author.as_bytes()),
+            entry_hash: crate::sync::store_commit::ObjectHash::digest(author.as_bytes()),
         },
-        head_hash: super::super::store_commit::ObjectHash::digest(&[stream]),
+        head_hash: crate::sync::store_commit::ObjectHash::digest(&[stream]),
         object: object.clone(),
     };
     let later = make("bbbb", 2);
@@ -735,7 +735,7 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     let mut second = first.clone();
     second.coord.author_pubkey = hex::encode([8; 32]);
     second.coord.author_owner_grant = MembershipGrantId(
-        super::super::store_commit::ObjectHash::digest(b"second grant"),
+        crate::sync::store_commit::ObjectHash::digest(b"second grant"),
     );
     second.coord.stream_id = AuthorStreamId::from_bytes([8; 32]);
     second.object = altered_exact(&first.object, b"second exact head");
@@ -827,7 +827,7 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
 async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively() {
     let fixture = merge_fixture("deep-membership-projection").await;
     let chain = load_fixture(&fixture).await;
-    let root_value = super::super::store_objects::load_store_protocol_root(
+    let root_value = crate::sync::store_objects::load_store_protocol_root(
         &fixture.store.storage,
         &fixture.store.root,
     )

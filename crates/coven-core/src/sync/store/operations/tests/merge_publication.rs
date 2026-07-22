@@ -924,7 +924,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let db = open();
         let (root, device_id) =
             initialize_exact_store(&db, &storage, "prepared-root-status", &keypair).await;
-        let membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+        let membership = crate::sync::store::membership::load_and_persist_owner_anchor(
             &storage,
             &root,
             &crate::keys::public_key_hex(&keypair),
@@ -1009,7 +1009,7 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
     .expect("in-memory home supports immutable copies");
     let db = open_test_db();
     let (root, device_id) = initialize_exact_store(&db, &storage, "blocked-retry", &keypair).await;
-    let membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+    let membership = crate::sync::store::membership::load_and_persist_owner_anchor(
         &storage,
         &root,
         &crate::keys::public_key_hex(&keypair),
@@ -1132,7 +1132,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     let db = open_test_db();
     let (root, device_id) =
         initialize_exact_store(&db, &storage, "blocked-discard", &keypair).await;
-    let membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+    let membership = crate::sync::store::membership::load_and_persist_owner_anchor(
         &storage,
         &root,
         &crate::keys::public_key_hex(&keypair),

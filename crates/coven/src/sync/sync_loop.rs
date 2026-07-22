@@ -437,7 +437,7 @@ impl SyncLoopHandle {
         invitee_email: Option<&str>,
         role: super::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, super::membership_ops::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, super::store::membership::MembershipOpsError> {
         self.inner
             .components
             .invite_member(public_key_hex, invitee_email, role, store_name)
@@ -447,7 +447,7 @@ impl SyncLoopHandle {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-    ) -> Result<String, super::membership_ops::MembershipOpsError> {
+    ) -> Result<String, super::store::membership::MembershipOpsError> {
         self.inner
             .components
             .remove_member(public_key_hex, self.inner.custody.as_ref())
