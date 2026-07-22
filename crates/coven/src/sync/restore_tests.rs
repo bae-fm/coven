@@ -1869,7 +1869,6 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         &owner,
         &Hlc::new("owner".to_string()),
         &pubkey_hex(&member),
-        &storage.root.store_root_id.to_string(),
         &encryption,
         &custody,
         &live_cipher,

@@ -566,7 +566,6 @@ async fn history_with_member_removal() -> (
         &owner,
         &super::hlc::Hlc::new("retained-removal-proof-remove".to_string()),
         &member_pubkey,
-        store.storage.store_id(),
         &encryption,
         &custody,
         &cipher,

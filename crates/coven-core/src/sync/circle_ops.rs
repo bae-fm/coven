@@ -4766,7 +4766,6 @@ mod tests {
             &founder,
             &super::super::hlc::Hlc::new("founder-device".to_string()),
             &successor_pubkey,
-            "circle-merge-revoked-grant",
             &encryption,
             &custody,
             cipher.as_ref(),

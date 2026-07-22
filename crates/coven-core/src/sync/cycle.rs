@@ -1470,7 +1470,6 @@ impl SyncComponents {
                 &self.user_keypair,
                 &self.hlc,
                 public_key_hex,
-                &self.store_id,
                 &encryption,
                 custody,
                 &self.cipher,

@@ -74,14 +74,8 @@ impl SerialStoreEngine {
         authorize_serial(self.access()).await
     }
 
-    async fn membership_context(
-        &self,
-    ) -> Result<
-        crate::sync::membership_ops::SerialMembershipContext<'_>,
-        crate::sync::membership_ops::MembershipOpsError,
-    > {
-        let device_id = self
-            .db()
+    async fn device_id(&self) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
+        self.db()
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| {
@@ -91,11 +85,8 @@ impl SerialStoreEngine {
                 crate::sync::store_outbound::StoreOutboundError::MissingState {
                     key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
                 },
-            )?;
-        Ok(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: self.coordination(),
-            device_id,
-        })
+            )
+            .map_err(Into::into)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -110,10 +101,12 @@ impl SerialStoreEngine {
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::membership_ops::MembershipOpsError> {
-        let context = self.membership_context().await?;
-        crate::sync::membership_ops::invite_member_with_coordination(
+        let device_id = self.device_id().await?;
+        crate::sync::membership_ops::invite_serial_member(
             &**self.storage(),
             self.storage().cloud_home(),
+            self.coordination(),
+            &device_id,
             identity,
             hlc,
             public_key_hex,
@@ -123,7 +116,6 @@ impl SerialStoreEngine {
             store_id,
             store_name,
             self.db(),
-            Some(context),
         )
         .await
     }
@@ -134,26 +126,25 @@ impl SerialStoreEngine {
         identity: &UserKeypair,
         hlc: &crate::sync::hlc::Hlc,
         public_key_hex: &str,
-        store_id: &str,
         encryption: &crate::encryption::EncryptionService,
         custody: &dyn crate::keys::MasterKeyCustody,
         cipher: &crate::sync::cloud_storage::CloudCipherState,
         pending_rotation: &crate::sync::cloud_storage::PendingRotation,
     ) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
-        let context = self.membership_context().await?;
-        crate::sync::membership_ops::remove_member_with_coordination(
+        let device_id = self.device_id().await?;
+        crate::sync::membership_ops::remove_serial_member_and_adopt(
             &**self.storage(),
             self.storage().cloud_home(),
+            self.coordination(),
+            &device_id,
             identity,
             hlc,
             public_key_hex,
-            store_id,
             encryption,
             custody,
             cipher,
             pending_rotation,
             self.db(),
-            Some(context),
         )
         .await
     }

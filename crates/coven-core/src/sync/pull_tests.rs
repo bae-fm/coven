@@ -7198,7 +7198,6 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         &second_owner,
         &crate::sync::hlc::Hlc::new("exact-predecessor-founder-removal".to_string()),
         &owner_pk,
-        "test-store",
         &encryption,
         &second_owner_custody,
         &second_owner_cipher,

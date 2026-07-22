@@ -3479,9 +3479,11 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
             )
             .await
             .expect("transfer provider administrator authority to recovered Owner device");
-            crate::sync::membership_ops::invite_member_with_coordination(
+            crate::sync::membership_ops::invite_serial_member(
                 storage,
                 home.as_ref(),
+                coordination,
+                &remote_device_id,
                 &founder,
                 &Hlc::new("serial-successor-member".to_string()),
                 &pubkey_hex(&successor),
@@ -3491,10 +3493,6 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
                 store_id,
                 "Serial post-pull authorization Store",
                 &remote,
-                Some(crate::sync::membership_ops::SerialMembershipContext {
-                    coordination,
-                    device_id: remote_device_id.clone(),
-                }),
             )
             .await
             .expect("add successor as a Serial Member");

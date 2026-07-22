@@ -81,7 +81,7 @@ impl MergeStoreEngine {
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::membership_ops::MembershipOpsError> {
-        crate::sync::membership_ops::invite_member_with_coordination(
+        crate::sync::membership_ops::invite_member(
             &**self.storage(),
             self.storage().cloud_home(),
             identity,
@@ -93,7 +93,6 @@ impl MergeStoreEngine {
             store_id,
             store_name,
             self.db(),
-            None,
         )
         .await
     }
@@ -104,25 +103,22 @@ impl MergeStoreEngine {
         identity: &UserKeypair,
         hlc: &crate::sync::hlc::Hlc,
         public_key_hex: &str,
-        store_id: &str,
         encryption: &crate::encryption::EncryptionService,
         custody: &dyn crate::keys::MasterKeyCustody,
         cipher: &crate::sync::cloud_storage::CloudCipherState,
         pending_rotation: &crate::sync::cloud_storage::PendingRotation,
     ) -> Result<String, crate::sync::membership_ops::MembershipOpsError> {
-        crate::sync::membership_ops::remove_member_with_coordination(
+        crate::sync::membership_ops::remove_member(
             &**self.storage(),
             self.storage().cloud_home(),
             identity,
             hlc,
             public_key_hex,
-            store_id,
             encryption,
             custody,
             cipher,
             pending_rotation,
             self.db(),
-            None,
         )
         .await
     }

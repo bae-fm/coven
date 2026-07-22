@@ -31,7 +31,7 @@ use crate::sync::hlc::Hlc;
 use crate::sync::invite::unwrap_store_keyring_for_refs;
 use crate::sync::membership::MemberRole;
 use crate::sync::membership_ops::{
-    invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
+    invite_member, invite_serial_member, remove_member, remove_serial_member_and_adopt,
     MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
 use crate::sync::storage::{
@@ -253,9 +253,11 @@ impl SerialMembershipFixture {
     }
 
     async fn invite(&self) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
-        invite_member_with_coordination(
+        invite_serial_member(
             self.storage.as_ref(),
             &self.home,
+            self.storage.serial_coordination().unwrap(),
+            &self.device_id,
             &self.owner,
             &Hlc::new(DEVICE_ID.to_string()),
             &pubkey_hex(&self.member),
@@ -265,10 +267,6 @@ impl SerialMembershipFixture {
             LIB_ID,
             "Serial Store",
             &self.db,
-            Some(crate::sync::membership_ops::SerialMembershipContext {
-                coordination: self.storage.serial_coordination().unwrap(),
-                device_id: self.device_id.clone(),
-            }),
         )
         .await
     }
@@ -288,22 +286,19 @@ impl SerialMembershipFixture {
         cipher: &dyn CloudCipherAccess,
         coordination: &dyn CoordinationStorage,
     ) -> Result<String, MembershipOpsError> {
-        remove_member_with_coordination(
+        remove_serial_member_and_adopt(
             self.storage.as_ref(),
             &self.home,
+            coordination,
+            &self.device_id,
             &self.owner,
             &Hlc::new(DEVICE_ID.to_string()),
             &pubkey_hex(&self.member),
-            LIB_ID,
             &EncryptionService::from_key(self.key),
             custody,
             cipher,
             self.storage.shared_pending_rotation().as_ref(),
             &self.db,
-            Some(crate::sync::membership_ops::SerialMembershipContext {
-                coordination,
-                device_id: self.device_id.clone(),
-            }),
         )
         .await
     }
@@ -807,9 +802,11 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     let device_id = local_store_device_id(&db).await;
     let registration = founder_registration(&storage, &root).await;
     let granting_home = GrantingCloudHome(home.clone());
-    let code = invite_member_with_coordination(
+    let code = invite_serial_member(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &Hlc::new(DEVICE_ID.to_string()),
         &pubkey_hex(&member),
@@ -819,10 +816,6 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         LIB_ID,
         "Serial Store",
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id: device_id.clone(),
-        }),
     )
     .await
     .expect("public Serial invitation");
@@ -895,22 +888,19 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     custody.set_initial_key(key);
     let cipher = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
-    remove_member_with_coordination(
+    remove_serial_member_and_adopt(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &Hlc::new(DEVICE_ID.to_string()),
         &pubkey_hex(&member),
-        LIB_ID,
         &EncryptionService::from_key(key),
         &custody,
         &cipher,
         &pending_rotation,
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id,
-        }),
     )
     .await
     .expect("public Serial removal and rotation");
@@ -991,9 +981,11 @@ async fn serial_rotation_extends_the_committed_wrapped_keyring() {
     let hlc = Hlc::new(DEVICE_ID.to_string());
 
     for member in [&first_member, &second_member] {
-        invite_member_with_coordination(
+        invite_serial_member(
             &storage,
             &granting_home,
+            storage.serial_coordination().unwrap(),
+            &device_id,
             &owner,
             &hlc,
             &pubkey_hex(member),
@@ -1003,10 +995,6 @@ async fn serial_rotation_extends_the_committed_wrapped_keyring() {
             LIB_ID,
             "Serial Store",
             &db,
-            Some(crate::sync::membership_ops::SerialMembershipContext {
-                coordination: storage.serial_coordination().unwrap(),
-                device_id: device_id.clone(),
-            }),
         )
         .await
         .expect("publish Serial invitation");
@@ -1016,22 +1004,19 @@ async fn serial_rotation_extends_the_committed_wrapped_keyring() {
     custody.set_initial_key(initial_key);
     let cipher = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
-    remove_member_with_coordination(
+    remove_serial_member_and_adopt(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &hlc,
         &pubkey_hex(&first_member),
-        LIB_ID,
         &initial,
         &custody,
         &cipher,
         &pending_rotation,
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id: device_id.clone(),
-        }),
     )
     .await
     .expect("publish first Serial removal");
@@ -1045,22 +1030,19 @@ async fn serial_rotation_extends_the_committed_wrapped_keyring() {
     let unrelated_generation_two = EncryptionService::from_key([0x61; 32])
         .with_appended_generation(2, [0x62; 32])
         .expect("build unrelated generation-two keyring");
-    remove_member_with_coordination(
+    remove_serial_member_and_adopt(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &hlc,
         &pubkey_hex(&second_member),
-        LIB_ID,
         &unrelated_generation_two,
         &custody,
         &cipher,
         &pending_rotation,
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id,
-        }),
     )
     .await
     .expect("publish second Serial removal");
@@ -1107,9 +1089,11 @@ async fn serial_invitation_after_rotation_uses_committed_key_authority() {
     let granting_home = GrantingCloudHome(home);
     let hlc = Hlc::new(DEVICE_ID.to_string());
 
-    invite_member_with_coordination(
+    invite_serial_member(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &hlc,
         &pubkey_hex(&removed_member),
@@ -1119,10 +1103,6 @@ async fn serial_invitation_after_rotation_uses_committed_key_authority() {
         LIB_ID,
         "Serial Store",
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id: device_id.clone(),
-        }),
     )
     .await
     .expect("publish initial Serial invitation");
@@ -1130,22 +1110,19 @@ async fn serial_invitation_after_rotation_uses_committed_key_authority() {
     custody.set_initial_key(initial_key);
     let cipher = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
-    remove_member_with_coordination(
+    remove_serial_member_and_adopt(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &hlc,
         &pubkey_hex(&removed_member),
-        LIB_ID,
         &initial,
         &custody,
         &cipher,
         &pending_rotation,
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id: device_id.clone(),
-        }),
     )
     .await
     .expect("publish Serial removal and rotation");
@@ -1155,9 +1132,11 @@ async fn serial_invitation_after_rotation_uses_committed_key_authority() {
     };
     let sealed = rotated.seal_app_data(b"current Serial data", b"serial invitation");
 
-    let invite = invite_member_with_coordination(
+    let invite = invite_serial_member(
         &storage,
         &granting_home,
+        storage.serial_coordination().unwrap(),
+        &device_id,
         &owner,
         &hlc,
         &pubkey_hex(&invited_member),
@@ -1167,10 +1146,6 @@ async fn serial_invitation_after_rotation_uses_committed_key_authority() {
         LIB_ID,
         "Serial Store",
         &db,
-        Some(crate::sync::membership_ops::SerialMembershipContext {
-            coordination: storage.serial_coordination().unwrap(),
-            device_id,
-        }),
     )
     .await
     .expect("publish post-rotation Serial invitation");
@@ -1254,7 +1229,6 @@ async fn found_add_and_fail_to_adopt_a_removal(
         owner,
         &hlc,
         &pubkey_hex(member),
-        LIB_ID,
         &EncryptionService::from_key(old_key),
         custody,
         &cipher_lock,
@@ -1406,7 +1380,6 @@ async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_cha
         &owner,
         &hlc,
         &pubkey_hex(&member),
-        LIB_ID,
         &EncryptionService::from_key(old_key),
         &custody,
         &cipher_lock,

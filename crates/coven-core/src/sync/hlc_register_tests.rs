@@ -412,7 +412,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         &owner,
         &Hlc::with_wall_clock("owner".to_string(), || 4_000),
         &pubkey_hex(&member),
-        "test-store",
         &encryption,
         &custody,
         cipher.as_ref(),
