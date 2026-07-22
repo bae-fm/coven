@@ -1,3 +1,4 @@
+use super::registration_authority::verify_serial_provider_administrator;
 use super::*;
 
 pub(in crate::sync::store_engine) async fn verify_accepted_provider_access_activation(
@@ -11,14 +12,10 @@ pub(in crate::sync::store_engine) async fn verify_accepted_provider_access_activ
 ) -> Result<(), StorePullError> {
     let activation =
         load_provider_access_activation(storage, root, root_value, access, administrator).await?;
-    let (position, authorization) =
+    let (_, authorization) =
         load_device_join_authorization(storage, root, &activation.membership_state).await?;
-    let authority = RegistrationPredecessorAuthority::Serial {
-        authorization: &authorization,
-        position,
-        history: SerialAuthorizationHistory::ExactPredecessor,
-    };
-    if !authority.verifies_provider_administrator(
+    if !verify_serial_provider_administrator(
+        &authorization,
         &access.grant.administrator_grant,
         &activation.author_registration,
         provider_admin,

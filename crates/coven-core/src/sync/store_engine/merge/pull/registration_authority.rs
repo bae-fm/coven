@@ -96,6 +96,38 @@ pub(crate) fn verify_merge_membership_state_ref(
     Ok(())
 }
 
+pub(crate) fn verify_merge_owner(
+    membership: &StoreMembershipStateRef,
+    chain: &MembershipChain,
+    owner_pubkey: &str,
+    owner_grant: &super::membership::MembershipGrantId,
+) -> bool {
+    let MembershipStatus::Resolved(resolved) = chain.status() else {
+        return false;
+    };
+    StoreMembershipStateRef::merge_concurrent(
+        chain.head_refs().to_vec(),
+        chain.resolution_refs().to_vec(),
+        membership.recovery().to_vec(),
+        resolved.state_hash,
+    )
+    .is_ok_and(|expected| membership == &expected)
+        && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
+}
+
+pub(crate) fn verify_merge_provider_administrator(
+    chain: &MembershipChain,
+    grant_id: &crate::sync::provider::ProviderAdminGrantId,
+    executor: &StoreDeviceRegistrationRef,
+    expected: &crate::sync::provider::ProviderAdminGrantRecord,
+) -> bool {
+    let MembershipStatus::Resolved(resolved) = chain.status() else {
+        return false;
+    };
+    let state = resolved.provider_admin.combined_state();
+    state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
+}
+
 pub(in crate::sync::store_engine) async fn load_device_join_authorization(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

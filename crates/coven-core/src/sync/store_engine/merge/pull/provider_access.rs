@@ -1,3 +1,4 @@
+use super::registration_authority::verify_merge_provider_administrator;
 use super::*;
 
 pub(in crate::sync::store_engine) async fn verify_accepted_provider_access_activation(
@@ -16,8 +17,8 @@ pub(in crate::sync::store_engine) async fn verify_accepted_provider_access_activ
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
-    let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
-    if !authority.verifies_provider_administrator(
+    if !verify_merge_provider_administrator(
+        &membership,
         &access.grant.administrator_grant,
         &activation.author_registration,
         provider_admin,

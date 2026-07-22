@@ -1,6 +1,16 @@
 use super::*;
 use crate::sync::circle_control::StoreMembershipStateRef;
 
+pub(crate) fn verify_serial_provider_administrator(
+    authorization: &SerialAuthorizationState,
+    grant_id: &super::provider::ProviderAdminGrantId,
+    executor: &StoreDeviceRegistrationRef,
+    expected: &super::provider::ProviderAdminGrantRecord,
+) -> bool {
+    authorization.provider_admin.authorizes(grant_id, executor)
+        && authorization.provider_admin.records().get(grant_id) == Some(expected)
+}
+
 pub(in crate::sync::store_engine) async fn load_device_join_authorization(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

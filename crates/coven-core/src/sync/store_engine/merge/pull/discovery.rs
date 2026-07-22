@@ -1,3 +1,4 @@
+use super::registration_authority::verify_merge_owner;
 use super::*;
 
 pub(crate) struct MergeStreamDiscovery {
@@ -79,7 +80,6 @@ pub(crate) async fn discover_merge_owner_recoveries(
         root.store_root_hash,
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
-    let authority = RegistrationPredecessorAuthority::MergeConcurrent(membership);
     let mut slot = first_slot.clone();
     let mut predecessor: Option<OwnerRecoveryNodeRef> = None;
     let mut sequence = 1_u64;
@@ -110,7 +110,12 @@ pub(crate) async fn discover_merge_owner_recoveries(
             || reference.owner_grant != protocol.descriptor.founder_grant
             || reference.sequence != sequence
             || node.predecessor != predecessor
-            || !authority.verifies_owner(&node.membership, &node.owner_pubkey, &node.owner_grant)
+            || !verify_merge_owner(
+                &node.membership,
+                membership,
+                &node.owner_pubkey,
+                &node.owner_grant,
+            )
         {
             return Err(StorePullError::Database(
                 "Owner recovery stream differs from its root-anchored authority".into(),
