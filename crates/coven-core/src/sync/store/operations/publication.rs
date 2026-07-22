@@ -165,7 +165,7 @@ impl StoreMembershipJournalCompletion {
                 Database::activate_store_operation_remote_objects_on(tx, candidate, &object_ids)?;
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
-                Database::advance_owner_promotion_journal_on(
+                StoreDatabase::advance_owner_promotion_journal_on(
                     tx,
                     journal_key,
                     target_key,

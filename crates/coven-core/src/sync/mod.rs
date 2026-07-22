@@ -28,7 +28,6 @@ mod cycle_tests;
 mod hlc_register_tests;
 pub mod loop_policy;
 pub mod membership;
-pub mod owner_promotion;
 pub mod provider;
 pub mod pull;
 #[cfg(test)]

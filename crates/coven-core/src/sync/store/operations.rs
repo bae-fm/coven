@@ -2,6 +2,7 @@ use super::abandonment::read_occupied_merge_head;
 use super::database::StoreDatabase;
 use super::device_join;
 use super::membership as invite;
+use super::owner_promotion;
 use super::reclaim as store_reclaim;
 use super::StoreError;
 use super::*;
@@ -23,8 +24,8 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::{run_blocking_object_verification, StoreObjectError};
 use crate::sync::{
-    audience_package, circle_control, membership, owner_promotion, provider, remote_object,
-    service, store_commit, store_objects, wrapped_store_key,
+    audience_package, circle_control, membership, provider, remote_object, service, store_commit,
+    store_objects, wrapped_store_key,
 };
 use std::future::Future;
 use std::pin::Pin;

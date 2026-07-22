@@ -1572,7 +1572,7 @@ pub async fn promote_active_member_fixture(
         )
         .await
         .map_err(|error| error.to_string())?;
-    let request = Box::pin(crate::sync::owner_promotion::begin_owner_promotion(
+    let request = Box::pin(crate::sync::store::owner_promotion::begin_owner_promotion(
         owner_db,
         &store.storage,
         &owner_device_id,
@@ -1581,7 +1581,7 @@ pub async fn promote_active_member_fixture(
     ))
     .await
     .map_err(|error| format!("begin Owner promotion: {error}"))?;
-    let acceptance = Box::pin(crate::sync::owner_promotion::accept_owner_promotion(
+    let acceptance = Box::pin(crate::sync::store::owner_promotion::accept_owner_promotion(
         member_db,
         &store.storage,
         &member_device_id,
@@ -1590,14 +1590,16 @@ pub async fn promote_active_member_fixture(
     ))
     .await
     .map_err(|error| format!("accept Owner promotion: {error}"))?;
-    let finalized = Box::pin(crate::sync::owner_promotion::finalize_owner_promotion(
-        owner_db,
-        &store.storage,
-        &owner_device_id,
-        owner,
-        encryption,
-        acceptance,
-    ))
+    let finalized = Box::pin(
+        crate::sync::store::owner_promotion::finalize_owner_promotion(
+            owner_db,
+            &store.storage,
+            &owner_device_id,
+            owner,
+            encryption,
+            acceptance,
+        ),
+    )
     .await
     .map_err(|error| format!("finalize Owner promotion: {error}"))?;
     let membership = crate::sync::pull::load_cycle_membership(&store.storage, member_db)

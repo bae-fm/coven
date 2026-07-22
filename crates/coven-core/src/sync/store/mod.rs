@@ -20,6 +20,7 @@ mod error;
 pub mod membership;
 pub(crate) mod operations;
 mod owner;
+pub mod owner_promotion;
 pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;

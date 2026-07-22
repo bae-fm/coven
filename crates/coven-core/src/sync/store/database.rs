@@ -1,5 +1,6 @@
 mod acknowledgements;
 mod device_exclusion;
+mod owner_promotion;
 mod reclaim;
 
 use crate::database::{

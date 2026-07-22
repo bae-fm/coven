@@ -111,7 +111,6 @@ mod membership_mutations;
 mod merge_candidate_lifecycle;
 mod merge_candidate_records;
 mod operation_models;
-mod owner_promotions;
 mod prepared_audience_objects;
 mod prepared_remote_objects;
 mod provider_probes;
