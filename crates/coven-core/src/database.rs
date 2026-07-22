@@ -19,8 +19,10 @@ use crate::database::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
 use crate::database::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
 pub(crate) use crate::database::remote_object_records::candidate_graph_exact_objects;
-use crate::database::remote_object_records::load_protocol_inert_object_on;
+pub(crate) use crate::database::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
+pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
+pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
 pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
 pub(crate) use crate::database::store_device_state::store_serial_predecessor_on;
@@ -164,6 +166,7 @@ pub(crate) use prepared_audience_objects::{
 };
 use schema_contract::{validate_host_synced_tables, DurablePreparedProtocolObject};
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+pub(crate) use store_ack_records::{finish_outbound_store_ack_on, load_outbound_store_ack_on};
 pub(crate) use store_authority_records::required_store_root_authority_on;
 use store_authority_records::{
     consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,

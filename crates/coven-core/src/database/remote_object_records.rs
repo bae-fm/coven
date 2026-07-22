@@ -202,7 +202,7 @@ pub(super) fn index_retained_replay_owner_on(
     Ok(())
 }
 
-pub(super) fn load_protocol_inert_object_on(
+pub(crate) fn load_protocol_inert_object_on(
     conn: &Connection,
     object_id: ObjectHash,
 ) -> Result<crate::sync::remote_object::ProtocolInertObject, DbError> {
@@ -404,7 +404,7 @@ pub(super) fn record_reclaimed_store_package_on(
     Ok(())
 }
 
-pub(super) fn persist_exact_remote_object_on(
+pub(crate) fn persist_exact_remote_object_on(
     conn: &Connection,
     remote: &RemoteObjectRecord,
     domain: &str,
@@ -574,7 +574,7 @@ pub(super) fn finish_remote_candidate_nonactivation_on(
     Ok(None)
 }
 
-pub(super) fn replace_prepared_merge_head_remote_on(
+pub(crate) fn replace_prepared_merge_head_remote_on(
     conn: &Connection,
     current: &ExactObjectRef,
     winner: &StoreDeviceHead,

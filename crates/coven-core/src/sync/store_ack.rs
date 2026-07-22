@@ -355,12 +355,14 @@ mod tests {
         )
         .await
         .expect("prepare acknowledgement candidate");
-        let candidate =
-            super::super::store_outbound::PreparedStoreOperationCommit::MergeConcurrent(candidate);
-        db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate.clone())
-            .await
-            .expect("persist acknowledgement candidate");
-        candidate
+        super::super::store_engine::prepare_merge_acknowledgement_activation_for_test(
+            db,
+            outbound.reference.clone(),
+            candidate.clone(),
+        )
+        .await
+        .expect("persist acknowledgement candidate");
+        super::super::store_outbound::PreparedStoreOperationCommit::MergeConcurrent(candidate)
     }
 
     async fn persist_serial_candidate(
@@ -393,12 +395,14 @@ mod tests {
         )
         .await
         .expect("prepare Serial acknowledgement candidate");
-        let candidate =
-            super::super::store_outbound::PreparedStoreOperationCommit::Serial(candidate);
-        db.prepare_outbound_store_ack_activation(outbound.reference.clone(), candidate.clone())
-            .await
-            .expect("persist Serial acknowledgement candidate");
-        candidate
+        super::super::store_engine::prepare_serial_acknowledgement_activation_for_test(
+            db,
+            outbound.reference.clone(),
+            candidate.clone(),
+        )
+        .await
+        .expect("persist Serial acknowledgement candidate");
+        super::super::store_outbound::PreparedStoreOperationCommit::Serial(candidate)
     }
 
     struct LosingMergeAckFixture {

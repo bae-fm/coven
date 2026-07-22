@@ -322,23 +322,6 @@ pub(crate) fn retained_store_operation_objects(
     Ok(objects)
 }
 
-pub(crate) async fn finish_nonactivating_store_ack(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    acknowledgement: super::store_commit::StoreAckRef,
-) -> Result<(), StoreOutboundError> {
-    let targets = db
-        .nonactivating_outbound_store_ack_cleanup_targets(acknowledgement.clone())
-        .await?;
-    for target in targets {
-        super::store_objects::delete_exact_object(storage, &target.object).await?;
-        db.mark_candidate_cleanup_absent(target.object).await?;
-    }
-    db.complete_nonactivating_outbound_store_ack(acknowledgement)
-        .await?;
-    Ok(())
-}
-
 pub(crate) async fn activate_store_operation_commit(
     db: &Database,
     storage: &dyn SyncStorage,

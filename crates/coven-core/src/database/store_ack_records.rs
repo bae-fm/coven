@@ -121,23 +121,23 @@ pub(super) fn load_published_store_ack_on(
     .transpose()
 }
 
-pub(super) fn record_published_store_ack_on(
+fn record_published_store_ack_on(
     conn: &Connection,
-    outbound: &OutboundStoreAck,
+    reference: &StoreAckRef,
+    successor_slot: &crate::storage::cloud::ObjectSlot,
 ) -> Result<(), DbError> {
-    let successor_slot =
-        serde_json::to_string(&outbound.ack.value.successor.next_slot).map_err(|error| {
-            DbError::Message(format!(
-                "serialize Store acknowledgement successor slot: {error}"
-            ))
-        })?;
+    let successor_slot = serde_json::to_string(successor_slot).map_err(|error| {
+        DbError::Message(format!(
+            "serialize Store acknowledgement successor slot: {error}"
+        ))
+    })?;
     conn.execute(
         "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
          VALUES (1, ?1, ?2) \
          ON CONFLICT(singleton) DO UPDATE SET \
            ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
         (
-            serde_json::to_string(&outbound.reference).map_err(|error| {
+            serde_json::to_string(reference).map_err(|error| {
                 DbError::Message(format!(
                     "serialize published Store acknowledgement ref: {error}"
                 ))
@@ -147,6 +147,27 @@ pub(super) fn record_published_store_ack_on(
     )
     .map(|_| ())
     .map_err(DbError::from)
+}
+
+pub(crate) fn finish_outbound_store_ack_on(
+    conn: &Connection,
+    reference: &StoreAckRef,
+    successor_slot: &crate::storage::cloud::ObjectSlot,
+) -> Result<(), DbError> {
+    let removed = conn
+        .execute(
+            "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
+            [serde_json::to_string(reference).map_err(|error| {
+                DbError::Message(format!("serialize Store acknowledgement ref: {error}"))
+            })?],
+        )
+        .map_err(DbError::from)?;
+    if removed != 1 {
+        return Err(DbError::Message(
+            "outbound Store acknowledgement disappeared".to_string(),
+        ));
+    }
+    record_published_store_ack_on(conn, reference, successor_slot)
 }
 
 pub(super) fn record_activated_store_ack_on(
@@ -204,7 +225,7 @@ pub(super) fn record_activated_store_ack_on(
     .map_err(DbError::from)
 }
 
-pub(super) fn load_outbound_store_ack_on(
+pub(crate) fn load_outbound_store_ack_on(
     conn: &Connection,
 ) -> Result<Option<OutboundStoreAck>, DbError> {
     conn.query_row(

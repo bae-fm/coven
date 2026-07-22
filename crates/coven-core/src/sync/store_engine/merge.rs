@@ -2,10 +2,24 @@ use super::*;
 
 pub(crate) mod abandonment;
 mod acknowledgements;
+mod database;
 pub(crate) mod operations;
 pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(crate) mod pull;
+
+use database::MergeDatabase;
+
+#[cfg(test)]
+pub(in crate::sync::store_engine) async fn prepare_acknowledgement_activation_for_test(
+    db: &Database,
+    acknowledgement: crate::sync::store_commit::StoreAckRef,
+    candidate: crate::sync::store_outbound::PreparedMergeStoreOperationCommit,
+) -> Result<(), crate::database::DbError> {
+    MergeDatabase::new(db)
+        .prepare_acknowledgement_activation(acknowledgement, candidate)
+        .await
+}
 
 pub(super) struct MergeStoreEngine {
     context: StoreEngineContext,
@@ -247,6 +261,10 @@ impl MergeStoreEngine {
 impl AuthorizedMergeStoreEngine<'_> {
     pub(super) fn db(&self) -> &Database {
         self.access.db
+    }
+
+    fn database(&self) -> MergeDatabase<'_> {
+        MergeDatabase::new(self.db())
     }
 
     pub(super) fn storage(&self) -> &dyn SyncStorage {

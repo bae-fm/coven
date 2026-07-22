@@ -11,10 +11,10 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::{
-    finish_nonactivating_store_ack, MergeStoreOperationCommitPlan,
-    PreparedMergeStoreOperationCommit, PreparedStoreOperationActivation,
-    PreparedStoreOperationCommit, StoreMembershipJournalCompletion, StoreOperationBatch,
-    StoreOperationPublicationOutcome, StoreOutboundError,
+    MergeStoreOperationCommitPlan, PreparedMergeStoreOperationCommit,
+    PreparedStoreOperationActivation, PreparedStoreOperationCommit,
+    StoreMembershipJournalCompletion, StoreOperationBatch, StoreOperationPublicationOutcome,
+    StoreOutboundError,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -580,7 +580,8 @@ async fn resolve_head_collision(
     if observation.winner().commit == reference {
         let (winner, winner_prepared) = observation.into_head();
         if let Some(acknowledgement) = commit.acknowledgement().cloned() {
-            db.adopt_outbound_store_ack_merge_head(acknowledgement, winner, winner_prepared)
+            MergeDatabase::new(db)
+                .adopt_acknowledgement_head(acknowledgement, winner, winner_prepared)
                 .await?;
             return Ok(StoreOperationPublicationOutcome::Reprepared);
         }
@@ -608,8 +609,10 @@ async fn resolve_head_collision(
             nonactivation: Box::new(nonactivation),
         });
     };
-    db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), nonactivation)
+    MergeDatabase::new(db)
+        .begin_acknowledgement_nonactivation(acknowledgement.clone(), nonactivation)
         .await?;
-    finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
+    super::acknowledgements::finish_nonactivating_acknowledgement(db, storage, acknowledgement)
+        .await?;
     Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
 }

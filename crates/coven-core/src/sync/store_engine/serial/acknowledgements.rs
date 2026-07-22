@@ -1,5 +1,24 @@
 use super::*;
 
+pub(super) async fn finish_nonactivating_acknowledgement(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    acknowledgement: crate::sync::store_commit::StoreAckRef,
+) -> Result<(), crate::sync::store_outbound::StoreOutboundError> {
+    let database = SerialDatabase::new(db);
+    if let Some(target) = database
+        .acknowledgement_cleanup_target(acknowledgement.clone())
+        .await?
+    {
+        crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    database
+        .complete_nonactivating_acknowledgement(acknowledgement)
+        .await?;
+    Ok(())
+}
+
 impl AuthorizedSerialStoreEngine<'_> {
     pub(in crate::sync::store_engine) async fn stage_and_publish_ack(
         &self,
@@ -221,19 +240,14 @@ impl AuthorizedSerialStoreEngine<'_> {
                         },
                     ))
                     .await?;
-                    self.db()
-                        .prepare_outbound_store_ack_activation(
-                            outbound.reference.clone(),
-                            crate::sync::store_outbound::PreparedStoreOperationCommit::Serial(
-                                candidate,
-                            ),
-                        )
+                    self.database()
+                        .prepare_acknowledgement_activation(outbound.reference.clone(), candidate)
                         .await?;
                     continue;
                 }
                 crate::database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
                 crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
-                    crate::sync::store_outbound::finish_nonactivating_store_ack(
+                    finish_nonactivating_acknowledgement(
                         self.db(),
                         self.storage(),
                         outbound.reference,

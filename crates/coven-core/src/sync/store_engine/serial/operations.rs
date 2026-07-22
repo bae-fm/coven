@@ -10,10 +10,9 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::{
-    finish_nonactivating_store_ack, required_store_root, PreparedSerialStoreOperationCommit,
-    PreparedStoreOperationActivation, SerialStoreOperationCommitPlan,
-    StoreMembershipJournalCompletion, StoreOperationBatch, StoreOperationPublicationOutcome,
-    StoreOutboundError,
+    required_store_root, PreparedSerialStoreOperationCommit, PreparedStoreOperationActivation,
+    SerialStoreOperationCommitPlan, StoreMembershipJournalCompletion, StoreOperationBatch,
+    StoreOperationPublicationOutcome, StoreOutboundError,
 };
 
 pub(crate) async fn prepare_plan(
@@ -416,7 +415,8 @@ pub(crate) async fn resolve_conflict(
     {
         super::pull::SerialSuccessorObservation::Unchanged(observed) => {
             if let Some(acknowledgement) = commit.acknowledgement().cloned() {
-                db.adopt_outbound_store_ack_serial_base_head(acknowledgement, observed)
+                SerialDatabase::new(db)
+                    .adopt_acknowledgement_base_head(acknowledgement, observed)
                     .await?;
                 return Ok(StoreOperationPublicationOutcome::Reprepared);
             }
@@ -465,9 +465,15 @@ pub(crate) async fn resolve_conflict(
                     nonactivation: Box::new(nonactivation),
                 });
             };
-            db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), nonactivation)
+            SerialDatabase::new(db)
+                .begin_acknowledgement_nonactivation(acknowledgement.clone(), nonactivation)
                 .await?;
-            finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
+            super::acknowledgements::finish_nonactivating_acknowledgement(
+                db,
+                storage,
+                acknowledgement,
+            )
+            .await?;
             Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
         }
     }

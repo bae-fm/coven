@@ -9,6 +9,17 @@ pub(crate) mod pull;
 
 use database::SerialDatabase;
 
+#[cfg(test)]
+pub(in crate::sync::store_engine) async fn prepare_acknowledgement_activation_for_test(
+    db: &Database,
+    acknowledgement: crate::sync::store_commit::StoreAckRef,
+    candidate: crate::sync::store_outbound::PreparedSerialStoreOperationCommit,
+) -> Result<(), crate::database::DbError> {
+    SerialDatabase::new(db)
+        .prepare_acknowledgement_activation(acknowledgement, candidate)
+        .await
+}
+
 pub(super) struct SerialStoreEngine {
     context: StoreEngineContext,
 }

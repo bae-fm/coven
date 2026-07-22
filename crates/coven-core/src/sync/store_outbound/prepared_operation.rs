@@ -564,13 +564,6 @@ impl PreparedStoreOperationCommit {
         }
     }
 
-    pub(crate) fn serial_base_head(&self) -> Option<&VersionedObject> {
-        match self {
-            Self::MergeConcurrent(_) => None,
-            Self::Serial(candidate) => Some(&candidate.base_head),
-        }
-    }
-
     pub(crate) fn adopt_serial_base_head(
         &mut self,
         observed: VersionedObject,

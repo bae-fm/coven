@@ -1,3 +1,4 @@
+mod acknowledgements;
 mod branch_resolution;
 mod candidate_cleanup;
 
@@ -9,22 +10,28 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::blob::decl::BlobDecls;
 use crate::database::{
     begin_remote_candidate_nonactivation_on, candidate_graph_exact_objects,
-    load_activated_registration_on, load_remote_object_on, parse_prepared_serial_candidate,
-    parse_prepared_serial_write_state, required_store_root_authority_on,
-    store_serial_predecessor_on, update_remote_object_on, CandidateCleanupObject, Database,
-    DbError, PreparedWriteMaterialization, StoreWriteBase, StoreWriteRouting,
-    LOCAL_DEVICE_ID_STATE_KEY, SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY,
+    finish_outbound_store_ack_on, load_activated_registration_on, load_outbound_store_ack_on,
+    load_protocol_inert_object_on, load_remote_object_on, parse_prepared_serial_candidate,
+    parse_prepared_serial_write_state, persist_exact_remote_object_on,
+    required_store_root_authority_on, store_serial_predecessor_on, update_remote_object_on,
+    CandidateCleanupObject, Database, DbError, OutboundStoreAckActivation,
+    PreparedWriteMaterialization, StoreWriteBase, StoreWriteRouting, LOCAL_DEVICE_ID_STATE_KEY,
+    SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY,
 };
 use crate::sync::gate::Gates;
 use crate::sync::membership::SerialMembershipState;
-use crate::sync::remote_object::remote_object_id;
+use crate::sync::remote_object::{
+    remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
+};
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::VersionedObject;
 use crate::sync::store_commit::{
-    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreSerialHead,
-    StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
+    ObjectHash, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
 };
-use crate::sync::store_outbound::StoreOutboundError;
+use crate::sync::store_outbound::{
+    PreparedSerialStoreOperationCommit, PreparedStoreOperationCommit, StoreOutboundError,
+};
 use crate::write::{
     PendingBranchId, PublishedPosition, WriteId, WriteReceipt, WriteResolution, WriteStatus,
 };

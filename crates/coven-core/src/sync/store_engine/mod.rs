@@ -222,6 +222,24 @@ pub(crate) async fn drain_serial_acknowledgements_for_test(
     engine.drain_acknowledgements_for_test(identity).await
 }
 
+#[cfg(test)]
+pub(crate) async fn prepare_merge_acknowledgement_activation_for_test(
+    db: &Database,
+    acknowledgement: super::store_commit::StoreAckRef,
+    candidate: super::store_outbound::PreparedMergeStoreOperationCommit,
+) -> Result<(), crate::database::DbError> {
+    merge::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
+}
+
+#[cfg(test)]
+pub(crate) async fn prepare_serial_acknowledgement_activation_for_test(
+    db: &Database,
+    acknowledgement: super::store_commit::StoreAckRef,
+    candidate: super::store_outbound::PreparedSerialStoreOperationCommit,
+) -> Result<(), crate::database::DbError> {
+    serial::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
+}
+
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn pull_store_commits<'a>(
@@ -887,10 +905,10 @@ impl<'engine> AuthorizedStoreEngine<'engine> {
     ) -> Result<u64, super::store_ack::StoreAckError> {
         match &self.0 {
             AuthorizedStoreEngineKind::Merge(engine) => {
-                engine.drain_acknowledgements(identity).await
+                Box::pin(engine.drain_acknowledgements(identity)).await
             }
             AuthorizedStoreEngineKind::Serial(engine) => {
-                engine.drain_acknowledgements(identity).await
+                Box::pin(engine.drain_acknowledgements(identity)).await
             }
         }
     }
