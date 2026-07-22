@@ -45,6 +45,7 @@ use crate::sync::{
 };
 
 mod device_join_attempt;
+mod device_join_cleanup;
 mod device_operations;
 mod discovery;
 mod history;
@@ -61,6 +62,7 @@ mod terminal_authority;
 mod terminal_cleanup;
 
 pub(in crate::sync::store_engine) use device_join_attempt::verify_device_join_attempt_evidence;
+pub(in crate::sync::store_engine) use device_join_cleanup::verify_device_join_cleanup_activation;
 pub(crate) use device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,
 };

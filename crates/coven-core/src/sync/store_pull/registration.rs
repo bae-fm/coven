@@ -5,6 +5,9 @@ pub(crate) enum RegistrationLoadError {
     Invalid(String),
 }
 
+pub(crate) type RegistrationLoadFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, RegistrationLoadError>> + Send + 'a>>;
+
 pub(crate) enum VerifiedAcceptedPredecessor<'a> {
     Exact,
     SerialHistory {
@@ -186,55 +189,43 @@ impl RegistrationPredecessorAuthority<'_> {
     }
 }
 
-pub(crate) async fn verify_device_join_cleanup_activation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    activation: &super::device_join::DeviceJoinCleanupActivation,
-) -> Result<super::device_join::JoinerJoinTerminal, StorePullError> {
-    let root_value = load_store_protocol_root(storage, root).await?.value;
-    let (commit, author) =
-        load_commit_with_author_at_root(storage, root, &root_value, &activation.activation).await?;
-    if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
-        return Err(StorePullError::Database(
-            "device join cleanup activation does not contain its exact sole receipt".to_string(),
-        ));
-    }
-    let authorization =
-        load_device_join_authorization(storage, root, &commit.membership_state).await?;
-    let predecessor = match &authorization {
-        DeviceJoinBootstrapAuthorization::MergeConcurrent { chain, .. } => {
-            RegistrationPredecessorAuthority::MergeConcurrent(chain)
+pub(crate) struct LoadedDeviceJoinCleanupActivation {
+    pub(crate) write_policy: crate::WritePolicy,
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) author: StoreDeviceRegistration,
+    pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
+}
+
+pub(crate) fn load_device_join_cleanup_activation<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    activation: &'a super::device_join::DeviceJoinCleanupActivation,
+) -> StorePullFuture<'a, LoadedDeviceJoinCleanupActivation> {
+    Box::pin(async move {
+        let root_value = load_store_protocol_root(storage, root).await?.value;
+        let (commit, author) =
+            load_commit_with_author_at_root(storage, root, &root_value, &activation.activation)
+                .await?;
+        if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
+            return Err(StorePullError::Database(
+                "device join cleanup activation does not contain its exact sole receipt"
+                    .to_string(),
+            ));
         }
-        DeviceJoinBootstrapAuthorization::Serial {
-            position,
-            authorization,
-            ..
-        } => RegistrationPredecessorAuthority::Serial {
-            authorization,
-            position: position.clone(),
-            history: SerialAuthorizationHistory::ExactPredecessor,
-        },
-    };
-    let receipts = Box::pin(validate_commit_join_cleanup_receipts(
-        storage,
-        root,
-        &root_value,
-        &commit,
-        &author,
-        Some(&predecessor),
-        None,
-    ))
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => StorePullError::Object(error),
-        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-    })?;
-    let [receipt] = receipts.as_slice() else {
-        return Err(StorePullError::Database(
-            "device join cleanup activation does not resolve to one verified receipt".to_string(),
-        ));
-    };
-    Ok(receipt.joiner_terminal.clone())
+        let receipts =
+            load_commit_join_cleanup_receipts(storage, root, &root_value, &commit, &author)
+                .await
+                .map_err(|error| match error {
+                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                })?;
+        Ok(LoadedDeviceJoinCleanupActivation {
+            write_policy: root_value.descriptor.write_policy,
+            commit,
+            author,
+            receipts,
+        })
+    })
 }
 
 pub(crate) async fn validate_commit_acknowledgement(

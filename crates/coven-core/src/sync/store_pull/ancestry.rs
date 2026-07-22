@@ -308,6 +308,17 @@ pub(super) fn load_verified_device_join_attempt_evidence_ref<'a>(
     Box::pin(async move {
         let evidence =
             load_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
+        verify_device_join_attempt_evidence(storage, root, evidence, accepted_predecessor).await
+    })
+}
+
+pub(super) fn verify_device_join_attempt_evidence<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    evidence: LoadedDeviceJoinAttemptEvidence,
+    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
+) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
+    Box::pin(async move {
         let offer = &evidence.attempt.value.provider_approval.request.offer;
         verify_provider_access_authority(
             storage,
@@ -320,49 +331,6 @@ pub(super) fn load_verified_device_join_attempt_evidence_ref<'a>(
         )
         .await?;
         Ok(evidence.attempt)
-    })
-}
-
-pub(crate) fn load_verified_device_join_attempt_ref<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    reference: &'a super::store_commit::DeviceJoinAttemptRef,
-    owner: &'a StoreDeviceRegistration,
-) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
-    Box::pin(async move {
-        let attempt =
-            load_verified_device_join_attempt_evidence_ref(storage, root, reference, owner, None)
-                .await?;
-        match &attempt.value.bootstrap_cut {
-            StoreHistoryCut::MergeConcurrent(_) => {
-                Box::pin(crate::sync::store_engine::verify_store_history_authority(
-                    storage,
-                    None,
-                    root,
-                    &attempt.value.bootstrap_cut,
-                    &attempt.value.membership,
-                ))
-                .await?;
-            }
-            StoreHistoryCut::Serial(cut_position) => {
-                let authorization =
-                    load_device_join_authorization(storage, root, &attempt.value.membership)
-                        .await?;
-                let DeviceJoinBootstrapAuthorization::Serial { position, .. } = authorization
-                else {
-                    return Err(StorePullError::Database(
-                        "Serial device join attempt carries Merge membership authority".to_string(),
-                    ));
-                };
-                if &position != cut_position {
-                    return Err(StorePullError::Serial(
-                    "device join attempt cut differs from its exact Serial authorization position"
-                        .to_string(),
-                ));
-                }
-            }
-        }
-        Ok(attempt)
     })
 }
 

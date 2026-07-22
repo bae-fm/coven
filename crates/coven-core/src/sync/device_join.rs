@@ -4070,9 +4070,12 @@ pub async fn accept_joiner_device_join_cleanup(
         ) => None,
         _ => return Err(DeviceJoinError::JournalConflict),
     };
-    let receipt_terminal =
-        crate::sync::store_pull::verify_device_join_cleanup_activation(storage, root, &activation)
-            .await?;
+    let receipt_terminal = crate::sync::store_engine::verify_device_join_cleanup_activation(
+        storage,
+        root,
+        &activation,
+    )
+    .await?;
     match &local_terminal {
         Some(terminal) if terminal != &receipt_terminal => {
             return Err(DeviceJoinError::JournalConflict);

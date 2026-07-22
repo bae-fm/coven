@@ -91,23 +91,6 @@ async fn verify_history_state(
     })
 }
 
-pub(in crate::sync::store_engine) async fn verify_history_authority(
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    root: &StoreRootRef,
-    cut: &StoreHistoryCut,
-    membership_ref: &StoreMembershipStateRef,
-) -> Result<(), StorePullError> {
-    let StoreHistoryCut::Serial(position) = cut else {
-        return Err(StorePullError::Serial(
-            "Serial history verification received a Merge cut".to_string(),
-        ));
-    };
-    verify_history_state(storage, coordination, root, position, membership_ref)
-        .await
-        .map(|_| ())
-}
-
 async fn verify_authority(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,

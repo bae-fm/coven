@@ -266,34 +266,6 @@ pub(crate) async fn verify_store_snapshot_stability(
     }
 }
 
-pub(crate) async fn verify_store_history_authority(
-    storage: &dyn SyncStorage,
-    serial_coordination: Option<&dyn CoordinationStorage>,
-    root: &StoreRootRef,
-    cut: &super::store_commit::StoreHistoryCut,
-    membership: &super::circle_control::StoreMembershipStateRef,
-) -> Result<(), super::store_pull::StorePullError> {
-    match cut {
-        super::store_commit::StoreHistoryCut::MergeConcurrent(_) => {
-            if serial_coordination.is_some() {
-                return Err(super::store_pull::StorePullError::Database(
-                    "Merge history verification received Serial coordination".to_string(),
-                ));
-            }
-            merge::pull::verify_history_authority(storage, root, cut, membership).await
-        }
-        super::store_commit::StoreHistoryCut::Serial(_) => {
-            let coordination = serial_coordination.ok_or_else(|| {
-                super::store_pull::StorePullError::Serial(
-                    "Serial history verification requires coordination capability".to_string(),
-                )
-            })?;
-            serial::pull::verify_history_authority(storage, coordination, root, cut, membership)
-                .await
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) async fn verify_merge_snapshot_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,
@@ -433,6 +405,26 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
             }
             crate::WritePolicy::Serial => {
                 serial::pull::verify_device_join_attempt_evidence(storage, root, evidence).await
+            }
+        }
+    })
+}
+
+pub(crate) fn verify_device_join_cleanup_activation<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    activation: &'a super::device_join::DeviceJoinCleanupActivation,
+) -> super::store_pull::StorePullFuture<'a, super::device_join::JoinerJoinTerminal> {
+    Box::pin(async move {
+        let evidence =
+            super::store_pull::load_device_join_cleanup_activation(storage, root, activation)
+                .await?;
+        match evidence.write_policy {
+            crate::WritePolicy::MergeConcurrent => {
+                merge::pull::verify_device_join_cleanup_activation(storage, root, evidence).await
+            }
+            crate::WritePolicy::Serial => {
+                serial::pull::verify_device_join_cleanup_activation(storage, root, evidence).await
             }
         }
     })
