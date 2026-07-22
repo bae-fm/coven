@@ -413,6 +413,54 @@ pub(crate) async fn load_device_join_authorization(
     }
 }
 
+pub(crate) async fn verify_accepted_provider_access_activation(
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    root: &StoreRootRef,
+    access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
+    provider_admin: &super::provider::ProviderAdminGrantRecord,
+    administrator: &super::store_commit::StoreDeviceRegistration,
+) -> Result<(), super::store_pull::StorePullError> {
+    let root_value = super::store_objects::load_store_protocol_root(storage, root)
+        .await?
+        .value;
+    match root_value.descriptor.write_policy {
+        crate::WritePolicy::MergeConcurrent => {
+            if coordination.is_some() {
+                return Err(super::store_pull::StorePullError::Database(
+                    "Merge provider-access verification received Serial coordination".to_string(),
+                ));
+            }
+            merge::pull::verify_accepted_provider_access_activation(
+                storage,
+                root,
+                &root_value,
+                access,
+                provider_admin,
+                administrator,
+            )
+            .await
+        }
+        crate::WritePolicy::Serial => {
+            let coordination = coordination.ok_or_else(|| {
+                super::store_pull::StorePullError::Serial(
+                    "provider-access verification requires coordination capability".to_string(),
+                )
+            })?;
+            serial::pull::verify_accepted_provider_access_activation(
+                storage,
+                coordination,
+                root,
+                &root_value,
+                access,
+                provider_admin,
+                administrator,
+            )
+            .await
+        }
+    }
+}
+
 pub(crate) async fn prepare_device_join_bootstrap(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

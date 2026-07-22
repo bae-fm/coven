@@ -3,6 +3,7 @@ use crate::sync::store_commit::{
     serial_head_key, DeviceStreamAnchor, OwnerRecoveryNodeRef, StoreCommitAnchor,
 };
 use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, StoreSerialHeadState};
+use crate::sync::store_engine::serial::pull::load_serial_cycle_authorization;
 
 async fn one_retained_checkpoint() -> (
     Database,

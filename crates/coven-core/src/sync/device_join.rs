@@ -2095,7 +2095,7 @@ pub fn prepare_device_registration_request<'a>(
         )
         .await?;
         approval.verify(&root_value, &owner, &administrator)?;
-        crate::sync::store_pull::verify_accepted_provider_access_activation(
+        crate::sync::store_engine::verify_accepted_provider_access_activation(
             storage,
             coordination,
             &approval.request.offer.store_root,
@@ -2287,7 +2287,7 @@ pub async fn accept_device_registration_request(
     request
         .approval
         .verify(&root_value, &owner, &administrator)?;
-    crate::sync::store_pull::verify_accepted_provider_access_activation(
+    crate::sync::store_engine::verify_accepted_provider_access_activation(
         storage,
         coordination,
         &offer.store_root,

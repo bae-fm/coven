@@ -44,6 +44,7 @@ mod device_operations;
 mod history;
 mod join_bootstrap;
 mod owner_promotion;
+mod provider_access;
 mod registration_authority;
 mod resolution;
 mod snapshot_authority;
@@ -58,6 +59,7 @@ pub(in crate::sync::store_engine) use owner_promotion::{
     find_request_activation as find_owner_promotion_request_activation,
     verify_acceptance as verify_owner_promotion_acceptance,
 };
+pub(in crate::sync::store_engine) use provider_access::verify_accepted_provider_access_activation;
 pub(in crate::sync::store_engine) use registration_authority::load_device_join_authorization;
 pub(crate) use resolution::cleanup_serial_abandonment_authority;
 pub use resolution::SerialResolutionPlan;

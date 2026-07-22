@@ -18,8 +18,8 @@ use super::circle_activation::{
 use super::circle_control::StoreMembershipStateRef;
 use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
 use super::storage::{
-    BlobSpoolProtection, CoordinationError, CoordinationStorage, ExactObjectRef,
-    ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+    BlobSpoolProtection, CoordinationError, ExactObjectRef, ProtocolObjectContext,
+    ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
     ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier, DeviceJoinAttempt,
@@ -37,18 +37,16 @@ use super::store_commit::{
 use super::store_objects::{
     load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
     load_device_exclusion_proposal_ref, load_device_join_outcome_ref, load_founder_registration,
-    load_founder_registration_with_root, load_owner_recovery_node_ref,
-    load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
-    load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
-    load_store_ack_predecessor, load_store_ack_ref, load_store_protocol_root,
-    run_blocking_object_verification, StoreObjectError, VerifiedObject,
+    load_owner_recovery_node_ref, load_owner_signed_device_join_attempt_ref,
+    load_reclaim_authorization_ref, load_reclaim_receipt_ref, load_registration_ref,
+    load_registration_ref_with_root, load_store_ack_predecessor, load_store_ack_ref,
+    load_store_protocol_root, run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::sync::store_engine::{
-    load_device_join_authorization, merge::pull::*, serial::pull::*,
-    DeviceJoinBootstrapAuthorization,
+    load_device_join_authorization, merge::pull::*, DeviceJoinBootstrapAuthorization,
 };
 
 mod ancestry;
