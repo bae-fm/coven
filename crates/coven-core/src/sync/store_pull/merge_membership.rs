@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn membership_authorizes(
+pub(crate) fn membership_authorizes(
     membership: Option<&MembershipChain>,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,

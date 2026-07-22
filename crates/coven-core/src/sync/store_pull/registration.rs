@@ -186,7 +186,7 @@ impl RegistrationPredecessorAuthority<'_> {
     }
 }
 
-pub(super) async fn load_merge_predecessor_membership(
+pub(crate) async fn load_merge_predecessor_membership(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,
@@ -673,6 +673,28 @@ pub(super) async fn load_commit_registrations(
         predecessor,
         accepted_predecessor,
     ))
+    .await
+}
+
+pub(crate) async fn load_merge_commit_registrations(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+    predecessor_membership: &MembershipChain,
+    accepted_predecessor: Option<&VerifiedStoreHistoryState>,
+) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
+{
+    let predecessor = RegistrationPredecessorAuthority::MergeConcurrent(predecessor_membership);
+    let exact_predecessor = VerifiedAcceptedPredecessor::Exact;
+    load_commit_registrations(
+        storage,
+        root,
+        commit,
+        activating_author,
+        Some(&predecessor),
+        accepted_predecessor.map(|_| &exact_predecessor),
+    )
     .await
 }
 

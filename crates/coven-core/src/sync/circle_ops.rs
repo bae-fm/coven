@@ -4254,22 +4254,14 @@ mod tests {
         );
 
         let (_store_temp, store_dir) = temp_store_dir();
-        let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+        let engine =
+            super::super::store_engine::StoreEngine::authorize_borrowed(&store.storage, None, &db)
+                .await
+                .expect("authorize Merge engine for pull");
+        let pull = engine
+            .pull(&store_dir, &signer)
             .await
-            .expect("load exact membership for Merge pull")
-            .chain
-            .expect("Merge Store has a membership chain");
-        let pull = super::super::store_pull::pull_merge_store_commits_with_identity(
-            &db,
-            &test_synced_tables(),
-            &store.storage,
-            store.root.store_root_hash,
-            &store_dir,
-            &membership,
-            Some(&signer),
-        )
-        .await
-        .expect("pull reports the invented access commit as held");
+            .expect("pull reports the invented access commit as held");
         assert!(pull.held_positions.iter().any(|held| {
             matches!(
                 &held.reason,

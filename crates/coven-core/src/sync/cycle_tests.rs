@@ -289,7 +289,7 @@ async fn recover_serial_owner_state(
     crate::sync::cycle::ensure_serial_founder_authorization(storage, &target, root, &protocol)
         .await
         .expect("install exact Serial founder authorization");
-    crate::sync::store_pull::pull_store_commits_with_coordination(
+    crate::sync::store_engine::pull_store_commits(
         &target,
         target.synced_tables(),
         storage,
@@ -300,6 +300,7 @@ async fn recover_serial_owner_state(
         ),
         root.store_root_hash,
         &StoreDir::new(target_dir.path()),
+        None,
         None,
     )
     .await

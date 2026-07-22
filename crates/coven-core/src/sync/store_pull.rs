@@ -85,7 +85,7 @@ mod terminal_cleanup;
 
 use circle_packages::*;
 pub(crate) use join_validation::*;
-use merge_discovery::*;
+pub(crate) use merge_discovery::*;
 use merge_replay::*;
 
 pub(crate) use ancestry::*;
@@ -270,25 +270,25 @@ impl From<DbError> for StorePullError {
 }
 
 #[derive(Clone)]
-struct Candidate {
-    commit_ref: StoreBatchCommitRef,
-    commit: StoreBatchCommit,
-    author: StoreDeviceRegistration,
-    package: Option<Vec<u8>>,
-    registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-    device_operations: CandidateDeviceOperations,
+pub(crate) struct Candidate {
+    pub(crate) commit_ref: StoreBatchCommitRef,
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) author: StoreDeviceRegistration,
+    pub(crate) package: Option<Vec<u8>>,
+    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) device_operations: CandidateDeviceOperations,
 }
 
 #[derive(Clone)]
-struct MergeCandidate {
-    candidate: Candidate,
-    activation_head: StoreDeviceHead,
-    activation_head_object: ExactObjectRef,
-    predecessor_membership: MembershipChain,
+pub(crate) struct MergeCandidate {
+    pub(crate) candidate: Candidate,
+    pub(crate) activation_head: StoreDeviceHead,
+    pub(crate) activation_head_object: ExactObjectRef,
+    pub(crate) predecessor_membership: MembershipChain,
 }
 
-struct LoadedMergePredecessorMemberships {
-    by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
+pub(crate) struct LoadedMergePredecessorMemberships {
+    pub(crate) by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
 impl LoadedMergePredecessorMemberships {
@@ -579,7 +579,7 @@ type CirclePackageAccesses =
     BTreeMap<(super::circle::CircleId, super::circle::CircleControlCoord), CirclePackageAccess>;
 
 #[derive(Clone)]
-enum CandidateDeviceOperations {
+pub(crate) enum CandidateDeviceOperations {
     Verified(VerifiedStoreDeviceOperations),
     MergePending {
         predecessor_membership: MembershipChain,
@@ -654,7 +654,7 @@ struct AuthorizedSerialCommit {
     authorization_after: SerialAuthorizationState,
 }
 
-fn held_commit(
+pub(crate) fn held_commit(
     reference: &StoreBatchCommitRef,
     reason: HeldStorePositionReason,
 ) -> HeldStorePosition {
@@ -667,7 +667,7 @@ fn held_commit(
     }
 }
 
-fn held_package(
+pub(crate) fn held_package(
     reference: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     reason: HeldStorePositionReason,
@@ -702,7 +702,7 @@ fn held_dependency(
     }
 }
 
-fn commit_stream_id(coord: &StoreCommitCoord) -> String {
+pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {
     match coord {
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
         StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),

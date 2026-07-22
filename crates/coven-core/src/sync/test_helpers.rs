@@ -1664,7 +1664,7 @@ pub fn install_active_device_fixture<'a>(
             }
         };
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
-        let bootstrap_pull = Box::pin(crate::sync::store_pull::pull_store_commits_with_identity(
+        let bootstrap_pull = Box::pin(crate::sync::store_engine::pull_store_commits(
             local_db,
             local_db.synced_tables(),
             &store.storage,
@@ -1807,7 +1807,7 @@ pub async fn promote_active_member_fixture(
         crate::WritePolicy::Serial => None,
     };
     let (_temp, store_dir) = temp_store_dir();
-    let pull = Box::pin(crate::sync::store_pull::pull_store_commits_with_identity(
+    let pull = Box::pin(crate::sync::store_engine::pull_store_commits(
         member_db,
         member_db.synced_tables(),
         &store.storage,
@@ -2496,13 +2496,15 @@ pub async fn pull_into_result(
             crate::sync::store_pull::StorePullMembershipError::Message(error),
         )
     })?);
-    let result = Box::pin(crate::sync::store_pull::pull_store_commits(
+    let result = Box::pin(crate::sync::store_engine::pull_store_commits(
         db,
         db.synced_tables(),
         &store.storage,
+        None,
         store.root.store_root_hash,
         store_dir,
         Some(&membership),
+        None,
     ))
     .await?;
     let sequences = result

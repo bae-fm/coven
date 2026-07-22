@@ -3099,7 +3099,7 @@ mod tests {
             .await
             .expect("load second Owner membership");
         let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-        let pull = crate::sync::store_pull::pull_store_commits_with_identity(
+        let pull = crate::sync::store_engine::pull_store_commits(
             &second_owner_db,
             second_owner_db.synced_tables(),
             &store.storage,

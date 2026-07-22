@@ -1958,7 +1958,7 @@ mod tests {
             .expect("read published pre-exclusion snapshot")
             .expect("published pre-exclusion snapshot exists");
         let (_peer_pull_temp, peer_pull_dir) = crate::sync::test_helpers::temp_store_dir();
-        let peer_pull = super::super::store_pull::pull_store_commits_with_identity(
+        let peer_pull = super::super::store_engine::pull_store_commits(
             &peer_db,
             peer_db.synced_tables(),
             &store.storage,
@@ -2601,13 +2601,15 @@ mod tests {
         ))
         .await
         .expect("load peer membership before surviving pull");
-        Box::pin(super::super::store_pull::pull_store_commits(
+        Box::pin(super::super::store_engine::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
+            None,
             store.root.store_root_hash,
             store_dir,
             peer_membership.chain.as_ref(),
+            None,
         ))
         .await
         .expect("materialize surviving owner commit on excluded peer");
@@ -2658,13 +2660,15 @@ mod tests {
         ))
         .await
         .expect("load excluded peer membership for injected failure");
-        let error = Box::pin(super::super::store_pull::pull_store_commits(
+        let error = Box::pin(super::super::store_engine::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
+            None,
             store.root.store_root_hash,
             store_dir,
             membership.chain.as_ref(),
+            None,
         ))
         .await
         .expect_err("injected terminal Merge transaction failure");
@@ -2946,13 +2950,15 @@ mod tests {
             ))
             .await
             .expect("reload excluded peer membership");
-            assert!(Box::pin(super::super::store_pull::pull_store_commits(
+            assert!(Box::pin(super::super::store_engine::pull_store_commits(
                 &peer_db,
                 peer_db.synced_tables(),
                 &store.storage,
+                None,
                 store.root.store_root_hash,
                 &store_dir,
                 membership.chain.as_ref(),
+                None,
             ))
             .await
             .is_err());
@@ -4041,13 +4047,15 @@ mod tests {
         ))
         .await
         .expect("reload excluded peer membership");
-        let pull = Box::pin(super::super::store_pull::pull_store_commits(
+        let pull = Box::pin(super::super::store_engine::pull_store_commits(
             peer_db,
             peer_db.synced_tables(),
             &store.storage,
+            None,
             store.root.store_root_hash,
             store_dir,
             membership.chain.as_ref(),
+            None,
         ))
         .await
         .expect("pull peer exclusion");

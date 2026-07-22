@@ -1,6 +1,7 @@
 use super::*;
 
 mod acknowledgements;
+pub(super) mod pull;
 
 pub(super) struct MergeStoreEngine {
     context: StoreEngineContext,
@@ -272,22 +273,24 @@ impl AuthorizedMergeStoreEngine<'_> {
         crate::sync::store_outbound::drain_merge_store_writes(self.db(), self.storage()).await
     }
 
-    pub(super) async fn pull(
+    pub(super) async fn prepare_pending_store_write(
         &self,
-        store_dir: &StoreDir,
+        device_id: &str,
+        timestamp: &str,
         identity: &UserKeypair,
-    ) -> Result<StorePullResult, SyncCycleFailure> {
-        crate::sync::store_pull::pull_merge_store_commits_with_identity(
+        store_dir: &StoreDir,
+    ) -> Result<bool, SyncCycleFailure> {
+        crate::sync::store_outbound::prepare_pending_merge_store_write(
             self.db(),
-            self.db().synced_tables(),
             self.storage(),
-            self.store_root().store_root_hash,
+            device_id,
+            timestamp,
+            identity,
             store_dir,
             &self.membership,
-            Some(identity),
         )
         .await
-        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))
+        .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))
     }
 
     pub(super) async fn snapshot_position(
@@ -315,30 +318,6 @@ impl AuthorizedMergeStoreEngine<'_> {
             crate::WritePolicy::MergeConcurrent,
             &stream_id,
         )
-    }
-
-    pub(super) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
-        Ok(false)
-    }
-
-    pub(super) async fn prepare_pending_store_write(
-        &self,
-        device_id: &str,
-        timestamp: &str,
-        identity: &UserKeypair,
-        store_dir: &StoreDir,
-    ) -> Result<bool, SyncCycleFailure> {
-        crate::sync::store_outbound::prepare_pending_merge_store_write(
-            self.db(),
-            self.storage(),
-            device_id,
-            timestamp,
-            identity,
-            store_dir,
-            &self.membership,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))
     }
 
     pub(super) async fn push_snapshot(

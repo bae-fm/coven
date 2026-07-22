@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) enum Readiness {
+pub(crate) enum Readiness {
     Ready,
     AlreadyMaterialized,
     Held(HeldStorePosition),
@@ -12,7 +12,7 @@ enum MaterializedCheck {
     Held(HeldStorePositionReason),
 }
 
-pub(super) fn held_object_error(error: StoreObjectError) -> HeldStorePositionReason {
+pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionReason {
     match error {
         StoreObjectError::Storage(source) => HeldStorePositionReason::ObjectUnreadable {
             key: "exact Store object".to_string(),
@@ -35,7 +35,7 @@ pub(super) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
     }
 }
 
-pub(super) async fn readiness(
+pub(crate) async fn readiness(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -317,7 +317,7 @@ async fn resolve_candidate_device_operations(
     }
 }
 
-pub(super) async fn apply_candidate(
+pub(crate) async fn apply_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

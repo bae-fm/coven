@@ -101,7 +101,7 @@ async fn verify_terminal_cleanup_candidate(
     }
 }
 
-pub(super) async fn resume_merge_retraction_cleanups(
+pub(crate) async fn resume_merge_retraction_cleanups(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

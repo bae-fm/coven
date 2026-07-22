@@ -518,13 +518,15 @@ async fn pull_exact_store_into(
     let membership = crate::sync::pull::load_cycle_membership(storage, destination)
         .await
         .expect("load exact Store membership");
-    let result = crate::sync::store_pull::pull_store_commits(
+    let result = crate::sync::store_engine::pull_store_commits(
         destination,
         destination.synced_tables(),
         storage,
+        None,
         root.store_root_hash,
         store_dir,
         membership.chain.as_ref(),
+        None,
     )
     .await
     .expect("pull exact Store commits");
@@ -3915,13 +3917,15 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .await
         .expect("open exact Store before failed lazy verification");
     let failing = FaultingStorage::blob(&storage.storage);
-    let error = crate::sync::store_pull::pull_store_commits(
+    let error = crate::sync::store_engine::pull_store_commits(
         &db2,
         db2.synced_tables(),
         &failing,
+        None,
         storage.root.store_root_hash,
         &ld,
         Some(&membership),
+        None,
     )
     .await
     .expect_err("lazy blob verification failure rejects the Store commit");
@@ -4092,7 +4096,7 @@ fn assert_serial_circle_move<'a>(
             .storage
             .serial_coordination()
             .expect("Serial test Store exposes coordination");
-        let moved = crate::sync::store_pull::pull_store_commits_with_identity(
+        let moved = crate::sync::store_engine::pull_store_commits(
             target,
             target.synced_tables(),
             &storage.storage,
@@ -4320,7 +4324,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
         .expect("open scoped target Store");
     let (_target_temp, target_dir) = temp_store_dir();
-    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+    let result = crate::sync::store_engine::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage.storage,
@@ -4439,7 +4443,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .open_into(successor)
         .await
         .expect("open Store before pulling Circle activation");
-    crate::sync::store_pull::pull_store_commits_with_identity(
+    crate::sync::store_engine::pull_store_commits(
         successor,
         successor.synced_tables(),
         &storage.storage,
@@ -4474,7 +4478,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .open_into(&receiver)
         .await
         .expect("open Store before ordered Circle pull");
-    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+    let result = crate::sync::store_engine::pull_store_commits(
         &receiver,
         receiver.synced_tables(),
         &storage.storage,
@@ -4616,7 +4620,7 @@ async fn serial_circle_pull_scenario() {
 
     let target = open_serial_scoped_circle_test_db_at(&target_path);
     let (_target_temp, target_dir) = temp_store_dir();
-    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+    let result = crate::sync::store_engine::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage.storage,
@@ -7001,13 +7005,15 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let stream_id = commit_stream_id(&reference);
 
     let (_tmp, store_dir) = temp_store_dir();
-    let result = crate::sync::store_pull::pull_store_commits(
+    let result = crate::sync::store_engine::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage.storage,
+        None,
         storage.store_root_hash(),
         &store_dir,
         cycle_membership.chain.as_ref(),
+        None,
     )
     .await
     .expect("pull with an empty mid-cycle membership LIST");
@@ -8072,13 +8078,15 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let stream_id = commit_stream_id(&reference);
 
     let failing = FaultingStorage::membership(&storage.storage, 1);
-    let result = crate::sync::store_pull::pull_store_commits(
+    let result = crate::sync::store_engine::pull_store_commits(
         &db2,
         db2.synced_tables(),
         &failing,
+        None,
         storage.root.store_root_hash,
         &temp_store_dir().1,
         Some(&loaded),
+        None,
     )
     .await
     .expect("a failed membership reload holds only the affected stream");

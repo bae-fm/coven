@@ -1,30 +1,30 @@
 use super::*;
 
-pub(super) struct MergeStreamDiscovery {
-    pub(super) latest_head: Option<StoreDeviceHead>,
-    pub(super) commits: Vec<(
+pub(crate) struct MergeStreamDiscovery {
+    pub(crate) latest_head: Option<StoreDeviceHead>,
+    pub(crate) commits: Vec<(
         super::store_commit::StoreDeviceHeadRef,
         StoreDeviceHead,
         StoreBatchCommitRef,
         StoreBatchCommit,
     )>,
-    pub(super) block: Option<MergeStreamBlock>,
+    pub(crate) block: Option<MergeStreamBlock>,
 }
 
-pub(super) enum MergeStreamBlock {
+pub(crate) enum MergeStreamBlock {
     Unauthenticated(HeldStorePosition),
     Authenticated(HeldStorePosition),
 }
 
 impl MergeStreamBlock {
-    pub(super) fn into_position(self) -> HeldStorePosition {
+    pub(crate) fn into_position(self) -> HeldStorePosition {
         match self {
             Self::Unauthenticated(position) | Self::Authenticated(position) => position,
         }
     }
 }
 
-pub(super) async fn load_active_merge_registrations(
+pub(crate) async fn load_active_merge_registrations(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -55,7 +55,7 @@ pub(super) async fn load_active_merge_registrations(
     Ok(verified)
 }
 
-pub(super) async fn discover_merge_owner_recoveries(
+pub(crate) async fn discover_merge_owner_recoveries(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     protocol: &super::store_commit::StoreProtocolRoot,
@@ -154,7 +154,7 @@ pub(super) async fn discover_merge_owner_recoveries(
     Ok(recovered)
 }
 
-pub(super) async fn discover_merge_stream(
+pub(crate) async fn discover_merge_stream(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,

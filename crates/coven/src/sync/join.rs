@@ -1271,17 +1271,16 @@ pub(crate) async fn open_db_and_pull(
             "Serial coordination capability is absent".to_string(),
         ));
     }
-    let pull_result = Box::pin(
-        crate::sync::store_pull::pull_store_commits_with_coordination(
-            &db,
-            db.synced_tables(),
-            storage,
-            coordination,
-            store_root.store_root_hash,
-            store_dir,
-            membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
-        ),
-    )
+    let pull_result = Box::pin(crate::sync::store_engine::pull_store_commits(
+        &db,
+        db.synced_tables(),
+        storage,
+        coordination,
+        store_root.store_root_hash,
+        store_dir,
+        membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
+        None,
+    ))
     .await?;
 
     if let Some((continuation, identity_signer, device_signer)) = activated_continuation {

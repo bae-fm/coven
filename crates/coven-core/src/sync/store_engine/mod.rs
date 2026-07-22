@@ -18,6 +18,63 @@ mod serial;
 use merge::{AuthorizedMergeStoreEngine, MergeStoreEngine};
 use serial::{AuthorizedSerialStoreEngine, SerialStoreEngine};
 
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn pull_store_commits<'a>(
+    db: &'a Database,
+    tables: &'a [super::session::SyncedTable],
+    storage: &'a dyn SyncStorage,
+    serial_coordination: Option<&'a dyn CoordinationStorage>,
+    store_root_hash: super::store_commit::ObjectHash,
+    store_dir: &'a StoreDir,
+    membership: Option<&'a super::membership::MembershipChain>,
+    identity: Option<&'a UserKeypair>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<StorePullResult, super::store_pull::StorePullError>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                let membership = membership.ok_or_else(|| {
+                    super::store_pull::StorePullError::Database(
+                        "Merge pull has no exact membership state".to_string(),
+                    )
+                })?;
+                merge::pull::pull_store_commits(
+                    db,
+                    tables,
+                    storage,
+                    store_root_hash,
+                    store_dir,
+                    membership,
+                    identity,
+                )
+                .await
+            }
+            crate::WritePolicy::Serial => {
+                super::store_pull::pull_serial_store_commits_with_identity(
+                    db,
+                    tables,
+                    storage,
+                    serial_coordination.ok_or_else(|| {
+                        super::store_pull::StorePullError::Serial(
+                            "coordination capability is absent".to_string(),
+                        )
+                    })?,
+                    store_root_hash,
+                    store_dir,
+                    identity,
+                )
+                .await
+            }
+        }
+    })
+}
+
 pub(crate) struct StoreEngine(StoreEngineKind);
 
 enum StoreEngineKind {
@@ -659,7 +716,6 @@ fn snapshot_position_for_stream(
         .map(|reference| reference.coord.sequence())
         .unwrap_or(0))
 }
-
 async fn stage_and_publish_ack(
     engine: &impl AcknowledgementEngine,
     identity: &UserKeypair,
