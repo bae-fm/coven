@@ -23,6 +23,7 @@ use crate::database::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::update_remote_object_on;
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
+pub(crate) use crate::database::store_device_state::store_serial_predecessor_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
@@ -120,7 +121,6 @@ mod remote_object_records;
 mod retained_merge_replay;
 mod schema_contract;
 mod serial_authorization;
-mod serial_branch_resolution;
 mod snapshot_objects;
 mod snapshot_publication;
 mod snapshot_records;
@@ -175,7 +175,6 @@ pub(crate) use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
 };
 pub use write_models::SerialBranchDiscardState;
-use write_models::StoreWriteRouting;
 pub(crate) use write_models::{
     AuthorExclusionActivationLocator, BlockedMergeCandidate, CanonicalProtocolObject,
     CompletePreparedStoreWriteOutcome, ExactProtocolObject, InitialStoreMembershipAuthority,
@@ -184,8 +183,11 @@ pub(crate) use write_models::{
     PreparedSerialStoreBranch, PreparedSerialStoreWriteCommit, PreparedStoreWrite,
     PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
     SerialStoreBranchPreparationWork, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
-    StoreWriteRemoteBlob, TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
-    UnresolvedSerialBranch,
+    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
+    TerminalCandidateCleanupVerification, UnresolvedSerialBranch,
+};
+pub(crate) use write_publication_records::{
+    parse_prepared_serial_write_state, PreparedWriteMaterialization,
 };
 pub(crate) use write_publication_records::{
     CandidateCleanupObject, LocalRetirementMaterialization, MergeCandidateAbandonmentPreparation,
@@ -197,9 +199,8 @@ pub(crate) use write_publication_records::{
 use write_publication_records::{
     DurableSerialCandidateAbandonment, MaterializedCommitRetention, MergeAbandonmentOutcome,
     MergeRetractionCleanupInput, PreparedMergeCandidate, PreparedSerialCandidate,
-    PreparedStoreWriteState, PreparedWriteMaterialization, RetainedAudiencePackage,
-    RetainedCommitActivationInput, RetainedMergeMaterializationInput,
-    RetainedMergeMaterializationKey,
+    PreparedStoreWriteState, RetainedAudiencePackage, RetainedCommitActivationInput,
+    RetainedMergeMaterializationInput, RetainedMergeMaterializationKey,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";

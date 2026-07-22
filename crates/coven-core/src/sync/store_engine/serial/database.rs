@@ -1,20 +1,34 @@
+mod branch_resolution;
 mod candidate_cleanup;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use rusqlite::{Connection, OptionalExtension};
+
+use crate::blob::decl::BlobDecls;
 use crate::database::{
     begin_remote_candidate_nonactivation_on, candidate_graph_exact_objects,
     load_activated_registration_on, load_remote_object_on, parse_prepared_serial_candidate,
-    required_store_root_authority_on, update_remote_object_on, CandidateCleanupObject, Database,
-    DbError, StoreWriteBase, LOCAL_DEVICE_ID_STATE_KEY, SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY,
+    parse_prepared_serial_write_state, required_store_root_authority_on,
+    store_serial_predecessor_on, update_remote_object_on, CandidateCleanupObject, Database,
+    DbError, PreparedWriteMaterialization, StoreWriteBase, StoreWriteRouting,
+    LOCAL_DEVICE_ID_STATE_KEY, SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY,
 };
+use crate::sync::gate::Gates;
 use crate::sync::membership::SerialMembershipState;
 use crate::sync::remote_object::remote_object_id;
+use crate::sync::session::SyncedTable;
+use crate::sync::storage::VersionedObject;
 use crate::sync::store_commit::{
-    ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreSerialHeadState,
+    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreSerialHead,
+    StoreSerialHeadState, StoreSerialPredecessor, SERIAL_STREAM_ID,
 };
 use crate::sync::store_outbound::StoreOutboundError;
-use crate::write::{PendingBranchId, WriteId, WriteResolution, WriteStatus};
+use crate::write::{
+    PendingBranchId, PublishedPosition, WriteId, WriteReceipt, WriteResolution, WriteStatus,
+};
+use crate::WritePolicy;
 
 #[derive(Clone, Copy)]
 pub(super) struct SerialDatabase<'a> {
@@ -45,10 +59,7 @@ impl<'a> SerialDatabase<'a> {
         };
         let stale = branch.base != authoritative_head;
         if !branch.conflicted && stale {
-            let authoritative_predecessor = self
-                .database
-                .exact_serial_predecessor(authoritative_head)
-                .await?;
+            let authoritative_predecessor = self.exact_predecessor(authoritative_head).await?;
             self.database
                 .mark_serial_branch_conflict(
                     branch.branch_id,

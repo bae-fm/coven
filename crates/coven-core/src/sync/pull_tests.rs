@@ -4228,7 +4228,7 @@ fn resolve_conflicting_serial_branch<'a>(
         )
         .await
         .expect("clean losing Serial candidate");
-        db.discard_pending_serial_branch(branch_id, plan)
+        plan.discard_pending_branch(db, branch_id)
             .await
             .expect("materialize accepted Serial Circle history");
         assert!(

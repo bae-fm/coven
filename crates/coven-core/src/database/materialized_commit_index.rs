@@ -256,7 +256,7 @@ impl Database {
         .transpose()
     }
 
-    pub(super) fn latest_position_for_device_on(
+    pub(crate) fn latest_position_for_device_on(
         conn: &Connection,
         device_id: &str,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {

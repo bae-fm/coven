@@ -18,7 +18,7 @@ impl Database {
         capture_changeset(session)
     }
 
-    pub(super) fn invert_changeset(changeset: &[u8]) -> Result<Vec<u8>, DbError> {
+    pub(crate) fn invert_changeset(changeset: &[u8]) -> Result<Vec<u8>, DbError> {
         if changeset.is_empty() {
             return Ok(Vec::new());
         }
@@ -49,7 +49,7 @@ impl Database {
         }
     }
 
-    pub(super) fn capture_host_changes_on<R, E>(
+    pub(crate) fn capture_host_changes_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
         f: impl FnOnce() -> Result<R, E>,
@@ -145,7 +145,7 @@ impl Database {
         })
     }
 
-    pub(super) fn capture_partition_blob_facts_on(
+    pub(crate) fn capture_partition_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
         partitions: &[gate::AudiencePartition],
         blob_decls: &BlobDecls,
@@ -174,7 +174,7 @@ impl Database {
         })
     }
 
-    pub(super) fn partition_captured_write_on(
+    pub(crate) fn partition_captured_write_on(
         tx: &rusqlite::Transaction<'_>,
         captured: &[u8],
         gates: &Gates,
@@ -249,7 +249,7 @@ impl Database {
         Self::store_write_routing(gates, write_policy, routing_encryption).map(drop)
     }
 
-    pub(super) fn insert_store_write_on(
+    pub(crate) fn insert_store_write_on(
         tx: &rusqlite::Transaction<'_>,
         write_id: &WriteId,
         partitions: &[gate::AudiencePartition],

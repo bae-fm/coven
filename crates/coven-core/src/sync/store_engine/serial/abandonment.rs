@@ -171,7 +171,10 @@ pub(crate) async fn publish_serial_candidate_abandonment(
     let observed = observe_serial_head(db, coordination).await?;
     if observed.bytes() == Some(prepared.head.bytes.as_slice())
         || observed.bytes() == Some(prepared.original_head_bytes.as_slice())
-        || observed.predecessor()? != db.exact_serial_predecessor(prepared.base.clone()).await?
+        || observed.predecessor()?
+            != SerialDatabase::new(db)
+                .exact_predecessor(prepared.base.clone())
+                .await?
     {
         return classify(observed);
     }
@@ -290,7 +293,9 @@ pub(crate) async fn abandon_serial_branch(
             SerialDatabase::new(db)
                 .remove_losing_abandonment_authority()
                 .await?;
-            db.complete_prepared_serial_branch(accepted).await?;
+            SerialDatabase::new(db)
+                .complete_prepared_branch(accepted)
+                .await?;
             Ok(SerialBranchAbandonment::OriginalBranchActivated)
         }
         SerialCandidateAbandonmentWinner::Authority { .. } => {

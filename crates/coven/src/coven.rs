@@ -649,9 +649,7 @@ impl CovenHandle {
                     .cleanup_serial_candidates(branch_id.clone(), &plan)
                     .await
                     .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
-                self.db()
-                    .discard_pending_serial_branch(branch_id, plan)
-                    .await?;
+                plan.discard_pending_branch(self.db(), branch_id).await?;
             }
         }
         self.sync_now();
@@ -675,9 +673,8 @@ impl CovenHandle {
             .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
         let write_id = self.db().new_write_id();
         let stamper = self.stamper();
-        let receipt = self
-            .db()
-            .replace_pending_serial_branch(branch_id, plan, write_id, move |tx| {
+        let receipt = plan
+            .replace_pending_branch(self.db(), branch_id, write_id, move |tx| {
                 f(SqlContext::new(tx, stamper))
             })
             .await?;

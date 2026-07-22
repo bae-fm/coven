@@ -79,7 +79,32 @@ pub(super) enum PreparedStoreWriteState {
     },
 }
 
-pub(super) enum PreparedWriteMaterialization<'a> {
+pub(crate) fn parse_prepared_serial_write_state(
+    raw: &str,
+) -> Result<
+    (
+        DurablePreparedProtocolObject,
+        Option<Vec<u8>>,
+        StoreBatchLocalCleanup,
+    ),
+    DbError,
+> {
+    let PreparedStoreWriteState::Serial {
+        commit,
+        tip_head_bytes,
+        local_cleanup,
+        ..
+    } = serde_json::from_str(raw)
+        .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?
+    else {
+        return Err(DbError::Message(
+            "non-Serial write reached Serial completion".to_string(),
+        ));
+    };
+    Ok((commit, tip_head_bytes, local_cleanup))
+}
+
+pub(crate) enum PreparedWriteMaterialization<'a> {
     MergeConcurrent {
         head: &'a StoreDeviceHead,
         head_object: &'a ExactObjectRef,
@@ -571,6 +596,14 @@ pub(crate) struct PreparedSerialCandidate {
 }
 
 impl PreparedSerialCandidate {
+    pub(crate) fn commit(&self) -> &StoreBatchCommit {
+        &self.commit
+    }
+
+    pub(crate) fn reference(&self) -> &StoreBatchCommitRef {
+        &self.reference
+    }
+
     pub(crate) fn into_parts(self) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>) {
         (self.commit, self.reference, self.canonical_signed_bytes)
     }

@@ -329,7 +329,9 @@ pub(crate) async fn prepare_serial_store_branch(
         }
     };
     if snapshot.base != branch.base {
-        let current = db.exact_serial_predecessor(snapshot.base).await?;
+        let current = SerialDatabase::new(db)
+            .exact_predecessor(snapshot.base)
+            .await?;
         db.mark_serial_branch_conflict(branch.branch_id, branch.base, current)
             .await?;
         return Ok(false);
@@ -670,8 +672,8 @@ pub(crate) async fn drain_store_writes(
                 "activated Serial head has no version receipt".to_string(),
             )
         })?;
-        return db
-            .complete_prepared_serial_branch(accepted)
+        return SerialDatabase::new(db)
+            .complete_prepared_branch(accepted)
             .await
             .map_err(Into::into);
     }
@@ -773,7 +775,8 @@ pub(crate) async fn drain_store_writes(
             }
         }
     };
-    db.complete_prepared_serial_branch(accepted)
+    SerialDatabase::new(db)
+        .complete_prepared_branch(accepted)
         .await
         .map_err(Into::into)
 }

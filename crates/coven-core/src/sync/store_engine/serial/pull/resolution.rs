@@ -55,6 +55,35 @@ impl SerialResolutionPlan {
             StorePullError::Serial("Serial resolution has no accepted successor suffix".to_string())
         })
     }
+
+    #[doc(hidden)]
+    pub async fn discard_pending_branch(
+        self,
+        db: &Database,
+        branch_id: crate::PendingBranchId,
+    ) -> Result<(), crate::database::DbError> {
+        SerialDatabase::new(db)
+            .discard_pending_branch(branch_id, self)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn replace_pending_branch<R, E, F>(
+        self,
+        db: &Database,
+        branch_id: crate::PendingBranchId,
+        replacement_write_id: crate::WriteId,
+        f: F,
+    ) -> Result<crate::WriteReceipt<R>, E>
+    where
+        R: Send + 'static,
+        E: From<crate::database::DbError> + Send + 'static,
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E> + Send + 'static,
+    {
+        SerialDatabase::new(db)
+            .replace_pending_branch(branch_id, self, replacement_write_id, f)
+            .await
+    }
 }
 
 pub(crate) async fn prepare_serial_resolution(

@@ -14,7 +14,7 @@ pub(super) fn load_store_device_genesis_state_on(
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }
 
-pub(super) fn store_serial_predecessor_on(
+pub(crate) fn store_serial_predecessor_on(
     conn: &Connection,
     commit: Option<&StoreBatchCommitRef>,
 ) -> Result<StoreSerialPredecessor, DbError> {

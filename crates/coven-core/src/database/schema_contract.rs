@@ -2,9 +2,19 @@ use super::*;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DurablePreparedProtocolObject {
+pub(crate) struct DurablePreparedProtocolObject {
     pub(super) semantic_bytes: Vec<u8>,
     pub(super) prepared: PreparedExactObject,
+}
+
+impl DurablePreparedProtocolObject {
+    pub(crate) fn semantic_bytes(&self) -> &[u8] {
+        &self.semantic_bytes
+    }
+
+    pub(crate) fn prepared(&self) -> &PreparedExactObject {
+        &self.prepared
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

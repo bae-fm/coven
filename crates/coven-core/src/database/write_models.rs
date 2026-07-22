@@ -22,7 +22,7 @@ pub(crate) struct MergeReplayWriteOverlay {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum StoreWriteRouting<'a> {
+pub(crate) enum StoreWriteRouting<'a> {
     Unscoped,
     MergeScoped(&'a EncryptionService),
     SerialScoped,

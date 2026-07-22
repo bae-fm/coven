@@ -838,7 +838,8 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     )
     .await;
     assert!(interrupted.is_err());
-    db.discard_pending_serial_branch(branch_id.clone(), resolution)
+    resolution
+        .discard_pending_branch(&db, branch_id.clone())
         .await
         .expect_err("incomplete candidate cleanup must block resolution");
 
@@ -871,7 +872,8 @@ async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branc
     )
     .await
     .expect("resume losing candidate cleanup");
-    db.discard_pending_serial_branch(branch_id, resolution)
+    resolution
+        .discard_pending_branch(&db, branch_id)
         .await
         .expect("discard cleaned branch");
     let deletes = home.deletes_seen();

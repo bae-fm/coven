@@ -309,7 +309,7 @@ impl Database {
         validate_prepared_audience_blob_bindings(audiences)
     }
 
-    pub(super) fn activate_prepared_write_on(
+    pub(crate) fn activate_prepared_write_on(
         conn: &rusqlite::Transaction<'_>,
         root: &crate::sync::store_commit::StoreRootRef,
         gates: &Gates,

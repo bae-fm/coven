@@ -387,8 +387,7 @@ impl SerialDatabase<'_> {
         self.database
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let write_ids =
-                    Database::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
+                let write_ids = Self::apply_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
                 let object_id = remote_object_id(&authority_ref.object);
                 let remote = load_remote_object_on(&tx, object_id)?;
                 if authority_accepted {

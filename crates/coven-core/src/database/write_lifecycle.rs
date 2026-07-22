@@ -20,7 +20,7 @@ impl Database {
         Self::notify_write_status_in(&self.state.write_statuses, &write_id, status);
     }
 
-    pub(super) fn set_write_status_on(
+    pub(crate) fn set_write_status_on(
         conn: &Connection,
         write_id: &WriteId,
         status: &WriteStatus,
@@ -35,6 +35,152 @@ impl Database {
             .map_err(DbError::from)?;
         if updated != 1 {
             return Err(DbError::Message(format!("write {write_id} does not exist")));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_unpublished_writes_on(
+        tx: &rusqlite::Transaction<'_>,
+        write_ids: &[WriteId],
+        resolution: &WriteResolution,
+    ) -> Result<(), DbError> {
+        let status = WriteStatus::Resolved(resolution.clone());
+        for write_id in write_ids {
+            let raw_prepared: Option<String> = tx
+                .query_row(
+                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let mut removable = Vec::new();
+            let mut candidate = None;
+            if let Some(raw_prepared) = raw_prepared.as_deref() {
+                let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
+                    .map_err(|error| {
+                        DbError::Message(format!("resolved prepared write: {error}"))
+                    })?;
+                match &prepared {
+                    PreparedStoreWriteState::MergeConcurrent { .. }
+                    | PreparedStoreWriteState::MergeAbandonment { .. } => {
+                        let merge = parse_prepared_merge_candidate_on(tx, &prepared)?
+                            .expect("matched Merge preparation");
+                        removable.push(remote_object_id(&merge.reference.object));
+                        match load_merge_candidate_head_cleanup_on(
+                            tx,
+                            merge.head_prepared.reference(),
+                            &merge.reference,
+                        )? {
+                            MergeCandidateHeadCleanup::Remote { .. } => {
+                                removable.push(remote_object_id(merge.head_prepared.reference()))
+                            }
+                            MergeCandidateHeadCleanup::ProtocolInert => {}
+                        }
+                        removable.extend(
+                            candidate_graph_exact_objects(&merge.commit)?
+                                .iter()
+                                .map(remote_object_id),
+                        );
+                        candidate = Some(merge.reference);
+                    }
+                    PreparedStoreWriteState::Serial { .. } => {
+                        if let Some(serial) = parse_prepared_serial_candidate(raw_prepared)? {
+                            removable.push(remote_object_id(&serial.reference.object));
+                            removable.extend(
+                                candidate_graph_exact_objects(&serial.commit)?
+                                    .iter()
+                                    .map(remote_object_id),
+                            );
+                            candidate = Some(serial.reference);
+                        }
+                    }
+                    PreparedStoreWriteState::SerialPreparing => {}
+                }
+            }
+            let mut statement = tx
+                .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
+                .map_err(DbError::from)?;
+            let indexed = statement
+                .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            for encoded in indexed {
+                removable.push(encoded.parse().map_err(|error| {
+                    DbError::Message(format!("resolved remote object id: {error}"))
+                })?);
+            }
+            if let Some(candidate) = &candidate {
+                for object_id in &removable {
+                    let remote = load_remote_object_on(tx, *object_id)?;
+                    if !remote
+                        .candidate_cleanup_complete(candidate)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "validate candidate cleanup for {object_id}: {error}"
+                            ))
+                        })?
+                    {
+                        return Err(DbError::Message(format!(
+                            "candidate cleanup for remote object {object_id} is incomplete"
+                        )));
+                    }
+                }
+            }
+            tx.execute(
+                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM store_write_packages WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM store_write_blobs WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            for object_id in removable {
+                let remote = load_remote_object_on(tx, object_id)?;
+                let absent = matches!(
+                    remote,
+                    RemoteObjectRecord::CandidateCommit(
+                        crate::sync::remote_object::CandidateCommitRecord {
+                            state:
+                                crate::sync::remote_object::CandidateCommitState::AbsentVerified { .. },
+                            ..
+                        }
+                    ) | RemoteObjectRecord::CandidateExclusive(
+                        crate::sync::remote_object::CandidateObjectRecord {
+                            state:
+                                crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. },
+                            ..
+                        }
+                    ) | RemoteObjectRecord::RetainedAuthority(
+                        crate::sync::remote_object::RetainedAuthorityRecord {
+                            state:
+                                crate::sync::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
+                            ..
+                        }
+                    )
+                );
+                if absent {
+                    tx.execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                }
+            }
+            tx.execute(
+                "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            Self::set_write_status_on(tx, write_id, &status)?;
         }
         Ok(())
     }
