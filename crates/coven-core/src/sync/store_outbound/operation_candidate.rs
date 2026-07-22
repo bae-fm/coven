@@ -307,16 +307,16 @@ pub(crate) async fn prepare_store_operation_candidate(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, plan.coord.clone(), prepared.reference().clone())
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let candidate = match plan.policy {
-        StoreOperationPolicyPlan::Serial(serial) => {
-            let authorization_after = serial
+    let candidate = match plan {
+        StoreOperationCommitPlan::Serial(plan) => {
+            let authorization_after = plan
                 .authorization
                 .authorize_and_apply(&commit_ref, &commit, &plan.registration)
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let head = StoreSerialHead::signed(
                 store_root_hash,
                 StoreSerialHeadState::Commit {
-                    author_registration: plan.registration_ref,
+                    author_registration: plan.registration_ref.clone(),
                     commit: commit_ref.clone(),
                 },
                 &plan.device_signer,
@@ -329,15 +329,12 @@ pub(crate) async fn prepare_store_operation_candidate(
                     reference: commit_ref,
                     registration_activation,
                 },
-                base_head: serial.base_head,
+                base_head: plan.base_head,
                 head,
                 authorization_after,
             })
         }
-        StoreOperationPolicyPlan::MergeConcurrent {
-            membership,
-            predecessor_state,
-        } => {
+        StoreOperationCommitPlan::MergeConcurrent(plan) => {
             let acknowledgement = match acknowledgement_evidence {
                 Some((reference, value)) => Some(
                     super::store_pull::retain_activated_acknowledgement(
@@ -381,7 +378,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 storage,
                 &plan.root,
                 &commit,
-                predecessor_state,
+                plan.predecessor_state.clone(),
                 &registrations,
                 device_operations,
             ))
@@ -397,7 +394,7 @@ pub(crate) async fn prepare_store_operation_candidate(
                 &plan.root,
                 &commit,
                 &commit_ref,
-                &membership,
+                &plan.membership,
                 &plan.registration,
                 None,
                 state_after,

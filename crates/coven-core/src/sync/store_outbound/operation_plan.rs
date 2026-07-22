@@ -36,7 +36,12 @@ pub(crate) struct DeviceJoinRegistrationActivation {
     pub authority: super::store_commit::StoreDeviceRegistrationActivation,
 }
 
-pub(crate) struct StoreOperationCommitPlan {
+pub(crate) enum StoreOperationCommitPlan {
+    MergeConcurrent(MergeStoreOperationCommitPlan),
+    Serial(SerialStoreOperationCommitPlan),
+}
+
+pub(crate) struct StoreOperationPlanCommon {
     pub(super) root: StoreRootRef,
     pub(super) registration_ref: StoreDeviceRegistrationRef,
     pub(super) registration: Box<StoreDeviceRegistration>,
@@ -47,7 +52,18 @@ pub(crate) struct StoreOperationCommitPlan {
     pub(super) device_state: super::store_commit::StoreDeviceStateRef,
     pub(super) membership_authority: StoreOperationMembershipAuthority,
     pub(super) owner_grant: Option<super::membership::MembershipGrantId>,
-    pub(super) policy: StoreOperationPolicyPlan,
+}
+
+pub(crate) struct MergeStoreOperationCommitPlan {
+    pub(super) common: StoreOperationPlanCommon,
+    pub(super) membership: MembershipChain,
+    pub(super) predecessor_state: super::store_commit::ResolvedStoreDeviceState,
+}
+
+pub(crate) struct SerialStoreOperationCommitPlan {
+    pub(super) common: StoreOperationPlanCommon,
+    pub(super) base_head: VersionedObject,
+    pub(super) authorization: SerialAuthorizationState,
 }
 
 #[derive(Clone, Copy)]
@@ -102,12 +118,31 @@ impl<'a> StoreOperationPreparation<'a> {
     }
 }
 
-pub(super) enum StoreOperationPolicyPlan {
-    MergeConcurrent {
-        membership: MembershipChain,
-        predecessor_state: super::store_commit::ResolvedStoreDeviceState,
-    },
-    Serial(Box<StoreOperationSerialPlan>),
+impl std::ops::Deref for MergeStoreOperationCommitPlan {
+    type Target = StoreOperationPlanCommon;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl std::ops::Deref for SerialStoreOperationCommitPlan {
+    type Target = StoreOperationPlanCommon;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl std::ops::Deref for StoreOperationCommitPlan {
+    type Target = StoreOperationPlanCommon;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::MergeConcurrent(plan) => &plan.common,
+            Self::Serial(plan) => &plan.common,
+        }
+    }
 }
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
@@ -188,30 +223,27 @@ impl MergeConflictResolutionCommitPlan {
             resolved.state_hash,
         )
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        Ok(StoreOperationCommitPlan {
-            root: self.root,
-            registration_ref: self.registration_ref,
-            registration: self.registration,
-            device_signer: self.device_signer,
-            coord: self.coord,
-            order: self.order,
-            membership_state,
-            device_state: self.device_state,
-            membership_authority: StoreOperationMembershipAuthority::MergeConcurrent {
-                predecessor: authority,
-            },
-            owner_grant: Some(replacement_grant),
-            policy: StoreOperationPolicyPlan::MergeConcurrent {
+        Ok(StoreOperationCommitPlan::MergeConcurrent(
+            MergeStoreOperationCommitPlan {
+                common: StoreOperationPlanCommon {
+                    root: self.root,
+                    registration_ref: self.registration_ref,
+                    registration: self.registration,
+                    device_signer: self.device_signer,
+                    coord: self.coord,
+                    order: self.order,
+                    membership_state,
+                    device_state: self.device_state,
+                    membership_authority: StoreOperationMembershipAuthority::MergeConcurrent {
+                        predecessor: authority,
+                    },
+                    owner_grant: Some(replacement_grant),
+                },
                 membership: membership.clone(),
                 predecessor_state: self.device_state_value,
             },
-        })
+        ))
     }
-}
-
-pub(super) struct StoreOperationSerialPlan {
-    pub(super) base_head: VersionedObject,
-    pub(super) authorization: SerialAuthorizationState,
 }
 
 impl StoreOperationCommitPlan {
@@ -287,7 +319,7 @@ impl StoreOperationCommitPlan {
         &self,
         member_pubkey: &str,
     ) -> Option<super::membership::MembershipGrantId> {
-        let StoreOperationPolicyPlan::Serial(serial) = &self.policy else {
+        let Self::Serial(serial) = self else {
             return None;
         };
         let grants = serial
@@ -304,7 +336,7 @@ impl StoreOperationCommitPlan {
     }
 
     pub(crate) fn serial_authorization(&self) -> Option<&SerialAuthorizationState> {
-        let StoreOperationPolicyPlan::Serial(serial) = &self.policy else {
+        let Self::Serial(serial) = self else {
             return None;
         };
         Some(&serial.authorization)
@@ -372,25 +404,27 @@ pub(crate) async fn serial_successor_plan_for_test(
         .authorization_after
         .membership
         .active_owner_grant(&registration.author_pubkey);
-    Ok(StoreOperationCommitPlan {
-        root,
-        registration_ref,
-        registration: Box::new(registration),
-        device_signer,
-        coord: StoreCommitCoord::Serial { sequence },
-        order: StoreCommitOrder::Serial {
-            seq: sequence,
-            predecessor: position,
-        },
-        membership_state,
-        device_state,
-        membership_authority: StoreOperationMembershipAuthority::Serial,
-        owner_grant,
-        policy: StoreOperationPolicyPlan::Serial(Box::new(StoreOperationSerialPlan {
+    Ok(StoreOperationCommitPlan::Serial(
+        SerialStoreOperationCommitPlan {
+            common: StoreOperationPlanCommon {
+                root,
+                registration_ref,
+                registration: Box::new(registration),
+                device_signer,
+                coord: StoreCommitCoord::Serial { sequence },
+                order: StoreCommitOrder::Serial {
+                    seq: sequence,
+                    predecessor: position,
+                },
+                membership_state,
+                device_state,
+                membership_authority: StoreOperationMembershipAuthority::Serial,
+                owner_grant,
+            },
             base_head,
             authorization: predecessor.authorization_after.clone(),
-        })),
-    })
+        },
+    ))
 }
 
 pub(crate) async fn prepare_merge_conflict_resolution_commit(
@@ -480,27 +514,28 @@ async fn prepare_serial_store_operation_plan(
         &snapshot.authorization,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let serial = StoreOperationSerialPlan {
-        base_head: snapshot.base_head,
-        authorization: snapshot.authorization,
-    };
-    let owner_grant = serial
+    let owner_grant = snapshot
         .authorization
         .membership
         .active_owner_grant(&registration.author_pubkey);
-    Ok(StoreOperationCommitPlan {
-        root,
-        registration_ref,
-        registration: Box::new(registration),
-        device_signer,
-        coord,
-        order,
-        membership_state,
-        device_state,
-        membership_authority: StoreOperationMembershipAuthority::Serial,
-        owner_grant,
-        policy: StoreOperationPolicyPlan::Serial(Box::new(serial)),
-    })
+    Ok(StoreOperationCommitPlan::Serial(
+        SerialStoreOperationCommitPlan {
+            common: StoreOperationPlanCommon {
+                root,
+                registration_ref,
+                registration: Box::new(registration),
+                device_signer,
+                coord,
+                order,
+                membership_state,
+                device_state,
+                membership_authority: StoreOperationMembershipAuthority::Serial,
+                owner_grant,
+            },
+            base_head: snapshot.base_head,
+            authorization: snapshot.authorization,
+        },
+    ))
 }
 
 pub(crate) async fn prepare_store_operation_commit_from_serial_snapshot(
@@ -598,10 +633,7 @@ pub(crate) async fn prepare_store_operation_commit(
                     authorization.device_state_ref,
                     StoreOperationMembershipAuthority::MergeConcurrent { predecessor },
                     owner_grant,
-                    StoreOperationPolicyPlan::MergeConcurrent {
-                        membership: authorization.membership,
-                        predecessor_state: authorization.device_state,
-                    },
+                    (authorization.membership, authorization.device_state),
                 )
             }
             StoreOperationPreparation::Serial { coordination } => {
@@ -622,17 +654,23 @@ pub(crate) async fn prepare_store_operation_commit(
                 .await;
             }
         };
-    Ok(StoreOperationCommitPlan {
-        root,
-        registration_ref,
-        registration: Box::new(registration),
-        device_signer,
-        coord,
-        order,
-        membership_state,
-        device_state,
-        membership_authority,
-        owner_grant,
-        policy,
-    })
+    let (membership, predecessor_state) = policy;
+    Ok(StoreOperationCommitPlan::MergeConcurrent(
+        MergeStoreOperationCommitPlan {
+            common: StoreOperationPlanCommon {
+                root,
+                registration_ref,
+                registration: Box::new(registration),
+                device_signer,
+                coord,
+                order,
+                membership_state,
+                device_state,
+                membership_authority,
+                owner_grant,
+            },
+            membership,
+            predecessor_state,
+        },
+    ))
 }
