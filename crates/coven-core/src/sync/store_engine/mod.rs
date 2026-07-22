@@ -661,48 +661,48 @@ fn snapshot_position_for_stream(
 }
 
 async fn stage_and_publish_ack(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    authority: AckAuthority<'_>,
+    engine: &impl AcknowledgementEngine,
     identity: &UserKeypair,
     sync_time: &str,
 ) -> Result<(), SyncCycleFailure> {
-    let (coordination, membership, policy) = match authority {
-        AckAuthority::Merge(membership) => {
-            (None, Some(membership), crate::WritePolicy::MergeConcurrent)
-        }
-        AckAuthority::Serial(coordination) => {
-            (Some(coordination), None, crate::WritePolicy::Serial)
-        }
-    };
-    super::store_ack::drain_outbound_store_acks(db, storage, coordination, identity, membership)
+    engine
+        .drain_acknowledgements(identity)
         .await
         .map_err(|error| {
             SyncCycleFailure::operation("publish queued Store acknowledgement", error)
         })?;
-    let frontier = db
+    let frontier = engine
+        .acknowledgement_database()
         .materialized_frontier()
         .await
         .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
-    let frontier = CommitFrontier::from_refs(policy, frontier)
+    let frontier = CommitFrontier::from_refs(engine.acknowledgement_policy(), frontier)
         .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-    super::store_ack::stage_store_ack(
-        db,
-        storage,
-        coordination,
-        frontier,
-        sync_time.to_owned(),
-        identity,
-    )
-    .await
-    .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-    super::store_ack::drain_outbound_store_acks(db, storage, coordination, identity, membership)
+    engine
+        .stage_acknowledgement(frontier, sync_time.to_owned(), identity)
+        .await
+        .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+    engine
+        .drain_acknowledgements(identity)
         .await
         .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
     Ok(())
 }
 
-enum AckAuthority<'a> {
-    Merge(&'a super::membership::MembershipChain),
-    Serial(&'a dyn CoordinationStorage),
+trait AcknowledgementEngine {
+    fn acknowledgement_database(&self) -> &Database;
+
+    fn acknowledgement_policy(&self) -> crate::WritePolicy;
+
+    async fn drain_acknowledgements(
+        &self,
+        identity: &UserKeypair,
+    ) -> Result<u64, super::store_ack::StoreAckError>;
+
+    async fn stage_acknowledgement(
+        &self,
+        frontier: CommitFrontier,
+        sync_time: String,
+        identity: &UserKeypair,
+    ) -> Result<super::store_commit::StoreAck, super::store_ack::StoreAckError>;
 }

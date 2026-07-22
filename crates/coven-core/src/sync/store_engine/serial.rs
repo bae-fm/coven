@@ -1,5 +1,6 @@
 use super::*;
 
+mod acknowledgements;
 mod database;
 
 use database::SerialDatabase;
@@ -397,21 +398,6 @@ impl AuthorizedSerialStoreEngine<'_> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("publish Store snapshot", error))
-    }
-
-    pub(super) async fn stage_and_publish_ack(
-        &self,
-        identity: &UserKeypair,
-        sync_time: &str,
-    ) -> Result<(), SyncCycleFailure> {
-        Box::pin(super::stage_and_publish_ack(
-            self.db(),
-            self.storage(),
-            AckAuthority::Serial(self.coordination()),
-            identity,
-            sync_time,
-        ))
-        .await
     }
 
     pub(super) fn may_author_snapshot(
