@@ -219,10 +219,13 @@ pub async fn drain_outbound_store_acks(
                 let plan = super::store_outbound::prepare_store_operation_commit(
                     db,
                     storage,
-                    coordination,
+                    super::store_outbound::StoreOperationPreparation::from_dependencies(
+                        db.write_policy(),
+                        coordination,
+                        membership,
+                    )?,
                     &device_id,
                     signer,
-                    membership,
                 )
                 .await?;
                 plan.validate_acknowledgement(&outbound.ack.value)?;
@@ -302,7 +305,10 @@ pub async fn drain_outbound_store_acks(
         let outcome = Box::pin(super::store_outbound::publish_prepared_store_operation(
             db,
             storage,
-            coordination,
+            super::store_outbound::StoreOperationPublicationMode::from_dependencies(
+                db.write_policy(),
+                coordination,
+            )?,
             Box::new(candidate),
         ))
         .await?;
@@ -456,10 +462,14 @@ mod tests {
         let plan = super::super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            None,
+            super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
+                membership: membership
+                    .chain
+                    .as_ref()
+                    .expect("resolved Merge membership"),
+            },
             &device_id,
             signer,
-            membership.chain.as_ref(),
         )
         .await
         .expect("prepare acknowledgement activation");
@@ -496,10 +506,11 @@ mod tests {
         let plan = super::super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            Some(storage),
+            super::super::store_outbound::StoreOperationPreparation::Serial {
+                coordination: storage,
+            },
             &device_id,
             signer,
-            None,
         )
         .await
         .expect("prepare Serial acknowledgement activation");
@@ -556,10 +567,14 @@ mod tests {
             super::super::store_outbound::prepare_store_operation_commit(
                 &db,
                 &storage,
-                None,
+                super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
+                    membership: membership
+                        .chain
+                        .as_ref()
+                        .expect("resolved Merge membership"),
+                },
                 &device_id,
                 &signer,
-                membership.chain.as_ref(),
             ),
         )
         .await
@@ -641,10 +656,11 @@ mod tests {
             super::super::store_outbound::prepare_store_operation_commit(
                 &db,
                 &storage,
-                Some(&storage),
+                super::super::store_outbound::StoreOperationPreparation::Serial {
+                    coordination: &storage,
+                },
                 &device_id,
                 &signer,
-                None,
             ),
         )
         .await
@@ -678,7 +694,9 @@ mod tests {
                 super::super::store_outbound::publish_prepared_store_operation(
                     &db,
                     &storage,
-                    Some(&storage),
+                    super::super::store_outbound::StoreOperationPublicationMode::Serial {
+                        coordination: &storage,
+                    },
                     Box::new(competing),
                 )
             )
@@ -1002,7 +1020,7 @@ mod tests {
         super::super::store_outbound::publish_prepared_store_operation(
             &db,
             &storage,
-            None,
+            super::super::store_outbound::StoreOperationPublicationMode::MergeConcurrent,
             Box::new(candidate),
         )
         .await
@@ -1633,7 +1651,9 @@ mod tests {
             super::super::store_outbound::publish_prepared_store_operation(
                 &db,
                 &storage,
-                Some(&storage),
+                super::super::store_outbound::StoreOperationPublicationMode::Serial {
+                    coordination: &storage,
+                },
                 Box::new(successor),
             ),
         )

@@ -1401,7 +1401,10 @@ async fn resume_request_publication_state(
                 let outcome = super::store_outbound::publish_prepared_store_operation(
                     db,
                     storage,
-                    coordination,
+                    super::store_outbound::StoreOperationPublicationMode::from_dependencies(
+                        db.write_policy(),
+                        coordination,
+                    )?,
                     candidate,
                 )
                 .await?;
@@ -1511,10 +1514,13 @@ pub async fn begin_owner_promotion(
     let plan = super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        super::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            merge_membership.as_ref(),
+        )?,
         device_id,
         identity,
-        merge_membership.as_ref(),
     )
     .await?;
     let member_grant = match merge_membership.as_ref() {
@@ -1875,13 +1881,7 @@ pub fn finalize_owner_promotion<'a>(
                 OwnerPromotionResumeOutcome::Complete(membership) => return Ok(membership),
                 OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
                     match activate_owner_promotion_merge_head(
-                        db,
-                        storage,
-                        coordination,
-                        &root,
-                        &promoter,
-                        &previous,
-                        pending,
+                        db, storage, &root, &promoter, &previous, pending,
                     )
                     .await?
                     {
@@ -2229,7 +2229,6 @@ fn prepare_serial_owner_promotion_finalization<'a>(
 fn prepare_merge_store_candidate<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn CoordinationStorage>,
     device_id: &'a str,
     identity: &'a UserKeypair,
     root: &'a StoreRootRef,
@@ -2257,10 +2256,11 @@ fn prepare_merge_store_candidate<'a>(
         let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            coordination,
+            super::store_outbound::StoreOperationPreparation::MergeConcurrent {
+                membership: &membership,
+            },
             device_id,
             identity,
-            Some(&membership),
         ))
         .await?;
         let OwnerPromotionAnchors::MergeConcurrent {
@@ -2377,7 +2377,6 @@ fn load_owner_promotion_remote_promoter<'a>(
 fn activate_owner_promotion_merge_head<'a>(
     db: &'a Database,
     storage: &'a dyn SyncStorage,
-    coordination: Option<&'a dyn CoordinationStorage>,
     root: &'a StoreRootRef,
     promoter: &'a super::store_commit::StoreDeviceRegistration,
     previous: &'a OwnerPromotionJournalPredecessor,
@@ -2467,7 +2466,6 @@ fn activate_owner_promotion_merge_head<'a>(
         let outcome = Box::pin(super::invite::publish_prepared_merge_membership_activation(
             db,
             storage,
-            coordination,
             root,
             promoter,
             &transition,
@@ -2566,7 +2564,10 @@ fn publish_owner_promotion_serial_candidate<'a>(
         let outcome = Box::pin(super::store_outbound::publish_prepared_store_operation(
             db,
             storage,
-            coordination,
+            super::store_outbound::StoreOperationPublicationMode::from_dependencies(
+                db.write_policy(),
+                coordination,
+            )?,
             candidate.clone(),
         ))
         .await?;
@@ -2810,7 +2811,6 @@ fn resume_owner_promotion_finalization<'a>(
                     let next = prepare_merge_store_candidate(
                         db,
                         storage,
-                        coordination,
                         device_id,
                         identity,
                         &root,

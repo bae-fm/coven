@@ -1945,16 +1945,22 @@ pub async fn abandon_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Abandonment(abandonment_ref.clone()),
     )
@@ -2322,10 +2328,13 @@ pub async fn accept_device_registration_request(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let cut = plan.predecessor_cut()?;
@@ -2389,7 +2398,10 @@ pub async fn accept_device_registration_request(
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Attempt(attempt_ref.clone()),
     )
@@ -2995,16 +3007,22 @@ pub async fn cancel_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let outcome_activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
@@ -3184,10 +3202,13 @@ async fn prepare_device_join_cleanup_inner(
             let plan = crate::sync::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                coordination,
+                crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+                    db.write_policy(),
+                    coordination,
+                    authorization.merge_chain(),
+                )?,
                 &local_device_id,
                 identity_signer,
-                authorization.merge_chain(),
             )
             .await?;
             let receipt_object = DeviceJoinCleanupReceiptObject::signed(
@@ -3908,10 +3929,13 @@ pub async fn activate_device_join_cleanup(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let root = db
@@ -3943,7 +3967,10 @@ pub async fn activate_device_join_cleanup(
     let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::CleanupReceipt(receipt.receipt.clone()),
     )
@@ -4783,16 +4810,22 @@ pub async fn finalize_device_join(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
@@ -5164,16 +5197,22 @@ pub async fn authorize_device_provider_access(
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &local_device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
-        coordination,
+        crate::sync::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         plan,
         crate::sync::store_outbound::StoreOperationBatch::ProviderAccessGrant(grant_ref.clone()),
     )

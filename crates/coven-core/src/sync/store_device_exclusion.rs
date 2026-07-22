@@ -613,10 +613,13 @@ async fn prepare_proposal(
         Box::pin(super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            coordination,
+            super::store_outbound::StoreOperationPreparation::from_dependencies(
+                db.write_policy(),
+                coordination,
+                authorization.merge_chain(),
+            )?,
             &device_id,
             identity_signer,
-            authorization.merge_chain(),
         ))
         .await?,
     );
@@ -858,10 +861,13 @@ async fn prepare_outcome(
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        super::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &device_id,
         identity_signer,
-        authorization.merge_chain(),
     ))
     .await?;
     let owner_grant = plan
@@ -1034,7 +1040,10 @@ async fn publish_device_exclusion_candidate(
     let publish = super::store_outbound::publish_prepared_store_operation(
         db,
         storage,
-        coordination,
+        super::store_outbound::StoreOperationPublicationMode::from_dependencies(
+            db.write_policy(),
+            coordination,
+        )?,
         Box::new(candidate),
     );
     let publication = Box::new(Box::pin(publish).await?);
@@ -1228,10 +1237,13 @@ async fn prepare_replacement_candidate(
     let plan = super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        super::store_outbound::StoreOperationPreparation::from_dependencies(
+            db.write_policy(),
+            coordination,
+            authorization.merge_chain(),
+        )?,
         &device_id,
         identity_signer,
-        authorization.merge_chain(),
     )
     .await?;
     let state = db.resolved_store_device_state(plan.device_state()).await?;
@@ -4507,10 +4519,14 @@ mod tests {
         let plan = super::super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            None,
+            super::super::store_outbound::StoreOperationPreparation::MergeConcurrent {
+                membership: membership
+                    .chain
+                    .as_ref()
+                    .expect("resolved Merge membership"),
+            },
             &device_id,
             signer,
-            membership.chain.as_ref(),
         )
         .await
         .expect("prepare exclusion proposal predecessor");

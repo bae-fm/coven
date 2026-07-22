@@ -549,7 +549,7 @@ pub enum ReclaimMembership<'a> {
     Serial(&'a SerialMembershipState),
 }
 
-impl ReclaimMembership<'_> {
+impl<'a> ReclaimMembership<'a> {
     fn write_policy(self) -> crate::WritePolicy {
         match self {
             Self::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
@@ -561,6 +561,26 @@ impl ReclaimMembership<'_> {
         match self {
             Self::MergeConcurrent { membership, .. } => membership.is_owner_now(pubkey),
             Self::Serial(membership) => membership.is_owner(pubkey),
+        }
+    }
+
+    fn store_operation_preparation(
+        self,
+        coordination: Option<&'a dyn CoordinationStorage>,
+    ) -> Result<super::store_outbound::StoreOperationPreparation<'a>, StoreReclaimError> {
+        match (self, coordination) {
+            (Self::MergeConcurrent { membership, .. }, None) => Ok(
+                super::store_outbound::StoreOperationPreparation::MergeConcurrent { membership },
+            ),
+            (Self::Serial(_), Some(coordination)) => {
+                Ok(super::store_outbound::StoreOperationPreparation::Serial { coordination })
+            }
+            (Self::MergeConcurrent { .. }, Some(_)) => Err(StoreReclaimError::PolicyMismatch(
+                "Merge reclamation received Serial coordination".to_string(),
+            )),
+            (Self::Serial(_), None) => Err(StoreReclaimError::Outbound(
+                super::store_outbound::StoreOutboundError::MissingSerialCoordination,
+            )),
         }
     }
 }
@@ -691,13 +711,9 @@ async fn prepare_reclaim_authorization(
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        membership.store_operation_preparation(coordination)?,
         device_id,
         identity_signer,
-        match membership {
-            ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
-            ReclaimMembership::Serial(_) => None,
-        },
     ))
     .await?;
     let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
@@ -1190,7 +1206,10 @@ async fn drive_reclaim_candidate(
         match Box::pin(super::store_outbound::publish_prepared_store_operation(
             db,
             storage,
-            coordination,
+            super::store_outbound::StoreOperationPublicationMode::from_dependencies(
+                db.write_policy(),
+                coordination,
+            )?,
             candidate,
         ))
         .await?
@@ -1211,13 +1230,9 @@ async fn drive_reclaim_candidate(
                 let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
                     db,
                     storage,
-                    coordination,
+                    membership.store_operation_preparation(coordination)?,
                     device_id,
                     identity_signer,
-                    match membership {
-                        ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
-                        ReclaimMembership::Serial(_) => None,
-                    },
                 ))
                 .await?;
                 let batch = match &*object {
@@ -1309,13 +1324,9 @@ async fn prepare_reclaim_receipt(
     let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
         db,
         storage,
-        coordination,
+        membership.store_operation_preparation(coordination)?,
         device_id,
         identity_signer,
-        match membership {
-            ReclaimMembership::MergeConcurrent { membership, .. } => Some(membership),
-            ReclaimMembership::Serial(_) => None,
-        },
     ))
     .await?;
     let provider_admin = match membership {
@@ -2292,10 +2303,11 @@ mod tests {
         let plan = super::super::store_outbound::prepare_store_operation_commit(
             &db,
             &store.storage,
-            Some(&store.storage),
+            super::super::store_outbound::StoreOperationPreparation::Serial {
+                coordination: &store.storage,
+            },
             &device_id,
             &signer,
-            None,
         )
         .await
         .expect("prepare Serial reclaim activation");

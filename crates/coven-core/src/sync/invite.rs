@@ -726,7 +726,6 @@ pub(crate) async fn publish_prepared_merge_membership_authority(
 pub(crate) async fn publish_prepared_merge_membership_activation(
     db: &Database,
     storage: &dyn SyncStorage,
-    coordination: Option<&dyn super::storage::CoordinationStorage>,
     root: &super::store_commit::StoreRootRef,
     author: &super::store_commit::StoreDeviceRegistration,
     transition: &PreparedMembershipTransition,
@@ -789,7 +788,6 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
     super::store_outbound::publish_prepared_store_membership_operation(
         db,
         storage,
-        coordination,
         candidate,
         membership_objects,
         completion,
@@ -1397,10 +1395,9 @@ async fn build_revoke_mutation(
         let operation = Box::pin(super::store_outbound::prepare_store_operation_commit(
             db,
             storage,
-            None,
+            super::store_outbound::StoreOperationPreparation::MergeConcurrent { membership: chain },
             &device_id,
             owner_keypair,
-            Some(chain),
         ))
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
@@ -2321,7 +2318,6 @@ async fn execute_revoke_mutation(
                 let outcome = Box::pin(publish_prepared_merge_membership_activation(
                     persistence.db,
                     storage,
-                    None,
                     &root,
                     &author,
                     &transition,
@@ -2687,7 +2683,6 @@ async fn execute_resolution_mutation(
         let outcome = publish_prepared_merge_membership_activation(
             persistence.db,
             storage,
-            None,
             &root,
             &author,
             &plan.transition,

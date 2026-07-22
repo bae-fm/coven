@@ -770,10 +770,9 @@ async fn invite_serial_member(
             let operation = super::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                Some(coordination),
+                super::store_outbound::StoreOperationPreparation::Serial { coordination },
                 device_id,
                 user_keypair,
-                None,
             )
             .await?;
             let prepared = super::store_outbound::prepare_store_operation_candidate(
@@ -1290,10 +1289,9 @@ async fn remove_serial_member(
             let operation = super::store_outbound::prepare_store_operation_commit(
                 db,
                 storage,
-                Some(coordination),
+                super::store_outbound::StoreOperationPreparation::Serial { coordination },
                 device_id,
                 user_keypair,
-                None,
             )
             .await?;
             let prepared = super::store_outbound::prepare_store_operation_candidate(

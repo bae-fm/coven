@@ -3445,17 +3445,16 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
             let provider_admin_plan = crate::sync::store_outbound::prepare_store_operation_commit(
                 &remote,
                 storage,
-                Some(coordination),
+                crate::sync::store_outbound::StoreOperationPreparation::Serial { coordination },
                 &remote_device_id,
                 &founder,
-                None,
             )
             .await
             .expect("prepare recovered provider administrator control");
             crate::sync::store_outbound::activate_store_operation_commit(
                 &remote,
                 storage,
-                Some(coordination),
+                crate::sync::store_outbound::StoreOperationPublicationMode::Serial { coordination },
                 provider_admin_plan,
                 crate::sync::store_outbound::StoreOperationBatch::Control(
                     StoreControl::ProviderAdmin {
@@ -7057,10 +7056,14 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
     let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         &owner_db,
         &storage.storage,
-        None,
+        crate::sync::store_outbound::StoreOperationPreparation::MergeConcurrent {
+            membership: fixture
+                .authorization
+                .merge_chain()
+                .expect("Merge authorization"),
+        },
         &local_device_id,
         &owner,
-        fixture.authorization.merge_chain(),
     )
     .await
     .expect("prepare exact Owner Store commit");
