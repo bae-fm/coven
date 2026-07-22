@@ -45,9 +45,7 @@ use super::store_objects::{
 use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
-use crate::sync::store_engine::{
-    load_device_join_authorization, merge::pull::*, DeviceJoinBootstrapAuthorization,
-};
+use crate::sync::store_engine::merge::pull::*;
 
 mod ancestry;
 mod circle_packages;

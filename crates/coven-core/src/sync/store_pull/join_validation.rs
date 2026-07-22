@@ -245,14 +245,9 @@ pub(super) fn validate_commit_join_cleanup_receipts<'a>(
                 .await?;
         let mut receipts = Vec::with_capacity(loaded.len());
         for loaded in loaded {
-            let attempt = verify_device_join_attempt_evidence(
-                storage,
-                root,
-                loaded.attempt,
-                accepted_predecessor,
-            )
-            .await
-            .map_err(registration_attempt_error)?;
+            let attempt = verify_device_join_attempt_evidence(loaded.attempt, accepted_predecessor)
+                .await
+                .map_err(registration_attempt_error)?;
             let expected_administrator =
                 &attempt.value.provider_approval.request.offer.provider_admin;
             if !predecessor.verifies_provider_administrator(

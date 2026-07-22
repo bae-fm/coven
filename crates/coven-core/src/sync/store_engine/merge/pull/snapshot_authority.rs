@@ -9,7 +9,7 @@ struct VerifiedMergeSnapshotState {
 pub(super) struct VerifiedMergeHistoryAuthority {
     pub(super) history: VerifiedMergeHistory,
     device_state: ResolvedStoreDeviceState,
-    membership: MembershipChain,
+    pub(super) membership: MembershipChain,
 }
 
 pub(super) async fn verify_merge_history_authority(
@@ -108,22 +108,6 @@ async fn verify_history_state(
         membership: authority.membership,
         checkpoints,
     })
-}
-
-pub(in crate::sync::store_engine) async fn verify_history_authority(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    cut: &StoreHistoryCut,
-    membership_ref: &StoreMembershipStateRef,
-) -> Result<(), StorePullError> {
-    let StoreHistoryCut::MergeConcurrent(frontier) = cut else {
-        return Err(StorePullError::Database(
-            "Merge history verification received a Serial cut".to_string(),
-        ));
-    };
-    verify_merge_history_authority(storage, root, frontier, membership_ref)
-        .await
-        .map(|_| ())
 }
 
 async fn verify_authority(

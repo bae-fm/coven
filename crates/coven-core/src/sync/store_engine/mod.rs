@@ -354,37 +354,6 @@ enum AuthorizedStoreEngineKind<'a> {
 
 pub(crate) struct VerifiedOwnerPromotionAcceptance(VerifiedOwnerPromotionAcceptanceKind);
 
-pub(crate) enum DeviceJoinBootstrapAuthorization {
-    MergeConcurrent {
-        chain: super::membership::MembershipChain,
-    },
-    Serial {
-        position: super::store_commit::SerialStorePosition,
-        authorization: super::membership::SerialAuthorizationState,
-    },
-}
-
-pub(crate) async fn load_device_join_authorization(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    state: &super::circle_control::StoreMembershipStateRef,
-) -> Result<DeviceJoinBootstrapAuthorization, super::store_pull::StorePullError> {
-    match state {
-        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
-            let chain = merge::pull::load_device_join_authorization(storage, root, state).await?;
-            Ok(DeviceJoinBootstrapAuthorization::MergeConcurrent { chain })
-        }
-        super::circle_control::StoreMembershipStateRef::Serial(_) => {
-            let (position, authorization) =
-                serial::pull::load_device_join_authorization(storage, root, state).await?;
-            Ok(DeviceJoinBootstrapAuthorization::Serial {
-                position,
-                authorization,
-            })
-        }
-    }
-}
-
 pub(crate) fn load_verified_device_join_attempt_ref<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
@@ -509,38 +478,40 @@ pub(crate) async fn prepare_device_join_bootstrap(
     }
 }
 
-pub(crate) async fn materialize_device_join_activation(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    reference: &super::store_commit::StoreBatchCommitRef,
-    expected_outcome: &super::store_commit::DeviceJoinOutcomeRef,
-    membership_state: &super::circle_control::StoreMembershipStateRef,
-) -> Result<(), super::store_pull::StorePullError> {
-    match membership_state {
-        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
-            merge::pull::materialize_device_join_activation(
-                db,
-                storage,
-                root,
-                reference,
-                expected_outcome,
-                membership_state,
-            )
-            .await
+pub(crate) fn materialize_device_join_activation<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    reference: &'a super::store_commit::StoreBatchCommitRef,
+    expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
+    membership_state: &'a super::circle_control::StoreMembershipStateRef,
+) -> super::store_pull::StorePullFuture<'a, ()> {
+    Box::pin(async move {
+        match membership_state {
+            super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
+                merge::pull::materialize_device_join_activation(
+                    db,
+                    storage,
+                    root,
+                    reference,
+                    expected_outcome,
+                    membership_state,
+                )
+                .await
+            }
+            super::circle_control::StoreMembershipStateRef::Serial(_) => {
+                serial::pull::materialize_device_join_activation(
+                    db,
+                    storage,
+                    root,
+                    reference,
+                    expected_outcome,
+                    membership_state,
+                )
+                .await
+            }
         }
-        super::circle_control::StoreMembershipStateRef::Serial(_) => {
-            serial::pull::materialize_device_join_activation(
-                db,
-                storage,
-                root,
-                reference,
-                expected_outcome,
-                membership_state,
-            )
-            .await
-        }
-    }
+    })
 }
 
 enum VerifiedOwnerPromotionAcceptanceKind {

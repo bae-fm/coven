@@ -86,7 +86,7 @@ pub(crate) use registration_authority::{
 use replay::*;
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store_engine) use snapshot_authority::{
-    verify_history_authority, verify_snapshot_for_acknowledgement, verify_snapshot_stability,
+    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
@@ -321,29 +321,43 @@ pub(crate) fn pull_store_commits<'a>(
                             StoreDeviceRegistrationActivationRef::Join { .. }
                         )
                     });
-                if requires_accepted_predecessor {
+                let accepted_history = if requires_accepted_predecessor {
                     let predecessor_cut = commit
                         .order
                         .predecessor_cut()
                         .map_err(|error| StorePullError::Database(error.to_string()))?;
-                    verify_history_authority(
-                        storage,
-                        &root,
-                        &predecessor_cut,
-                        &commit.membership_state,
+                    let StoreHistoryCut::MergeConcurrent(frontier) = predecessor_cut else {
+                        return Err(StorePullError::Database(
+                            "Merge commit carries a Serial predecessor cut".to_string(),
+                        ));
+                    };
+                    Some(
+                        snapshot_authority::verify_merge_history_authority(
+                            storage,
+                            &root,
+                            &frontier,
+                            &commit.membership_state,
+                        )
+                        .await?,
                     )
-                    .await?;
-                }
+                } else {
+                    None
+                };
                 let predecessor_authority =
                     RegistrationPredecessorAuthority::MergeConcurrent(&predecessor_membership);
-                let exact_predecessor = VerifiedAcceptedPredecessor::Exact;
+                let accepted_predecessor = accepted_history.as_ref().map(|history| {
+                    VerifiedAcceptedPredecessor::MergeHistory {
+                        commits: &history.history.commits,
+                        frontier: commit_predecessor_references(&commit),
+                    }
+                });
                 let registrations = match Box::pin(load_commit_registrations(
                     storage,
                     &root,
                     &commit,
                     &registration,
                     Some(&predecessor_authority),
-                    requires_accepted_predecessor.then_some(&exact_predecessor),
+                    accepted_predecessor.as_ref(),
                 ))
                 .await
                 {

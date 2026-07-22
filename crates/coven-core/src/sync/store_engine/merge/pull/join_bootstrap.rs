@@ -232,159 +232,186 @@ pub(in crate::sync::store_engine) async fn prepare_device_join_bootstrap(
     })
 }
 
-pub(in crate::sync::store_engine) async fn materialize_device_join_activation(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    reference: &StoreBatchCommitRef,
-    expected_outcome: &super::store_commit::DeviceJoinOutcomeRef,
-    membership_state: &StoreMembershipStateRef,
-) -> Result<(), StorePullError> {
-    let StoreCommitCoord::MergeConcurrent {
-        stream_id,
-        sequence,
-    } = reference.coord
-    else {
-        return Err(StorePullError::Database(
-            "Merge device join materialization received a Serial commit".to_string(),
-        ));
-    };
-    let stream_id = stream_id.to_string();
-    if let Some(materialized) = db.exact_materialized_ref(&stream_id, sequence).await? {
-        if materialized == *reference {
-            return Ok(());
+pub(in crate::sync::store_engine) fn materialize_device_join_activation<'a>(
+    db: &'a Database,
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    reference: &'a StoreBatchCommitRef,
+    expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
+    membership_state: &'a StoreMembershipStateRef,
+) -> StorePullFuture<'a, ()> {
+    Box::pin(async move {
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = reference.coord
+        else {
+            return Err(StorePullError::Database(
+                "Merge device join materialization received a Serial commit".to_string(),
+            ));
+        };
+        let stream_id = stream_id.to_string();
+        if let Some(materialized) = db.exact_materialized_ref(&stream_id, sequence).await? {
+            if materialized == *reference {
+                return Ok(());
+            }
+            return Err(StorePullError::Database(format!(
+                "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
+            )));
         }
-        return Err(StorePullError::Database(format!(
-            "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
-        )));
-    }
-    let (commit, author) =
-        load_device_join_activation_commit(storage, root, reference, expected_outcome).await?;
-    let membership = load_device_join_authorization(storage, root, membership_state).await?;
-    let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
-    let accepted_predecessor = VerifiedAcceptedPredecessor::Exact;
-    let registrations = Box::pin(load_commit_registrations(
-        storage,
-        root,
-        &commit,
-        &author,
-        Some(&authority),
-        Some(&accepted_predecessor),
-    ))
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => StorePullError::Object(error),
-        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-    })?;
-    if !membership_authorizes(Some(&membership), &commit, &author) {
-        return Err(StorePullError::Database(
-            "device join activation author is not authorized by its exact predecessor membership"
-                .to_string(),
-        ));
-    }
-    let (_, head_ref) = super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &commit.author_registration,
-        &author,
-        Some(reference),
-    )
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let head_ref = head_ref.ok_or_else(|| {
-        StorePullError::Database(
-            "device join activation has no exact accepted activation head".to_string(),
-        )
-    })?;
-    let head = super::store_objects::load_head_ref(
-        storage,
-        root.store_root_hash,
-        &head_ref,
-        &author,
-        reference,
-    )
-    .await?;
-    let (_, predecessor_state) = db.store_device_state_for_order(&commit.order).await?;
-    let (authorized_predecessor, recovery_author) =
-        predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
+        let (commit, author) =
+            load_device_join_activation_commit(storage, root, reference, expected_outcome).await?;
+        if &commit.membership_state != membership_state {
+            return Err(StorePullError::Database(
+                "device join activation differs from its expected Merge membership state"
+                    .to_string(),
+            ));
+        }
+        let predecessor_cut = commit
+            .order
+            .predecessor_cut()
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
+        let StoreHistoryCut::MergeConcurrent(frontier) = predecessor_cut else {
+            return Err(StorePullError::Database(
+                "Merge device join activation carries a Serial predecessor cut".to_string(),
+            ));
+        };
+        let accepted_history = super::snapshot_authority::verify_merge_history_authority(
+            storage,
+            root,
+            &frontier,
+            &commit.membership_state,
+        )
+        .await?;
+        let membership = accepted_history.membership.clone();
+        let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
+        let accepted_predecessor = VerifiedAcceptedPredecessor::MergeHistory {
+            commits: &accepted_history.history.commits,
+            frontier: commit_predecessor_references(&commit),
+        };
+        let registrations = Box::pin(load_commit_registrations(
+            storage,
+            root,
+            &commit,
+            &author,
+            Some(&authority),
+            Some(&accepted_predecessor),
+        ))
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+        if !membership_authorizes(Some(&membership), &commit, &author) {
+            return Err(StorePullError::Database(
+                "device join activation author is not authorized by its exact predecessor membership"
+                    .to_string(),
+            ));
+        }
+        let (_, head_ref) = super::store_outbound::exact_next_announcement_slot(
+            storage,
+            root,
+            &commit.author_registration,
+            &author,
+            Some(reference),
+        )
+        .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let state_after = device_operations
-        .apply_to(authorized_predecessor, &commit.device_state)
-        .and_then(|state| {
-            apply_verified_device_lifecycle(
-                state,
+        let head_ref = head_ref.ok_or_else(|| {
+            StorePullError::Database(
+                "device join activation has no exact accepted activation head".to_string(),
+            )
+        })?;
+        let head = super::store_objects::load_head_ref(
+            storage,
+            root.store_root_hash,
+            &head_ref,
+            &author,
+            reference,
+        )
+        .await?;
+        let (_, predecessor_state) = db.store_device_state_for_order(&commit.order).await?;
+        let (authorized_predecessor, recovery_author) =
+            predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let state_after = device_operations
+            .apply_to(authorized_predecessor, &commit.device_state)
+            .and_then(|state| {
+                apply_verified_device_lifecycle(
+                    state,
+                    &commit,
+                    &registrations,
+                    recovery_author.as_ref(),
+                    None,
+                )
+            })
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let history = prepare_merge_history_successor(
+            db,
+            root,
+            &commit,
+            reference,
+            &membership,
+            &author,
+            recovery_author.as_ref(),
+            state_after.clone(),
+            MergeHistorySuccessorEvidence {
+                registrations: commit
+                    .device_registrations()
+                    .iter()
+                    .zip(&registrations)
+                    .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+                        reference: activation.registration.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+                acknowledgement: None,
+                membership_proof: None,
+            },
+        )
+        .await?;
+        history
+            .summary
+            .open(&commit, reference, &head.value, &head_ref, &state_after)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let root = root.clone();
+        let commit_ref = reference.clone();
+        let expected_ref = reference.clone();
+        db.call(move |connection| {
+            let tx = connection.unchecked_transaction().map_err(DbError::from)?;
+            if let Some(materialized) =
+                Database::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+            {
+                if materialized != expected_ref {
+                    return Err(DbError::Message(format!(
+                        "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
+                    )));
+                }
+                tx.commit().map_err(DbError::from)?;
+                return Ok(());
+            }
+            Database::record_activated_store_device_registrations_on(
+                &tx,
                 &commit,
                 &registrations,
-                recovery_author.as_ref(),
+            )?;
+            Database::record_materialized_merge_commit_on(
+                &tx,
+                &root,
+                &commit,
+                &commit_ref,
+                &registrations,
+                &head.value,
+                &head.object,
+                &history.summary,
+                &[],
                 None,
-            )
+            )?;
+            tx.commit().map_err(DbError::from)
         })
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let history = prepare_merge_history_successor(
-        db,
-        root,
-        &commit,
-        reference,
-        &membership,
-        &author,
-        recovery_author.as_ref(),
-        state_after.clone(),
-        MergeHistorySuccessorEvidence {
-            registrations: commit
-                .device_registrations()
-                .iter()
-                .zip(&registrations)
-                .map(|(activation, (value, _))| RetainedVerifiedRegistration {
-                    reference: activation.registration.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-            acknowledgement: None,
-            membership_proof: None,
-        },
-    )
-    .await?;
-    history
-        .summary
-        .open(&commit, reference, &head.value, &head_ref, &state_after)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let root = root.clone();
-    let commit_ref = reference.clone();
-    let expected_ref = reference.clone();
-    db.call(move |connection| {
-        let tx = connection.unchecked_transaction().map_err(DbError::from)?;
-        if let Some(materialized) =
-            Database::materialized_commit_ref_on(&tx, &stream_id, sequence)?
-        {
-            if materialized != expected_ref {
-                return Err(DbError::Message(format!(
-                    "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
-                )));
-            }
-            tx.commit().map_err(DbError::from)?;
-            return Ok(());
-        }
-        Database::record_activated_store_device_registrations_on(
-            &tx,
-            &commit,
-            &registrations,
-        )?;
-        Database::record_materialized_merge_commit_on(
-            &tx,
-            &root,
-            &commit,
-            &commit_ref,
-            &registrations,
-            &head.value,
-            &head.object,
-            &history.summary,
-            &[],
-            None,
-        )?;
-        tx.commit().map_err(DbError::from)
+        .await?;
+        Ok(())
     })
-    .await?;
-    Ok(())
 }

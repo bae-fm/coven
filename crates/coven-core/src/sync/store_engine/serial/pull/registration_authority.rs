@@ -11,17 +11,17 @@ pub(crate) fn verify_serial_provider_administrator(
         && authorization.provider_admin.records().get(grant_id) == Some(expected)
 }
 
-pub(in crate::sync::store_engine) async fn load_device_join_authorization(
+pub(crate) struct SerialRegistrationAuthority {
+    pub(crate) position: super::store_commit::SerialStorePosition,
+    pub(crate) authorization: SerialAuthorizationState,
+    pub(crate) accepted_prefix: Vec<AuthorizedSerialCommit>,
+}
+
+pub(crate) async fn load_serial_registration_authority(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,
-) -> Result<
-    (
-        super::store_commit::SerialStorePosition,
-        SerialAuthorizationState,
-    ),
-    StorePullError,
-> {
+) -> Result<SerialRegistrationAuthority, StorePullError> {
     let StoreMembershipStateRef::Serial(state_ref) = state else {
         return Err(StorePullError::Serial(
             "Serial device join carries Merge membership authority".to_string(),
@@ -31,10 +31,8 @@ pub(in crate::sync::store_engine) async fn load_device_join_authorization(
         super::store_commit::SerialStorePosition::Genesis { .. } => None,
         super::store_commit::SerialStorePosition::Commit(reference) => Some(reference.clone()),
     };
-    let authorization = Box::pin(load_serial_authorization_at_position(
-        storage, root, reference,
-    ))
-    .await?;
+    let (accepted_prefix, authorization, _) =
+        Box::pin(load_authorized_serial_prefix(storage, root, reference)).await?;
     let expected = StoreMembershipStateRef::serial(
         state_ref.position.clone(),
         state_ref.recovery.clone(),
@@ -46,5 +44,24 @@ pub(in crate::sync::store_engine) async fn load_device_join_authorization(
             "Serial device join membership state differs from its exact authorization".to_string(),
         ));
     }
-    Ok((state_ref.position.clone(), authorization))
+    Ok(SerialRegistrationAuthority {
+        position: state_ref.position.clone(),
+        authorization,
+        accepted_prefix,
+    })
+}
+
+pub(in crate::sync::store_engine) async fn load_device_join_authorization(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &StoreMembershipStateRef,
+) -> Result<
+    (
+        super::store_commit::SerialStorePosition,
+        SerialAuthorizationState,
+    ),
+    StorePullError,
+> {
+    let authority = load_serial_registration_authority(storage, root, state).await?;
+    Ok((authority.position, authority.authorization))
 }

@@ -9,7 +9,6 @@ pub(crate) type RegistrationLoadFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RegistrationLoadError>> + Send + 'a>>;
 
 pub(crate) enum VerifiedAcceptedPredecessor<'a> {
-    Exact,
     SerialHistory {
         commits: &'a [AuthorizedSerialCommit],
     },
