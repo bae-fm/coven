@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store_commit::StoreBatchCommitDeletionTarget;
 
 #[tokio::test]
 async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {

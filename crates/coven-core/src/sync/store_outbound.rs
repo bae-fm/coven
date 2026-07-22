@@ -8,32 +8,31 @@ use super::membership::{MembershipChain, SerialAuthorizationState};
 #[cfg(test)]
 use super::membership_ops;
 use super::storage::{
-    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, StorageError,
-    SyncStorage, VersionedObject,
+    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, SyncStorage,
+    VersionedObject,
 };
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId,
-    DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit,
-    StoreBatchCommitDeletionTarget, StoreBatchCommitRef, StoreCommitCoord,
-    StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
+    DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
+    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
     StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
     StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::{run_blocking_object_verification, StoreObjectError};
 use super::{
-    audience_package, circle, circle_activation, circle_control, device_join, gate, invite,
-    membership, owner_promotion, provider, remote_object, service, storage, store_commit,
-    store_objects, store_pull, store_reclaim, wrapped_store_key,
+    audience_package, circle, circle_control, device_join, gate, invite, membership,
+    owner_promotion, provider, remote_object, service, storage, store_commit, store_objects,
+    store_pull, store_reclaim, wrapped_store_key,
 };
 
 pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 pub(crate) const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
-    StoreWriteBlobFact, StoreWriteBlobFacts, VerifiedMergeMaterialization,
+    StoreWriteBlobFact, StoreWriteBlobFacts,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;

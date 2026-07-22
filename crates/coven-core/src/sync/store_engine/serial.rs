@@ -3,6 +3,7 @@ use super::*;
 pub(crate) mod abandonment;
 mod acknowledgements;
 mod database;
+pub(crate) mod operations;
 pub(crate) mod publication;
 pub(super) mod pull;
 

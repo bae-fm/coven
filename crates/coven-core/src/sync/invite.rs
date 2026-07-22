@@ -2290,11 +2290,9 @@ async fn execute_revoke_mutation(
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            super::store_outbound::upload_prepared_merge_store_operation_commit(
-                storage, &candidate,
-            )
-            .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            super::store_engine::merge::operations::upload_commit(storage, &candidate)
+                .await
+                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
             persistence
                 .db
                 .mark_remote_object_uploaded(exact_owned_remote(
@@ -2667,7 +2665,7 @@ async fn execute_resolution_mutation(
             &plan.transition.entry_ref.object,
         )?)
         .await?;
-    super::store_outbound::upload_prepared_merge_store_operation_commit(storage, &plan.candidate)
+    super::store_engine::merge::operations::upload_commit(storage, &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence

@@ -7,7 +7,7 @@ pub(crate) struct PreparedStoreOperationCommit {
     pub(crate) prepared: PreparedExactObject,
     pub(crate) reference: StoreBatchCommitRef,
     pub(super) publication: StoreOperationPublication,
-    pub(super) registration_activation: Option<DeviceJoinRegistrationActivation>,
+    pub(crate) registration_activation: Option<DeviceJoinRegistrationActivation>,
 }
 
 impl PreparedStoreOperationCommit {
