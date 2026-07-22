@@ -49,6 +49,7 @@ mod history;
 mod materialization;
 mod membership_control;
 mod owner_promotion;
+mod registration_authority;
 mod replay;
 mod retained_authority;
 mod snapshot_authority;
@@ -62,6 +63,11 @@ pub(crate) use membership_control::*;
 pub(in crate::sync::store_engine) use owner_promotion::{
     find_request_activation as find_owner_promotion_request_activation,
     verify_acceptance as verify_owner_promotion_acceptance,
+};
+pub(in crate::sync::store_engine) use registration_authority::load_device_join_authorization;
+pub(crate) use registration_authority::{
+    load_merge_predecessor_membership, load_merge_predecessor_membership_with_verified_activations,
+    verify_merge_membership_state_ref,
 };
 use replay::*;
 pub(crate) use retained_authority::*;

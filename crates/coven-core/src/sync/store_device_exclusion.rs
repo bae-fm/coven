@@ -2023,7 +2023,7 @@ mod tests {
             .order
             .predecessor_cut()
             .expect("read exclusion activation predecessor");
-        let authorization = super::super::store_pull::load_device_join_authorization(
+        let authorization = super::super::store_engine::load_device_join_authorization(
             &store.storage,
             &store.root,
             &activation_commit.membership_state,

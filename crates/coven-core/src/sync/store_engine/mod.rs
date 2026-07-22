@@ -382,6 +382,43 @@ enum AuthorizedStoreEngineKind<'a> {
 
 pub(crate) struct VerifiedOwnerPromotionAcceptance(VerifiedOwnerPromotionAcceptanceKind);
 
+pub(crate) enum DeviceJoinBootstrapAuthorization {
+    MergeConcurrent {
+        state: super::circle_control::StoreMembershipStateRef,
+        chain: super::membership::MembershipChain,
+    },
+    Serial {
+        state: super::circle_control::StoreMembershipStateRef,
+        position: super::store_commit::SerialStorePosition,
+        authorization: super::membership::SerialAuthorizationState,
+    },
+}
+
+pub(crate) async fn load_device_join_authorization(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    state: &super::circle_control::StoreMembershipStateRef,
+) -> Result<DeviceJoinBootstrapAuthorization, super::store_pull::StorePullError> {
+    match state {
+        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
+            let chain = merge::pull::load_device_join_authorization(storage, root, state).await?;
+            Ok(DeviceJoinBootstrapAuthorization::MergeConcurrent {
+                state: state.clone(),
+                chain,
+            })
+        }
+        super::circle_control::StoreMembershipStateRef::Serial(_) => {
+            let (position, authorization) =
+                serial::pull::load_device_join_authorization(storage, root, state).await?;
+            Ok(DeviceJoinBootstrapAuthorization::Serial {
+                state: state.clone(),
+                position,
+                authorization,
+            })
+        }
+    }
+}
+
 enum VerifiedOwnerPromotionAcceptanceKind {
     MergeConcurrent,
     Serial(serial::publication::SerialAuthorizationSnapshot),

@@ -2580,7 +2580,7 @@ pub async fn bootstrap_pending_device(
         return Err(DeviceJoinError::AttemptMismatch);
     }
     let bootstrap_authorization =
-        Box::pin(crate::sync::store_pull::load_device_join_authorization(
+        Box::pin(crate::sync::store_engine::load_device_join_authorization(
             storage,
             &offer.store_root,
             &verified_attempt.value.membership,
@@ -4892,7 +4892,7 @@ pub async fn materialize_device_join_activation(
     )
     .await?
     .value;
-    let authorization = Box::pin(crate::sync::store_pull::load_device_join_authorization(
+    let authorization = Box::pin(crate::sync::store_engine::load_device_join_authorization(
         storage,
         &root,
         &attempt.membership,
