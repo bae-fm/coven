@@ -171,7 +171,7 @@ pub struct BootstrapResult {
         super::store_objects::VerifiedObject<super::store_commit::StoreDeviceRegistration>,
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: super::store_commit::CommitFrontier,
-    stability: super::store_pull::VerifiedStoreSnapshotStability,
+    stability: super::store::pull::VerifiedStoreSnapshotStability,
 }
 
 impl BootstrapResult {

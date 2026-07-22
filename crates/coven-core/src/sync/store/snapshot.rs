@@ -690,14 +690,14 @@ pub(crate) fn select_maximal_store_snapshot(
 
 pub(crate) struct SelectedStableStoreSnapshot {
     pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
-    pub(crate) stability: crate::sync::store_pull::VerifiedStoreSnapshotStability,
+    pub(crate) stability: crate::sync::store::pull::VerifiedStoreSnapshotStability,
 }
 
 pub(crate) async fn select_maximal_stable_store_snapshot(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
-) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store_pull::StorePullError> {
+) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::pull::StorePullError> {
     let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
         return Ok(None);
     };
@@ -711,9 +711,9 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
                 stability,
             }),
             Err(error) => match &error {
-                crate::sync::store_pull::StorePullError::SnapshotNotStable { .. }
-                | crate::sync::store_pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store_pull::StorePullError::SnapshotAuthorNotOwner => {
+                crate::sync::store::pull::StorePullError::SnapshotNotStable { .. }
+                | crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
+                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner => {
                     if snapshot.reference == maximal_reference {
                         maximal_rejection = Some(error);
                     }
@@ -733,14 +733,14 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
             .iter()
             .position(|candidate| candidate.snapshot.reference == selected.reference)
             .ok_or_else(|| {
-                crate::sync::store_pull::StorePullError::Database(
+                crate::sync::store::pull::StorePullError::Database(
                     "stable Store snapshot selection lost its verified candidate".to_string(),
                 )
             })?;
         return Ok(Some(stable.swap_remove(index)));
     }
     Err(maximal_rejection.ok_or_else(|| {
-        crate::sync::store_pull::StorePullError::Database(
+        crate::sync::store::pull::StorePullError::Database(
             "Store snapshot candidates produced no stability decision".to_string(),
         )
     })?)
@@ -760,7 +760,7 @@ pub(crate) async fn select_store_snapshot(
         crate::sync::store_objects::VerifiedObject<crate::sync::store_commit::StoreProtocolRoot>,
         crate::database::PublishedStoreSnapshot,
         Vec<u8>,
-        crate::sync::store_pull::VerifiedStoreSnapshotStability,
+        crate::sync::store::pull::VerifiedStoreSnapshotStability,
     ),
     SnapshotError,
 > {

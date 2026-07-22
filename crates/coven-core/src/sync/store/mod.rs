@@ -10,7 +10,6 @@ use super::cycle::SyncCycleFailure;
 use super::pull::MembershipDiscoveryProof;
 use super::storage::SyncStorage;
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
-use super::store_pull::StorePullResult;
 
 pub(crate) mod abandonment;
 mod acknowledgements;
@@ -29,6 +28,9 @@ pub(crate) mod snapshot;
 pub use abandonment::MergeCandidateAbandonment;
 pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
+pub use pull::{
+    StorePullError, StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
+};
 #[cfg(feature = "test-utils")]
 #[doc(hidden)]
 pub use registration::ensure_active_registration as ensure_active_registration_for_test;
@@ -130,7 +132,7 @@ pub(crate) async fn verify_store_snapshot_stability(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
-) -> Result<super::store_pull::VerifiedStoreSnapshotStability, super::store_pull::StorePullError> {
+) -> Result<pull::VerifiedStoreSnapshotStability, pull::StorePullError> {
     pull::verify_snapshot_stability(storage, root, snapshot).await
 }
 
@@ -139,7 +141,7 @@ pub(crate) async fn verify_store_snapshot_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
-) -> Result<(), super::store_pull::StorePullError> {
+) -> Result<(), pull::StorePullError> {
     pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
 }
 
@@ -153,7 +155,7 @@ pub fn pull_store_commits<'a>(
     store_dir: &'a StoreDir,
     membership: &'a super::membership::MembershipChain,
     identity: Option<&'a UserKeypair>,
-) -> super::store_pull::StorePullFuture<'a, StorePullResult> {
+) -> pull::StorePullFuture<'a, StorePullResult> {
     pull::pull_store_commits(
         db,
         tables,
@@ -170,15 +172,13 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
     root: &'a StoreRootRef,
     reference: &'a super::store_commit::DeviceJoinAttemptRef,
     owner: &'a super::store_commit::StoreDeviceRegistration,
-) -> super::store_pull::StorePullFuture<
+) -> pull::StorePullFuture<
     'a,
     super::store_objects::VerifiedObject<super::store_commit::DeviceJoinAttempt>,
 > {
     Box::pin(async move {
-        let evidence = super::store_pull::load_device_join_attempt_evidence_ref(
-            storage, root, reference, owner,
-        )
-        .await?;
+        let evidence =
+            pull::load_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
         pull::verify_device_join_attempt_evidence(storage, root, evidence).await
     })
 }
@@ -187,11 +187,9 @@ pub(crate) fn verify_device_join_cleanup_activation<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     activation: &'a super::device_join::DeviceJoinCleanupActivation,
-) -> super::store_pull::StorePullFuture<'a, super::device_join::JoinerJoinTerminal> {
+) -> pull::StorePullFuture<'a, super::device_join::JoinerJoinTerminal> {
     Box::pin(async move {
-        let evidence =
-            super::store_pull::load_device_join_cleanup_activation(storage, root, activation)
-                .await?;
+        let evidence = pull::load_device_join_cleanup_activation(storage, root, activation).await?;
         pull::verify_device_join_cleanup_activation(storage, root, evidence).await
     })
 }
@@ -202,7 +200,7 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &super::store_commit::StoreDeviceRegistration,
-) -> Result<(), super::store_pull::StorePullError> {
+) -> Result<(), pull::StorePullError> {
     let root_value = super::store_objects::load_store_protocol_root(storage, root)
         .await?
         .value;
@@ -223,7 +221,7 @@ pub(crate) fn prepare_device_join_bootstrap<'a>(
     coverage: &'a super::store_commit::StoreHistoryCut,
     attempt_activation: &'a super::store_commit::StoreBatchCommitRef,
     membership_state: &'a super::circle_control::StoreMembershipStateRef,
-) -> super::store_pull::StorePullFuture<'a, super::store_pull::DeviceJoinBootstrapPlan> {
+) -> pull::StorePullFuture<'a, pull::DeviceJoinBootstrapPlan> {
     pull::prepare_device_join_bootstrap(
         storage,
         root,
@@ -240,7 +238,7 @@ pub(crate) fn materialize_device_join_activation<'a>(
     reference: &'a super::store_commit::StoreBatchCommitRef,
     expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
     membership_state: &'a super::circle_control::StoreMembershipStateRef,
-) -> super::store_pull::StorePullFuture<'a, ()> {
+) -> pull::StorePullFuture<'a, ()> {
     pull::materialize_device_join_activation(
         db,
         storage,
@@ -257,8 +255,7 @@ pub(crate) async fn find_owner_promotion_request_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
-) -> Result<super::store_commit::OwnerPromotionRequestActivation, super::store_pull::StorePullError>
-{
+) -> Result<super::store_commit::OwnerPromotionRequestActivation, pull::StorePullError> {
     pull::find_owner_promotion_request_activation(storage, root, request).await
 }
 
@@ -266,7 +263,7 @@ pub(crate) async fn verify_owner_promotion_acceptance(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
-) -> Result<VerifiedOwnerPromotionAcceptance, super::store_pull::StorePullError> {
+) -> Result<VerifiedOwnerPromotionAcceptance, pull::StorePullError> {
     pull::verify_owner_promotion_acceptance(storage, root, acceptance)
         .await
         .map(|()| VerifiedOwnerPromotionAcceptance)

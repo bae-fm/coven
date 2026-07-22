@@ -1,11 +1,11 @@
 use super::registration_authority::verify_merge_provider_administrator;
 use super::snapshot_authority::verify_merge_history_authority;
 use super::*;
-use crate::sync::store_commit::DeviceJoinAttempt;
-use crate::sync::store_objects::VerifiedObject;
-use crate::sync::store_pull::{
+use crate::sync::store::pull::{
     LoadedCommitJoinEvidence, LoadedDeviceJoinAttemptEvidence, VerifiedCommitJoinEvidence,
 };
+use crate::sync::store_commit::DeviceJoinAttempt;
+use crate::sync::store_objects::VerifiedObject;
 
 pub(super) struct MergeAcceptedJoinHistory<'a> {
     pub(super) commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,

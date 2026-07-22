@@ -470,7 +470,7 @@ impl VerifiedSnapshotBootstrapInstall {
         snapshot: PublishedStoreSnapshot,
         store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
-        stability: crate::sync::store_pull::VerifiedStoreSnapshotStability,
+        stability: crate::sync::store::pull::VerifiedStoreSnapshotStability,
     ) -> Result<Self, DbError> {
         if store_root.value.to_bytes() != store_root.bytes
             || store_root.value.object_hash() != store_root.semantic_hash

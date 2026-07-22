@@ -19,10 +19,10 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::pull::PullError;
-use crate::sync::store_commit::StoreDeviceHead;
-use crate::sync::store_pull::{
+use crate::sync::store::pull::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
+use crate::sync::store_commit::StoreDeviceHead;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
@@ -492,7 +492,7 @@ async fn pull_exact_store_into(
     store_dir: &crate::store_dir::StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
-    crate::sync::store_pull::StorePullResult,
+    crate::sync::store::pull::StorePullResult,
 ) {
     let root = source
         .local_store_root_ref()
@@ -693,7 +693,7 @@ async fn materialized_sequences(db: &crate::database::Database) -> HashMap<Strin
 }
 
 fn constraint_conflicts(
-    result: &crate::sync::store_pull::StorePullResult,
+    result: &crate::sync::store::pull::StorePullResult,
 ) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -703,7 +703,7 @@ fn constraint_conflicts(
 }
 
 fn newer_schema_positions(
-    result: &crate::sync::store_pull::StorePullResult,
+    result: &crate::sync::store::pull::StorePullResult,
 ) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -713,7 +713,7 @@ fn newer_schema_positions(
 }
 
 fn unauthorized_positions(
-    result: &crate::sync::store_pull::StorePullResult,
+    result: &crate::sync::store::pull::StorePullResult,
 ) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -723,7 +723,7 @@ fn unauthorized_positions(
 }
 
 fn invalid_changeset_positions(
-    result: &crate::sync::store_pull::StorePullResult,
+    result: &crate::sync::store::pull::StorePullResult,
 ) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -3910,7 +3910,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     assert!(
         matches!(
             &error,
-            crate::sync::store_pull::StorePullError::BlobDownloads(_)
+            crate::sync::store::pull::StorePullError::BlobDownloads(_)
         ),
         "unexpected lazy verification error: {error:?}"
     );

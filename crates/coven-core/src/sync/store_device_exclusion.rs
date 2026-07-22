@@ -1921,7 +1921,7 @@ mod tests {
             .await
             .expect("read exclusion activation position")
             .expect("exclusion activation position exists");
-        let (activation_commit, _) = super::super::store_pull::load_commit_with_author(
+        let (activation_commit, _) = super::super::store::pull::load_commit_with_author(
             &store.storage,
             &store.root,
             &activation,
@@ -3959,13 +3959,13 @@ mod tests {
         let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
             matches!(
                 pull.held_positions.as_slice(),
-                [super::super::store_pull::HeldStorePosition {
+                [super::super::store::pull::HeldStorePosition {
                     coordinate:
-                        super::super::store_pull::HeldStoreCoordinate::Commit {
+                        super::super::store::pull::HeldStoreCoordinate::Commit {
                             commit,
                             ..
                         },
-                    reason: super::super::store_pull::HeldStorePositionReason::InactiveDevice {
+                    reason: super::super::store::pull::HeldStorePositionReason::InactiveDevice {
                         ..
                     },
                 }] if commit == candidate

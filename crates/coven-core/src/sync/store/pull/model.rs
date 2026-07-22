@@ -1,66 +1,4 @@
-//! Causal discovery and atomic materialization for immutable Store commits.
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::pin::Pin;
-
-use tracing::debug;
-
-use super::{
-    circle, circle_activation, circle_ops, device_join, membership, membership_ops, provider,
-    retained_replay, store_commit, store_objects, store_reclaim,
-};
-
-use super::audience_package::{AudiencePackage, PackageAudience};
-use super::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivationPrefix};
-use super::circle_control::StoreMembershipStateRef;
-use super::membership::{MembershipChain, MembershipStatus};
-use super::storage::{
-    BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-    SyncStorage,
-};
-use super::store_commit::{
-    ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier, DeviceJoinAttempt,
-    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, ObjectHash, OwnerRecoveryCursor,
-    OwnerRecoveryPosition, ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
-    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
-    RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
-    StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, VerifiedStoreDeviceOperations,
-};
-use super::store_objects::{
-    load_circle_package, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
-    load_device_join_outcome_ref, load_founder_registration, load_owner_recovery_node_ref,
-    load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
-    load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
-    load_store_ack_predecessor, load_store_ack_ref, load_store_protocol_root,
-    run_blocking_object_verification, StoreObjectError, VerifiedObject,
-};
-use crate::changeset::RowChange;
-use crate::database::{Database, DbError};
-use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
-mod ancestry;
-mod circle_packages;
-mod device_lifecycle_state;
-mod device_operations;
-mod join_bootstrap;
-mod join_validation;
-mod pull;
-mod registration;
-mod snapshot_evidence;
-
-pub(crate) use ancestry::*;
-pub(crate) use circle_packages::*;
-pub(crate) use device_lifecycle_state::*;
-pub(crate) use device_operations::*;
-pub(crate) use join_bootstrap::*;
-pub(crate) use join_validation::*;
-pub(crate) use pull::*;
-pub(crate) use registration::*;
-pub(crate) use snapshot_evidence::*;
+use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStorePositionReason {
@@ -199,7 +137,7 @@ pub enum StorePullError {
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("{0}")]
-    BlobDownloads(#[source] super::pull::BlobDownloadFailures),
+    BlobDownloads(#[source] crate::sync::pull::BlobDownloadFailures),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
 }
@@ -352,7 +290,3 @@ pub(crate) fn held_dependency(
 pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {
     coord.stream_id.to_string()
 }
-
-#[cfg(test)]
-#[path = "store_pull/tests.rs"]
-mod tests;

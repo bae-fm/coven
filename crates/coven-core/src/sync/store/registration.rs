@@ -1228,7 +1228,7 @@ pub(crate) async fn bootstrap_pending_device(
     identity_signer: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
     verified_attempt: crate::sync::store_objects::VerifiedObject<DeviceJoinAttempt>,
-    bootstrap_plan: crate::sync::store_pull::DeviceJoinBootstrapPlan,
+    bootstrap_plan: crate::sync::store::pull::DeviceJoinBootstrapPlan,
     attempt_activation: StoreBatchCommitRef,
     owner: &StoreDeviceRegistration,
     published_at: &str,
@@ -1254,7 +1254,7 @@ pub(crate) async fn bootstrap_pending_device(
         return Err(StoreRegistrationError::ActivationRequired);
     }
     let (activation_commit, activation_author) =
-        Box::pin(crate::sync::store_pull::load_commit_with_author(
+        Box::pin(crate::sync::store::pull::load_commit_with_author(
             storage,
             &attempt.store_root,
             &attempt_activation,
@@ -1633,7 +1633,7 @@ mod tests {
             .expect("load materialized Store frontier")
             .into_values()
         {
-            let (commit, _) = crate::sync::store_pull::load_commit_with_author(
+            let (commit, _) = crate::sync::store::pull::load_commit_with_author(
                 &store.storage,
                 &store.root,
                 &reference,

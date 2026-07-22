@@ -1,12 +1,18 @@
+//! Causal discovery and atomic materialization for immutable Store commits.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tracing::debug;
+
 use super::*;
 use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
+use crate::changeset::RowChange;
 use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
+use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::audience_package::{AudiencePackage, PackageAudience};
@@ -24,52 +30,91 @@ use crate::sync::storage::{
 };
 use crate::sync::store::StoreError;
 use crate::sync::store_commit::{
-    head_slot_prefix, CommitFrontier, DeviceStreamAnchor, ObjectHash,
-    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
-    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
+    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, DeviceStreamAnchor,
+    ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor, OwnerRecoveryNode,
+    OwnerRecoveryNodeRef, OwnerRecoveryPosition, ResolvedStoreDeviceState,
+    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
+    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
+    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
+    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
     VerifiedStoreDeviceOperations,
 };
 use crate::sync::store_objects::{
-    load_commit_ref, load_founder_registration_with_root, load_registration_ref,
-    load_store_ack_ref, load_store_package, load_store_protocol_root, StoreObjectError,
+    load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
+    load_device_exclusion_proposal_ref, load_device_join_outcome_ref, load_founder_registration,
+    load_founder_registration_with_root, load_owner_recovery_node_ref,
+    load_owner_signed_device_join_attempt_ref, load_reclaim_authorization_ref,
+    load_reclaim_receipt_ref, load_registration_ref, load_registration_ref_with_root,
+    load_store_ack_predecessor, load_store_ack_ref, load_store_package, load_store_protocol_root,
+    run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
-use crate::sync::store_pull::*;
 use crate::sync::{
-    causal_grants, gate, hlc, membership, membership_ops, remote_object, retained_replay, session,
-    store_commit, store_objects,
+    causal_grants, circle, circle_activation, circle_ops, device_join, gate, hlc, membership,
+    membership_ops, provider, remote_object, retained_replay, session, store_commit, store_objects,
+    store_reclaim,
 };
 
+mod ancestry;
+mod circle_packages;
 mod device_join_attempt;
 mod device_join_cleanup;
+mod device_lifecycle_state;
 mod device_operations;
 mod discovery;
 mod history;
+mod join_activation;
 mod join_bootstrap;
+mod join_validation;
+mod local_device_operations;
 mod materialization;
 mod membership_control;
+mod model;
 mod owner_promotion;
 mod provider_access;
+mod registration;
 mod registration_authority;
 mod registration_validation;
 mod replay;
 mod retained_authority;
+mod root_validation;
 mod snapshot_authority;
+mod snapshot_evidence;
 mod terminal_authority;
 mod terminal_cleanup;
 
+pub(crate) use ancestry::*;
+pub(crate) use circle_packages::*;
+pub(crate) use device_lifecycle_state::*;
+pub(crate) use device_operations::*;
+pub(crate) use join_activation::*;
+pub(crate) use join_validation::*;
+pub(crate) use model::{
+    commit_stream_id, held_commit, held_dependency, held_package, parse_candidate_circle_package,
+    parse_candidate_store_package, Candidate, CirclePackageAccess, CirclePackageAccesses,
+    LoadedCirclePackage, StorePullFuture,
+};
+pub use model::{
+    HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
+    StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
+};
+pub(crate) use registration::*;
+pub(crate) use root_validation::*;
+pub(crate) use snapshot_evidence::*;
+
 pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence;
 pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
-pub(crate) use device_operations::{
-    derive_local_post_device_state, load_local_commit_device_operations,
-};
 pub(crate) use discovery::*;
 pub(crate) use history::*;
 pub(in crate::sync::store) use join_bootstrap::{
     materialize_device_join_activation, prepare_device_join_bootstrap,
+};
+pub(crate) use local_device_operations::{
+    derive_local_post_device_state, load_local_commit_device_operations,
 };
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
@@ -92,6 +137,9 @@ pub(in crate::sync::store) use snapshot_authority::{
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
 pub(super) use terminal_cleanup::resume_merge_retraction_cleanups;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone)]
 enum MergeCandidateDeviceOperations {

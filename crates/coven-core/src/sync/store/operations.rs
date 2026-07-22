@@ -170,7 +170,7 @@ pub(crate) async fn prepare_candidate(
         prepare_store_operation_candidate_common(db, storage, plan.common(), batch).await?;
     let acknowledgement = match acknowledgement_evidence {
         Some((reference, value)) => Some(
-            crate::sync::store_pull::retain_activated_acknowledgement(
+            crate::sync::store::pull::retain_activated_acknowledgement(
                 storage,
                 plan.root(),
                 &common.reference,

@@ -1170,7 +1170,7 @@ async fn resolve_circle_stream_authority(
             ));
         }
     } else {
-        let reached = super::store_pull::predecessor_commit_matching(
+        let reached = super::store::pull::predecessor_commit_matching(
             storage,
             root,
             &commit.order,
@@ -1184,10 +1184,10 @@ async fn resolve_circle_stream_authority(
         )
         .await
         .map_err(|error| match error {
-            super::store_pull::RegistrationLoadError::Object(error) => {
+            super::store::pull::RegistrationLoadError::Object(error) => {
                 CircleOperationError::Object(error)
             }
-            super::store_pull::RegistrationLoadError::Invalid(error) => {
+            super::store::pull::RegistrationLoadError::Invalid(error) => {
                 CircleOperationError::InvalidState(error)
             }
         })?

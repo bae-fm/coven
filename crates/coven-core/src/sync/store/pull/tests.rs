@@ -20,7 +20,7 @@ async fn one_retained_checkpoint() -> (
     )
     .await
     .expect("create retained-checkpoint Store");
-    let membership = super::super::pull::load_cycle_membership(&store.storage, &db)
+    let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load checkpoint membership")
         .chain
@@ -38,7 +38,7 @@ async fn one_retained_checkpoint() -> (
         .expect("load checkpoint device id")
         .expect("checkpoint device id exists");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(super::super::store::preparation::prepare_store_write(
+    assert!(crate::sync::store::preparation::prepare_store_write(
         &db,
         &store.storage,
         &device_id,
@@ -50,7 +50,7 @@ async fn one_retained_checkpoint() -> (
     .await
     .expect("prepare checkpoint commit"));
     assert_eq!(
-        super::super::store::publication::drain_store_writes(&db, &store.storage)
+        crate::sync::store::publication::drain_store_writes(&db, &store.storage)
             .await
             .expect("publish checkpoint commit"),
         1,
@@ -165,10 +165,10 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
 
 #[test]
 fn recovery_cursor_requires_the_exact_origin_activation_pair() {
-    let recovery_id = super::super::store_commit::DeviceRecoveryId::from_hash(ObjectHash::digest(
+    let recovery_id = crate::sync::store_commit::DeviceRecoveryId::from_hash(ObjectHash::digest(
         b"recovery cursor id",
     ));
-    let owner_grant = super::super::causal_grants::MembershipGrantId(ObjectHash::digest(
+    let owner_grant = crate::sync::causal_grants::MembershipGrantId(ObjectHash::digest(
         b"recovery cursor owner grant",
     ));
     let recovery_slot = crate::storage::cloud::ObjectSlot::opaque(
@@ -206,7 +206,7 @@ fn recovery_cursor_requires_the_exact_origin_activation_pair() {
     );
 
     let wrong_activation = StoreDeviceRegistrationActivation::Recovery {
-        recovery_id: super::super::store_commit::DeviceRecoveryId::from_hash(ObjectHash::digest(
+        recovery_id: crate::sync::store_commit::DeviceRecoveryId::from_hash(ObjectHash::digest(
             b"another recovery cursor id",
         )),
         node,
@@ -231,10 +231,10 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &store.storage,
         store.home.as_ref(),
         &founder,
-        &super::super::hlc::Hlc::new("causal-membership-proof".to_string()),
+        &crate::sync::hlc::Hlc::new("causal-membership-proof".to_string()),
         &crate::sync::test_helpers::pubkey_hex(&candidate),
         None,
-        super::super::membership::MemberRole::Member,
+        crate::sync::membership::MemberRole::Member,
         &encryption,
         "causal-membership-proof",
         "Causal Membership Proof",
@@ -264,7 +264,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     .await
     .expect("promote candidate Owner");
     let candidate_membership =
-        super::super::pull::load_cycle_membership(&store.storage, &candidate_db)
+        crate::sync::pull::load_cycle_membership(&store.storage, &candidate_db)
             .await
             .expect("load candidate Owner membership");
     let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -290,12 +290,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let later_owner = &founder;
 
     let mut earlier_membership =
-        super::super::pull::load_cycle_membership(&store.storage, earlier_db)
+        crate::sync::pull::load_cycle_membership(&store.storage, earlier_db)
             .await
             .expect("load earlier Owner membership")
             .chain
             .expect("initialized Store has membership");
-    let _rotated = super::super::invite::revoke_member_durable(
+    let _rotated = crate::sync::invite::revoke_member_durable(
         &store.storage,
         store.home.as_ref(),
         store.root.store_root_hash,
@@ -305,7 +305,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &store.root.store_root_id.to_string(),
         "0000000003000-0000-causal-proof",
         &encryption,
-        &super::super::cloud_storage::PendingRotation::none(),
+        &crate::sync::cloud_storage::PendingRotation::none(),
         earlier_db,
     )
     .await
@@ -318,7 +318,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let (earlier_value, _) = load_commit_with_author(&store.storage, &store.root, &earlier_control)
         .await
         .expect("load traversal-earlier control");
-    let Some(super::super::store_commit::StoreControl { transition }) = earlier_value.control()
+    let Some(crate::sync::store_commit::StoreControl { transition }) = earlier_value.control()
     else {
         panic!("earlier Owner position is not a Merge membership control");
     };
@@ -336,7 +336,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
-    let later_membership = super::super::pull::load_cycle_membership(&store.storage, later_db)
+    let later_membership = crate::sync::pull::load_cycle_membership(&store.storage, later_db)
         .await
         .expect("load membership containing the concurrent control");
     let caller_membership = later_membership
@@ -349,7 +349,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .find(|head| head.coord == transition.body.entry.coord)
         .expect("caller membership contains the concurrent control")
         .clone();
-    let earlier_head = super::super::membership_ops::load_exact_membership_head(
+    let earlier_head = crate::sync::membership_ops::load_exact_membership_head(
         &store.storage,
         &store.root,
         &earlier_head_ref,
@@ -362,7 +362,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later Owner device id")
         .expect("later Owner device is activated");
     let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(super::super::store::preparation::prepare_store_write(
+    assert!(crate::sync::store::preparation::prepare_store_write(
         later_db,
         &store.storage,
         &later_device_id,
@@ -376,7 +376,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("prepare later concurrent write"));
-    super::super::store::publication::drain_store_writes(later_db, &store.storage)
+    crate::sync::store::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");
     let later_commit = later_db
@@ -447,7 +447,7 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         .founder_device_authority()
         .await
         .expect("load founder authority");
-    let commit = super::super::store_objects::load_commit_ref(
+    let commit = crate::sync::store_objects::load_commit_ref(
         &store.storage,
         store.root.store_root_hash,
         &third,

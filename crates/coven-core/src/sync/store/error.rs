@@ -26,7 +26,7 @@ pub enum StoreError {
         source: crate::sync::storage::StorageError,
     },
     #[error("candidate cleanup: {0}")]
-    CandidateCleanup(#[from] crate::sync::store_pull::StorePullError),
+    CandidateCleanup(#[from] crate::sync::store::pull::StorePullError),
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
     #[error("Store author {device_id} was excluded before candidate activation")]

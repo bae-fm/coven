@@ -901,7 +901,7 @@ async fn verify_reclaim_authorization_activation(
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let commit_ref = activation.commit();
     let (commit_value, author) =
-        super::store_pull::load_commit_with_author(storage, root, commit_ref)
+        super::store::pull::load_commit_with_author(storage, root, commit_ref)
             .await
             .map_err(StoreReclaimError::Object)?;
     if commit_value.reclaim_authorization() != Some(authorization) {
@@ -978,12 +978,12 @@ async fn verify_store_package_reclaim_evidence(
     let authority =
         match super::store::verify_store_snapshot_stability(storage, root, &snapshot).await {
             Ok(stability) => stability.into_authority(),
-            Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+            Err(super::store::pull::StorePullError::SnapshotNotStable { member, device_id }) => {
                 return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
             }
             Err(
-                super::store_pull::StorePullError::SnapshotAuthorInactive
-                | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
+                super::store::pull::StorePullError::SnapshotAuthorInactive
+                | super::store::pull::StorePullError::SnapshotAuthorNotOwner,
             ) => return Err(StoreReclaimError::NoSnapshot),
             Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
         };
@@ -1009,7 +1009,8 @@ async fn verify_store_package_reclaim_evidence(
         ));
     }
     let (commit, _) =
-        super::store_pull::load_commit_with_author(storage, root, &claim.target.activation).await?;
+        super::store::pull::load_commit_with_author(storage, root, &claim.target.activation)
+            .await?;
     if commit.store_package() != Some(&claim.target.package)
         || !snapshot_covers_target(
             storage,
@@ -1322,12 +1323,12 @@ async fn choose_snapshot(
     {
         Ok(Some(selected)) => selected,
         Ok(None) => return Err(StoreReclaimError::NoSnapshot),
-        Err(super::store_pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+        Err(super::store::pull::StorePullError::SnapshotNotStable { member, device_id }) => {
             return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
         }
         Err(
-            super::store_pull::StorePullError::SnapshotAuthorInactive
-            | super::store_pull::StorePullError::SnapshotAuthorNotOwner,
+            super::store::pull::StorePullError::SnapshotAuthorInactive
+            | super::store::pull::StorePullError::SnapshotAuthorNotOwner,
         ) => return Err(StoreReclaimError::NoSnapshot),
         Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
     };
@@ -1383,13 +1384,13 @@ async fn position_covers(
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
-    super::store_pull::commit_position_covers(storage, root, covering, covered)
+    super::store::pull::commit_position_covers(storage, root, covering, covered)
         .await
         .map_err(|error| match error {
-            super::store_pull::CommitCoverageError::Object(error) => {
+            super::store::pull::CommitCoverageError::Object(error) => {
                 StoreReclaimError::Object(error)
             }
-            super::store_pull::CommitCoverageError::MissingAncestry { commit_hash } => {
+            super::store::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
                 StoreReclaimError::MissingAncestry { commit_hash }
             }
         })
@@ -1407,9 +1408,10 @@ async fn exact_package_targets(
             if targets.contains_key(&reference) {
                 break;
             }
-            let (commit, _) = super::store_pull::load_commit_with_author(storage, root, &reference)
-                .await
-                .map_err(StoreReclaimError::Object)?;
+            let (commit, _) =
+                super::store::pull::load_commit_with_author(storage, root, &reference)
+                    .await
+                    .map_err(StoreReclaimError::Object)?;
             if let Some(package) = commit.store_package().cloned() {
                 targets.insert(reference.clone(), package);
             }
@@ -1825,7 +1827,7 @@ mod tests {
             .publish_changeset("founder", 1, &changeset, db.schema_version())
             .await
             .expect("publish target package activation");
-        let (target_commit, _) = super::super::store_pull::load_commit_with_author(
+        let (target_commit, _) = super::super::store::pull::load_commit_with_author(
             &store.storage,
             &store.root,
             &target_activation,

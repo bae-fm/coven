@@ -1172,7 +1172,7 @@ pub(crate) async fn rename_circle(
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;
     let (activation_commit, _) =
-        super::store_pull::load_commit_with_author(storage, &root, &activation_commit_ref).await?;
+        super::store::pull::load_commit_with_author(storage, &root, &activation_commit_ref).await?;
     if activation_commit.candidate_family() != current.candidate_family {
         return Err(CircleOperationError::InvalidState(format!(
             "Circle {circle_id} current state differs from its activating Store commit"
@@ -3501,7 +3501,7 @@ mod tests {
         assert!(pull.held_positions.iter().any(|held| {
             matches!(
                 &held.reason,
-                super::super::store_pull::HeldStorePositionReason::InvalidObject(reason)
+                super::super::store::pull::HeldStorePositionReason::InvalidObject(reason)
                     if reason.contains("circle access envelope failed verification")
             )
         }));

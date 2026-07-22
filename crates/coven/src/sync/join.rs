@@ -44,7 +44,7 @@ pub enum BootstrapError {
     #[error("pull: {0}")]
     Pull(#[from] PullError),
     #[error("Store pull: {0}")]
-    StorePull(#[from] crate::sync::store_pull::StorePullError),
+    StorePull(#[from] coven_core::sync::store::StorePullError),
     #[error("Store device registration: {0}")]
     StoreRegistration(#[from] crate::sync::store::StoreRegistrationError),
     #[error("Store device join: {0}")]

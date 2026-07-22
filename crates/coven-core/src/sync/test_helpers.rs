@@ -2279,13 +2279,13 @@ pub async fn pull_into_result(
 ) -> Result<
     (
         std::collections::BTreeMap<String, u64>,
-        crate::sync::store_pull::StorePullResult,
+        crate::sync::store::pull::StorePullResult,
     ),
-    crate::sync::store_pull::StorePullError,
+    crate::sync::store::pull::StorePullError,
 > {
     let membership = Box::new(Box::pin(store.open_into(db)).await.map_err(|error| {
-        crate::sync::store_pull::StorePullError::Membership(
-            crate::sync::store_pull::StorePullMembershipError::Message(error),
+        crate::sync::store::pull::StorePullError::Membership(
+            crate::sync::store::pull::StorePullMembershipError::Message(error),
         )
     })?);
     let result = Box::pin(crate::sync::store::pull_store_commits(
@@ -2312,7 +2312,7 @@ pub async fn pull_into(
     store_dir: &StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
-    crate::sync::store_pull::StorePullResult,
+    crate::sync::store::pull::StorePullResult,
 ) {
     pull_into_result(db, store, store_dir)
         .await

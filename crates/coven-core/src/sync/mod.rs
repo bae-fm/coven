@@ -53,7 +53,6 @@ pub mod store_device_exclusion;
 mod store_history_checkpoint_tests;
 pub mod store_objects;
 pub mod store_protocol_root;
-pub mod store_pull;
 pub mod store_reclaim;
 pub(crate) mod store_reclaim_journal;
 #[cfg(any(test, feature = "test-utils"))]

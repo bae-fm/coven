@@ -15,7 +15,7 @@ impl Database {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
-        plan: crate::sync::store_pull::DeviceJoinBootstrapPlan,
+        plan: crate::sync::store::pull::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;

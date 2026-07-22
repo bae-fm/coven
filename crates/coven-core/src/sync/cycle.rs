@@ -28,8 +28,8 @@ use super::hlc::Hlc;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
+use super::store::pull::HeldStorePosition;
 use super::store::{AuthorizedStore, Store};
-use super::store_pull::HeldStorePosition;
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -506,7 +506,7 @@ enum CycleBeforePull {
 }
 
 struct CompletedPullCycle {
-    store_pull: super::store_pull::StorePullResult,
+    store_pull: super::store::pull::StorePullResult,
     local_blob_cleanup_pending: bool,
     sync_time: String,
     resume_drain_promptly: bool,
@@ -709,7 +709,7 @@ async fn complete_cycle_after_pull(
     authorization: &AuthorizedStore<'_>,
     post_pull: &AuthorizedStore<'_>,
     prepared: PreparedCycle,
-    store_pull: super::store_pull::StorePullResult,
+    store_pull: super::store::pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
     let db = authorization.db();
     let PreparedCycle {

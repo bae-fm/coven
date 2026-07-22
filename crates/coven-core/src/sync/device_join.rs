@@ -2219,7 +2219,7 @@ pub async fn accept_device_registration_request(
     )
     .await?;
     let cut = plan.predecessor_cut()?;
-    if !crate::sync::store_pull::history_cut_covers(
+    if !crate::sync::store::pull::history_cut_covers(
         storage,
         &offer.store_root,
         &cut,
@@ -2334,7 +2334,7 @@ pub async fn publish_device_provider_challenge(
             let exact = administrator_exact.ok_or(DeviceJoinError::ExactSlotStorageRequired)?;
             let context = cross_challenge_context(&bootstrap.request.approval.request);
             let (_, activation_author) =
-                Box::pin(crate::sync::store_pull::load_commit_with_author(
+                Box::pin(crate::sync::store::pull::load_commit_with_author(
                     storage,
                     &offer.store_root,
                     &bootstrap.publication_authorization.attempt_activation,
@@ -4416,7 +4416,7 @@ pub async fn observe_device_join_abandonment(
     .await?
     .value;
     abandonment.abandonment.verify(&object, &owner)?;
-    let (activation, author) = crate::sync::store_pull::load_commit_with_author(
+    let (activation, author) = crate::sync::store::pull::load_commit_with_author(
         storage,
         root,
         &abandonment.abandonment_activation,
@@ -5717,7 +5717,7 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Registration(#[from] crate::sync::store::StoreRegistrationError),
     #[error(transparent)]
-    Pull(#[from] crate::sync::store_pull::StorePullError),
+    Pull(#[from] crate::sync::store::pull::StorePullError),
     #[error(transparent)]
     Outbound(#[from] crate::sync::store::StoreError),
     #[error(transparent)]
