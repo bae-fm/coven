@@ -254,198 +254,210 @@ pub(crate) async fn verify_author_exclusion_nonactivation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn verify_membership_grant_revocation_nonactivation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    grant_id: &super::membership::MembershipGrantId,
-    membership: &crate::sync::circle_control::MergeStoreMembershipStateRef,
-    activation_commit: &StoreBatchCommitRef,
-    activation_head: &super::store_commit::StoreDeviceHeadRef,
-    candidate: &StoreBatchCommitRef,
-    candidate_commit: &StoreBatchCommit,
-    candidate_head: &StoreDeviceHead,
-    candidate_head_object: &ExactObjectRef,
-) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
-    let head_prefix =
-        super::store_commit::semantic_prefix_from_exact_object(&activation_head.object, ".json")
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let head_bytes = storage
-        .read_protocol_object(&context, &activation_head.object, &head_prefix)
-        .await?;
-    activation_head.object.verify(&head_bytes)?;
-    let witness_head: StoreDeviceHead = serde_json::from_slice(&head_bytes).map_err(|error| {
-        StorePullError::Database(format!("membership revocation witness head: {error}"))
-    })?;
-    if witness_head.head_hash() != activation_head.head_hash
-        || &witness_head.commit != activation_commit
-    {
-        return Err(StorePullError::Database(
-            "membership revocation witness head differs from its exact activation".to_string(),
-        ));
-    }
-    let witness_author =
-        load_registration_ref(storage, root, &witness_head.author_registration).await?;
-    let opened = super::store_objects::load_head_ref(
-        storage,
-        root.store_root_hash,
-        activation_head,
-        &witness_author.value,
-        &witness_head.commit,
-    )
-    .await?;
-    let (_, exact_head) = super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &witness_head.author_registration,
-        &witness_author.value,
-        Some(&witness_head.commit),
-    )
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    if exact_head.as_ref() != Some(activation_head) || opened.value != witness_head {
-        return Err(StorePullError::Database(
-            "membership revocation witness is not an accepted exact head".to_string(),
-        ));
-    }
-    let witness_commit = load_commit_ref(
-        storage,
-        root.store_root_hash,
-        &witness_head.commit,
-        &witness_author.value,
-    )
-    .await?;
-    let (_, _, replayed_witness_commit, _) = Box::pin(replay_merge_device_history(
-        storage,
-        root,
-        &witness_head.commit,
-    ))
-    .await?;
-    if replayed_witness_commit != witness_commit.value {
-        return Err(StorePullError::Database(
-            "membership revocation witness commit differs from its verified history".to_string(),
-        ));
-    }
-    if witness_commit.value.membership_state
-        != StoreMembershipStateRef::MergeConcurrent(membership.clone())
-    {
-        return Err(StorePullError::Database(
-            "membership revocation witness commit names another membership state".to_string(),
-        ));
-    }
-    let current_membership =
-        load_merge_predecessor_membership(storage, root, &witness_commit.value.membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
-    let MembershipStatus::Resolved(current) = current_membership.status() else {
-        return Err(StorePullError::Database(
-            "membership revocation witness state is conflicted".to_string(),
-        ));
-    };
-    let Some(super::causal_grants::GrantState::Tombstoned {
-        record: current_record,
-        ..
-    }) = current.grants.get(grant_id)
-    else {
-        return Err(StorePullError::Database(
-            "membership revocation witness grant is not tombstoned".to_string(),
-        ));
-    };
-    let candidate_author =
-        load_registration_ref(storage, root, &candidate_commit.author_registration).await?;
-    candidate
-        .verify_commit(candidate_commit)
+pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    grant_id: &'a super::membership::MembershipGrantId,
+    membership: &'a crate::sync::circle_control::MergeStoreMembershipStateRef,
+    activation_commit: &'a StoreBatchCommitRef,
+    activation_head: &'a super::store_commit::StoreDeviceHeadRef,
+    candidate: &'a StoreBatchCommitRef,
+    candidate_commit: &'a StoreBatchCommit,
+    candidate_head: &'a StoreDeviceHead,
+    candidate_head_object: &'a ExactObjectRef,
+) -> StorePullFuture<'a, super::remote_object::VerifiedCandidateNonactivation> {
+    Box::pin(async move {
+        let head_prefix = super::store_commit::semantic_prefix_from_exact_object(
+            &activation_head.object,
+            ".json",
+        )
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let predecessor_membership =
-        load_merge_predecessor_membership(storage, root, &candidate_commit.membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let head_bytes = storage
+            .read_protocol_object(&context, &activation_head.object, &head_prefix)
+            .await?;
+        activation_head.object.verify(&head_bytes)?;
+        let witness_head: StoreDeviceHead =
+            serde_json::from_slice(&head_bytes).map_err(|error| {
+                StorePullError::Database(format!("membership revocation witness head: {error}"))
             })?;
-    let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
-        return Err(StorePullError::Database(
-            "membership revocation candidate predecessor is conflicted".to_string(),
-        ));
-    };
-    let Some(predecessor_record) = predecessor.active_grant(grant_id) else {
-        return Err(StorePullError::Database(
-            "membership revocation grant was not active at the candidate predecessor".to_string(),
-        ));
-    };
-    if predecessor_record != current_record
-        || predecessor_record.member_pubkey != candidate_author.value.author_pubkey
-        || candidate_commit.membership_authority.as_ref()
-            != Some(&predecessor_record.creation_authority)
-    {
-        return Err(StorePullError::Database(
-            "membership revocation grant differs from the candidate's signed authority".to_string(),
-        ));
-    }
-    let StoreHistoryCut::MergeConcurrent(cap) = witness_commit
-        .value
-        .order
-        .predecessor_cut()
-        .map_err(|error| StorePullError::Database(error.to_string()))?
-    else {
-        return Err(StorePullError::Database(
-            "membership revocation witness is not Merge".to_string(),
-        ));
-    };
-    let expected_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
-        root.store_root_hash,
-        &candidate_commit.author_registration,
-        super::store_commit::StreamAnchorDomain::StoreAnnouncements,
-    );
-    let StoreCommitCoord::MergeConcurrent {
-        stream_id,
-        sequence,
-    } = candidate.coord
-    else {
-        return Err(StorePullError::Database(
-            "membership revocation candidate is not Merge".to_string(),
-        ));
-    };
-    if stream_id != expected_stream
-        || cap
-            .get(&expected_stream)
-            .is_some_and(|covered| sequence <= covered.coord.sequence())
-    {
-        return Err(StorePullError::Database(
-            "membership revocation candidate is not beyond the accepted witness cut".to_string(),
-        ));
-    }
-    let verified_candidate_head = verify_terminal_candidate_head(
-        storage,
-        root,
-        candidate,
-        candidate_commit,
-        candidate_head,
-        candidate_head_object,
-        &candidate_author.value,
-    )
-    .await?;
-    let durable = super::remote_object::CandidateNonactivation::from_durable_parts(
-        candidate,
-        candidate_commit,
-        super::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
-            grant_id: grant_id.clone(),
-            membership: membership.clone(),
-            activation_commit: witness_head.commit,
-            activation_head: activation_head.clone(),
-        },
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    super::remote_object::VerifiedCandidateNonactivation::from_verified_membership_grant_revocation(
-        durable,
-        candidate.clone(),
-        verified_candidate_head,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))
+        if witness_head.head_hash() != activation_head.head_hash
+            || &witness_head.commit != activation_commit
+        {
+            return Err(StorePullError::Database(
+                "membership revocation witness head differs from its exact activation".to_string(),
+            ));
+        }
+        let witness_author =
+            load_registration_ref(storage, root, &witness_head.author_registration).await?;
+        let opened = super::store_objects::load_head_ref(
+            storage,
+            root.store_root_hash,
+            activation_head,
+            &witness_author.value,
+            &witness_head.commit,
+        )
+        .await?;
+        let (_, exact_head) = super::store_outbound::exact_next_announcement_slot(
+            storage,
+            root,
+            &witness_head.author_registration,
+            &witness_author.value,
+            Some(&witness_head.commit),
+        )
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        if exact_head.as_ref() != Some(activation_head) || opened.value != witness_head {
+            return Err(StorePullError::Database(
+                "membership revocation witness is not an accepted exact head".to_string(),
+            ));
+        }
+        let witness_commit = load_commit_ref(
+            storage,
+            root.store_root_hash,
+            &witness_head.commit,
+            &witness_author.value,
+        )
+        .await?;
+        let (_, _, replayed_witness_commit, _) = Box::pin(replay_merge_device_history(
+            storage,
+            root,
+            &witness_head.commit,
+        ))
+        .await?;
+        if replayed_witness_commit != witness_commit.value {
+            return Err(StorePullError::Database(
+                "membership revocation witness commit differs from its verified history"
+                    .to_string(),
+            ));
+        }
+        if witness_commit.value.membership_state
+            != StoreMembershipStateRef::MergeConcurrent(membership.clone())
+        {
+            return Err(StorePullError::Database(
+                "membership revocation witness commit names another membership state".to_string(),
+            ));
+        }
+        let current_membership = load_merge_predecessor_membership(
+            storage,
+            root,
+            &witness_commit.value.membership_state,
+        )
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+        let MembershipStatus::Resolved(current) = current_membership.status() else {
+            return Err(StorePullError::Database(
+                "membership revocation witness state is conflicted".to_string(),
+            ));
+        };
+        let Some(super::causal_grants::GrantState::Tombstoned {
+            record: current_record,
+            ..
+        }) = current.grants.get(grant_id)
+        else {
+            return Err(StorePullError::Database(
+                "membership revocation witness grant is not tombstoned".to_string(),
+            ));
+        };
+        let candidate_author =
+            load_registration_ref(storage, root, &candidate_commit.author_registration).await?;
+        candidate
+            .verify_commit(candidate_commit)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let predecessor_membership =
+            load_merge_predecessor_membership(storage, root, &candidate_commit.membership_state)
+                .await
+                .map_err(|error| match error {
+                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                })?;
+        let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
+            return Err(StorePullError::Database(
+                "membership revocation candidate predecessor is conflicted".to_string(),
+            ));
+        };
+        let Some(predecessor_record) = predecessor.active_grant(grant_id) else {
+            return Err(StorePullError::Database(
+                "membership revocation grant was not active at the candidate predecessor"
+                    .to_string(),
+            ));
+        };
+        if predecessor_record != current_record
+            || predecessor_record.member_pubkey != candidate_author.value.author_pubkey
+            || candidate_commit.membership_authority.as_ref()
+                != Some(&predecessor_record.creation_authority)
+        {
+            return Err(StorePullError::Database(
+                "membership revocation grant differs from the candidate's signed authority"
+                    .to_string(),
+            ));
+        }
+        let StoreHistoryCut::MergeConcurrent(cap) = witness_commit
+            .value
+            .order
+            .predecessor_cut()
+            .map_err(|error| StorePullError::Database(error.to_string()))?
+        else {
+            return Err(StorePullError::Database(
+                "membership revocation witness is not Merge".to_string(),
+            ));
+        };
+        let expected_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &candidate_commit.author_registration,
+            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
+        let StoreCommitCoord::MergeConcurrent {
+            stream_id,
+            sequence,
+        } = candidate.coord
+        else {
+            return Err(StorePullError::Database(
+                "membership revocation candidate is not Merge".to_string(),
+            ));
+        };
+        if stream_id != expected_stream
+            || cap
+                .get(&expected_stream)
+                .is_some_and(|covered| sequence <= covered.coord.sequence())
+        {
+            return Err(StorePullError::Database(
+                "membership revocation candidate is not beyond the accepted witness cut"
+                    .to_string(),
+            ));
+        }
+        let verified_candidate_head = verify_terminal_candidate_head(
+            storage,
+            root,
+            candidate,
+            candidate_commit,
+            candidate_head,
+            candidate_head_object,
+            &candidate_author.value,
+        )
+        .await?;
+        let durable = super::remote_object::CandidateNonactivation::from_durable_parts(
+            candidate,
+            candidate_commit,
+            super::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+                grant_id: grant_id.clone(),
+                membership: membership.clone(),
+                activation_commit: witness_head.commit,
+                activation_head: activation_head.clone(),
+            },
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        super::remote_object::VerifiedCandidateNonactivation::from_verified_membership_grant_revocation(
+            durable,
+            candidate.clone(),
+            verified_candidate_head,
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))
+    })
 }

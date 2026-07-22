@@ -98,56 +98,6 @@ pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) history: OpenedRetainedMergeHistorySummary,
 }
 
-impl VerifiedAcceptedPredecessor<'_> {
-    pub(crate) fn serial_history_commit(
-        &self,
-        target: &StoreBatchCommitRef,
-    ) -> Result<Option<&AuthorizedSerialCommit>, StorePullError> {
-        let Self::SerialHistory { commits } = self else {
-            return Ok(None);
-        };
-        commits
-            .iter()
-            .find(|accepted| &accepted.commit_ref == target)
-            .map(Some)
-            .ok_or_else(|| {
-                StorePullError::Serial(
-                    "provider-access activation is outside the accepted Serial predecessor history"
-                        .to_string(),
-                )
-            })
-    }
-
-    pub(crate) fn merge_history_commit(
-        &self,
-        target: &StoreBatchCommitRef,
-    ) -> Result<Option<&VerifiedMergeHistoryCommit>, StorePullError> {
-        let Self::MergeHistory { commits, frontier } = self else {
-            return Ok(None);
-        };
-        let mut pending = frontier.clone();
-        let mut visited = BTreeSet::new();
-        while let Some(reference) = pending.pop() {
-            if !visited.insert(reference.clone()) {
-                continue;
-            }
-            let commit = commits.get(&reference).ok_or_else(|| {
-                StorePullError::Database(
-                    "accepted Merge predecessor graph is missing an exact commit".to_string(),
-                )
-            })?;
-            if &reference == target {
-                return Ok(Some(commit));
-            }
-            pending.extend(commit_predecessor_references(&commit.commit));
-        }
-        Err(StorePullError::Database(
-            "provider-access activation is outside the accepted Merge predecessor graph"
-                .to_string(),
-        ))
-    }
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMergeMembershipHeadActivation {
     commit: StoreBatchCommitRef,
@@ -1317,25 +1267,25 @@ async fn verify_merge_history_refs_impl(
                 "Merge history commit lacks exact membership authority".to_string(),
             ));
         }
-        let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
-        let accepted_predecessor = VerifiedAcceptedPredecessor::MergeHistory {
-            commits: &verified,
-            frontier: commit_predecessor_references(&commit),
-        };
-        let registrations = Box::pin(load_commit_registrations_with_root(
+        let accepted_frontier = commit_predecessor_references(&commit);
+        let registrations = Box::pin(load_merge_commit_registrations(
             storage,
             root,
             &verified_root,
             &commit,
             &author,
-            Some(&authority),
-            Some(&accepted_predecessor),
+            &membership,
+            Some(super::device_join_attempt::MergeAcceptedJoinHistory {
+                commits: &verified,
+                frontier: &accepted_frontier,
+            }),
         ))
         .await
         .map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
+        let authority = RegistrationPredecessorAuthority::MergeConcurrent(&membership);
         let (authorized_predecessor, recovery_author) =
             predecessor_with_recovery_author(predecessor_state.clone(), &commit, &registrations)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;

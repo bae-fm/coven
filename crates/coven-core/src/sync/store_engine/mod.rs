@@ -447,35 +447,37 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     }
 }
 
-pub(crate) async fn prepare_device_join_bootstrap(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    coverage: &super::store_commit::StoreHistoryCut,
-    attempt_activation: &super::store_commit::StoreBatchCommitRef,
-    membership_state: &super::circle_control::StoreMembershipStateRef,
-) -> Result<super::store_pull::DeviceJoinBootstrapPlan, super::store_pull::StorePullError> {
-    match membership_state {
-        super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
-            merge::pull::prepare_device_join_bootstrap(
-                storage,
-                root,
-                coverage,
-                attempt_activation,
-                membership_state,
-            )
-            .await
+pub(crate) fn prepare_device_join_bootstrap<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    coverage: &'a super::store_commit::StoreHistoryCut,
+    attempt_activation: &'a super::store_commit::StoreBatchCommitRef,
+    membership_state: &'a super::circle_control::StoreMembershipStateRef,
+) -> super::store_pull::StorePullFuture<'a, super::store_pull::DeviceJoinBootstrapPlan> {
+    Box::pin(async move {
+        match membership_state {
+            super::circle_control::StoreMembershipStateRef::MergeConcurrent(_) => {
+                merge::pull::prepare_device_join_bootstrap(
+                    storage,
+                    root,
+                    coverage,
+                    attempt_activation,
+                    membership_state,
+                )
+                .await
+            }
+            super::circle_control::StoreMembershipStateRef::Serial(_) => {
+                serial::pull::prepare_device_join_bootstrap(
+                    storage,
+                    root,
+                    coverage,
+                    attempt_activation,
+                    membership_state,
+                )
+                .await
+            }
         }
-        super::circle_control::StoreMembershipStateRef::Serial(_) => {
-            serial::pull::prepare_device_join_bootstrap(
-                storage,
-                root,
-                coverage,
-                attempt_activation,
-                membership_state,
-            )
-            .await
-        }
-    }
+    })
 }
 
 pub(crate) fn materialize_device_join_activation<'a>(

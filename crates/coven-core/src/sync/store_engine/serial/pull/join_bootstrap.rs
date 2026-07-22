@@ -3,94 +3,96 @@ use super::*;
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::store_commit::StoreHistoryCut;
 
-pub(in crate::sync::store_engine) async fn prepare_device_join_bootstrap(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    coverage: &StoreHistoryCut,
-    attempt_activation: &StoreBatchCommitRef,
-    membership_state: &StoreMembershipStateRef,
-) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
-    let StoreHistoryCut::Serial(coverage_position) = coverage else {
-        return Err(StorePullError::Serial(
-            "Serial device join bootstrap received a Merge history cut".to_string(),
-        ));
-    };
-    if !matches!(attempt_activation.coord, StoreCommitCoord::Serial { .. }) {
-        return Err(StorePullError::Serial(
-            "Serial device join bootstrap received a Merge activation".to_string(),
-        ));
-    }
-    let (verified_position, verified_authorization) =
-        load_device_join_authorization(storage, root, membership_state).await?;
-    if &verified_position != coverage_position {
-        return Err(StorePullError::Serial(
-            "Serial device join bootstrap cut differs from its verified membership position"
-                .to_string(),
-        ));
-    }
+pub(in crate::sync::store_engine) fn prepare_device_join_bootstrap<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    coverage: &'a StoreHistoryCut,
+    attempt_activation: &'a StoreBatchCommitRef,
+    membership_state: &'a StoreMembershipStateRef,
+) -> StorePullFuture<'a, DeviceJoinBootstrapPlan> {
+    Box::pin(async move {
+        let StoreHistoryCut::Serial(coverage_position) = coverage else {
+            return Err(StorePullError::Serial(
+                "Serial device join bootstrap received a Merge history cut".to_string(),
+            ));
+        };
+        if !matches!(attempt_activation.coord, StoreCommitCoord::Serial { .. }) {
+            return Err(StorePullError::Serial(
+                "Serial device join bootstrap received a Merge activation".to_string(),
+            ));
+        }
+        let (verified_position, verified_authorization) =
+            load_device_join_authorization(storage, root, membership_state).await?;
+        if &verified_position != coverage_position {
+            return Err(StorePullError::Serial(
+                "Serial device join bootstrap cut differs from its verified membership position"
+                    .to_string(),
+            ));
+        }
 
-    let (authorized, _, _) = Box::pin(load_authorized_serial_prefix(
-        storage,
-        root,
-        Some(attempt_activation.clone()),
-    ))
-    .await?;
-    let activation = authorized.last().ok_or_else(|| {
-        StorePullError::Serial(
-            "device join attempt activation is absent from its Serial history".to_string(),
+        let (authorized, _, _) = Box::pin(load_authorized_serial_prefix(
+            storage,
+            root,
+            Some(attempt_activation.clone()),
+        ))
+        .await?;
+        let activation = authorized.last().ok_or_else(|| {
+            StorePullError::Serial(
+                "device join attempt activation is absent from its Serial history".to_string(),
+            )
+        })?;
+        if activation.commit_ref != *attempt_activation
+            || activation
+                .commit
+                .order
+                .predecessor_cut()
+                .map_err(|error| StorePullError::Serial(error.to_string()))?
+                != *coverage
+        {
+            return Err(StorePullError::Serial(
+                "device join attempt activation predecessor differs from its signed bootstrap cut"
+                    .to_string(),
+            ));
+        }
+        if activation.commit.membership_state != *membership_state
+            || activation.authorization_before != verified_authorization
+        {
+            return Err(StorePullError::Serial(
+                "device join attempt activation differs from its exact verified membership state"
+                    .to_string(),
+            ));
+        }
+
+        let verified_root = load_store_protocol_root(storage, root).await?.value;
+        let founder = load_founder_registration_with_root(storage, root, &verified_root).await?;
+        let founder_reference =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        let genesis = ResolvedStoreDeviceState::founder(
+            root,
+            founder_reference.clone(),
+            &verified_root.descriptor.founder_pubkey,
+            verified_root.descriptor.founder_grant.clone(),
+            &verified_root.descriptor.founder_recovery,
         )
-    })?;
-    if activation.commit_ref != *attempt_activation
-        || activation
-            .commit
-            .order
-            .predecessor_cut()
-            .map_err(|error| StorePullError::Serial(error.to_string()))?
-            != *coverage
-    {
-        return Err(StorePullError::Serial(
-            "device join attempt activation predecessor differs from its signed bootstrap cut"
-                .to_string(),
-        ));
-    }
-    if activation.commit.membership_state != *membership_state
-        || activation.authorization_before != verified_authorization
-    {
-        return Err(StorePullError::Serial(
-            "device join attempt activation differs from its exact verified membership state"
-                .to_string(),
-        ));
-    }
-
-    let verified_root = load_store_protocol_root(storage, root).await?.value;
-    let founder = load_founder_registration_with_root(storage, root, &verified_root).await?;
-    let founder_reference =
-        StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-    let genesis = ResolvedStoreDeviceState::founder(
-        root,
-        founder_reference.clone(),
-        &verified_root.descriptor.founder_pubkey,
-        verified_root.descriptor.founder_grant.clone(),
-        &verified_root.descriptor.founder_recovery,
-    )
-    .map_err(|error| StorePullError::Serial(error.to_string()))?;
-    let commits = authorized
-        .into_iter()
-        .map(|authorized| DeviceJoinBootstrapCommit {
-            reference: authorized.commit_ref,
-            commit: authorized.commit,
-            registrations: authorized.registrations,
-            device_operations: authorized.device_operations,
-            activation: DeviceJoinBootstrapActivation::Serial,
+        .map_err(|error| StorePullError::Serial(error.to_string()))?;
+        let commits = authorized
+            .into_iter()
+            .map(|authorized| DeviceJoinBootstrapCommit {
+                reference: authorized.commit_ref,
+                commit: authorized.commit,
+                registrations: authorized.registrations,
+                device_operations: authorized.device_operations,
+                activation: DeviceJoinBootstrapActivation::Serial,
+            })
+            .collect();
+        Ok(DeviceJoinBootstrapPlan {
+            founder_reference,
+            founder: founder.value,
+            founder_bytes: founder.bytes,
+            genesis,
+            coverage: coverage.clone(),
+            commits,
         })
-        .collect();
-    Ok(DeviceJoinBootstrapPlan {
-        founder_reference,
-        founder: founder.value,
-        founder_bytes: founder.bytes,
-        genesis,
-        coverage: coverage.clone(),
-        commits,
     })
 }
 
@@ -121,21 +123,17 @@ pub(in crate::sync::store_engine) fn materialize_device_join_activation<'a>(
             load_device_join_activation_commit(storage, root, reference, expected_outcome).await?;
         let serial_authority =
             load_serial_registration_authority(storage, root, membership_state).await?;
-        let authority = RegistrationPredecessorAuthority::Serial {
-            authorization: &serial_authority.authorization,
-            position: serial_authority.position.clone(),
-            history: SerialAuthorizationHistory::ExactPredecessor,
-        };
-        let accepted_predecessor = VerifiedAcceptedPredecessor::SerialHistory {
-            commits: &serial_authority.accepted_prefix,
-        };
-        let registrations = Box::pin(load_commit_registrations(
+        let verified_root = load_store_protocol_root(storage, root).await?.value;
+        let registrations = Box::pin(load_serial_commit_registrations(
             storage,
             root,
+            &verified_root,
             &commit,
             &author,
-            Some(&authority),
-            Some(&accepted_predecessor),
+            &serial_authority.authorization,
+            serial_authority.position.clone(),
+            SerialAuthorizationHistory::ExactPredecessor,
+            &serial_authority.accepted_prefix,
         ))
         .await
         .map_err(|error| match error {

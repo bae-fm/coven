@@ -130,40 +130,45 @@ pub(crate) async fn load_authorized_serial_prefix(
                 "Serial commit author bytes differ from its exact registration".to_string(),
             ));
         }
-        let predecessor_authority = RegistrationPredecessorAuthority::Serial {
-            authorization: &authorization,
-            position: match &commit.order {
-                super::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
-                    predecessor.clone()
-                }
-                super::store_commit::StoreCommitOrder::MergeConcurrent { .. } => {
-                    return Err(StorePullError::Serial(
-                        "Serial chain contains a Merge commit order".to_string(),
-                    ));
-                }
-            },
-            history: SerialAuthorizationHistory::Prefix {
+        let predecessor_position = match &commit.order {
+            super::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
+                predecessor.clone()
+            }
+            super::store_commit::StoreCommitOrder::MergeConcurrent { .. } => {
+                return Err(StorePullError::Serial(
+                    "Serial chain contains a Merge commit order".to_string(),
+                ));
+            }
+        };
+        let registrations = load_serial_commit_registrations(
+            storage,
+            root,
+            &root_value,
+            &commit,
+            &author,
+            &authorization,
+            predecessor_position.clone(),
+            SerialAuthorizationHistory::Prefix {
                 genesis_position: &genesis_position,
                 genesis_authorization: genesis_authorization.as_ref(),
                 commits: &authorized,
             },
-        };
-        let accepted_predecessor = VerifiedAcceptedPredecessor::SerialHistory {
-            commits: &authorized,
-        };
-        let registrations = load_commit_registrations(
-            storage,
-            root,
-            &commit,
-            &author,
-            Some(&predecessor_authority),
-            Some(&accepted_predecessor),
+            &authorized,
         )
         .await
         .map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Serial(error),
         })?;
+        let predecessor_authority = RegistrationPredecessorAuthority::Serial {
+            authorization: &authorization,
+            position: predecessor_position,
+            history: SerialAuthorizationHistory::Prefix {
+                genesis_position: &genesis_position,
+                genesis_authorization: genesis_authorization.as_ref(),
+                commits: &authorized,
+            },
+        };
         let acknowledgement = validate_commit_acknowledgement(storage, root, &commit, &author)
             .await
             .map_err(|error| match error {

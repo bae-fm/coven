@@ -30,9 +30,9 @@ use crate::sync::store_commit::{
     ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, VerifiedStoreDeviceOperations,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
+    VerifiedStoreDeviceOperations,
 };
 use crate::sync::store_objects::{
     load_commit_ref, load_founder_registration_with_root, load_registration_ref,
@@ -55,6 +55,7 @@ mod membership_control;
 mod owner_promotion;
 mod provider_access;
 mod registration_authority;
+mod registration_validation;
 mod replay;
 mod retained_authority;
 mod snapshot_authority;
@@ -83,6 +84,7 @@ pub(crate) use registration_authority::{
     load_merge_predecessor_membership, load_merge_predecessor_membership_with_verified_activations,
     verify_merge_membership_state_ref,
 };
+use registration_validation::load_merge_commit_registrations;
 use replay::*;
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store_engine) use snapshot_authority::{
@@ -304,24 +306,19 @@ pub(crate) fn pull_store_commits<'a>(
                         continue;
                     }
                 };
-                let requires_accepted_predecessor = commit
-                    .device_join_attempt_decisions()
-                    .iter()
-                    .any(|decision| {
-                        matches!(
-                            decision,
-                            crate::sync::store_commit::DeviceJoinAttemptDecisionRef::Attempt(_)
-                        )
-                    })
-                    || !commit.device_join_outcomes().is_empty()
-                    || !commit.device_join_cleanup_receipts().is_empty()
-                    || commit.device_registrations().iter().any(|activation| {
-                        matches!(
-                            activation.authority,
-                            StoreDeviceRegistrationActivationRef::Join { .. }
-                        )
-                    });
-                let accepted_history = if requires_accepted_predecessor {
+                let carries_join_evidence =
+                    commit
+                        .device_join_attempt_decisions()
+                        .iter()
+                        .any(|decision| {
+                            matches!(
+                                decision,
+                                crate::sync::store_commit::DeviceJoinAttemptDecisionRef::Attempt(_)
+                            )
+                        })
+                        || !commit.device_join_outcomes().is_empty()
+                        || !commit.device_join_cleanup_receipts().is_empty();
+                let accepted_history = if carries_join_evidence {
                     let predecessor_cut = commit
                         .order
                         .predecessor_cut()
@@ -343,21 +340,20 @@ pub(crate) fn pull_store_commits<'a>(
                 } else {
                     None
                 };
-                let predecessor_authority =
-                    RegistrationPredecessorAuthority::MergeConcurrent(&predecessor_membership);
-                let accepted_predecessor = accepted_history.as_ref().map(|history| {
-                    VerifiedAcceptedPredecessor::MergeHistory {
-                        commits: &history.history.commits,
-                        frontier: commit_predecessor_references(&commit),
-                    }
-                });
-                let registrations = match Box::pin(load_commit_registrations(
+                let accepted_frontier = commit_predecessor_references(&commit);
+                let registrations = match Box::pin(load_merge_commit_registrations(
                     storage,
                     &root,
+                    &verified_root,
                     &commit,
                     &registration,
-                    Some(&predecessor_authority),
-                    accepted_predecessor.as_ref(),
+                    &predecessor_membership,
+                    accepted_history.as_ref().map(|history| {
+                        device_join_attempt::MergeAcceptedJoinHistory {
+                            commits: &history.history.commits,
+                            frontier: &accepted_frontier,
+                        }
+                    }),
                 ))
                 .await
                 {

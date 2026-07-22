@@ -91,22 +91,6 @@ pub(crate) async fn history_cut_covers(
     }
 }
 
-fn verify_provider_access_authority<'a>(
-    access: &'a super::provider::ActivatedStoreMemberProviderAccessGrant,
-    provider_admin: &'a super::provider::ProviderAdminGrantRecord,
-    administrator: &'a StoreDeviceRegistration,
-    activation: &'a StoreBatchCommit,
-    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
-) -> StorePullFuture<'a, ()> {
-    Box::pin(verify_provider_access_authority_impl(
-        access,
-        provider_admin,
-        administrator,
-        activation,
-        accepted_predecessor,
-    ))
-}
-
 pub(crate) async fn load_provider_access_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -140,70 +124,6 @@ pub(crate) async fn load_provider_access_activation(
         ));
     }
     Ok(activation)
-}
-
-async fn verify_provider_access_authority_impl(
-    access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
-    provider_admin: &super::provider::ProviderAdminGrantRecord,
-    administrator: &StoreDeviceRegistration,
-    activation: &StoreBatchCommit,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
-) -> Result<(), StorePullError> {
-    if let Some(verified) = accepted_predecessor
-        .map(|predecessor| predecessor.serial_history_commit(&access.activation))
-        .transpose()?
-        .flatten()
-    {
-        if verified.commit != *activation || verified.author != *administrator {
-            return Err(StorePullError::Database(
-                "accepted Serial provider-access activation differs from its exact object"
-                    .to_string(),
-            ));
-        }
-        let provider_admin_state = &verified.authorization_before.provider_admin;
-        if !provider_admin_state.authorizes(
-            &access.grant.administrator_grant,
-            &activation.author_registration,
-        ) || provider_admin_state
-            .records()
-            .get(&access.grant.administrator_grant)
-            != Some(provider_admin)
-        {
-            return Err(StorePullError::Database(
-                "device provider approval activation lacks exact predecessor provider-administrator authority"
-                    .to_string(),
-            ));
-        }
-        return Ok(());
-    }
-    if let Some(verified) = accepted_predecessor
-        .map(|predecessor| predecessor.merge_history_commit(&access.activation))
-        .transpose()?
-        .flatten()
-    {
-        if verified.commit != *activation {
-            return Err(StorePullError::Database(
-                "accepted Merge provider-access activation differs from its exact object"
-                    .to_string(),
-            ));
-        }
-        let authority =
-            RegistrationPredecessorAuthority::MergeConcurrent(&verified.predecessor_membership);
-        if !authority.verifies_provider_administrator(
-            &access.grant.administrator_grant,
-            &activation.author_registration,
-            provider_admin,
-        ) {
-            return Err(StorePullError::Database(
-                "device provider approval activation lacks exact predecessor provider-administrator authority"
-                    .to_string(),
-            ));
-        }
-        return Ok(());
-    }
-    Err(StorePullError::Database(
-        "device provider approval has no matching accepted predecessor policy".to_string(),
-    ))
 }
 
 pub(crate) struct LoadedDeviceJoinAttemptEvidence {
@@ -265,38 +185,6 @@ pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
             provider_access_activation,
             provider_administrator: administrator,
         })
-    })
-}
-
-pub(super) fn load_verified_device_join_attempt_evidence_ref<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    reference: &'a super::store_commit::DeviceJoinAttemptRef,
-    owner: &'a StoreDeviceRegistration,
-    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
-) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
-    Box::pin(async move {
-        let evidence =
-            load_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
-        verify_device_join_attempt_evidence(evidence, accepted_predecessor).await
-    })
-}
-
-pub(super) fn verify_device_join_attempt_evidence<'a>(
-    evidence: LoadedDeviceJoinAttemptEvidence,
-    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
-) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
-    Box::pin(async move {
-        let offer = &evidence.attempt.value.provider_approval.request.offer;
-        verify_provider_access_authority(
-            &evidence.attempt.value.provider_approval.access_grant,
-            &offer.provider_admin,
-            &evidence.provider_administrator,
-            &evidence.provider_access_activation,
-            accepted_predecessor,
-        )
-        .await?;
-        Ok(evidence.attempt)
     })
 }
 

@@ -1,8 +1,10 @@
 use super::registration_authority::verify_serial_provider_administrator;
 use super::*;
-use crate::sync::store_commit::{DeviceJoinAttempt, StoreHistoryCut};
+use crate::sync::store_commit::{DeviceJoinAttempt, StoreBatchCommit, StoreHistoryCut};
 use crate::sync::store_objects::VerifiedObject;
-use crate::sync::store_pull::LoadedDeviceJoinAttemptEvidence;
+use crate::sync::store_pull::{
+    LoadedCommitJoinEvidence, LoadedDeviceJoinAttemptEvidence, VerifiedCommitJoinEvidence,
+};
 
 pub(in crate::sync::store_engine) fn verify_device_join_attempt_evidence<'a>(
     storage: &'a dyn SyncStorage,
@@ -60,5 +62,58 @@ pub(in crate::sync::store_engine) fn verify_device_join_attempt_evidence<'a>(
             ));
         }
         Ok(evidence.attempt)
+    })
+}
+
+pub(super) fn verify_commit_join_evidence<'a>(
+    commit: &'a StoreBatchCommit,
+    loaded: LoadedCommitJoinEvidence,
+    accepted: &'a [AuthorizedSerialCommit],
+) -> StorePullFuture<'a, VerifiedCommitJoinEvidence> {
+    Box::pin(async move {
+        let mut attempts = BTreeMap::new();
+        for (reference, evidence) in loaded.attempts {
+            if evidence.write_policy != crate::WritePolicy::Serial {
+                return Err(StorePullError::Serial(
+                    "Serial commit join evidence comes from a Merge Store root".to_string(),
+                ));
+            }
+            let access = &evidence.attempt.value.provider_approval.access_grant;
+            let verified = accepted
+                .iter()
+                .find(|candidate| candidate.commit_ref == access.activation)
+                .ok_or_else(|| {
+                    StorePullError::Serial(
+                        "provider-access activation is outside the accepted Serial predecessor history"
+                            .to_string(),
+                    )
+                })?;
+            if verified.commit != evidence.provider_access_activation
+                || verified.author != evidence.provider_administrator
+                || !verify_serial_provider_administrator(
+                    &verified.authorization_before,
+                    &access.grant.administrator_grant,
+                    &verified.commit.author_registration,
+                    &evidence
+                        .attempt
+                        .value
+                        .provider_approval
+                        .request
+                        .offer
+                        .provider_admin,
+                )
+            {
+                return Err(StorePullError::Serial(
+                    "device join attempt lacks exact Serial provider-administrator authority"
+                        .to_string(),
+                ));
+            }
+            attempts.insert(reference, evidence.attempt.value);
+        }
+        Ok(VerifiedCommitJoinEvidence {
+            commit: commit.clone(),
+            attempts,
+            cleanup_receipts: loaded.cleanup_receipts,
+        })
     })
 }

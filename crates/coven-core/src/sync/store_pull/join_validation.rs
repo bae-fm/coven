@@ -55,33 +55,54 @@ pub(super) async fn validate_commit_join_abandonments(
     Ok(())
 }
 
-async fn load_commit_device_join_attempt(
+async fn load_commit_device_join_attempt_evidence(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     reference: &super::store_commit::DeviceJoinAttemptRef,
-    owner: &StoreDeviceRegistration,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
-) -> Result<DeviceJoinAttempt, RegistrationLoadError> {
-    let accepted_predecessor = accepted_predecessor.ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "device join validation has no accepted predecessor history".to_string(),
+) -> Result<LoadedDeviceJoinAttemptEvidence, RegistrationLoadError> {
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::DeviceJoinAttempt,
+    );
+    let bytes = storage
+        .read_protocol_object(
+            &context,
+            &reference.object,
+            &super::store_commit::device_join_attempt_semantic_prefix(reference.attempt_id),
         )
-    })?;
-    let attempt = load_verified_device_join_attempt_evidence_ref(
-        storage,
-        root,
-        reference,
-        owner,
-        Some(accepted_predecessor),
-    )
-    .await
-    .map_err(registration_attempt_error)?;
-    Ok(attempt.value)
+        .await
+        .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
+    let unverified: DeviceJoinAttempt = serde_json::from_slice(&bytes)
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    let owner = load_registration_ref(storage, root, &unverified.owner_registration)
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
+    load_device_join_attempt_evidence_ref(storage, root, reference, &owner)
+        .await
+        .map_err(registration_attempt_error)
 }
 
 pub(crate) struct LoadedCommitJoinCleanupReceipt {
     pub(crate) receipt: super::device_join::DeviceJoinCleanupReceiptObject,
     pub(crate) attempt: LoadedDeviceJoinAttemptEvidence,
+}
+
+pub(crate) struct CommitJoinCleanupReceiptEvidence {
+    pub(crate) receipt: super::device_join::DeviceJoinCleanupReceiptObject,
+    pub(crate) attempt: super::store_commit::DeviceJoinAttemptRef,
+}
+
+pub(crate) struct LoadedCommitJoinEvidence {
+    pub(crate) attempts:
+        BTreeMap<super::store_commit::DeviceJoinAttemptRef, LoadedDeviceJoinAttemptEvidence>,
+    pub(crate) cleanup_receipts: Vec<CommitJoinCleanupReceiptEvidence>,
+}
+
+pub(crate) struct VerifiedCommitJoinEvidence {
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) attempts: BTreeMap<super::store_commit::DeviceJoinAttemptRef, DeviceJoinAttempt>,
+    pub(crate) cleanup_receipts: Vec<CommitJoinCleanupReceiptEvidence>,
 }
 
 pub(crate) fn load_commit_join_cleanup_receipts<'a>(
@@ -220,50 +241,88 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
     })
 }
 
-pub(super) fn validate_commit_join_cleanup_receipts<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    root_value: &'a super::store_commit::StoreProtocolRoot,
-    commit: &'a StoreBatchCommit,
-    activating_author: &'a StoreDeviceRegistration,
-    predecessor: Option<&'a RegistrationPredecessorAuthority<'a>>,
-    accepted_predecessor: Option<&'a VerifiedAcceptedPredecessor<'a>>,
-) -> RegistrationLoadFuture<'a, Vec<super::device_join::DeviceJoinCleanupReceiptObject>> {
-    Box::pin(async move {
-        let predecessor = predecessor.ok_or_else(|| {
+pub(crate) async fn load_commit_join_evidence(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+) -> Result<LoadedCommitJoinEvidence, RegistrationLoadError> {
+    let loaded_cleanup =
+        load_commit_join_cleanup_receipts(storage, root, root_value, commit, activating_author)
+            .await?;
+    let mut attempts = BTreeMap::new();
+    let mut cleanup_receipts = Vec::with_capacity(loaded_cleanup.len());
+    for loaded in loaded_cleanup {
+        let attempt = loaded.receipt.cancellation.attempt().clone();
+        attempts.entry(attempt.clone()).or_insert(loaded.attempt);
+        cleanup_receipts.push(CommitJoinCleanupReceiptEvidence {
+            receipt: loaded.receipt,
+            attempt,
+        });
+    }
+    let references = commit
+        .device_join_attempt_decisions()
+        .iter()
+        .filter_map(|decision| match decision {
+            DeviceJoinAttemptDecisionRef::Attempt(reference) => Some(reference),
+            DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
+        })
+        .chain(
+            commit
+                .device_join_outcomes()
+                .iter()
+                .map(|outcome| outcome.attempt()),
+        )
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for reference in references {
+        if attempts.contains_key(&reference) {
+            continue;
+        }
+        let evidence = load_commit_device_join_attempt_evidence(storage, root, &reference).await?;
+        attempts.insert(reference, evidence);
+    }
+    Ok(LoadedCommitJoinEvidence {
+        attempts,
+        cleanup_receipts,
+    })
+}
+
+pub(super) fn validate_commit_join_cleanup_receipts(
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    join_evidence: &VerifiedCommitJoinEvidence,
+) -> Result<(), RegistrationLoadError> {
+    let predecessor = predecessor.ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "device join cleanup activation has no exact predecessor authority".to_string(),
+        )
+    })?;
+    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+        return Err(RegistrationLoadError::Invalid(
+            "device join cleanup activation author is not an active Owner".to_string(),
+        ));
+    }
+    for loaded in &join_evidence.cleanup_receipts {
+        let attempt = join_evidence.attempts.get(&loaded.attempt).ok_or_else(|| {
             RegistrationLoadError::Invalid(
-                "device join cleanup activation has no exact predecessor authority".to_string(),
+                "device join cleanup receipt has no verified exact attempt".to_string(),
             )
         })?;
-        if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+        let expected_administrator = &attempt.provider_approval.request.offer.provider_admin;
+        if !predecessor.verifies_provider_administrator(
+            &loaded.receipt.provider_admin_grant,
+            &loaded.receipt.executor,
+            expected_administrator,
+        ) {
             return Err(RegistrationLoadError::Invalid(
-                "device join cleanup activation author is not an active Owner".to_string(),
+                "device join cleanup executor is not the exact effective provider administrator"
+                    .to_string(),
             ));
         }
-        let loaded =
-            load_commit_join_cleanup_receipts(storage, root, root_value, commit, activating_author)
-                .await?;
-        let mut receipts = Vec::with_capacity(loaded.len());
-        for loaded in loaded {
-            let attempt = verify_device_join_attempt_evidence(loaded.attempt, accepted_predecessor)
-                .await
-                .map_err(registration_attempt_error)?;
-            let expected_administrator =
-                &attempt.value.provider_approval.request.offer.provider_admin;
-            if !predecessor.verifies_provider_administrator(
-                &loaded.receipt.provider_admin_grant,
-                &loaded.receipt.executor,
-                expected_administrator,
-            ) {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join cleanup executor is not the exact effective provider administrator"
-                        .to_string(),
-                ));
-            }
-            receipts.push(loaded.receipt);
-        }
-        Ok(receipts)
-    })
+    }
+    Ok(())
 }
 
 pub(super) async fn validate_commit_join_outcomes(
@@ -273,7 +332,7 @@ pub(super) async fn validate_commit_join_outcomes(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+    join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<
     BTreeMap<super::store_commit::DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
     RegistrationLoadError,
@@ -305,43 +364,22 @@ pub(super) async fn validate_commit_join_outcomes(
                     .to_string(),
             ));
         }
-        let attempt_context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::DeviceJoinAttempt,
-        );
-        let attempt_bytes = storage
-            .read_protocol_object(
-                &attempt_context,
-                &outcome_ref.attempt().object,
-                &super::store_commit::device_join_attempt_semantic_prefix(
-                    outcome_ref.attempt().attempt_id,
-                ),
-            )
-            .await
-            .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
-        let unverified: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-        let owner = load_registration_ref(storage, root, &unverified.owner_registration)
-            .await
-            .map_err(RegistrationLoadError::Object)?
-            .value;
-        let attempt = Box::pin(load_commit_device_join_attempt(
-            storage,
-            root,
-            outcome_ref.attempt(),
-            &owner,
-            accepted_predecessor,
-        ))
-        .await?;
-        if owner != *activating_author
-            || attempt.owner_registration != commit.author_registration
+        let attempt = join_evidence
+            .attempts
+            .get(outcome_ref.attempt())
+            .ok_or_else(|| {
+                RegistrationLoadError::Invalid(
+                    "device join outcome has no verified exact attempt".to_string(),
+                )
+            })?;
+        if attempt.owner_registration != commit.author_registration
             || outcome_ref.slot() != &attempt.outcome_slot
         {
             return Err(RegistrationLoadError::Invalid(
                 "device join outcome differs from its exact Owner attempt".to_string(),
             ));
         }
-        let outcome = load_device_join_outcome_ref(storage, root, outcome_ref, &owner)
+        let outcome = load_device_join_outcome_ref(storage, root, outcome_ref, activating_author)
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
@@ -370,8 +408,8 @@ pub(super) async fn validate_commit_join_outcomes(
             .insert(
                 outcome_ref.clone(),
                 VerifiedCommitJoinOutcome {
-                    attempt,
-                    owner,
+                    attempt: attempt.clone(),
+                    owner: activating_author.clone(),
                     outcome,
                 },
             )
@@ -385,13 +423,11 @@ pub(super) async fn validate_commit_join_outcomes(
     Ok(verified)
 }
 
-pub(super) async fn validate_commit_join_attempts(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+pub(super) fn validate_commit_join_attempts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+    join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -417,14 +453,11 @@ pub(super) async fn validate_commit_join_attempts(
             DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
         })
     {
-        let attempt = Box::pin(load_commit_device_join_attempt(
-            storage,
-            root,
-            reference,
-            activating_author,
-            accepted_predecessor,
-        ))
-        .await?;
+        let attempt = join_evidence.attempts.get(reference).ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "device join activation has no verified exact attempt".to_string(),
+            )
+        })?;
         if attempt.owner_registration != commit.author_registration
             || attempt.membership != commit.membership_state
             || attempt.bootstrap_cut != bootstrap_cut

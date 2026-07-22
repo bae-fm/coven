@@ -8,23 +8,13 @@ pub(crate) enum RegistrationLoadError {
 pub(crate) type RegistrationLoadFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RegistrationLoadError>> + Send + 'a>>;
 
-pub(crate) enum VerifiedAcceptedPredecessor<'a> {
-    SerialHistory {
-        commits: &'a [AuthorizedSerialCommit],
-    },
-    MergeHistory {
-        commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
-        frontier: Vec<StoreBatchCommitRef>,
-    },
-}
-
 pub(crate) struct VerifiedCommitJoinOutcome {
     pub(crate) attempt: DeviceJoinAttempt,
     pub(crate) owner: StoreDeviceRegistration,
     pub(crate) outcome: super::store_commit::DeviceJoinOutcome,
 }
 
-pub(super) fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
+pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationLoadError {
     match error {
         StorePullError::Object(error) => RegistrationLoadError::Object(error),
         StorePullError::Storage(error) => {
@@ -481,31 +471,6 @@ async fn validate_commit_reclaim_receipt(
     Ok(())
 }
 
-pub(crate) async fn load_commit_registrations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    commit: &StoreBatchCommit,
-    activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
-) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
-{
-    let root_value = load_store_protocol_root(storage, root)
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
-    Box::pin(load_commit_registrations_with_root(
-        storage,
-        root,
-        &root_value,
-        commit,
-        activating_author,
-        predecessor,
-        accepted_predecessor,
-    ))
-    .await
-}
-
 pub(crate) async fn load_commit_registrations_with_root(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -513,9 +478,14 @@ pub(crate) async fn load_commit_registrations_with_root(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-    accepted_predecessor: Option<&VerifiedAcceptedPredecessor<'_>>,
+    join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
+    if join_evidence.commit != *commit {
+        return Err(RegistrationLoadError::Invalid(
+            "verified device-join evidence belongs to another Store commit".to_string(),
+        ));
+    }
     if commit.acknowledgement().is_some() {
         Box::pin(validate_commit_acknowledgement(
             storage,
@@ -554,15 +524,7 @@ pub(crate) async fn load_commit_registrations_with_root(
         .iter()
         .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)));
     if has_join_attempt {
-        Box::pin(validate_commit_join_attempts(
-            storage,
-            root,
-            commit,
-            activating_author,
-            predecessor,
-            accepted_predecessor,
-        ))
-        .await?;
+        validate_commit_join_attempts(commit, activating_author, predecessor, join_evidence)?;
     }
     let verified_join_outcomes = if commit.device_join_outcomes().is_empty() {
         BTreeMap::new()
@@ -574,7 +536,7 @@ pub(crate) async fn load_commit_registrations_with_root(
             commit,
             activating_author,
             predecessor,
-            accepted_predecessor,
+            join_evidence,
         ))
         .await?
     };
@@ -593,16 +555,7 @@ pub(crate) async fn load_commit_registrations_with_root(
         .await?;
     }
     if !commit.device_join_cleanup_receipts().is_empty() {
-        Box::pin(validate_commit_join_cleanup_receipts(
-            storage,
-            root,
-            root_value,
-            commit,
-            activating_author,
-            predecessor,
-            accepted_predecessor,
-        ))
-        .await?;
+        validate_commit_join_cleanup_receipts(activating_author, predecessor, join_evidence)?;
     }
     let mut registrations = Vec::with_capacity(commit.device_registrations().len());
     for activated in commit.device_registrations() {
