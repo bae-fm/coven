@@ -712,7 +712,6 @@ async fn complete_cycle_after_pull(
     store_pull: super::store_pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
     let db = authorization.db();
-    let storage = authorization.storage();
     let PreparedCycle {
         last_snapshot_time,
         last_snapshot_position,
@@ -795,10 +794,7 @@ async fn complete_cycle_after_pull(
     // (the VACUUM), so a non-owner never builds an image, publishes one readers
     // would reject, or runs the reclaim a publish triggers. A non-owner's rows still
     // propagate via the changeset push above.
-    let resumed_snapshot = super::store_snapshot::drain_outbound_store_snapshot(storage, db)
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish pending Store snapshot", error))?
-        .is_some();
+    let resumed_snapshot = authorization.drain_snapshot().await?;
     let snapshot_due = !resumed_snapshot
         && (is_initial_sync
             || super::snapshot::should_create_snapshot(

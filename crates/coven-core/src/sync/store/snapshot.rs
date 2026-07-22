@@ -1,14 +1,14 @@
 //! Durable exact Store snapshot publication.
 
-use super::membership::MembershipChain;
-use super::snapshot::{CreatedSnapshot, SnapshotError};
-use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
-use super::store_commit::{
+use crate::keys::UserKeypair;
+use crate::sync::membership::MembershipChain;
+use crate::sync::snapshot::{CreatedSnapshot, SnapshotError};
+use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
     StoreProtocolError, StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
 };
-use crate::keys::UserKeypair;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_store_snapshot(
@@ -56,12 +56,12 @@ pub(crate) async fn push_store_snapshot(
         .store_device_state_for_history_cut(&history_cut)
         .await
         .map_err(publication_error)?;
-    let super::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
+    let crate::sync::membership::MembershipStatus::Resolved(resolved) = membership.status() else {
         return Err(SnapshotError::PublicationState(
             "snapshot publication requires resolved membership".to_string(),
         ));
     };
-    let membership_state = super::circle_control::StoreMembershipStateRef::from_parts(
+    let membership_state = crate::sync::circle_control::StoreMembershipStateRef::from_parts(
         membership.head_refs().to_vec(),
         membership.resolution_refs().to_vec(),
         resolved_devices.recovery.clone(),
@@ -72,7 +72,7 @@ pub(crate) async fn push_store_snapshot(
         membership: membership_state,
         devices,
     };
-    let history_summary = super::store::pull::prepare_merge_snapshot_history_summary(
+    let history_summary = super::pull::prepare_merge_snapshot_history_summary(
         db,
         &root,
         &coverage,
@@ -104,7 +104,7 @@ pub(crate) async fn push_store_snapshot(
         None => (0, None, snapshot_first_slot(&registration)?.clone()),
     };
 
-    let snapshot_owner = super::remote_object::SnapshotObjectOwner {
+    let snapshot_owner = crate::sync::remote_object::SnapshotObjectOwner {
         activation: registration
             .store_snapshot_activation(&registration_ref)
             .map_err(|error| SnapshotError::Parse(error.to_string()))?
@@ -218,11 +218,11 @@ async fn prepare_snapshot_blobs(
     db: &crate::database::Database,
     storage: &dyn SyncStorage,
     snapshot: CreatedSnapshot,
-    owner: super::remote_object::SnapshotObjectOwner,
-    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
-    registration: &super::store_commit::StoreDeviceRegistration,
+    owner: crate::sync::remote_object::SnapshotObjectOwner,
+    registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
 ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
-    let authority = super::storage::BlobWriteAuthority::new(registration_ref, registration)
+    let authority = crate::sync::storage::BlobWriteAuthority::new(registration_ref, registration)
         .map_err(SnapshotError::Bucket)?;
     let CreatedSnapshot {
         db_image,
@@ -235,20 +235,20 @@ async fn prepare_snapshot_blobs(
     let preparation = async {
     for captured in blobs {
         let (audience, protection, package_authority) = match captured.audience {
-            super::snapshot::SnapshotBlobAudience::Store => (
+            crate::sync::snapshot::SnapshotBlobAudience::Store => (
                 crate::blob::locator::RemoteAudience::Store,
                 storage.store_blob_protection().map_err(SnapshotError::Bucket)?,
-                super::audience_package::PackageAudience::Store,
+                crate::sync::audience_package::PackageAudience::Store,
             ),
-            super::snapshot::SnapshotBlobAudience::Circle { circle_id, control } => {
+            crate::sync::snapshot::SnapshotBlobAudience::Circle { circle_id, control } => {
                 let (encryption, key_fingerprint) = db
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await
                     .map_err(publication_error)?;
                 (
                     crate::blob::locator::RemoteAudience::Circle(circle_id),
-                    super::storage::BlobSpoolProtection::Opaque(encryption),
-                    super::audience_package::PackageAudience::Circle {
+                    crate::sync::storage::BlobSpoolProtection::Opaque(encryption),
+                    crate::sync::audience_package::PackageAudience::Circle {
                         circle_id,
                         control: control.coordinate().clone(),
                         key_fingerprint,
@@ -265,7 +265,7 @@ async fn prepare_snapshot_blobs(
             )));
         }
         if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided {
-            let locator = super::store::package_preparation::prepare_partition_blob_locator(
+            let locator = super::package_preparation::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
                 &protection,
@@ -296,7 +296,7 @@ async fn prepare_snapshot_blobs(
         .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         if let Some(index) = coalesced.get(&coalesce_key).copied() {
             let stored = prepared[index].bindings[0].blob().clone();
-            let binding = super::audience_package::RowBlobLocatorBinding::new(
+            let binding = crate::sync::audience_package::RowBlobLocatorBinding::new(
                 captured.fact.table,
                 captured.fact.row_id,
                 captured.fact.row_stamp,
@@ -307,7 +307,7 @@ async fn prepare_snapshot_blobs(
             prepared[index].bindings.push(binding);
             continue;
         }
-        let (binding, blob) = super::store::package_preparation::prepare_partition_blob(
+        let (binding, blob) = super::package_preparation::prepare_partition_blob(
             db,
             storage,
             &captured.fact,
@@ -338,7 +338,7 @@ async fn prepare_snapshot_blobs(
                 "prepared snapshot blob awaiting upload has no exact spool".to_string(),
             ));
         }
-        let remote = super::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+        let remote = crate::sync::remote_object::RemoteObjectRecord::snapshot_activated_blob(
             &blob.stored,
             owner.clone(),
         )
@@ -371,20 +371,23 @@ async fn prepare_snapshot_blobs(
             "prepared snapshot blob graph has no captured Store directory".to_string(),
         )
     })?;
-    let image =
-        match super::snapshot::install_snapshot_blob_graph(db_image, &prepared, &image_store_dir) {
-            Ok(image) => image,
-            Err(error) => {
-                cleanup_snapshot_spools(&prepared)
-                    .await
-                    .map_err(|cleanup| {
-                        SnapshotError::PublicationState(format!(
-                    "snapshot image closure failed: {error}; spool cleanup failed: {cleanup}"
-                ))
-                    })?;
-                return Err(error);
-            }
-        };
+    let image = match crate::sync::snapshot::install_snapshot_blob_graph(
+        db_image,
+        &prepared,
+        &image_store_dir,
+    ) {
+        Ok(image) => image,
+        Err(error) => {
+            cleanup_snapshot_spools(&prepared)
+                .await
+                .map_err(|cleanup| {
+                    SnapshotError::PublicationState(format!(
+                        "snapshot image closure failed: {error}; spool cleanup failed: {cleanup}"
+                    ))
+                })?;
+            return Err(error);
+        }
+    };
     Ok((image, prepared))
 }
 
@@ -440,7 +443,7 @@ async fn publish_durable_snapshot(
             .activated_store_device_registration(uploader.clone())
             .await
             .map_err(publication_error)?;
-        let authority = super::storage::BlobWriteAuthority::new(&uploader, &registration)
+        let authority = crate::sync::storage::BlobWriteAuthority::new(&uploader, &registration)
             .map_err(SnapshotError::Bucket)?;
         if let Some(spool_path) = &prepared.spool_path {
             storage
@@ -514,7 +517,7 @@ async fn drain_snapshot_spool_cleanup(db: &crate::database::Database) -> Result<
 }
 
 fn snapshot_first_slot(
-    registration: &super::store_commit::StoreDeviceRegistration,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
 ) -> Result<&crate::storage::cloud::ObjectSlot, SnapshotError> {
     match &registration.snapshots {
         DeviceStreamAnchor::StoreSnapshots { first_slot } => Ok(first_slot),
@@ -527,8 +530,8 @@ fn snapshot_first_slot(
 pub async fn load_store_snapshot_ref(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
-    registration: &super::store_commit::StoreDeviceRegistration,
+    registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
     reference: &StoreSnapshotRef,
 ) -> Result<(StoreSnapshotRef, SnapshotMeta), SnapshotError> {
     if registration_ref.device_id != registration.device_id {
@@ -549,7 +552,7 @@ pub async fn load_store_snapshot_ref(
     let verify_registration_ref = registration_ref.clone();
     let verify_registration = registration.clone();
     let verify_reference = reference.clone();
-    let meta = super::store_objects::run_blocking_object_verification(
+    let meta = crate::sync::store_objects::run_blocking_object_verification(
         &prefix,
         &reference.object,
         Box::new(move || {
@@ -570,8 +573,8 @@ pub async fn load_store_snapshot_ref(
 
 pub(crate) fn verify_store_snapshot_bytes(
     root: &StoreRootRef,
-    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
-    registration: &super::store_commit::StoreDeviceRegistration,
+    registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
     reference: &StoreSnapshotRef,
     bytes: &[u8],
 ) -> Result<SnapshotMeta, SnapshotError> {
@@ -605,8 +608,8 @@ pub(crate) fn verify_store_snapshot_bytes(
 pub(crate) async fn load_store_snapshot_stream(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
-    registration: &super::store_commit::StoreDeviceRegistration,
+    registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
 ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, SnapshotError> {
     let mut slot = snapshot_first_slot(registration)?.clone();
     let context = ProtocolObjectContext::signed_plaintext(
@@ -620,14 +623,14 @@ pub(crate) async fn load_store_snapshot_stream(
         let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), generation);
         let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
             Ok(value) => value,
-            Err(super::storage::StorageError::NotFound(_)) => break,
+            Err(crate::sync::storage::StorageError::NotFound(_)) => break,
             Err(error) => return Err(SnapshotError::Bucket(error)),
         };
         let verify_root = root.clone();
         let verify_registration_ref = registration_ref.clone();
         let verify_registration = registration.clone();
         let verify_object = object.clone();
-        let (reference, meta) = super::store_objects::run_blocking_object_verification(
+        let (reference, meta) = crate::sync::store_objects::run_blocking_object_verification(
             &prefix,
             &object,
             Box::new(move || {
@@ -687,14 +690,14 @@ pub(crate) fn select_maximal_store_snapshot(
 
 pub(crate) struct SelectedStableStoreSnapshot {
     pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
-    pub(crate) stability: super::store_pull::VerifiedStoreSnapshotStability,
+    pub(crate) stability: crate::sync::store_pull::VerifiedStoreSnapshotStability,
 }
 
 pub(crate) async fn select_maximal_stable_store_snapshot(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
-) -> Result<Option<SelectedStableStoreSnapshot>, super::store_pull::StorePullError> {
+) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store_pull::StorePullError> {
     let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
         return Ok(None);
     };
@@ -702,15 +705,15 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     let mut stable = Vec::new();
     let mut maximal_rejection = None;
     for snapshot in candidates {
-        match super::store::verify_store_snapshot_stability(storage, root, &snapshot).await {
+        match super::verify_store_snapshot_stability(storage, root, &snapshot).await {
             Ok(stability) => stable.push(SelectedStableStoreSnapshot {
                 snapshot,
                 stability,
             }),
             Err(error) => match &error {
-                super::store_pull::StorePullError::SnapshotNotStable { .. }
-                | super::store_pull::StorePullError::SnapshotAuthorInactive
-                | super::store_pull::StorePullError::SnapshotAuthorNotOwner => {
+                crate::sync::store_pull::StorePullError::SnapshotNotStable { .. }
+                | crate::sync::store_pull::StorePullError::SnapshotAuthorInactive
+                | crate::sync::store_pull::StorePullError::SnapshotAuthorNotOwner => {
                     if snapshot.reference == maximal_reference {
                         maximal_rejection = Some(error);
                     }
@@ -730,14 +733,14 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
             .iter()
             .position(|candidate| candidate.snapshot.reference == selected.reference)
             .ok_or_else(|| {
-                super::store_pull::StorePullError::Database(
+                crate::sync::store_pull::StorePullError::Database(
                     "stable Store snapshot selection lost its verified candidate".to_string(),
                 )
             })?;
         return Ok(Some(stable.swap_remove(index)));
     }
     Err(maximal_rejection.ok_or_else(|| {
-        super::store_pull::StorePullError::Database(
+        crate::sync::store_pull::StorePullError::Database(
             "Store snapshot candidates produced no stability decision".to_string(),
         )
     })?)
@@ -754,14 +757,14 @@ pub(crate) async fn select_store_snapshot(
     binary_schema_version: u32,
 ) -> Result<
     (
-        super::store_objects::VerifiedObject<super::store_commit::StoreProtocolRoot>,
+        crate::sync::store_objects::VerifiedObject<crate::sync::store_commit::StoreProtocolRoot>,
         crate::database::PublishedStoreSnapshot,
         Vec<u8>,
-        super::store_pull::VerifiedStoreSnapshotStability,
+        crate::sync::store_pull::VerifiedStoreSnapshotStability,
     ),
     SnapshotError,
 > {
-    let verified_root = super::store_objects::load_store_protocol_root(storage, root)
+    let verified_root = crate::sync::store_objects::load_store_protocol_root(storage, root)
         .await
         .map_err(|error| SnapshotError::Parse(error.to_string()))?;
     let root_value = &verified_root.value;
@@ -774,11 +777,12 @@ pub(crate) async fn select_store_snapshot(
     let mut registrations = std::collections::BTreeMap::new();
     let mut resolutions = std::collections::BTreeSet::new();
     for reference in heads {
-        let head = super::membership_ops::load_exact_membership_head(storage, root, reference)
-            .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+        let head =
+            crate::sync::membership_ops::load_exact_membership_head(storage, root, reference)
+                .await
+                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
         resolutions.extend(head.body.resolutions.iter().cloned());
-        let registration = super::store_objects::load_registration_ref(
+        let registration = crate::sync::store_objects::load_registration_ref(
             storage,
             root,
             &head.body.author_registration,
@@ -789,7 +793,7 @@ pub(crate) async fn select_store_snapshot(
         registrations.insert(head.body.author_registration.clone(), registration);
     }
     let resolutions = resolutions.into_iter().collect::<Vec<_>>();
-    let membership = super::membership_ops::load_anchored_chain_at_exact_heads(
+    let membership = crate::sync::membership_ops::load_anchored_chain_at_exact_heads(
         storage,
         root,
         &root_value.descriptor.founder_pubkey,
@@ -814,7 +818,7 @@ pub(crate) async fn select_store_snapshot(
     .await
     .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
     .ok_or_else(|| {
-        SnapshotError::Bucket(super::storage::StorageError::NotFound(
+        SnapshotError::Bucket(crate::sync::storage::StorageError::NotFound(
             "Store snapshot stream".to_string(),
         ))
     })?;
@@ -907,7 +911,7 @@ mod tests {
         storage: &CloudSyncStorage,
         signer: &UserKeypair,
     ) -> (ObjectHash, String, MembershipChain) {
-        let root = super::super::store_protocol_root::create_store(
+        let root = crate::sync::store_protocol_root::create_store(
             db,
             storage,
             "snapshot-exact-store",
@@ -915,7 +919,7 @@ mod tests {
         )
         .await
         .expect("create snapshot test Store");
-        super::super::store_registration::ensure_active_registration(db, storage)
+        crate::sync::store_registration::ensure_active_registration(db, storage)
             .await
             .expect("activate snapshot test registration");
         let root_ref = db
@@ -923,11 +927,11 @@ mod tests {
             .await
             .expect("read snapshot test Store root")
             .expect("snapshot test Store root exists");
-        let origin = super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
+        let origin = crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder {
             creation_id: root.descriptor.creation_id,
         };
-        let device_id = super::super::store_commit::StoreDeviceId::derive(&root_ref, &origin);
-        let membership = super::super::pull::load_cycle_membership(storage, db)
+        let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root_ref, &origin);
+        let membership = crate::sync::pull::load_cycle_membership(storage, db)
             .await
             .expect("load snapshot test membership")
             .chain
@@ -1310,7 +1314,7 @@ mod tests {
         .await
         .expect("publish first snapshot");
         assert_eq!(first.generation, 0);
-        let image_object_id = super::super::remote_object::remote_object_id(&first.image.object);
+        let image_object_id = crate::sync::remote_object::remote_object_id(&first.image.object);
         let image_ownership = db
             .call(move |connection| {
                 connection
@@ -1323,14 +1327,14 @@ mod tests {
             })
             .await
             .expect("load published snapshot image ownership");
-        let image_ownership: super::super::remote_object::RemoteObjectRecord =
+        let image_ownership: crate::sync::remote_object::RemoteObjectRecord =
             serde_json::from_str(&image_ownership).expect("parse snapshot image ownership");
         assert!(matches!(
             image_ownership,
-            super::super::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+            crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(record)
                 if matches!(
                     &record.identity.domain,
-                    super::super::remote_object::SharedLiveSetObjectDomain::StoreSnapshotImage {
+                    crate::sync::remote_object::SharedLiveSetObjectDomain::StoreSnapshotImage {
                         reference
                     } if reference == &first.image
                 )

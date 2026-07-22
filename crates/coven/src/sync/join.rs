@@ -1184,7 +1184,7 @@ pub(crate) async fn open_db_and_pull(
         }
         let latest_snapshot = match &continuation.latest_snapshot {
             Some(reference) => Some(
-                crate::sync::store_snapshot::load_store_snapshot_ref(
+                crate::sync::store::load_store_snapshot_ref(
                     storage,
                     &store_root,
                     &continuation.registration,

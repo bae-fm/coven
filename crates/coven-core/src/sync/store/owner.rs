@@ -451,7 +451,7 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
         created_at: String,
     ) -> Result<crate::sync::store_commit::SnapshotMeta, SyncCycleFailure> {
-        crate::sync::store_snapshot::push_store_snapshot(
+        snapshot::push_store_snapshot(
             self.storage(),
             self.store_root().store_root_hash,
             snapshot,
@@ -464,6 +464,13 @@ impl AuthorizedStore<'_> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("publish Store snapshot", error))
+    }
+
+    pub(crate) async fn drain_snapshot(&self) -> Result<bool, SyncCycleFailure> {
+        snapshot::drain_outbound_store_snapshot(self.storage(), self.db())
+            .await
+            .map(|snapshot| snapshot.is_some())
+            .map_err(|error| SyncCycleFailure::operation("publish pending Store snapshot", error))
     }
 
     pub(crate) fn may_author_snapshot(&self, author_pubkey: &str) -> Result<(), String> {

@@ -301,7 +301,7 @@ async fn retain_store_packages_for_assertion(db: &Database, storage: &TestStore,
         .open_into(db)
         .await
         .expect("open exact Store before seeding snapshot");
-    crate::sync::store_snapshot::push_store_snapshot(
+    crate::sync::store::snapshot::push_store_snapshot(
         &storage.storage,
         storage.store_root_hash(),
         crate::sync::snapshot::CreatedSnapshot {
@@ -2362,7 +2362,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     drop(db);
 
     let reopened = open();
-    assert!(crate::sync::store_snapshot::drain_outbound_store_snapshot(
+    assert!(crate::sync::store::snapshot::drain_outbound_store_snapshot(
         &storage.storage,
         &reopened,
     )
@@ -4940,7 +4940,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .open_into(&db)
             .await
             .expect("open Store before publishing cadence snapshot");
-        crate::sync::store_snapshot::push_store_snapshot(
+        crate::sync::store::snapshot::push_store_snapshot(
             &storage.storage,
             storage.store_root_hash(),
             crate::sync::snapshot::CreatedSnapshot {

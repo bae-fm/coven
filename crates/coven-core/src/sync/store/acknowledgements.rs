@@ -116,7 +116,7 @@ impl AuthorizedStore<'_> {
             .await?;
         let mut candidates = Vec::new();
         for (registration_ref, registration) in registrations {
-            for snapshot in crate::sync::store_snapshot::load_store_snapshot_stream(
+            for snapshot in crate::sync::store::snapshot::load_store_snapshot_stream(
                 self.storage(),
                 root,
                 &registration_ref,
@@ -139,7 +139,7 @@ impl AuthorizedStore<'_> {
             }
         }
         Ok(
-            crate::sync::store_snapshot::select_maximal_store_snapshot(candidates).map(
+            crate::sync::store::snapshot::select_maximal_store_snapshot(candidates).map(
                 |snapshot| crate::sync::store_commit::StoreSnapshotLocator {
                     author_registration: snapshot.meta.author_registration,
                     snapshot: snapshot.reference,

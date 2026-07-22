@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::{
     circle, circle_activation, circle_ops, device_join, membership, membership_ops, provider,
-    retained_replay, store_commit, store_objects, store_reclaim, store_snapshot,
+    retained_replay, store_commit, store_objects, store_reclaim,
 };
 
 use super::audience_package::{AudiencePackage, PackageAudience};

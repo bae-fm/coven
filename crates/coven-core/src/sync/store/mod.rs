@@ -22,11 +22,13 @@ pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(crate) mod pull;
+pub(crate) mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
 pub use error::StoreError;
 pub(crate) use owner::{AuthorizedStore, Store};
+pub use snapshot::load_store_snapshot_ref;
 
 enum StoreLoadError {
     Database(crate::database::DbError),

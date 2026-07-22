@@ -752,7 +752,7 @@ pub async fn bootstrap_from_snapshot(
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
     let (store_root, snapshot, plaintext, stability) =
-        Box::pin(super::store_snapshot::select_store_snapshot(
+        Box::pin(super::store::snapshot::select_store_snapshot(
             storage,
             &expected_store_root,
             membership_floor,

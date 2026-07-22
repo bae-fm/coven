@@ -139,7 +139,7 @@ impl Database {
         match (&continuation.latest_snapshot, &latest_snapshot) {
             (None, None) => {}
             (Some(expected), Some((reference, meta))) if expected == reference => {
-                let verified = crate::sync::store_snapshot::verify_store_snapshot_bytes(
+                let verified = crate::sync::store::snapshot::verify_store_snapshot_bytes(
                     &root,
                     &continuation.registration,
                     &registration,

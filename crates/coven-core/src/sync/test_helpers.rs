@@ -1271,7 +1271,7 @@ pub async fn publish_snapshot_fixture(
     membership: &crate::sync::membership::MembershipChain,
     db: &Database,
 ) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
-    crate::sync::store_snapshot::push_store_snapshot(
+    crate::sync::store::snapshot::push_store_snapshot(
         storage,
         root.store_root_hash,
         crate::sync::snapshot::CreatedSnapshot {

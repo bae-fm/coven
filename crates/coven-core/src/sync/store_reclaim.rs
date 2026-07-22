@@ -961,7 +961,7 @@ async fn verify_store_package_reclaim_evidence(
         &claim.covering_snapshot.author_registration,
     )
     .await?;
-    let (reference, metadata) = super::store_snapshot::load_store_snapshot_ref(
+    let (reference, metadata) = super::store::snapshot::load_store_snapshot_ref(
         storage,
         root,
         &claim.covering_snapshot.author_registration,
@@ -1303,7 +1303,7 @@ async fn choose_snapshot(
 ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
-        for snapshot in super::store_snapshot::load_store_snapshot_stream(
+        for snapshot in super::store::snapshot::load_store_snapshot_stream(
             storage,
             root,
             registration_ref,
@@ -1315,7 +1315,7 @@ async fn choose_snapshot(
             authorized.push(snapshot);
         }
     }
-    let selected = match super::store_snapshot::select_maximal_stable_store_snapshot(
+    let selected = match super::store::snapshot::select_maximal_stable_store_snapshot(
         storage, root, authorized,
     )
     .await

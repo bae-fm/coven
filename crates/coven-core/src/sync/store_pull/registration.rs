@@ -166,7 +166,7 @@ pub(crate) async fn validate_commit_acknowledgement(
         let snapshot_author = load_registration_ref(storage, root, &snapshot.author_registration)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        let (_, metadata) = Box::pin(super::store_snapshot::load_store_snapshot_ref(
+        let (_, metadata) = Box::pin(crate::sync::store::snapshot::load_store_snapshot_ref(
             storage,
             root,
             &snapshot.author_registration,
