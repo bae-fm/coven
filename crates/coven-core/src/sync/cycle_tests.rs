@@ -3686,15 +3686,13 @@ async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remo
         .await;
         let (_remote_temp, remote_store_dir) = temp_store_dir();
         assert!(
-            crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
                 &remote,
                 &storage,
-                Some(storage.serial_coordination().unwrap()),
+                storage.serial_coordination().unwrap(),
                 &remote_device_id,
-                "2026-01-01T00:00:00Z",
                 &owner,
-                &remote_store_dir,
-                None,
+                &remote_store_dir
             )
             .await
             .unwrap()
@@ -3817,15 +3815,13 @@ async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
         let first = db.pending_writes().await.unwrap().pop().unwrap().write_id;
         let (_temp, store_dir) = temp_store_dir();
         assert!(
-            crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
                 &db,
                 &storage,
-                Some(storage.serial_coordination().unwrap()),
+                storage.serial_coordination().unwrap(),
                 &device_id,
-                "2026-01-01T00:00:00Z",
                 &owner,
-                &store_dir,
-                None,
+                &store_dir
             )
             .await
             .unwrap()

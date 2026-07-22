@@ -32,17 +32,19 @@ async fn one_retained_checkpoint() -> (
         .expect("load checkpoint device id")
         .expect("checkpoint device id exists");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(super::super::store_outbound::prepare_pending_store_write(
-        &db,
-        &store.storage,
-        &device_id,
-        "2026-07-21T00:00:00Z",
-        &store.signer,
-        &store_dir,
-        Some(&membership),
-    )
-    .await
-    .expect("prepare checkpoint commit"));
+    assert!(
+        super::super::store_engine::merge::preparation::prepare_store_write(
+            &db,
+            &store.storage,
+            &device_id,
+            "2026-07-21T00:00:00Z",
+            &store.signer,
+            &store_dir,
+            &membership,
+        )
+        .await
+        .expect("prepare checkpoint commit")
+    );
     assert_eq!(
         super::super::store_engine::merge::publication::drain_store_writes(&db, &store.storage)
             .await
@@ -497,17 +499,22 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later Owner device id")
         .expect("later Owner device is activated");
     let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    assert!(super::super::store_outbound::prepare_pending_store_write(
-        later_db,
-        &store.storage,
-        &later_device_id,
-        "2026-07-21T00:02:00Z",
-        later_owner,
-        &later_store_dir,
-        later_membership.chain.as_ref(),
-    )
-    .await
-    .expect("prepare later concurrent write"));
+    assert!(
+        super::super::store_engine::merge::preparation::prepare_store_write(
+            later_db,
+            &store.storage,
+            &later_device_id,
+            "2026-07-21T00:02:00Z",
+            later_owner,
+            &later_store_dir,
+            later_membership
+                .chain
+                .as_ref()
+                .expect("later Merge membership chain"),
+        )
+        .await
+        .expect("prepare later concurrent write")
+    );
     super::super::store_engine::merge::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");

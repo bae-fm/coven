@@ -1,6 +1,7 @@
 use super::*;
 
 mod acknowledgements;
+pub(crate) mod preparation;
 pub(crate) mod publication;
 pub(super) mod pull;
 
@@ -281,7 +282,7 @@ impl AuthorizedMergeStoreEngine<'_> {
         identity: &UserKeypair,
         store_dir: &StoreDir,
     ) -> Result<bool, SyncCycleFailure> {
-        crate::sync::store_outbound::prepare_pending_merge_store_write(
+        preparation::prepare_store_write(
             self.db(),
             self.storage(),
             device_id,

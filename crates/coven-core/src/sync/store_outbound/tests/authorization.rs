@@ -192,14 +192,14 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write(
+    assert!(prepare_merge_store_write(
         &owner_db,
         &store.storage,
         &local_device_id(&owner_db).await,
         "2026-07-21T00:01:00Z",
         &owner,
         &store_dir,
-        Some(&after_removal),
+        &after_removal,
     )
     .await
     .expect("prepare removal-witnessing predecessor commit"));
@@ -281,14 +281,14 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write(
+    assert!(prepare_merge_store_write(
         &owner_db,
         &store.storage,
         &local_device_id(&owner_db).await,
         "2026-07-21T00:00:00Z",
         &owner,
         &store_dir,
-        Some(&predecessor_membership),
+        &predecessor_membership,
     )
     .await
     .expect("prepare predecessor commit"));

@@ -385,14 +385,17 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
     assert!(
-        crate::sync::store_outbound::prepare_pending_store_write(
+        crate::sync::store_engine::merge::preparation::prepare_store_write(
             &member_db,
             &storage.storage,
             &member_device_id,
             "0000000003000-0000-member",
             &member,
             &member_store_dir,
-            membership.chain.as_ref(),
+            membership
+                .chain
+                .as_ref()
+                .expect("active Merge membership chain"),
         )
         .await
         .expect("prepare member commit while grant is active"),

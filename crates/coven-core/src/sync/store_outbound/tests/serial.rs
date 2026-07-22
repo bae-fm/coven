@@ -33,15 +33,13 @@ async fn two_serial_writes_publish_as_one_branch_with_one_head_cas() {
     assert_eq!(pending.len(), 2);
     let (_temp, store_dir) = temp_store_dir();
     let head_mutations_before = home.head_mutation_count();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &device_id,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare one Serial branch"));
@@ -244,15 +242,13 @@ async fn changed_serial_base_marks_the_whole_branch_conflict_before_uploading_ca
     home.fail_exact_create_before_call(1);
     let (_temp, store_dir) = temp_store_dir();
 
-    assert!(!prepare_pending_store_write_with_coordination(
+    assert!(!prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("detect changed Serial base"));
@@ -279,15 +275,13 @@ async fn changed_serial_base_marks_the_whole_branch_conflict_before_uploading_ca
 async fn lost_successful_serial_head_response_completes_from_the_exact_authoritative_tip() {
     let (home, storage, db, keypair, _root, pending) = serial_fixture("serial-lost-success").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .unwrap());
@@ -315,15 +309,13 @@ async fn serial_candidate_abandonment_persists_and_wins_the_branch_base() {
     let (_home, storage, db, keypair, _root, pending) =
         serial_fixture("serial-candidate-abandonment").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial branch"));
@@ -379,15 +371,13 @@ async fn original_serial_branch_activation_wins_abandonment_race() {
     let (_home, storage, db, keypair, root, pending) =
         serial_fixture("serial-abandonment-original-wins").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial branch"));
@@ -473,15 +463,13 @@ async fn third_serial_successor_discards_both_losing_candidate_families() {
     let (_home, storage, db, keypair, _root, pending) =
         serial_fixture("serial-abandonment-third-wins").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial branch"));
@@ -530,15 +518,13 @@ async fn serial_abandonment_retries_commit_publication_and_candidate_cleanup() {
         let (home, storage, db, keypair, root, pending) =
             serial_fixture(&format!("serial-abandonment-retry-{failure}")).await;
         let (_temp, store_dir) = temp_store_dir();
-        assert!(prepare_pending_store_write_with_coordination(
+        assert!(prepare_serial_store_write(
             &db,
             &storage,
-            Some(storage.serial_coordination().unwrap()),
+            storage.serial_coordination().unwrap(),
             &local_device_id(&db).await,
-            "2026-01-01T00:00:00Z",
             &keypair,
-            &store_dir,
-            None,
+            &store_dir
         )
         .await
         .expect("prepare exact Serial branch"));
@@ -651,15 +637,13 @@ async fn serial_abandonment_resumes_candidate_cleanup_after_database_reopen() {
         .pending_writes()
         .await
         .expect("read pending Serial write");
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().expect("Serial coordination")),
+        storage.serial_coordination().expect("Serial coordination"),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial branch"));
@@ -743,15 +727,13 @@ async fn serial_abandonment_settles_a_lost_success_response_by_head_readback() {
     let (home, storage, db, keypair, _root, pending) =
         serial_fixture("serial-abandonment-lost-response").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial branch"));
@@ -778,15 +760,13 @@ async fn serial_abandonment_settles_a_lost_success_response_by_head_readback() {
 async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branch() {
     let (home, storage, db, keypair, root, pending) = serial_fixture("serial-lost-to-other").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .unwrap());
@@ -1099,15 +1079,13 @@ async fn serial_preparation_transport_failure_returns_the_reserved_branch_to_pen
     };
     let (_temp, store_dir) = temp_store_dir();
 
-    let result = prepare_pending_store_write_with_coordination(
+    let result = prepare_serial_store_write(
         &db,
         &storage,
-        Some(&coordination),
+        &coordination,
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
         &store_dir,
-        None,
     )
     .await;
 
@@ -1127,15 +1105,13 @@ async fn serial_preparation_protocol_failure_blocks_the_reserved_branch() {
     remove_exact_store_root(&db).await;
     let (_temp, store_dir) = temp_store_dir();
 
-    let result = prepare_pending_store_write_with_coordination(
+    let result = prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
         &store_dir,
-        None,
     )
     .await;
 
@@ -1156,15 +1132,13 @@ async fn write_arriving_during_serial_publication_rebases_after_activation() {
     let (_home, storage, db, keypair, _root, _pending) =
         serial_fixture("serial-publishing-success-suffix").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .unwrap());
@@ -1182,15 +1156,13 @@ async fn write_arriving_during_serial_publication_rebases_after_activation() {
             .unwrap(),
         2
     );
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:01Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare rebased suffix"));
@@ -1216,15 +1188,13 @@ async fn write_arriving_during_serial_publication_conflicts_with_the_branch_on_c
     let (home, storage, db, keypair, _root, pending) =
         serial_fixture("serial-publishing-lost-suffix").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .unwrap());
@@ -1261,15 +1231,13 @@ async fn missing_serial_head_fails_when_a_materialized_position_exists() {
     let (home, storage, db, keypair, _root, _pending) =
         serial_fixture("serial-missing-head-after-materialization").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .unwrap());
@@ -1317,15 +1285,13 @@ async fn missing_serial_head_during_activation_names_the_coordination_head() {
     let (home, storage, db, keypair, _root, pending) =
         serial_fixture("serial-missing-head-during-activation").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare exact Serial write"));

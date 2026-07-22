@@ -344,7 +344,7 @@ impl AuthorizedSerialStoreEngine<'_> {
         identity: &UserKeypair,
         store_dir: &StoreDir,
     ) -> Result<bool, SyncCycleFailure> {
-        crate::sync::store_outbound::prepare_pending_serial_store_write(
+        publication::prepare_serial_store_branch(
             self.db(),
             self.storage(),
             self.coordination(),

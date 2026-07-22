@@ -187,15 +187,13 @@ async fn serial_nonactivation_requires_a_different_verified_immediate_successor(
     let (_home, storage, db, keypair, root, _pending) =
         serial_fixture("serial-verified-nonactivation").await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().expect("Serial coordination")),
+        storage.serial_coordination().expect("Serial coordination"),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare losing Serial branch"));

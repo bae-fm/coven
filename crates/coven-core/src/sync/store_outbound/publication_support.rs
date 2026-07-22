@@ -77,24 +77,6 @@ pub(crate) fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteB
     }
 }
 
-pub(super) async fn record_preparation_failure(
-    db: &Database,
-    write_id: &crate::WriteId,
-    error: &StoreOutboundError,
-) -> Result<(), StoreOutboundError> {
-    let Some(block) = blocked_status(error) else {
-        return Ok(());
-    };
-    db.block_write_if_unresolved(write_id, block)
-        .await
-        .map(|_| ())
-        .map_err(|status_error| {
-            StoreOutboundError::Database(format!(
-                "record blocked status for write {write_id} after {error}: {status_error}"
-            ))
-        })
-}
-
 pub(crate) async fn publish_prepared_remote_objects(
     db: &Database,
     storage: &dyn SyncStorage,

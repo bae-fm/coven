@@ -941,14 +941,14 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         )
         .await;
         let (_store_temp, store_dir) = temp_store_dir();
-        assert!(prepare_pending_store_write(
+        assert!(prepare_merge_store_write(
             &db,
             &storage,
             &device_id,
             "2026-01-01T00:00:00Z",
             &keypair,
             &store_dir,
-            Some(&membership),
+            &membership,
         )
         .await
         .expect("prepare write"));
@@ -1039,14 +1039,14 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
     let (_store_temp, store_dir) = temp_store_dir();
 
     assert!(matches!(
-        prepare_pending_store_write(
+        prepare_merge_store_write(
             &db,
             &storage,
             &device_id,
             "2026-01-01T00:00:00Z",
             &keypair,
             &store_dir,
-            Some(&membership),
+            &membership,
         )
         .await,
         Err(StoreOutboundError::MissingState { .. })
@@ -1055,14 +1055,14 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
         db.blocked_writes().await.expect("inspect blocked writes")[0].write_id,
         first
     );
-    assert!(!prepare_pending_store_write(
+    assert!(!prepare_merge_store_write(
         &db,
         &storage,
         &device_id,
         "2026-01-01T00:00:01Z",
         &keypair,
         &store_dir,
-        Some(&membership),
+        &membership,
     )
     .await
     .expect("a blocked oldest write stays blocked"));
@@ -1076,14 +1076,14 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
         vec![first.clone()]
     );
     assert!(matches!(
-        prepare_pending_store_write(
+        prepare_merge_store_write(
             &db,
             &storage,
             &device_id,
             "2026-01-01T00:00:02Z",
             &keypair,
             &store_dir,
-            Some(&membership),
+            &membership,
         )
         .await,
         Err(StoreOutboundError::MissingState { .. })
@@ -1101,14 +1101,14 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
     db.retry_blocked_write(&first)
         .await
         .expect("explicit retry after repair");
-    assert!(prepare_pending_store_write(
+    assert!(prepare_merge_store_write(
         &db,
         &storage,
         &device_id,
         "2026-01-01T00:00:03Z",
         &keypair,
         &store_dir,
-        Some(&membership),
+        &membership,
     )
     .await
     .expect("revalidate repaired write"));
@@ -1160,14 +1160,14 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     let second = writes[1].write_id.clone();
     remove_exact_store_root(&db).await;
     let (_store_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write(
+    assert!(prepare_merge_store_write(
         &db,
         &storage,
         &device_id,
         "2026-01-01T00:00:00Z",
         &keypair,
         &store_dir,
-        Some(&membership),
+        &membership,
     )
     .await
     .is_err());
@@ -1200,14 +1200,14 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
                  '0000000001002-0000-writer', '2026-01-01')",
     )
     .await;
-    assert!(prepare_pending_store_write(
+    assert!(prepare_merge_store_write(
         &db,
         &storage,
         &device_id,
         "2026-01-01T00:00:01Z",
         &keypair,
         &store_dir,
-        Some(&membership),
+        &membership,
     )
     .await
     .expect("prepare write after discarded blocked writes"));
@@ -1219,15 +1219,13 @@ async fn retrying_one_blocked_serial_write_revalidates_the_whole_ordered_branch(
     let (_home, storage, db, keypair, root, blocked) = serial_fixture("serial-blocked-retry").await;
     remove_exact_store_root(&db).await;
     let (_store_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .is_err());
@@ -1253,15 +1251,13 @@ async fn retrying_one_blocked_serial_write_revalidates_the_whole_ordered_branch(
             .collect::<Vec<_>>()
     );
     remove_exact_store_root(&db).await;
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:01Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .is_err());
@@ -1274,15 +1270,13 @@ async fn retrying_one_blocked_serial_write_revalidates_the_whole_ordered_branch(
             .map(|write| write.write_id.clone())
             .collect::<Vec<_>>()
     );
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:02Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("revalidate repaired Serial branch"));
@@ -1300,15 +1294,13 @@ async fn discarding_a_blocked_serial_branch_allows_a_new_branch_to_publish() {
         serial_fixture("serial-blocked-discard").await;
     remove_exact_store_root(&db).await;
     let (_store_temp, store_dir) = temp_store_dir();
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:00Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .is_err());
@@ -1327,15 +1319,13 @@ async fn discarding_a_blocked_serial_branch_allows_a_new_branch_to_publish() {
                  '0000000001002-0000-writer', '2026-01-01')",
     )
     .await;
-    assert!(prepare_pending_store_write_with_coordination(
+    assert!(prepare_serial_store_write(
         &db,
         &storage,
-        Some(storage.serial_coordination().unwrap()),
+        storage.serial_coordination().unwrap(),
         &local_device_id(&db).await,
-        "2026-01-01T00:00:01Z",
         &keypair,
-        &store_dir,
-        None,
+        &store_dir
     )
     .await
     .expect("prepare new branch after discarded Serial branch"));

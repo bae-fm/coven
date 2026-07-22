@@ -5,10 +5,12 @@ use super::*;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::storage::{CreateHeadError, VersionToken, VersionedObject};
+use crate::sync::store_engine::merge::preparation::prepare_store_write as prepare_merge_store_write;
 use crate::sync::store_engine::merge::publication::drain_store_writes;
 use crate::sync::store_engine::serial::publication::{
     current_serial_authorization, current_serial_head_ref,
     drain_store_writes as drain_serial_store_writes,
+    prepare_serial_store_branch as prepare_serial_store_write,
 };
 use crate::sync::test_helpers::{
     create_exact_test_store, host_exec, install_active_device_fixture, open_serial_test_db,

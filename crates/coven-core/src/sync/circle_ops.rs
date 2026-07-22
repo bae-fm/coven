@@ -5291,15 +5291,13 @@ mod tests {
         .await;
         let (_store_temp, store_dir) = temp_store_dir();
         assert!(
-            super::super::store_outbound::prepare_pending_store_write_with_coordination(
+            super::super::store_engine::serial::publication::prepare_serial_store_branch(
                 &db,
                 &storage,
-                Some(coordination),
+                coordination,
                 &device_id,
-                "0000000001001-0000-creator",
                 &signer,
-                &store_dir,
-                None,
+                &store_dir
             )
             .await
             .expect("prepare competing Serial Store write")

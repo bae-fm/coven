@@ -2576,19 +2576,22 @@ mod tests {
         .await
         .expect("load owner membership before surviving commit");
         let owner_device_id = local_device_id(owner_db).await.expect("owner device id");
-        assert!(
-            Box::pin(super::super::store_outbound::prepare_pending_store_write(
+        assert!(Box::pin(
+            super::super::store_engine::merge::preparation::prepare_store_write(
                 owner_db,
                 &store.storage,
                 &owner_device_id,
                 "2026-07-18T01:00:30Z",
                 signer,
                 store_dir,
-                owner_membership.chain.as_ref(),
-            ))
-            .await
-            .expect("prepare surviving owner commit")
-        );
+                owner_membership
+                    .chain
+                    .as_ref()
+                    .expect("owner Merge membership chain"),
+            )
+        )
+        .await
+        .expect("prepare surviving owner commit"));
         Box::pin(
             super::super::store_engine::merge::publication::drain_store_writes(
                 owner_db,
@@ -2794,19 +2797,22 @@ mod tests {
         let peer_device_id = local_device_id(&peer_db)
             .await
             .expect("excluded peer device id");
-        assert!(
-            Box::pin(super::super::store_outbound::prepare_pending_store_write(
+        assert!(Box::pin(
+            super::super::store_engine::merge::preparation::prepare_store_write(
                 &peer_db,
                 &store.storage,
                 &peer_device_id,
                 "2026-07-18T01:01:00Z",
                 &signer,
                 &store_dir,
-                membership.chain.as_ref(),
-            ))
-            .await
-            .expect("prepare excluded peer candidate")
-        );
+                membership
+                    .chain
+                    .as_ref()
+                    .expect("peer Merge membership chain"),
+            )
+        )
+        .await
+        .expect("prepare excluded peer candidate"));
         let candidate = peer_db
             .oldest_prepared_store_write()
             .await
@@ -4476,19 +4482,22 @@ mod tests {
             .await
             .expect("transfer candidate device id");
         let (temporary, store_dir) = temp_store_dir();
-        assert!(
-            Box::pin(super::super::store_outbound::prepare_pending_store_write(
+        assert!(Box::pin(
+            super::super::store_engine::merge::preparation::prepare_store_write(
                 peer_db,
                 &store.storage,
                 &peer_device_id,
                 "2026-07-18T00:02:00Z",
                 signer,
                 &store_dir,
-                membership.chain.as_ref(),
-            ))
-            .await
-            .expect("prepare transfer candidate")
-        );
+                membership
+                    .chain
+                    .as_ref()
+                    .expect("transfer Merge membership chain"),
+            )
+        )
+        .await
+        .expect("prepare transfer candidate"));
         let candidate = peer_db
             .oldest_prepared_store_write()
             .await

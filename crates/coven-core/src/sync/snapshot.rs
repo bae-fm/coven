@@ -967,17 +967,19 @@ mod tests {
                 ),
             )
             .await;
-            assert!(super::super::store_outbound::prepare_pending_store_write(
-                &source,
-                &store.storage,
-                &device_id,
-                "2026-07-21T00:00:00Z",
-                &signer,
-                &store_dir,
-                Some(&membership),
-            )
-            .await
-            .expect("prepare snapshot history write"));
+            assert!(
+                super::super::store_engine::merge::preparation::prepare_store_write(
+                    &source,
+                    &store.storage,
+                    &device_id,
+                    "2026-07-21T00:00:00Z",
+                    &signer,
+                    &store_dir,
+                    &membership,
+                )
+                .await
+                .expect("prepare snapshot history write")
+            );
             assert_eq!(
                 super::super::store_engine::merge::publication::drain_store_writes(
                     &source,

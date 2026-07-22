@@ -2345,14 +2345,18 @@ impl TestStore {
         let membership = crate::sync::pull::load_cycle_membership(&self.storage, &db)
             .await
             .map_err(|error| error.to_string())?;
-        let prepared = crate::sync::store_outbound::prepare_pending_store_write(
+        let membership = membership
+            .chain
+            .as_ref()
+            .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
+        let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
             &db,
             &self.storage,
             &device_id,
             "2026-07-16T00:00:00Z",
             &self.signer,
             &store_dir,
-            membership.chain.as_ref(),
+            membership,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2456,14 +2460,18 @@ impl TestStore {
         let membership = crate::sync::pull::load_cycle_membership(&self.storage, db)
             .await
             .map_err(|error| error.to_string())?;
-        let prepared = crate::sync::store_outbound::prepare_pending_store_write(
+        let membership = membership
+            .chain
+            .as_ref()
+            .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
+        let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
             db,
             &self.storage,
             &device_id,
             "2026-07-16T00:00:00Z",
             &self.signer,
             store_dir,
-            membership.chain.as_ref(),
+            membership,
         )
         .await
         .map_err(|error| error.to_string())?;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store_commit::StorePackageInput;
 
 pub(super) struct PreparedWriteFixture {
     pub(super) home: InMemoryCloudHome,
@@ -43,14 +44,14 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         )
         .await;
         let (_temp, store_dir) = temp_store_dir();
-        assert!(prepare_pending_store_write(
+        assert!(prepare_merge_store_write(
             &db,
             &storage,
             &device_id,
             "2026-01-01T00:00:00Z",
             &keypair,
             &store_dir,
-            Some(&membership),
+            &membership,
         )
         .await
         .expect("prepare outbound write"));

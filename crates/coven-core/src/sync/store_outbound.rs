@@ -15,13 +15,12 @@ use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectD
 use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef,
-    CandidateCleanupManifest, CandidateFamilyId, CirclePackageInput, DeviceJoinAttemptRef,
-    DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget,
-    StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
-    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreHistoryCut, StoreOperationMembershipAuthority,
-    StorePackageInput, StoreProtocolError, StoreRootRef, StoreSerialHead, StoreSerialHeadState,
-    StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    CandidateCleanupManifest, CandidateFamilyId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
+    ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef,
+    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
+    StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::{run_blocking_object_verification, StoreObjectError};
 use super::{
@@ -34,9 +33,8 @@ pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 pub(crate) const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, MergeCandidateAbandonmentPreparation, PreparedAudienceBlob, PreparedAudienceObjects,
-    PreparedAudiencePackage, PreparedProtocolObject, PreparedStoreWrite,
-    SerialCandidateAbandonmentPreparation, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
-    StoreWritePreparation, VerifiedMergeMaterialization,
+    PreparedAudiencePackage, PreparedProtocolObject, SerialCandidateAbandonmentPreparation,
+    StoreWriteBlobFact, StoreWriteBlobFacts, VerifiedMergeMaterialization,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
@@ -44,22 +42,22 @@ use crate::store_dir::StoreDir;
 mod abandonment;
 mod announcement;
 mod audience_preparation;
+mod local_authority;
 mod operation_candidate;
 mod operation_plan;
 mod operation_publication;
 mod prepared_operation;
 mod publication_support;
-mod write_preparation;
 
 pub use abandonment::*;
 pub(crate) use announcement::*;
 pub(crate) use audience_preparation::*;
+pub(crate) use local_authority::*;
 pub(crate) use operation_candidate::*;
 pub(crate) use operation_plan::*;
 pub(crate) use operation_publication::*;
 pub(crate) use prepared_operation::*;
 pub(crate) use publication_support::*;
-pub use write_preparation::*;
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: super::circle::Audience,
@@ -129,7 +127,7 @@ impl From<crate::database::DbError> for StoreOutboundError {
     }
 }
 
-fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
+pub(crate) fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
     current
         .checked_add(1)
         .ok_or(StoreOutboundError::SequenceExhausted { current })

@@ -2258,15 +2258,13 @@ mod tests {
             .await
             .expect("enqueue Serial target package");
         let (_directory, store_dir) = crate::sync::test_helpers::temp_store_dir();
-        super::super::store_outbound::prepare_pending_store_write_with_coordination(
+        super::super::store_engine::serial::publication::prepare_serial_store_branch(
             &db,
             &store.storage,
-            Some(&store.storage),
+            &store.storage,
             &device_id,
-            "2026-07-16T00:00:00Z",
             &signer,
             &store_dir,
-            None,
         )
         .await
         .expect("prepare Serial target package");

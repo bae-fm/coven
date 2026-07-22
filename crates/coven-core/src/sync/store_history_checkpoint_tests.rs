@@ -10,7 +10,7 @@ async fn publish_note(
     db: &crate::database::Database,
     store: &TestStore,
     device_id: &str,
-    membership: Option<&MembershipChain>,
+    membership: &MembershipChain,
     store_dir: &crate::store_dir::StoreDir,
     sequence: u64,
 ) {
@@ -24,7 +24,7 @@ async fn publish_note(
     )
     .await;
     assert!(
-        super::store_outbound::prepare_pending_store_write(
+        super::store_engine::merge::preparation::prepare_store_write(
             db,
             &store.storage,
             device_id,
@@ -64,19 +64,12 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
     let membership = super::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load Merge membership")
-        .chain;
+        .chain
+        .expect("Merge membership chain");
     let (_temp, store_dir) = temp_store_dir();
 
     for sequence in 1..=history_length {
-        publish_note(
-            &db,
-            &store,
-            &device_id,
-            membership.as_ref(),
-            &store_dir,
-            sequence,
-        )
-        .await;
+        publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
     }
 
     let retained = db
@@ -109,7 +102,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         &db,
         &store,
         &device_id,
-        membership.as_ref(),
+        &membership,
         &store_dir,
         history_length + 1,
     )
@@ -130,7 +123,7 @@ async fn published_history(
     crate::database::Database,
     TestStore,
     String,
-    Option<MembershipChain>,
+    MembershipChain,
     tempfile::TempDir,
     crate::store_dir::StoreDir,
 ) {
@@ -151,18 +144,11 @@ async fn published_history(
     let membership = super::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load Merge membership")
-        .chain;
+        .chain
+        .expect("Merge membership chain");
     let (temp, store_dir) = temp_store_dir();
     for sequence in 1..=history_length {
-        publish_note(
-            &db,
-            &store,
-            &device_id,
-            membership.as_ref(),
-            &store_dir,
-            sequence,
-        )
-        .await;
+        publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
     }
     (db, store, device_id, membership, temp, store_dir)
 }
@@ -171,7 +157,7 @@ async fn prepare_sabotaged_successor(
     db: &crate::database::Database,
     store: &TestStore,
     device_id: &str,
-    membership: Option<&MembershipChain>,
+    membership: &MembershipChain,
     store_dir: &crate::store_dir::StoreDir,
 ) -> String {
     host_exec(
@@ -181,7 +167,7 @@ async fn prepare_sabotaged_successor(
                  '0000000002000-0000-history', '2026-07-21')",
     )
     .await;
-    match super::store_outbound::prepare_pending_store_write(
+    match super::store_engine::merge::preparation::prepare_store_write(
         db,
         &store.storage,
         device_id,
@@ -279,8 +265,7 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     .await
     .expect("remove retained frontier row");
 
-    let error =
-        prepare_sabotaged_successor(&db, &store, &device_id, membership.as_ref(), &store_dir).await;
+    let error = prepare_sabotaged_successor(&db, &store, &device_id, &membership, &store_dir).await;
     assert!(
         !error.is_empty(),
         "missing retained frontier returned an empty error"
@@ -360,8 +345,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             .expect("forge canonical checkpoint state");
         }
         let error =
-            prepare_sabotaged_successor(&db, &store, &device_id, membership.as_ref(), &store_dir)
-                .await;
+            prepare_sabotaged_successor(&db, &store, &device_id, &membership, &store_dir).await;
         assert!(
             !error.is_empty(),
             "checkpoint-state sabotage returned an empty error"
@@ -488,7 +472,7 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
         None,
         coverage,
         &store.signer,
-        membership.as_ref(),
+        Some(&membership),
     )
     .await
     .expect("publish retained acknowledgement");
@@ -789,7 +773,6 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
 #[tokio::test]
 async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_history() {
     let (db, store, device_id, membership, _temp, _store_dir) = published_history(4).await;
-    let membership = membership.expect("Merge Store has membership");
     let retained = db
         .retained_merge_replay_inputs()
         .await

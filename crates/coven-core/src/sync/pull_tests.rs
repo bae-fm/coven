@@ -467,14 +467,17 @@ async fn sync_for_test<S: TestStoreStorage>(
     let membership = crate::sync::pull::load_cycle_membership(storage.sync_storage(), db)
         .await
         .map_err(|error| error.to_string())?;
-    let prepared = crate::sync::store_outbound::prepare_pending_store_write(
+    let prepared = crate::sync::store_engine::merge::preparation::prepare_store_write(
         db,
         storage.sync_storage(),
         &device_id,
         timestamp,
         keypair,
         store_dir,
-        membership.chain.as_ref(),
+        membership
+            .chain
+            .as_ref()
+            .ok_or_else(|| "Merge pull fixture has no membership chain".to_string())?,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -4057,15 +4060,13 @@ fn publish_serial_circle_move<'a>(
             ),
         )
         .await;
-        let prepared = crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+        let prepared = crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
             source,
             &storage.storage,
-            Some(coordination),
+            coordination,
             device_id,
-            "2026-07-16T00:01:00Z",
             owner,
             source_dir,
-            None,
         )
         .await
         .expect("prepare cross-Circle Serial move");
@@ -4161,15 +4162,13 @@ fn prepare_conflicting_serial_branch<'a>(
             .serial_coordination()
             .expect("Serial test Store exposes coordination");
         assert!(
-            crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
                 db,
                 &storage.storage,
-                Some(coordination),
+                coordination,
                 device_id,
-                "2026-07-16T00:00:30Z",
                 owner,
-                store_dir,
-                None,
+                store_dir
             )
             .await
             .expect("prepare losing Serial branch")
@@ -4597,15 +4596,13 @@ async fn serial_circle_pull_scenario() {
     )
     .await;
     let (_source_temp, source_dir) = temp_store_dir();
-    let prepared = crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+    let prepared = crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
         &source,
         &storage.storage,
-        Some(coordination),
+        coordination,
         &device_id,
-        "2026-07-16T00:00:00Z",
         &owner,
         &source_dir,
-        None,
     )
     .await
     .expect("prepare Serial Circle-only write");

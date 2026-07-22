@@ -1,85 +1,19 @@
 use super::*;
-
-/// Prepare the oldest pending write as exact signed bytes. A blocked or already
-/// prepared oldest write holds later writes behind it.
-#[allow(clippy::too_many_arguments)]
-#[cfg(any(test, feature = "test-utils"))]
-pub async fn prepare_pending_store_write(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    device_id: &str,
-    timestamp: &str,
-    keypair: &UserKeypair,
-    store_dir: &StoreDir,
-    membership: Option<&MembershipChain>,
-) -> Result<bool, StoreOutboundError> {
-    let membership = membership.ok_or_else(|| {
-        StoreOutboundError::InvalidOutbound(
-            "Merge Store write has no exact membership state".to_string(),
-        )
-    })?;
-    prepare_pending_merge_store_write(
-        db, storage, device_id, timestamp, keypair, store_dir, membership,
-    )
-    .await
-}
+use crate::database::{
+    PreparedProtocolObject, PreparedStoreWrite, StoreWriteBase, StoreWritePreparation,
+};
+use crate::sync::membership::MembershipChain;
+use crate::sync::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::sync::store_commit::{
+    commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
+    StoreCommitOrder, StoreDeviceHead, StorePackageInput, SuccessorLink,
+};
+use crate::sync::store_objects::StoreObjectError;
+use crate::sync::store_outbound::*;
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) async fn prepare_pending_store_write_with_coordination(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn CoordinationStorage>,
-    device_id: &str,
-    _timestamp: &str,
-    keypair: &UserKeypair,
-    store_dir: &StoreDir,
-    membership: Option<&MembershipChain>,
-) -> Result<bool, StoreOutboundError> {
-    if db.write_policy() == crate::WritePolicy::Serial {
-        return prepare_pending_serial_store_write(
-            db,
-            storage,
-            coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?,
-            device_id,
-            keypair,
-            store_dir,
-        )
-        .await;
-    }
-    let membership = membership.ok_or_else(|| {
-        StoreOutboundError::InvalidOutbound(
-            "Merge Store write has no exact membership state".to_string(),
-        )
-    })?;
-    prepare_pending_merge_store_write(
-        db, storage, device_id, _timestamp, keypair, store_dir, membership,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_pending_serial_store_write(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    device_id: &str,
-    keypair: &UserKeypair,
-    store_dir: &StoreDir,
-) -> Result<bool, StoreOutboundError> {
-    crate::sync::store_engine::serial::publication::prepare_serial_store_branch(
-        db,
-        storage,
-        coordination,
-        device_id,
-        keypair,
-        store_dir,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_pending_merge_store_write(
+pub(crate) async fn prepare_store_write(
     db: &Database,
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -106,7 +40,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
     }
     let dependencies = match base {
         StoreWriteBase::MergeConcurrent { dependencies } => {
-            super::store_commit::CommitFrontier::from_refs(
+            crate::sync::store_commit::CommitFrontier::from_refs(
                 crate::WritePolicy::MergeConcurrent,
                 dependencies,
             )
@@ -125,10 +59,10 @@ pub(crate) async fn prepare_pending_merge_store_write(
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         let store_root_hash = root.store_root_hash;
-        let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(
+        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &registration_ref,
-            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
         let previous = db.latest_local_store_position().await?;
         let seq = next_store_sequence(previous.as_ref())?;
@@ -142,7 +76,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
             dependencies,
         };
         let candidate_membership = membership;
-        let authorization = super::store_pull::load_retained_merge_outbound_authorization(
+        let authorization = crate::sync::store_pull::load_retained_merge_outbound_authorization(
             db,
             storage,
             &root,
@@ -152,11 +86,13 @@ pub(crate) async fn prepare_pending_merge_store_write(
         )
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let payload = super::service::prepare_store_payload(
+        let payload = crate::sync::service::prepare_store_payload(
             &blob_facts,
             keypair,
             store_dir,
-            super::service::StorePayloadMembership::MergeConcurrent(&authorization.membership),
+            crate::sync::service::StorePayloadMembership::MergeConcurrent(
+                &authorization.membership,
+            ),
         )
         .await
         .map_err(StoreOutboundError::Preparation)?;
@@ -223,7 +159,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
 
         let store_package = prepared_packages
             .iter()
-            .find(|package| package.audience == super::circle::Audience::Store)
+            .find(|package| package.audience == crate::sync::circle::Audience::Store)
             .map(|package| StorePackageInput {
                 candidate_family,
                 schema_version: db.schema_version(),
@@ -233,7 +169,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
         let circle_packages = prepared_packages
             .iter()
             .filter_map(|package| {
-                let super::circle::Audience::Circle(circle_id) = package.audience else {
+                let crate::sync::circle::Audience::Circle(circle_id) = package.audience else {
                     return None;
                 };
                 let control = package
@@ -305,7 +241,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let successor = super::store_pull::prepare_merge_history_successor(
+        let successor = crate::sync::store_pull::prepare_merge_history_successor(
             db,
             &root,
             &commit,
@@ -314,7 +250,7 @@ pub(crate) async fn prepare_pending_merge_store_write(
             &registration,
             None,
             authorization.device_state.clone(),
-            super::store_pull::MergeHistorySuccessorEvidence::none(),
+            crate::sync::store_pull::MergeHistorySuccessorEvidence::none(),
         )
         .await
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
@@ -345,9 +281,11 @@ pub(crate) async fn prepare_pending_merge_store_write(
             .map_err(StoreObjectError::from)?;
         let (remote_objects, audience_objects) =
             close_prepared_packages(prepared_packages, &commit, &commit_ref)?;
-        let local_cleanup =
-            super::service::bind_local_cleanup(payload.local_cleanup, &audience_objects.blobs)
-                .map_err(StoreOutboundError::Preparation)?;
+        let local_cleanup = crate::sync::service::bind_local_cleanup(
+            payload.local_cleanup,
+            &audience_objects.blobs,
+        )
+        .map_err(StoreOutboundError::Preparation)?;
         Ok::<_, StoreOutboundError>(StoreWritePreparation {
             write_id: write_id.clone(),
             remote_objects,
@@ -377,58 +315,20 @@ pub(crate) async fn prepare_pending_merge_store_write(
     Ok(true)
 }
 
-pub(crate) async fn load_local_store_authority(
+async fn record_preparation_failure(
     db: &Database,
-    expected_device_id: &str,
-    identity_signer: &UserKeypair,
-) -> Result<
-    (
-        super::store_commit::StoreRootRef,
-        StoreDeviceRegistrationRef,
-        StoreDeviceRegistration,
-        UserKeypair,
-    ),
-    StoreOutboundError,
-> {
-    let root = db
-        .local_store_root_ref()
-        .await?
-        .ok_or(StoreOutboundError::MissingState {
-            key: STORE_ROOT_AUTHORITY,
-        })?;
-    let durable = db.latest_local_store_device_registration().await?.ok_or(
-        StoreOutboundError::MissingState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        },
-    )?;
-    if !durable.is_activated() || durable.device_id.to_string() != expected_device_id {
-        return Err(StoreOutboundError::InvalidState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-            reason: "local Store device registration is not the activated writer".to_string(),
-        });
-    }
-    let registration =
-        StoreDeviceRegistration::parse_at(&durable.registration_bytes, &root, durable.device_id)
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    if registration.registration_hash() != durable.registration_hash {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "local Store device registration differs from its durable hash".to_string(),
-        ));
-    }
-    let reference = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        durable.prepared.reference().clone(),
-    );
-    let activated = db
-        .activated_store_device_registration(reference.clone())
-        .await?;
-    if activated != registration {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "local Store writer differs from its activated exact registration".to_string(),
-        ));
-    }
-    let device_signer = registration
-        .device_signer(identity_signer)
-        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    Ok((root, reference, registration, device_signer))
+    write_id: &crate::WriteId,
+    error: &StoreOutboundError,
+) -> Result<(), StoreOutboundError> {
+    let Some(block) = blocked_status(error) else {
+        return Ok(());
+    };
+    db.block_write_if_unresolved(write_id, block)
+        .await
+        .map(|_| ())
+        .map_err(|status_error| {
+            StoreOutboundError::Database(format!(
+                "record blocked status for write {write_id} after {error}: {status_error}"
+            ))
+        })
 }
