@@ -1,8 +1,11 @@
+use super::abandonment::{read_occupied_merge_head, verify_merge_candidate_nonactivations};
 use super::*;
-use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use crate::sync::storage::{
+    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+};
 use crate::sync::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreCommitCoord,
-    StoreDeviceHeadRef,
+    commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreBatchCommitDeletionTarget,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceHeadRef,
 };
 use crate::sync::store_objects::StoreObjectError;
 use crate::sync::store_outbound::*;
@@ -216,4 +219,61 @@ pub(crate) async fn drain_store_writes(
             .ok_or_else(|| StoreOutboundError::Database("publish count exceeded u64".into()))?;
     }
     Ok(published)
+}
+
+pub(crate) async fn resolve_store_operation_head_collision(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    mut candidate: Box<PreparedStoreOperationCommit>,
+    commit: StoreBatchCommit,
+    reference: StoreBatchCommitRef,
+    head: StoreDeviceHead,
+    prepared_head: PreparedExactObject,
+    head_prefix: String,
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
+    let observation = read_occupied_merge_head(
+        db,
+        storage,
+        commit.store_root_hash,
+        &head,
+        &commit,
+        prepared_head.reference().slot(),
+        &head_prefix,
+    )
+    .await?;
+    if observation.winner().commit == reference {
+        let (winner, winner_prepared) = observation.into_head();
+        if let Some(acknowledgement) = commit.acknowledgement().cloned() {
+            db.adopt_outbound_store_ack_merge_head(acknowledgement, winner, winner_prepared)
+                .await?;
+            return Ok(StoreOperationPublicationOutcome::Reprepared);
+        }
+        candidate.adopt_merge_head(winner, winner_prepared)?;
+        return Ok(StoreOperationPublicationOutcome::RepreparedCandidate(
+            candidate,
+        ));
+    }
+    let registration = db
+        .activated_store_device_registration(commit.author_registration.clone())
+        .await?;
+    let nonactivation = observation
+        .verified_nonactivation(
+            StoreBatchCommitDeletionTarget {
+                coord: reference.coord.clone(),
+                object: reference.object.clone(),
+                canonical_signed_bytes: commit.to_bytes(),
+            },
+            &registration,
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let Some(acknowledgement) = commit.acknowledgement().cloned() else {
+        return Ok(StoreOperationPublicationOutcome::NonactivatedCandidate {
+            candidate,
+            nonactivation: Box::new(nonactivation),
+        });
+    };
+    db.begin_outbound_store_ack_nonactivation(acknowledgement.clone(), nonactivation)
+        .await?;
+    finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
+    Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
 }

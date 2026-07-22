@@ -261,12 +261,9 @@ impl SyncManager {
         &self,
         branch_id: coven_core::PendingBranchId,
         store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<coven_core::sync::store_outbound::SerialBranchAbandonment, SyncError> {
+    ) -> Result<coven_core::sync::store_engine::SerialBranchAbandonment, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
         let storage = loop_handle.storage();
-        let coordination = storage
-            .serial_coordination()
-            .map_err(|error| SyncError::Protocol(error.to_string()))?;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let device_id = self
             .db
@@ -275,10 +272,9 @@ impl SyncManager {
             .ok_or_else(|| {
                 SyncError::Protocol("local Store device identity is absent".to_string())
             })?;
-        crate::sync::store_outbound::abandon_serial_branch(
+        coven_core::sync::store_engine::abandon_serial_branch(
             &self.db,
-            &**storage,
-            coordination,
+            Arc::clone(storage),
             &device_id,
             &identity,
             store_dir,
@@ -291,7 +287,7 @@ impl SyncManager {
     pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_core::WriteId,
-    ) -> Result<coven_core::sync::store_outbound::MergeCandidateAbandonment, SyncError> {
+    ) -> Result<coven_core::sync::store_engine::MergeCandidateAbandonment, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let device_id = self
@@ -301,9 +297,9 @@ impl SyncManager {
             .ok_or_else(|| {
                 SyncError::Protocol("local Store device identity is absent".to_string())
             })?;
-        crate::sync::store_outbound::abandon_merge_candidate(
+        coven_core::sync::store_engine::abandon_merge_candidate(
             &self.db,
-            &**loop_handle.storage(),
+            Arc::clone(loop_handle.storage()),
             &device_id,
             &identity,
             write_id,

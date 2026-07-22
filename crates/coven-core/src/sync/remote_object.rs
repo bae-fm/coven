@@ -3216,61 +3216,18 @@ enum VerifiedCandidateNonactivationEvidence {
 }
 
 impl VerifiedCandidateNonactivation {
-    pub(crate) fn merge(
-        observation: &super::store_outbound::VerifiedMergeWinner,
+    pub(crate) fn from_verified_merge_winner(
         candidate: StoreBatchCommitDeletionTarget,
-        author: &super::store_commit::StoreDeviceRegistration,
+        winner_head: super::store_commit::StoreDeviceHeadRef,
+        winner_commit: StoreBatchCommitRef,
     ) -> Result<Self, RemoteObjectRecordError> {
-        let commit = candidate
-            .verify_nonactivation_candidate(observation.store_root_hash(), author)
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let expected = observation.expected();
-        let expected_commit = observation.expected_commit();
-        let winner = observation.winner();
-        let winner_prepared = observation.winner_prepared();
-        let winner_commit = observation.winner_commit();
-        if expected.store_root_hash != observation.store_root_hash()
-            || commit.store_root_hash != observation.store_root_hash()
-            || expected.author_registration != commit.author_registration
-            || expected.commit.coord != reference.coord
-            || expected_commit.author_registration != commit.author_registration
-            || expected_commit.order.predecessor() != commit.order.predecessor()
-            || winner.store_root_hash != observation.store_root_hash()
-            || winner.author_registration != expected.author_registration
-            || winner.commit.coord != expected.commit.coord
-            || winner.successor.activation != expected.successor.activation
-            || winner.successor.predecessor != expected.successor.predecessor
-            || winner_prepared.reference().slot() != observation.expected_slot()
-            || winner.commit == reference
-            || winner.commit.commit_hash != winner_commit.commit_hash()
-        {
-            return Err(RemoteObjectRecordError::InvalidProof(
-                "Merge winner observation is not bound to the losing candidate's exact activation point"
-                    .to_string(),
-            ));
-        }
-        winner
-            .commit
-            .verify_commit(winner_commit)
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
         let value = Self {
             evidence: Box::new(VerifiedCandidateNonactivationEvidence::Merge {
                 durable: CandidateNonactivation {
                     candidate,
-                    proof: CandidateNonactivationProof::MergeWinner {
-                        winner_head: super::store_commit::StoreDeviceHeadRef {
-                            head_hash: winner.head_hash(),
-                            object: winner_prepared.reference().clone(),
-                        },
-                    },
+                    proof: CandidateNonactivationProof::MergeWinner { winner_head },
                 },
-                winner_commit: winner.commit.clone(),
+                winner_commit,
             }),
         };
         value.durable().validate()?;

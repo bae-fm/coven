@@ -8,16 +8,16 @@ use super::membership::{MembershipChain, SerialAuthorizationState};
 #[cfg(test)]
 use super::membership_ops;
 use super::storage::{
-    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, ReplaceHeadError,
-    StorageError, SyncStorage, VersionedObject,
+    BlobWriteAuthority, CoordinationError, CoordinationStorage, ExactObjectRef, StorageError,
+    SyncStorage, VersionedObject,
 };
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
-    package_semantic_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef,
-    CandidateCleanupManifest, CandidateFamilyId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
-    ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
+    package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId,
+    DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit,
+    StoreBatchCommitDeletionTarget, StoreBatchCommitRef, StoreCommitCoord,
+    StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
     StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
     StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
@@ -32,14 +32,12 @@ use super::{
 pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 pub(crate) const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
-    Database, MergeCandidateAbandonmentPreparation, PreparedAudienceBlob, PreparedAudienceObjects,
-    PreparedAudiencePackage, PreparedProtocolObject, SerialCandidateAbandonmentPreparation,
+    Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
     StoreWriteBlobFact, StoreWriteBlobFacts, VerifiedMergeMaterialization,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 
-mod abandonment;
 mod announcement;
 mod audience_preparation;
 mod local_authority;
@@ -49,7 +47,6 @@ mod operation_publication;
 mod prepared_operation;
 mod publication_support;
 
-pub use abandonment::*;
 pub(crate) use announcement::*;
 pub(crate) use audience_preparation::*;
 pub(crate) use local_authority::*;
@@ -139,32 +136,6 @@ pub(crate) fn next_store_sequence(
     previous.map_or(Ok(1), |reference| {
         successor_store_sequence(reference.coord.sequence())
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeCandidateAbandonment {
-    NotRequired,
-    Abandoned,
-    CandidateActivated,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerialCandidateAbandonmentWinner {
-    Authority {
-        accepted: super::storage::VersionedObject,
-    },
-    OriginalBranch {
-        accepted: super::storage::VersionedObject,
-    },
-    Other {
-        current: StoreSerialPredecessor,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SerialBranchAbandonment {
-    Discarded,
-    OriginalBranchActivated,
 }
 
 #[cfg(test)]

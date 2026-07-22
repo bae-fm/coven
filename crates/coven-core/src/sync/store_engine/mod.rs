@@ -19,7 +19,74 @@ use merge::{AuthorizedMergeStoreEngine, MergeStoreEngine};
 use serial::{AuthorizedSerialStoreEngine, SerialStoreEngine};
 
 #[doc(hidden)]
+pub use merge::abandonment::MergeCandidateAbandonment;
+#[doc(hidden)]
+pub use serial::abandonment::SerialBranchAbandonment;
+#[doc(hidden)]
 pub use serial::publication::current_serial_head_ref;
+
+#[doc(hidden)]
+pub async fn abandon_merge_candidate(
+    db: &Database,
+    storage: Arc<CloudSyncStorage>,
+    device_id: &str,
+    identity: &UserKeypair,
+    write_id: crate::WriteId,
+) -> Result<MergeCandidateAbandonment, super::store_outbound::StoreOutboundError> {
+    let engine = load_store_engine(db, storage).await?;
+    match engine.0 {
+        StoreEngineKind::Merge(engine) => {
+            engine
+                .abandon_candidate(device_id, identity, write_id)
+                .await
+        }
+        StoreEngineKind::Serial(_) => {
+            Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+                "Merge candidate abandonment requires MergeConcurrent policy".to_string(),
+            ))
+        }
+    }
+}
+
+#[doc(hidden)]
+pub async fn abandon_serial_branch(
+    db: &Database,
+    storage: Arc<CloudSyncStorage>,
+    device_id: &str,
+    identity: &UserKeypair,
+    store_dir: &StoreDir,
+    branch_id: crate::PendingBranchId,
+) -> Result<SerialBranchAbandonment, super::store_outbound::StoreOutboundError> {
+    let engine = load_store_engine(db, storage).await?;
+    match engine.0 {
+        StoreEngineKind::Serial(engine) => {
+            engine
+                .abandon_branch(device_id, identity, store_dir, branch_id)
+                .await
+        }
+        StoreEngineKind::Merge(_) => {
+            Err(super::store_outbound::StoreOutboundError::InvalidOutbound(
+                "Serial branch abandonment requires Serial policy".to_string(),
+            ))
+        }
+    }
+}
+
+async fn load_store_engine(
+    db: &Database,
+    storage: Arc<CloudSyncStorage>,
+) -> Result<StoreEngine, super::store_outbound::StoreOutboundError> {
+    let store_root = db.local_store_root_ref().await?.ok_or(
+        super::store_outbound::StoreOutboundError::MissingState {
+            key: super::store_outbound::STORE_ROOT_AUTHORITY,
+        },
+    )?;
+    let verified_root = super::store_objects::load_store_protocol_root(&*storage, &store_root)
+        .await?
+        .value;
+    StoreEngine::new(db.clone(), storage, store_root, &verified_root)
+        .map_err(super::store_outbound::StoreOutboundError::InvalidOutbound)
+}
 
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]

@@ -1,5 +1,6 @@
 use super::*;
 
+pub(crate) mod abandonment;
 mod acknowledgements;
 pub(crate) mod preparation;
 pub(crate) mod publication;
@@ -66,6 +67,25 @@ impl MergeStoreEngine {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
+    }
+
+    pub(super) async fn abandon_candidate(
+        &self,
+        device_id: &str,
+        identity: &UserKeypair,
+        write_id: crate::WriteId,
+    ) -> Result<
+        abandonment::MergeCandidateAbandonment,
+        crate::sync::store_outbound::StoreOutboundError,
+    > {
+        abandonment::abandon_merge_candidate(
+            self.db(),
+            &**self.storage(),
+            device_id,
+            identity,
+            write_id,
+        )
+        .await
     }
 
     pub(super) async fn authorize(

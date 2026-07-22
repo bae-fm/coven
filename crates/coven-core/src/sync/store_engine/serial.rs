@@ -1,5 +1,6 @@
 use super::*;
 
+pub(crate) mod abandonment;
 mod acknowledgements;
 mod database;
 pub(crate) mod publication;
@@ -77,6 +78,26 @@ impl SerialStoreEngine {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
+    }
+
+    pub(super) async fn abandon_branch(
+        &self,
+        device_id: &str,
+        identity: &UserKeypair,
+        store_dir: &StoreDir,
+        branch_id: crate::PendingBranchId,
+    ) -> Result<abandonment::SerialBranchAbandonment, crate::sync::store_outbound::StoreOutboundError>
+    {
+        abandonment::abandon_serial_branch(
+            self.db(),
+            &**self.storage(),
+            self.coordination(),
+            device_id,
+            identity,
+            store_dir,
+            branch_id,
+        )
+        .await
     }
 
     pub(super) async fn authorize(

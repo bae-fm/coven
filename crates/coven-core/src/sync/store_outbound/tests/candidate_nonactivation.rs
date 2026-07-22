@@ -37,51 +37,33 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         object: batch.head.value.commit.object.clone(),
         canonical_signed_bytes: batch.commit.value.to_bytes(),
     };
-    super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-        &observation,
-        candidate.clone(),
-        &author,
-    )
-    .expect("exact losing candidate is verified");
+    observation
+        .verified_nonactivation(candidate.clone(), &author)
+        .expect("exact losing candidate is verified");
 
     let mut wrong_head_commit = observation.clone();
     wrong_head_commit.winner_mut_for_test().commit = batch.head.value.commit.clone();
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &wrong_head_commit,
-            candidate.clone(),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(wrong_head_commit
+        .verified_nonactivation(candidate.clone(), &author,)
+        .is_err());
 
     let winner_target = StoreBatchCommitDeletionTarget {
         coord: observation.winner().commit.coord.clone(),
         object: observation.winner().commit.object.clone(),
         canonical_signed_bytes: observation.winner_commit().to_bytes(),
     };
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            winner_target,
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(winner_target, &author,)
+        .is_err());
 
     let mut wrong_slot = observation.clone();
     wrong_slot.set_expected_slot_for_test(
         crate::storage::cloud::ObjectSlot::logical("store-v1/heads/wrong-slot.json".to_string())
             .expect("valid wrong slot"),
     );
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &wrong_slot,
-            candidate.clone(),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(wrong_slot
+        .verified_nonactivation(candidate.clone(), &author,)
+        .is_err());
     let mut wrong_competition_point = candidate.clone();
     let StoreCommitCoord::MergeConcurrent {
         stream_id,
@@ -96,14 +78,9 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
             .checked_add(1)
             .expect("test sequence has a successor"),
     };
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            wrong_competition_point,
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(wrong_competition_point, &author,)
+        .is_err());
 
     let exact_target = |commit: StoreBatchCommit| {
         let bytes = commit.to_bytes();
@@ -119,14 +96,9 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
     };
     let mut wrong_root = batch.commit.value.clone();
     wrong_root.store_root_hash = ObjectHash::digest(b"wrong Store root");
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            exact_target(wrong_root),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(exact_target(wrong_root), &author,)
+        .is_err());
     let mut wrong_predecessor = batch.commit.value.clone();
     let StoreCommitOrder::MergeConcurrent { predecessor, .. } = &mut wrong_predecessor.order else {
         unreachable!("Merge fixture commit")
@@ -135,36 +107,21 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         Some(_) => None,
         None => Some(observation.winner().commit.clone()),
     };
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            exact_target(wrong_predecessor),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(exact_target(wrong_predecessor), &author,)
+        .is_err());
     let mut wrong_author = batch.commit.value.clone();
     wrong_author.author_registration = observation.winner().author_registration.clone();
     wrong_author.author_registration.registration_hash =
         ObjectHash::digest(b"wrong author registration");
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            exact_target(wrong_author),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(exact_target(wrong_author), &author,)
+        .is_err());
     let mut unsigned = batch.commit.value.clone();
     unsigned.signature = "00".to_string();
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            exact_target(unsigned),
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(exact_target(unsigned), &author,)
+        .is_err());
     let mut noncanonical = candidate;
     noncanonical.canonical_signed_bytes.push(b' ');
     noncanonical.object = crate::sync::storage::ExactObjectRef::new(
@@ -172,14 +129,9 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         noncanonical.canonical_signed_bytes.len() as u64,
         ObjectHash::digest(&noncanonical.canonical_signed_bytes),
     );
-    assert!(
-        super::super::super::remote_object::VerifiedCandidateNonactivation::merge(
-            &observation,
-            noncanonical,
-            &author,
-        )
-        .is_err()
-    );
+    assert!(observation
+        .verified_nonactivation(noncanonical, &author,)
+        .is_err());
 }
 
 #[tokio::test]

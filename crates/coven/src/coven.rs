@@ -632,7 +632,7 @@ impl CovenHandle {
                     .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
                 if matches!(
                     outcome,
-                    coven_core::sync::store_outbound::SerialBranchAbandonment::OriginalBranchActivated
+                    coven_core::sync::store_engine::SerialBranchAbandonment::OriginalBranchActivated
                 ) {
                     return Err(CovenError::SerialResolution(
                         "the original Serial branch activated before abandonment and cannot be discarded"

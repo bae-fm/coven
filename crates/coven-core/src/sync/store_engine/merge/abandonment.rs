@@ -1,7 +1,24 @@
 use super::*;
-use crate::sync::store_engine::serial::publication::{observe_serial_head, SerialHeadObservation};
+use crate::database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
+use crate::sync::storage::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+};
+use crate::sync::store_commit::{
+    commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest, ObjectHash,
+    StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistration,
+};
+use crate::sync::store_objects::StoreObjectError;
+use crate::sync::store_outbound::{load_local_store_authority, StoreOutboundError};
 
-pub async fn prepare_merge_candidate_abandonment(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeCandidateAbandonment {
+    NotRequired,
+    Abandoned,
+    CandidateActivated,
+}
+
+pub(crate) async fn prepare_merge_candidate_abandonment(
     db: &Database,
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -73,7 +90,7 @@ pub async fn prepare_merge_candidate_abandonment(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let history_summary = super::store_pull::prepare_merge_abandonment_history_summary(
+    let history_summary = crate::sync::store_pull::prepare_merge_abandonment_history_summary(
         &candidate_summary,
         &candidate.head.value.commit,
         &candidate.commit.value,
@@ -119,344 +136,7 @@ pub async fn prepare_merge_candidate_abandonment(
     Ok(true)
 }
 
-pub async fn prepare_serial_candidate_abandonment(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    device_id: &str,
-    identity_signer: &UserKeypair,
-    branch_id: crate::PendingBranchId,
-) -> Result<bool, StoreOutboundError> {
-    if let Some(prepared) = db.prepared_serial_candidate_abandonment().await? {
-        if prepared.branch_id != branch_id {
-            return Err(StoreOutboundError::InvalidOutbound(
-                "another Serial branch already owns candidate abandonment".to_string(),
-            ));
-        }
-        return Ok(false);
-    }
-    let branch = db.prepared_serial_store_branch().await?.ok_or_else(|| {
-        StoreOutboundError::InvalidOutbound(
-            "Serial candidate abandonment requires an exact prepared branch".to_string(),
-        )
-    })?;
-    if branch.branch_id != branch_id {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Serial candidate abandonment names another prepared branch".to_string(),
-        ));
-    }
-    let candidate = branch.writes.first().ok_or_else(|| {
-        StoreOutboundError::InvalidOutbound("prepared Serial branch has no candidates".to_string())
-    })?;
-    let (root, registration_ref, registration, device_signer) =
-        load_local_store_authority(db, device_id, identity_signer).await?;
-    if candidate.commit.value.author_registration != registration_ref {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Serial candidate belongs to another local registration".to_string(),
-        ));
-    }
-    let coord = StoreCommitCoord::Serial {
-        sequence: candidate.commit.value.seq(),
-    };
-    let candidate_ref = StoreBatchCommitRef::from_commit(
-        &candidate.commit.value,
-        coord.clone(),
-        candidate.commit.object.clone(),
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let commit = StoreBatchCommit::signed_with_candidate_abandonment(
-        root.store_root_hash,
-        candidate.commit.value.write_id.clone(),
-        coord.clone(),
-        registration_ref.clone(),
-        &registration,
-        candidate.commit.value.order.clone(),
-        candidate.commit.value.membership_state.clone(),
-        candidate.commit.value.device_state.clone(),
-        vec![CandidateCleanupManifest {
-            candidate: StoreBatchCommitDeletionTarget {
-                coord: coord.clone(),
-                object: candidate.commit.object.clone(),
-                canonical_signed_bytes: candidate.commit.bytes.clone(),
-            },
-        }],
-        &device_signer,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let prefix = commit_semantic_prefix(
-        commit.candidate_family(),
-        SERIAL_STREAM_ID,
-        commit.seq(),
-        commit.commit_hash(),
-    );
-    let slot = storage
-        .allocate_protocol_slot(&context, &prefix, ".json")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let commit_prepared = storage
-        .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
-        .map_err(StoreObjectError::from)?;
-    let authority_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let head = StoreSerialHead::signed(
-        root.store_root_hash,
-        StoreSerialHeadState::Commit {
-            author_registration: registration_ref,
-            commit: authority_ref,
-        },
-        &device_signer,
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    db.prepare_serial_candidate_abandonment(SerialCandidateAbandonmentPreparation {
-        branch_id,
-        candidate: candidate_ref,
-        commit: PreparedProtocolObject {
-            value: commit,
-            prepared: commit_prepared,
-        },
-        head,
-        original_head_bytes: branch.head.bytes,
-    })
-    .await?;
-    Ok(true)
-}
-
-pub async fn publish_serial_candidate_abandonment(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    branch_id: crate::PendingBranchId,
-) -> Result<SerialCandidateAbandonmentWinner, StoreOutboundError> {
-    let prepared = db
-        .prepared_serial_candidate_abandonment()
-        .await?
-        .ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "Serial candidate abandonment is not prepared".to_string(),
-            )
-        })?;
-    if prepared.branch_id != branch_id {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Serial abandonment belongs to another branch".to_string(),
-        ));
-    }
-    let classify = |observed: SerialHeadObservation| {
-        let accepted = observed.versioned().ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "Serial abandonment observed no versioned coordination head".to_string(),
-            )
-        })?;
-        if observed.bytes() == Some(prepared.head.bytes.as_slice()) {
-            return Ok(SerialCandidateAbandonmentWinner::Authority { accepted });
-        }
-        if observed.bytes() == Some(prepared.original_head_bytes.as_slice()) {
-            return Ok(SerialCandidateAbandonmentWinner::OriginalBranch { accepted });
-        }
-        Ok(SerialCandidateAbandonmentWinner::Other {
-            current: observed.predecessor()?,
-        })
-    };
-    let observed = observe_serial_head(db, coordination).await?;
-    if observed.bytes() == Some(prepared.head.bytes.as_slice())
-        || observed.bytes() == Some(prepared.original_head_bytes.as_slice())
-        || observed.predecessor()? != db.exact_serial_predecessor(prepared.base.clone()).await?
-    {
-        return classify(observed);
-    }
-    if observed.bytes() != Some(prepared.base_head.bytes.as_slice())
-        || observed.version() != Some(&prepared.base_head.version)
-    {
-        return Err(StoreOutboundError::InvalidState {
-            key: SERIAL_COORDINATION_HEAD,
-            reason: "bytes or provider version changed at the abandonment base".to_string(),
-        });
-    }
-    storage
-        .create_protocol_object(&prepared.authority.prepared)
-        .await
-        .map_err(StoreObjectError::from)?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        prepared.authority.value.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let prefix = commit_semantic_prefix(
-        prepared.authority.value.candidate_family(),
-        SERIAL_STREAM_ID,
-        prepared.authority.value.seq(),
-        prepared.authority.value.commit_hash(),
-    );
-    let opened = storage
-        .read_protocol_object(&context, &prepared.authority.object, &prefix)
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened != prepared.authority.bytes {
-        return Err(StoreOutboundError::InvalidOutbound(
-            "Serial abandonment commit exact readback differs from its signed bytes".to_string(),
-        ));
-    }
-    let authority_ref = StoreBatchCommitRef::from_commit(
-        &prepared.authority.value,
-        StoreCommitCoord::Serial {
-            sequence: prepared.authority.value.seq(),
-        },
-        prepared.authority.object.clone(),
-    )
-    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    db.mark_candidate_commit_uploaded(authority_ref).await?;
-    let activation = coordination
-        .replace_head(
-            serial_head_key(),
-            &prepared.base_head.version,
-            &prepared.head.bytes,
-        )
-        .await;
-    match activation {
-        Ok(accepted) if accepted.bytes == prepared.head.bytes => {
-            Ok(SerialCandidateAbandonmentWinner::Authority { accepted })
-        }
-        Ok(_) => Err(StoreOutboundError::InvalidOutbound(
-            "Serial abandonment head readback differs from its signed bytes".to_string(),
-        )),
-        Err(ReplaceHeadError::Coordination(error)) => {
-            let after = observe_serial_head(db, coordination).await?;
-            if after.bytes() != Some(prepared.base_head.bytes.as_slice())
-                || after.version() != Some(&prepared.base_head.version)
-            {
-                classify(after)
-            } else {
-                Err(StoreOutboundError::Coordination(error))
-            }
-        }
-        Err(ReplaceHeadError::VersionMismatch) => {
-            classify(observe_serial_head(db, coordination).await?)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn abandon_serial_branch(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    device_id: &str,
-    identity_signer: &UserKeypair,
-    store_dir: &StoreDir,
-    branch_id: crate::PendingBranchId,
-) -> Result<SerialBranchAbandonment, StoreOutboundError> {
-    prepare_serial_candidate_abandonment(
-        db,
-        storage,
-        device_id,
-        identity_signer,
-        branch_id.clone(),
-    )
-    .await?;
-    let prepared = db
-        .prepared_serial_candidate_abandonment()
-        .await?
-        .ok_or_else(|| {
-            StoreOutboundError::InvalidOutbound(
-                "Serial candidate abandonment disappeared after preparation".to_string(),
-            )
-        })?;
-    let winner =
-        publish_serial_candidate_abandonment(db, storage, coordination, branch_id.clone()).await?;
-    let root = required_store_root(db).await?;
-    match winner {
-        SerialCandidateAbandonmentWinner::OriginalBranch { accepted } => {
-            let plan = super::store_pull::prepare_serial_resolution(
-                db,
-                storage,
-                coordination,
-                root.store_root_hash,
-                store_dir,
-                prepared.base,
-                identity_signer,
-            )
-            .await?;
-            super::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
-            db.remove_losing_serial_abandonment_authority().await?;
-            db.complete_prepared_serial_branch(accepted).await?;
-            Ok(SerialBranchAbandonment::OriginalBranchActivated)
-        }
-        SerialCandidateAbandonmentWinner::Authority { .. } => {
-            let authority_ref = StoreBatchCommitRef::from_commit(
-                &prepared.authority.value,
-                StoreCommitCoord::Serial {
-                    sequence: prepared.authority.value.seq(),
-                },
-                prepared.authority.object,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            db.mark_serial_branch_conflict(
-                branch_id.clone(),
-                prepared.base.clone(),
-                StoreSerialPredecessor::Commit(authority_ref),
-            )
-            .await?;
-            finish_serial_branch_abandonment(
-                db,
-                storage,
-                coordination,
-                identity_signer,
-                store_dir,
-                root.store_root_hash,
-                branch_id,
-                prepared.base,
-            )
-            .await
-        }
-        SerialCandidateAbandonmentWinner::Other { current } => {
-            db.mark_serial_branch_conflict(branch_id.clone(), prepared.base.clone(), current)
-                .await?;
-            finish_serial_branch_abandonment(
-                db,
-                storage,
-                coordination,
-                identity_signer,
-                store_dir,
-                root.store_root_hash,
-                branch_id,
-                prepared.base,
-            )
-            .await
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn finish_serial_branch_abandonment(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    coordination: &dyn CoordinationStorage,
-    identity_signer: &UserKeypair,
-    store_dir: &StoreDir,
-    store_root_hash: ObjectHash,
-    branch_id: crate::PendingBranchId,
-    branch_base: Option<StoreBatchCommitRef>,
-) -> Result<SerialBranchAbandonment, StoreOutboundError> {
-    let plan = super::store_pull::prepare_serial_resolution(
-        db,
-        storage,
-        coordination,
-        store_root_hash,
-        store_dir,
-        branch_base,
-        identity_signer,
-    )
-    .await?;
-    super::store_pull::cleanup_serial_candidates(db, storage, branch_id.clone(), &plan).await?;
-    super::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
-    db.discard_serial_branch_after_abandonment(branch_id, plan)
-        .await?;
-    Ok(SerialBranchAbandonment::Discarded)
-}
-
-pub async fn abandon_merge_candidate(
+pub(crate) async fn abandon_merge_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -466,7 +146,8 @@ pub async fn abandon_merge_candidate(
     match db.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    .await?;
                 db.finish_retracted_merge_candidate_cleanup(write_id.clone())
                     .await?;
                 return Ok(MergeCandidateAbandonment::Abandoned);
@@ -483,7 +164,7 @@ pub async fn abandon_merge_candidate(
                 {
                     db.begin_blocked_merge_candidate_nonactivation(write_id.clone(), nonactivation)
                         .await?;
-                    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
                         .await?;
                     return Ok(MergeCandidateAbandonment::Abandoned);
                 }
@@ -529,7 +210,7 @@ pub async fn abandon_merge_candidate(
                         authority,
                     )
                     .await?;
-                    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
                         .await?;
                     db.finish_author_excluded_merge_abandonment(write_id)
                         .await?;
@@ -548,13 +229,15 @@ pub async fn abandon_merge_candidate(
         | crate::database::MergeAbandonmentState::CandidateWon
         | crate::database::MergeAbandonmentState::OtherWon => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    .await?;
             }
             return finish_merge_abandonment(db, storage, write_id).await;
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    .await?;
             }
             db.finish_author_excluded_merge_abandonment(write_id)
                 .await?;
@@ -567,7 +250,7 @@ pub async fn abandon_merge_candidate(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
         ));
     }
-    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+    crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
     finish_merge_abandonment(db, storage, write_id).await
 }
 
@@ -597,7 +280,8 @@ async fn finish_merge_abandonment(
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if db.merge_candidate_cleanup_pending(&write_id).await? {
-                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                crate::sync::store_pull::cleanup_merge_candidate(db, storage, write_id.clone())
+                    .await?;
             }
             db.finish_author_excluded_merge_abandonment(write_id)
                 .await?;
@@ -610,7 +294,8 @@ async fn excluded_candidate_nonactivation(
     db: &Database,
     storage: &dyn SyncStorage,
     candidate: &crate::database::BlockedMergeCandidate,
-) -> Result<Option<super::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
+) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError>
+{
     let candidate_ref = candidate.head.value.commit.clone();
     let Some(locator) = db
         .author_exclusion_activation_for_candidate(
@@ -640,7 +325,7 @@ async fn excluded_candidate_nonactivation(
     .await?
     {
         ExcludedCandidateHeadObservation::AuthorExclusion => {
-            let activation = Box::pin(super::store_pull::verify_author_exclusion_activation(
+            let activation = Box::pin(crate::sync::store_pull::verify_author_exclusion_activation(
                 db,
                 storage,
                 &root,
@@ -651,7 +336,7 @@ async fn excluded_candidate_nonactivation(
                 &candidate.head.object,
             ))
             .await?;
-            super::remote_object::VerifiedCandidateNonactivation::author_exclusion(
+            crate::sync::remote_object::VerifiedCandidateNonactivation::author_exclusion(
                 &activation,
                 candidate_target,
             )
@@ -663,12 +348,9 @@ async fn excluded_candidate_nonactivation(
                     candidate.commit.value.author_registration.clone(),
                 )
                 .await?;
-            super::remote_object::VerifiedCandidateNonactivation::merge(
-                &observation,
-                candidate_target,
-                &registration,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
+            observation
+                .verified_nonactivation(candidate_target, &registration)
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?
         }
     };
     Ok(Some(nonactivation))
@@ -688,20 +370,63 @@ pub(crate) struct VerifiedMergeWinner {
 }
 
 impl VerifiedMergeWinner {
-    pub(crate) fn store_root_hash(&self) -> ObjectHash {
-        self.store_root_hash
-    }
-
-    pub(crate) fn expected(&self) -> &StoreDeviceHead {
-        &self.expected
-    }
-
-    pub(crate) fn expected_commit(&self) -> &StoreBatchCommit {
-        &self.expected_commit
-    }
-
-    pub(crate) fn expected_slot(&self) -> &crate::storage::cloud::ObjectSlot {
-        &self.expected_slot
+    pub(crate) fn verified_nonactivation(
+        &self,
+        candidate: StoreBatchCommitDeletionTarget,
+        author: &StoreDeviceRegistration,
+    ) -> Result<
+        crate::sync::remote_object::VerifiedCandidateNonactivation,
+        crate::sync::remote_object::RemoteObjectRecordError,
+    > {
+        let commit = candidate
+            .verify_nonactivation_candidate(self.store_root_hash, author)
+            .map_err(|error| {
+                crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
+            })?;
+        let reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            candidate.coord.clone(),
+            candidate.object.clone(),
+        )
+        .map_err(|error| {
+            crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
+        })?;
+        if self.expected.store_root_hash != self.store_root_hash
+            || commit.store_root_hash != self.store_root_hash
+            || self.expected.author_registration != commit.author_registration
+            || self.expected.commit.coord != reference.coord
+            || self.expected_commit.author_registration != commit.author_registration
+            || self.expected_commit.order.predecessor() != commit.order.predecessor()
+            || self.winner.store_root_hash != self.store_root_hash
+            || self.winner.author_registration != self.expected.author_registration
+            || self.winner.commit.coord != self.expected.commit.coord
+            || self.winner.successor.activation != self.expected.successor.activation
+            || self.winner.successor.predecessor != self.expected.successor.predecessor
+            || self.winner_prepared.reference().slot() != &self.expected_slot
+            || self.winner.commit == reference
+            || self.winner.commit.commit_hash != self.winner_commit.commit_hash()
+        {
+            return Err(
+                crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(
+                    "Merge winner observation is not bound to the losing candidate's exact activation point"
+                        .to_string(),
+                ),
+            );
+        }
+        self.winner
+            .commit
+            .verify_commit(&self.winner_commit)
+            .map_err(|error| {
+                crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
+            })?;
+        crate::sync::remote_object::VerifiedCandidateNonactivation::from_verified_merge_winner(
+            candidate,
+            crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: self.winner.head_hash(),
+                object: self.winner_prepared.reference().clone(),
+            },
+            self.winner.commit.clone(),
+        )
     }
 
     pub(crate) fn winner(&self) -> &StoreDeviceHead {
@@ -721,12 +446,12 @@ impl VerifiedMergeWinner {
     }
 
     #[cfg(test)]
-    pub(super) fn winner_mut_for_test(&mut self) -> &mut StoreDeviceHead {
+    pub(crate) fn winner_mut_for_test(&mut self) -> &mut StoreDeviceHead {
         &mut self.winner
     }
 
     #[cfg(test)]
-    pub(super) fn set_expected_slot_for_test(
+    pub(crate) fn set_expected_slot_for_test(
         &mut self,
         expected_slot: crate::storage::cloud::ObjectSlot,
     ) {
@@ -734,12 +459,12 @@ impl VerifiedMergeWinner {
     }
 }
 
-pub(super) enum ExcludedCandidateHeadObservation {
+pub(crate) enum ExcludedCandidateHeadObservation {
     AuthorExclusion,
     MergeWinner(VerifiedMergeWinner),
 }
 
-pub(super) async fn observe_excluded_candidate_head(
+pub(crate) async fn observe_excluded_candidate_head(
     db: &Database,
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -780,7 +505,7 @@ pub(crate) fn verify_merge_candidate_nonactivations(
     observation: &VerifiedMergeWinner,
     targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
     author: &StoreDeviceRegistration,
-) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
+) -> Result<Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreOutboundError> {
     let mut nonactivations = Vec::new();
     for target in targets {
         if target.coord == observation.winner().commit.coord
@@ -790,12 +515,9 @@ pub(crate) fn verify_merge_candidate_nonactivations(
             continue;
         }
         nonactivations.push(
-            super::remote_object::VerifiedCandidateNonactivation::merge(
-                observation,
-                target,
-                author,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
+            observation
+                .verified_nonactivation(target, author)
+                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?,
         );
     }
     Ok(nonactivations)
@@ -849,7 +571,7 @@ pub(crate) async fn read_occupied_merge_head(
         &expected.commit,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let winner_commit = super::store_objects::load_commit_ref(
+    let winner_commit = crate::sync::store_objects::load_commit_ref(
         storage,
         store_root_hash,
         &unverified.commit,

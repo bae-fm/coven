@@ -1815,13 +1815,15 @@ mod tests {
                 tamper,
             ))
             .await;
-            Box::pin(super::super::store_outbound::abandon_merge_candidate(
-                &restored,
-                &store.storage,
-                &target.device_id.to_string(),
-                &signer,
-                candidate_write_id.clone(),
-            ))
+            Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                    &restored,
+                    &store.storage,
+                    &target.device_id.to_string(),
+                    &signer,
+                    candidate_write_id.clone(),
+                ),
+            )
             .await
             .expect_err("tampered snapshot exclusion evidence must fail loud");
             assert!(restored
@@ -1867,16 +1869,18 @@ mod tests {
             .expect("select snapshotted exclusion locator")
             .expect("snapshotted exclusion covers restored candidate");
         assert_eq!(
-            Box::pin(super::super::store_outbound::abandon_merge_candidate(
-                &restored,
-                &store.storage,
-                &target.device_id.to_string(),
-                &signer,
-                candidate_write_id.clone(),
-            ))
+            Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                    &restored,
+                    &store.storage,
+                    &target.device_id.to_string(),
+                    &signer,
+                    candidate_write_id.clone(),
+                )
+            )
             .await
             .expect("consume snapshotted exclusion evidence"),
-            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!restored
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -2104,16 +2108,18 @@ mod tests {
         assert!(!stored.0.is_empty());
         assert!(!stored.1.is_empty());
         assert_eq!(
-            Box::pin(super::super::store_outbound::abandon_merge_candidate(
-                &joining_db,
-                &store.storage,
-                &target.device_id.to_string(),
-                &signer,
-                candidate_write_id.clone(),
-            ))
+            Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                    &joining_db,
+                    &store.storage,
+                    &target.device_id.to_string(),
+                    &signer,
+                    candidate_write_id.clone(),
+                )
+            )
             .await
             .expect("consume replayed exclusion evidence"),
-            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         assert!(!joining_db
             .merge_candidate_cleanup_pending(&candidate_write_id)
@@ -3286,24 +3292,24 @@ mod tests {
             .expect("load excluded peer cleanup state");
         if cleanup_pending {
             store.home.fail_exact_delete_on_call(1);
-            assert!(
-                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+            assert!(Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
                     &signer,
                     write_id.clone(),
-                ))
-                .await
-                .is_err()
-            );
+                )
+            )
+            .await
+            .is_err());
             assert!(reopened
                 .merge_candidate_cleanup_pending(&write_id)
                 .await
                 .expect("excluded peer cleanup remains pending"));
         } else {
             assert!(matches!(
-                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3312,8 +3318,8 @@ mod tests {
                 ))
                 .await
                 .expect("observe completed excluded peer cleanup"),
-                super::super::store_outbound::MergeCandidateAbandonment::NotRequired
-                    | super::super::store_outbound::MergeCandidateAbandonment::Abandoned
+                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::NotRequired
+                    | super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned
             ));
         }
         if cleanup_pending && !indexed_shared_blobs.is_empty() {
@@ -3391,7 +3397,7 @@ mod tests {
             )
         {
             assert_eq!(
-                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
@@ -3400,7 +3406,7 @@ mod tests {
                 ))
                 .await
                 .expect("reconcile candidate head published after the absence proof"),
-                super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
             );
         }
         if cleanup_pending && sabotage_activation_head {
@@ -3461,24 +3467,24 @@ mod tests {
                 .merge_candidate_cleanup_pending(&write_id)
                 .await
                 .is_err());
-            assert!(
-                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+            assert!(Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
                     &reopened,
                     &store.storage,
                     &peer_device_id,
                     &signer,
                     write_id,
-                ))
-                .await
-                .is_err()
-            );
+                )
+            )
+            .await
+            .is_err());
             return;
         }
         let retried = if cleanup_pending {
             drop(reopened);
             let retried = open(&path, "excluded-peer-host");
             assert_eq!(
-                Box::pin(super::super::store_outbound::abandon_merge_candidate(
+                Box::pin(super::super::store_engine::merge::abandonment::abandon_merge_candidate(
                     &retried,
                     &store.storage,
                     &peer_device_id,
@@ -3487,7 +3493,7 @@ mod tests {
                 ))
                 .await
                 .expect("resume excluded peer cleanup"),
-                super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+                super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
             );
             retried
         } else {
@@ -3714,7 +3720,7 @@ mod tests {
             .await
             .expect("block candidate before abandonment preparation");
         assert!(Box::pin(
-            super::super::store_outbound::prepare_merge_candidate_abandonment(
+            super::super::store_engine::merge::abandonment::prepare_merge_candidate_abandonment(
                 peer_db,
                 &store.storage,
                 peer_device_id,
@@ -3990,16 +3996,18 @@ mod tests {
         ))
         .await;
         assert_eq!(
-            Box::pin(super::super::store_outbound::abandon_merge_candidate(
-                peer_db,
-                &store.storage,
-                peer_device_id,
-                signer,
-                write_id.clone(),
-            ))
+            Box::pin(
+                super::super::store_engine::merge::abandonment::abandon_merge_candidate(
+                    peer_db,
+                    &store.storage,
+                    peer_device_id,
+                    signer,
+                    write_id.clone(),
+                )
+            )
             .await
             .expect("exclude prepared abandonment candidates"),
-            super::super::store_outbound::MergeCandidateAbandonment::Abandoned,
+            super::super::store_engine::merge::abandonment::MergeCandidateAbandonment::Abandoned,
         );
         for reference in [
             &candidates.candidate.head.value.commit,
