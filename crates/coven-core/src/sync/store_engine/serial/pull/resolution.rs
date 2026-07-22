@@ -134,7 +134,7 @@ pub(crate) async fn prepare_serial_resolution(
         let package =
             load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
                 .await?;
-        let verified_circle_activations = match load_pull_circle_activations(
+        let verified_circle_activations = match load_circle_payload_activations(
             db,
             storage,
             &root,

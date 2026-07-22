@@ -1,14 +1,11 @@
 use super::*;
-use crate::sync::store_engine::merge::pull::{
-    carries_circle_payload, verify_merge_membership_control,
-};
 
 pub(crate) enum PullCircleActivationError {
     Database(DbError),
     Invalid(String),
 }
 
-pub(crate) async fn load_pull_circle_activations(
+pub(crate) async fn load_circle_payload_activations(
     db: &Database,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -19,15 +16,10 @@ pub(crate) async fn load_pull_circle_activations(
     membership_authority: &CircleMembershipAuthority,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
-    if matches!(
-        commit.control(),
-        Some(super::store_commit::StoreControl::MergeMembership { .. })
-    ) {
-        return verify_merge_membership_control(storage, root, commit_ref, commit)
-            .await
-            .map_err(PullCircleActivationError::Invalid);
-    }
-    if !carries_circle_payload(commit) {
+    if commit.circle_controls().is_empty()
+        && commit.circle_packages().is_empty()
+        && commit.stream_activations().is_empty()
+    {
         return VerifiedCircleActivations::none(commit, commit_ref)
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()));
     }

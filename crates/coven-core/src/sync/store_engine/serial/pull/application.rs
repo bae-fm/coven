@@ -12,7 +12,7 @@ pub(super) async fn apply_serial_candidate(
     let candidate = &application.candidate;
     let device_operations = application.device_operations.clone();
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
-    let verified_circle_activations = match Box::pin(load_pull_circle_activations(
+    let verified_circle_activations = match Box::pin(load_circle_payload_activations(
         db,
         storage,
         root,

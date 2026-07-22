@@ -331,19 +331,28 @@ pub(super) async fn apply_candidate(
     let device_operations =
         resolve_candidate_device_operations(db, storage, root, merge_candidate).await?;
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
-    let verified_circle_activations = match load_pull_circle_activations(
-        db,
-        storage,
-        root,
-        &candidate.commit_ref,
-        &candidate.commit,
-        &candidate.author,
-        identity,
-        &CircleMembershipAuthority::MergeConcurrent,
-        &verified_prefix,
-    )
-    .await
-    {
+    let circle_activations = if matches!(
+        candidate.commit.control(),
+        Some(super::store_commit::StoreControl::MergeMembership { .. })
+    ) {
+        verify_merge_membership_control(storage, root, &candidate.commit_ref, &candidate.commit)
+            .await
+            .map_err(PullCircleActivationError::Invalid)
+    } else {
+        load_circle_payload_activations(
+            db,
+            storage,
+            root,
+            &candidate.commit_ref,
+            &candidate.commit,
+            &candidate.author,
+            identity,
+            &CircleMembershipAuthority::MergeConcurrent,
+            &verified_prefix,
+        )
+        .await
+    };
+    let verified_circle_activations = match circle_activations {
         Ok(activations) => activations,
         Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
         Err(PullCircleActivationError::Invalid(error)) => {

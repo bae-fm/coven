@@ -17,12 +17,6 @@ pub(crate) fn membership_authorizes(
         .is_some_and(|authority| chain.authorizes_write_authority(authority, &author.author_pubkey))
 }
 
-pub(crate) fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
-    !commit.circle_controls().is_empty()
-        || !commit.circle_packages().is_empty()
-        || !commit.stream_activations().is_empty()
-}
-
 pub(crate) async fn verify_merge_membership_control(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
