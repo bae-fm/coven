@@ -5900,12 +5900,10 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .await
         .expect("load local device id")
         .expect("active founder device id");
-    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
+    let plan = crate::sync::store_engine::engine::operations::prepare_plan(
         &owner_db,
         &storage.storage,
-        crate::sync::store_outbound::StoreOperationPreparation {
-            membership: &fixture.authorization,
-        },
+        &fixture.authorization,
         &local_device_id,
         &owner,
     )
@@ -6220,15 +6218,16 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) = crate::sync::store_outbound::exact_next_announcement_slot(
-        &storage.storage,
-        &storage.root,
-        &owner_ref,
-        &owner_registration,
-        Some(&activation),
-    )
-    .await
-    .expect("load exact next announcement slot");
+    let (next_slot, _) =
+        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+            &storage.storage,
+            &storage.root,
+            &owner_ref,
+            &owner_registration,
+            Some(&activation),
+        )
+        .await
+        .expect("load exact next announcement slot");
     let next_sequence = activation
         .coord
         .sequence()
@@ -6281,15 +6280,16 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, accepted_head_ref) = crate::sync::store_outbound::exact_next_announcement_slot(
-        &storage.storage,
-        &storage.root,
-        &owner_ref,
-        &owner_registration,
-        Some(&activation),
-    )
-    .await
-    .expect("load exact next announcement slot");
+    let (next_slot, accepted_head_ref) =
+        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+            &storage.storage,
+            &storage.root,
+            &owner_ref,
+            &owner_registration,
+            Some(&activation),
+        )
+        .await
+        .expect("load exact next announcement slot");
     let accepted_head_ref = accepted_head_ref.expect("activation has an accepted Store head");
     let accepted_head = crate::sync::store_objects::load_head_ref(
         &storage.storage,

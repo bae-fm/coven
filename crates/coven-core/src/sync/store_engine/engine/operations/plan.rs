@@ -51,17 +51,6 @@ pub(crate) struct StoreOperationCommitPlan {
     pub(super) predecessor_state: super::store_commit::ResolvedStoreDeviceState,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct StoreOperationPreparation<'a> {
-    pub(crate) membership: &'a MembershipChain,
-}
-
-impl<'a> StoreOperationPreparation<'a> {
-    pub(crate) fn new(membership: &'a MembershipChain) -> Self {
-        Self { membership }
-    }
-}
-
 impl std::ops::Deref for StoreOperationCommitPlan {
     type Target = StoreOperationPlanCommon;
 
@@ -363,21 +352,4 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         device_state: authorization.device_state_ref,
         device_state_value: authorization.device_state,
     })
-}
-
-pub(crate) async fn prepare_store_operation_commit(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    preparation: StoreOperationPreparation<'_>,
-    device_id: &str,
-    keypair: &UserKeypair,
-) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
-    crate::sync::store_engine::engine::operations::prepare_plan(
-        db,
-        storage,
-        preparation.membership,
-        device_id,
-        keypair,
-    )
-    .await
 }

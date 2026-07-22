@@ -547,10 +547,6 @@ impl<'a> ReclaimMembership<'a> {
     fn is_owner(self, pubkey: &str) -> bool {
         self.membership.is_owner_now(pubkey)
     }
-
-    fn store_operation_preparation(self) -> super::store_outbound::StoreOperationPreparation<'a> {
-        super::store_outbound::StoreOperationPreparation::new(self.membership)
-    }
 }
 
 pub async fn reclaim_store_packages(
@@ -664,10 +660,10 @@ async fn prepare_reclaim_authorization(
     root: &StoreRootRef,
     claim: StorePackageReclaimClaim,
 ) -> Result<(), StoreReclaimError> {
-    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+    let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
         db,
         storage,
-        membership.store_operation_preparation(),
+        membership.membership,
         device_id,
         identity_signer,
     ))
@@ -725,11 +721,11 @@ async fn prepare_reclaim_authorization(
         &authorization,
         authorization_prepared.reference().clone(),
     );
-    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+    let candidate = Box::pin(crate::sync::store_engine::engine::operations::prepare_candidate(
         db,
         storage,
         plan,
-        super::store_outbound::StoreOperationBatch::ReclaimAuthorization(Box::new(
+        crate::sync::store_engine::engine::operations::StoreOperationBatch::ReclaimAuthorization(Box::new(
             authorization_ref.clone(),
         )),
     ))
@@ -923,14 +919,15 @@ async fn verify_reclaim_authorization_activation(
             "reclaim head activates another commit".to_string(),
         ));
     }
-    let (_, accepted_head) = super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &commit_value.author_registration,
-        &author,
-        Some(commit),
-    )
-    .await?;
+    let (_, accepted_head) =
+        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+            storage,
+            root,
+            &commit_value.author_registration,
+            &author,
+            Some(commit),
+        )
+        .await?;
     if accepted_head.as_ref() != Some(head) {
         return Err(StoreReclaimError::Authorization(
             "reclaim activation head is not the exact accepted stream position".to_string(),
@@ -1095,28 +1092,28 @@ async fn drive_reclaim_candidate(
                 db.mark_reusable_retained_authority_uploaded(remote).await?;
             }
         }
-        match Box::pin(super::store_outbound::publish_prepared_store_operation(
+        match Box::pin(crate::sync::store_engine::engine::operations::publish_prepared_store_operation(
             db, storage, candidate,
         ))
         .await?
         {
-            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => {
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Activated(_) => {
                 return Ok(());
             }
-            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
                 replacement,
             ) => {
                 operation =
                     Box::pin(db.replace_store_reclaim_candidate(operation, *replacement)).await?;
             }
-            super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
                 nonactivation,
                 ..
             } => {
-                let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+                let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
                     db,
                     storage,
-                    membership.store_operation_preparation(),
+                    membership.membership,
                     device_id,
                     identity_signer,
                 ))
@@ -1125,18 +1122,18 @@ async fn drive_reclaim_candidate(
                     super::store_reclaim_journal::DurableStoreReclaimObject::Authorization {
                         authorization_ref,
                         ..
-                    } => super::store_outbound::StoreOperationBatch::ReclaimAuthorization(
+                    } => crate::sync::store_engine::engine::operations::StoreOperationBatch::ReclaimAuthorization(
                         Box::new(authorization_ref.clone()),
                     ),
                     super::store_reclaim_journal::DurableStoreReclaimObject::Receipt {
                         receipt_ref,
                         ..
-                    } => super::store_outbound::StoreOperationBatch::ReclaimReceipt(Box::new(
+                    } => crate::sync::store_engine::engine::operations::StoreOperationBatch::ReclaimReceipt(Box::new(
                         receipt_ref.clone(),
                     )),
                 };
                 let replacement =
-                    Box::pin(super::store_outbound::prepare_store_operation_candidate(
+                    Box::pin(crate::sync::store_engine::engine::operations::prepare_candidate(
                         db, storage, plan, batch,
                     ))
                     .await?;
@@ -1149,8 +1146,8 @@ async fn drive_reclaim_candidate(
                 Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;
                 return Ok(());
             }
-            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(_)
-            | super::store_outbound::StoreOperationPublicationOutcome::Reprepared => {
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Nonactivated(_)
+            | crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Reprepared => {
                 return Err(StoreReclaimError::Authorization(
                     "Store reclaim publication returned acknowledgement-only state".to_string(),
                 ));
@@ -1206,10 +1203,10 @@ async fn prepare_reclaim_receipt(
         ));
     }
 
-    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+    let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
         db,
         storage,
-        membership.store_operation_preparation(),
+        membership.membership,
         device_id,
         identity_signer,
     ))
@@ -1250,12 +1247,16 @@ async fn prepare_reclaim_receipt(
         .await?;
     let prepared = storage.prepare_protocol_object(&context, slot, &prefix, receipt.to_bytes())?;
     let receipt_ref = ReclaimReceiptRef::from_receipt(&receipt, prepared.reference().clone());
-    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
-        db,
-        storage,
-        plan,
-        super::store_outbound::StoreOperationBatch::ReclaimReceipt(Box::new(receipt_ref.clone())),
-    ))
+    let candidate = Box::pin(
+        crate::sync::store_engine::engine::operations::prepare_candidate(
+            db,
+            storage,
+            plan,
+            crate::sync::store_engine::engine::operations::StoreOperationBatch::ReclaimReceipt(
+                Box::new(receipt_ref.clone()),
+            ),
+        ),
+    )
     .await?;
     Box::pin(db.begin_store_reclaim_receipt(
         operation,

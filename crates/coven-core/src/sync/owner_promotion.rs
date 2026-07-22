@@ -15,7 +15,7 @@ use super::store_commit::{
     OwnerPromotionStatus, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
     StreamAnchorDomain,
 };
-use super::store_outbound::{
+use super::store_engine::engine::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
 use super::wrapped_store_key::PreparedWrappedStoreKey;
@@ -1065,7 +1065,7 @@ async fn resume_request_publication_state(
             OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
                 let head = candidate.head_ref();
                 let outcome =
-                    super::store_outbound::publish_prepared_store_operation(db, storage, candidate)
+                    crate::sync::store_engine::engine::operations::publish_prepared_store_operation(db, storage, candidate)
                         .await?;
                 let next_state = match outcome {
                     StoreOperationPublicationOutcome::Activated(commit) => {
@@ -1151,10 +1151,10 @@ pub async fn begin_owner_promotion(
         .await
         .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
     let membership = load_current_merge_membership(db, storage, &root).await?;
-    let plan = super::store_outbound::prepare_store_operation_commit(
+    let plan = crate::sync::store_engine::engine::operations::prepare_plan(
         db,
         storage,
-        super::store_outbound::StoreOperationPreparation::new(&membership),
+        &membership,
         device_id,
         identity,
     )
@@ -1209,7 +1209,7 @@ pub async fn begin_owner_promotion(
         finalization,
         identity,
     )?;
-    let candidate = super::store_outbound::prepare_store_operation_candidate(
+    let candidate = crate::sync::store_engine::engine::operations::prepare_candidate(
         db,
         storage,
         plan,
@@ -1255,7 +1255,10 @@ pub async fn accept_owner_promotion(
         ));
     }
     let (root, registration_ref, registration, _) =
-        super::store_outbound::load_local_store_authority(db, device_id, identity).await?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db, device_id, identity,
+        )
+        .await?;
     if registration_ref != request.member_registration
         || registration.author_pubkey != request.member_pubkey
     {
@@ -1474,7 +1477,9 @@ fn load_owner_promotion_promoter<'a>(
 > {
     Box::pin(async move {
         let (promoter_root, promoter_ref, promoter, _) = Box::pin(
-            super::store_outbound::load_local_store_authority(db, device_id, identity),
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
+                db, device_id, identity,
+            ),
         )
         .await?;
         if promoter_root != *root
@@ -1654,10 +1659,10 @@ fn prepare_merge_store_candidate<'a>(
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let membership = Box::pin(load_current_merge_membership(db, storage, root)).await?;
-        let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+        let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
             db,
             storage,
-            super::store_outbound::StoreOperationPreparation::new(&membership),
+            &membership,
             device_id,
             identity,
         ))
@@ -1681,15 +1686,17 @@ fn prepare_merge_store_candidate<'a>(
             ),
         ];
         stream_activations.sort();
-        let mut candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
-            db,
-            storage,
-            plan,
-            StoreOperationBatch::MergeMembershipActivation {
-                transition: transition.transition.clone(),
-                stream_activations,
-            },
-        ))
+        let mut candidate = Box::pin(
+            crate::sync::store_engine::engine::operations::prepare_candidate(
+                db,
+                storage,
+                plan,
+                StoreOperationBatch::MergeMembershipActivation {
+                    transition: transition.transition.clone(),
+                    stream_activations,
+                },
+            ),
+        )
         .await?;
         let publication = super::invite::finish_membership_transition(
             storage,
@@ -1860,7 +1867,7 @@ fn activate_owner_promotion_merge_head<'a>(
             &transition,
             &publication,
             candidate,
-            super::store_outbound::StoreMembershipJournalCompletion::OwnerPromotion {
+            crate::sync::store_engine::engine::operations::StoreMembershipJournalCompletion::OwnerPromotion {
                 transition: journal_transition,
                 remote_objects,
             },
@@ -2364,7 +2371,7 @@ mod tests {
             .expect("read Member device id")
             .expect("Member device id");
         let (_, member_registration, _, _) =
-            super::super::store_outbound::load_local_store_authority(
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
                 &member_db,
                 &member_device_id,
                 &member,
@@ -2497,7 +2504,7 @@ mod tests {
             .expect("read Owner device id")
             .expect("Owner device id");
         let (_, member_registration, _, _) =
-            super::super::store_outbound::load_local_store_authority(
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
                 &member_db,
                 &member_db
                     .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)

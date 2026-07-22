@@ -99,15 +99,16 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
         activation_commit,
     )
     .await?;
-    let (_, exact_head) = super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &request.promoter_registration,
-        &promoter.value,
-        Some(activation_commit),
-    )
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let (_, exact_head) =
+        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+            storage,
+            root,
+            &request.promoter_registration,
+            &promoter.value,
+            Some(activation_commit),
+        )
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
     if opened.value != head
         || head.head_hash() != activation_head.head_hash
         || head.commit != *activation_commit

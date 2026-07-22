@@ -40,7 +40,7 @@ async fn publish_prepared_store_operation_with_membership_completion(
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    crate::sync::store_engine::engine::operations::publish_prepared(
+    publish_prepared(
         db,
         storage,
         prepared,
@@ -235,7 +235,7 @@ pub(crate) async fn activate_store_operation_commit(
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreOutboundError> {
-    let prepared = prepare_store_operation_candidate(db, storage, plan, batch).await?;
+    let prepared = prepare_candidate(db, storage, plan, batch).await?;
     match publish_prepared_store_operation(db, storage, Box::new(prepared)).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {

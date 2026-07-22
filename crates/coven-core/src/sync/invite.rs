@@ -131,7 +131,7 @@ struct ResolveMutationPlan {
     reference: super::membership::StoreMembershipConflictResolutionRef,
     resolution_object: PreparedExactObject,
     transition: Box<PreparedMembershipTransition>,
-    candidate: Box<super::store_outbound::PreparedStoreOperationCommit>,
+    candidate: Box<crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit>,
     publication: Box<PreparedMembershipPublication>,
 }
 
@@ -143,7 +143,7 @@ enum RevokeMembershipPublication {
     },
     StoreActivated {
         transition: Box<PreparedMembershipTransition>,
-        candidate: Box<super::store_outbound::PreparedStoreOperationCommit>,
+        candidate: Box<crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit>,
         publication: Box<PreparedMembershipPublication>,
     },
 }
@@ -474,9 +474,13 @@ pub(crate) async fn prepare_membership_transition(
             )
         })?;
     let (root, registration_ref, registration, _) =
-        super::store_outbound::load_local_store_authority(db, &device_id, owner_keypair)
-            .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db,
+            &device_id,
+            owner_keypair,
+        )
+        .await
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     if root.store_root_hash != store_root_hash
         || registration.author_pubkey != entry.author_pubkey
         || registration_ref.device_id != registration.device_id
@@ -603,9 +607,13 @@ pub(crate) async fn finish_membership_transition(
             )
         })?;
     let (root, registration_ref, registration, device_signer) =
-        super::store_outbound::load_local_store_authority(db, &device_id, owner_keypair)
-            .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db,
+            &device_id,
+            owner_keypair,
+        )
+        .await
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     if root.store_root_hash != store_root_hash
         || registration.author_pubkey != prepared.entry.author_pubkey
         || registration_ref != prepared.transition.body.author_registration
@@ -709,9 +717,12 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
     author: &super::store_commit::StoreDeviceRegistration,
     transition: &PreparedMembershipTransition,
     publication: &PreparedMembershipPublication,
-    candidate: Box<super::store_outbound::PreparedStoreOperationCommit>,
-    completion: super::store_outbound::StoreMembershipJournalCompletion,
-) -> Result<super::store_outbound::StoreOperationPublicationOutcome, InviteError> {
+    candidate: Box<crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit>,
+    completion: crate::sync::store_engine::engine::operations::StoreMembershipJournalCompletion,
+) -> Result<
+    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome,
+    InviteError,
+> {
     validate_prepared_transition(transition)?;
     validate_prepared_publication(publication)?;
     candidate
@@ -764,7 +775,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
         &publication.head,
         publication.head_ref.clone(),
     )?;
-    super::store_outbound::publish_prepared_store_membership_operation(
+    crate::sync::store_engine::engine::operations::publish_prepared_store_membership_operation(
         db,
         storage,
         candidate,
@@ -1285,10 +1296,10 @@ async fn build_revoke_mutation(
                     "local Store device registration is absent".to_string(),
                 )
             })?;
-        let operation = Box::pin(super::store_outbound::prepare_store_operation_commit(
+        let operation = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
             db,
             storage,
-            super::store_outbound::StoreOperationPreparation::new(chain),
+            chain,
             &device_id,
             owner_keypair,
         ))
@@ -1311,11 +1322,11 @@ async fn build_revoke_mutation(
             owner_keypair,
         )
         .await?;
-        let mut candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
+        let mut candidate = Box::pin(crate::sync::store_engine::engine::operations::prepare_candidate(
             db,
             storage,
             operation,
-            super::store_outbound::StoreOperationBatch::MergeMembershipActivation {
+            crate::sync::store_engine::engine::operations::StoreOperationBatch::MergeMembershipActivation {
                 transition: transition.transition.clone(),
                 stream_activations: Vec::new(),
             },
@@ -1675,15 +1686,16 @@ async fn build_resolution_mutation(
     resolver_branch_heads: Vec<MembershipHeadRef>,
     created_at: &str,
 ) -> Result<ResolveMutationPlan, InviteError> {
-    let base = super::store_outbound::prepare_merge_conflict_resolution_commit(
-        db,
-        storage,
-        device_id,
-        signer,
-        chain.head_refs(),
-    )
-    .await
-    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+    let base =
+        crate::sync::store_engine::engine::operations::prepare_merge_conflict_resolution_commit(
+            db,
+            storage,
+            device_id,
+            signer,
+            chain.head_refs(),
+        )
+        .await
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     let chain = base.membership();
     let super::membership::MembershipStatus::Conflict(
         super::membership::MembershipConflict::RevocationCycle {
@@ -1824,11 +1836,11 @@ async fn build_resolution_mutation(
         ),
     ];
     stream_activations.sort();
-    let mut candidate = super::store_outbound::prepare_store_operation_candidate(
+    let mut candidate = crate::sync::store_engine::engine::operations::prepare_candidate(
         db,
         storage,
         operation,
-        super::store_outbound::StoreOperationBatch::MergeMembershipActivation {
+        crate::sync::store_engine::engine::operations::StoreOperationBatch::MergeMembershipActivation {
             transition: transition.transition.clone(),
             stream_activations,
         },
@@ -2211,7 +2223,7 @@ async fn execute_revoke_mutation(
                     &transition,
                     &publication,
                     candidate.clone(),
-                    super::store_outbound::StoreMembershipJournalCompletion::RotationMutation {
+                    crate::sync::store_engine::engine::operations::StoreMembershipJournalCompletion::RotationMutation {
                         intent_hash: persistence.intent_hash,
                         progress_bytes: encode_membership_progress(
                             &MembershipMutationProgress::RevokeActivated {
@@ -2224,7 +2236,7 @@ async fn execute_revoke_mutation(
                 ))
                 .await?;
                 match outcome {
-                    super::store_outbound::StoreOperationPublicationOutcome::Activated(reference) => {
+                    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Activated(reference) => {
                         if reference != candidate.reference {
                             return Err(InviteError::InvalidDurableMutation(
                                 "membership removal activated another Store candidate".to_string(),
@@ -2240,7 +2252,7 @@ async fn execute_revoke_mutation(
                         *chain = validated_chain;
                         return Ok(keyring);
                     }
-                    super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+                    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
                         replacement,
                     ) => {
                         if replacement.reference != candidate.reference {
@@ -2306,7 +2318,7 @@ async fn execute_revoke_mutation(
                             .map_err(InviteError::InvalidDurableMutation)?;
                         persistence.intent_hash = replacement_intent_hash;
                     }
-                    super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
                         candidate: returned,
                         nonactivation,
                     } => {
@@ -2353,7 +2365,7 @@ async fn execute_revoke_mutation(
                             "membership removal candidate did not activate".to_string(),
                         ));
                     }
-                    super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(
+                    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Nonactivated(
                         reference,
                     ) => {
                         return Err(InviteError::InvalidDurableMutation(format!(
@@ -2361,7 +2373,7 @@ async fn execute_revoke_mutation(
                             reference.commit_hash
                         )))
                     }
-                    super::store_outbound::StoreOperationPublicationOutcome::Reprepared => {
+                    crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Reprepared => {
                         return Err(InviteError::InvalidDurableMutation(
                             "membership removal returned acknowledgement-only reprepare state"
                                 .to_string(),
@@ -2567,7 +2579,7 @@ async fn execute_resolution_mutation(
             &plan.transition,
             &plan.publication,
             plan.candidate.clone(),
-            super::store_outbound::StoreMembershipJournalCompletion::Mutation {
+            crate::sync::store_engine::engine::operations::StoreMembershipJournalCompletion::Mutation {
                 intent_hash: persistence.intent_hash,
                 progress_bytes: encode_membership_progress(
                     &MembershipMutationProgress::ResolutionActivated {
@@ -2579,14 +2591,14 @@ async fn execute_resolution_mutation(
         )
         .await?;
         match outcome {
-            super::store_outbound::StoreOperationPublicationOutcome::Activated(reference)
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::Activated(reference)
                 if reference == plan.candidate.reference =>
             {
                 successor.activate_head_ref(plan.publication.head_ref.clone())?;
                 *chain = successor;
                 return Ok(plan.reference);
             }
-            super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
                 replacement,
             ) if replacement.reference == plan.candidate.reference => {
                 let previous_remotes = plan.remote_objects()?;
@@ -2607,7 +2619,7 @@ async fn execute_resolution_mutation(
                     )
                     .await?;
             }
-            super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
+            crate::sync::store_engine::engine::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
                 candidate,
                 nonactivation,
             } if candidate.as_ref() == plan.candidate.as_ref() => {

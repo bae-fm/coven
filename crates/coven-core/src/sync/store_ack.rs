@@ -131,7 +131,7 @@ pub(crate) async fn publish_acknowledgement_object(
     storage: &dyn SyncStorage,
     device_id: &str,
     outbound: &crate::database::OutboundStoreAck,
-    candidate: &super::store_outbound::PreparedStoreOperationCommit,
+    candidate: &crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
 ) -> Result<bool, StoreAckError> {
     let context = ProtocolObjectContext::signed_plaintext(
         outbound.ack.value.store_root_hash,
@@ -282,7 +282,7 @@ mod tests {
         storage: &CloudSyncStorage,
         signer: &UserKeypair,
         outbound: &crate::database::OutboundStoreAck,
-    ) -> super::super::store_outbound::PreparedStoreOperationCommit {
+    ) -> crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit {
         let membership = super::super::pull::load_cycle_membership(storage, db)
             .await
             .expect("load acknowledgement test membership");
@@ -310,7 +310,7 @@ mod tests {
             db,
             storage,
             plan,
-            super::super::store_outbound::StoreOperationBatch::Acknowledgement {
+            crate::sync::store_engine::engine::operations::StoreOperationBatch::Acknowledgement {
                 reference: outbound.reference.clone(),
                 value: outbound.ack.value.clone(),
             },
@@ -333,7 +333,7 @@ mod tests {
         storage: CloudSyncStorage,
         db: Database,
         outbound: crate::database::OutboundStoreAck,
-        losing: super::super::store_outbound::PreparedStoreOperationCommit,
+        losing: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
     }
 
     async fn losing_merge_ack_fixture(path: &Path) -> LosingMergeAckFixture {
@@ -390,7 +390,7 @@ mod tests {
                 &db,
                 &storage,
                 competing_plan,
-                super::super::store_outbound::StoreOperationBatch::ProviderAccessGrant(grant),
+                crate::sync::store_engine::engine::operations::StoreOperationBatch::ProviderAccessGrant(grant),
             ),
         )
         .await
@@ -1009,7 +1009,7 @@ mod tests {
         let expected_head = candidate.head.clone();
         let expected_prepared = candidate.prepared_head.clone();
         let (root, registration_ref, _, device_signer) =
-            super::super::store_outbound::load_local_store_authority(
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
                 &db,
                 &outbound.reference.registration.device_id.to_string(),
                 &signer,

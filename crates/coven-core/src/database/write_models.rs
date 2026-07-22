@@ -206,8 +206,8 @@ pub(crate) struct OutboundStoreAck {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum OutboundStoreAckActivation {
     AwaitingCandidate,
-    Prepared(crate::sync::store_outbound::PreparedStoreOperationCommit),
-    Nonactivating(crate::sync::store_outbound::PreparedStoreOperationCommit),
+    Prepared(crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit),
+    Nonactivating(crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]

@@ -20,10 +20,10 @@ use super::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId, StoreDeviceExclusionProposalRef,
     StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
 };
-use super::store_outbound::{
+use super::store_engine::engine::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
-    StoreOutboundError,
 };
+use super::store_outbound::StoreOutboundError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -593,10 +593,10 @@ async fn prepare_proposal(
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
     );
     let plan = Box::new(
-        Box::pin(super::store_outbound::prepare_store_operation_commit(
+        Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
             db,
             storage,
-            super::store_outbound::StoreOperationPreparation::new(&authorization),
+            &authorization,
             &device_id,
             identity_signer,
         ))
@@ -663,12 +663,14 @@ async fn prepare_proposal(
         &target_registration,
         plan.registration(),
     )?;
-    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
-        db,
-        storage,
-        *plan,
-        StoreOperationBatch::DeviceExclusionProposal(retained),
-    ))
+    let candidate = Box::pin(
+        crate::sync::store_engine::engine::operations::prepare_candidate(
+            db,
+            storage,
+            *plan,
+            StoreOperationBatch::DeviceExclusionProposal(retained),
+        ),
+    )
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
         DurableStoreDeviceExclusionObject::Proposal {
@@ -814,10 +816,10 @@ async fn prepare_outcome(
     authorization: MembershipChain,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
-    let plan = Box::pin(super::store_outbound::prepare_store_operation_commit(
+    let plan = Box::pin(crate::sync::store_engine::engine::operations::prepare_plan(
         db,
         storage,
-        super::store_outbound::StoreOperationPreparation::new(&authorization),
+        &authorization,
         &device_id,
         identity_signer,
     ))
@@ -894,12 +896,14 @@ async fn prepare_outcome(
         &outcome,
         plan.registration(),
     )?;
-    let candidate = Box::pin(super::store_outbound::prepare_store_operation_candidate(
-        db,
-        storage,
-        plan,
-        StoreOperationBatch::DeviceExclusionOutcome(retained),
-    ))
+    let candidate = Box::pin(
+        crate::sync::store_engine::engine::operations::prepare_candidate(
+            db,
+            storage,
+            plan,
+            StoreOperationBatch::DeviceExclusionOutcome(retained),
+        ),
+    )
     .await?;
     let operation = DurableStoreDeviceExclusionOperation::prepared(
         DurableStoreDeviceExclusionObject::Outcome {
@@ -985,8 +989,11 @@ async fn publish_device_exclusion_candidate(
             "active exclusion operation has no activation candidate".to_string(),
         )
     })?;
-    let publish =
-        super::store_outbound::publish_prepared_store_operation(db, storage, Box::new(candidate));
+    let publish = crate::sync::store_engine::engine::operations::publish_prepared_store_operation(
+        db,
+        storage,
+        Box::new(candidate),
+    );
     let publication = Box::new(Box::pin(publish).await?);
     match publication.as_ref() {
         StoreOperationPublicationOutcome::Activated(_) => {
@@ -1164,10 +1171,10 @@ async fn prepare_replacement_candidate(
     let authorization = super::device_join::load_current_device_join_authorization(db, storage)
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-    let plan = super::store_outbound::prepare_store_operation_commit(
+    let plan = crate::sync::store_engine::engine::operations::prepare_plan(
         db,
         storage,
-        super::store_outbound::StoreOperationPreparation::new(&authorization),
+        &authorization,
         &device_id,
         identity_signer,
     )
@@ -1186,12 +1193,14 @@ async fn prepare_replacement_candidate(
         value,
         plan.registration(),
     )?;
-    Box::pin(super::store_outbound::prepare_store_operation_candidate(
-        db,
-        storage,
-        plan,
-        StoreOperationBatch::DeviceExclusionOutcome(retained),
-    ))
+    Box::pin(
+        crate::sync::store_engine::engine::operations::prepare_candidate(
+            db,
+            storage,
+            plan,
+            StoreOperationBatch::DeviceExclusionOutcome(retained),
+        ),
+    )
     .await
     .map_err(StoreDeviceExclusionError::from)
 }
@@ -4439,15 +4448,13 @@ mod tests {
             .await
             .expect("load exclusion test membership");
         let device_id = local_device_id(db).await.expect("local device id");
-        let plan = super::super::store_outbound::prepare_store_operation_commit(
+        let plan = crate::sync::store_engine::engine::operations::prepare_plan(
             db,
             storage,
-            super::super::store_outbound::StoreOperationPreparation {
-                membership: membership
-                    .chain
-                    .as_ref()
-                    .expect("resolved Merge membership"),
-            },
+            membership
+                .chain
+                .as_ref()
+                .expect("resolved Merge membership"),
             &device_id,
             signer,
         )
@@ -4507,7 +4514,7 @@ mod tests {
                 plan.registration(),
             )
             .expect("retain prepared exclusion proposal");
-        let candidate = super::super::store_outbound::prepare_store_operation_candidate(
+        let candidate = crate::sync::store_engine::engine::operations::prepare_candidate(
             db,
             storage,
             plan,

@@ -31,15 +31,16 @@ async fn verify_terminal_candidate_head(
         .verify_at(root.store_root_hash, &candidate.coord, candidate_author)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     candidate_head_object.verify(&candidate_head.to_bytes())?;
-    let (candidate_slot, predecessor_head) = super::store_outbound::exact_next_announcement_slot(
-        storage,
-        root,
-        &candidate_commit.author_registration,
-        candidate_author,
-        candidate_commit.order.predecessor(),
-    )
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let (candidate_slot, predecessor_head) =
+        crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+            storage,
+            root,
+            &candidate_commit.author_registration,
+            candidate_author,
+            candidate_commit.order.predecessor(),
+        )
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
     let activation = candidate_author
         .store_announcement_activation(&candidate_commit.author_registration)
         .map_err(|error| StorePullError::Database(error.to_string()))?
@@ -297,15 +298,16 @@ pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
             &witness_head.commit,
         )
         .await?;
-        let (_, exact_head) = super::store_outbound::exact_next_announcement_slot(
-            storage,
-            root,
-            &witness_head.author_registration,
-            &witness_author.value,
-            Some(&witness_head.commit),
-        )
-        .await
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let (_, exact_head) =
+            crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+                storage,
+                root,
+                &witness_head.author_registration,
+                &witness_author.value,
+                Some(&witness_head.commit),
+            )
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         if exact_head.as_ref() != Some(activation_head) || opened.value != witness_head {
             return Err(StorePullError::Database(
                 "membership revocation witness is not an accepted exact head".to_string(),

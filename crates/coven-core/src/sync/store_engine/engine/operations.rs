@@ -2,21 +2,63 @@ use super::abandonment::read_occupied_merge_head;
 use super::*;
 use crate::database::VerifiedMergeMaterialization;
 use crate::sync::circle_activation::VerifiedCircleActivations;
+use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{
-    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+    BlobWriteAuthority, ExactObjectRef, PreparedExactObject, ProtocolObjectContext,
+    ProtocolObjectDomain, StorageError,
 };
 use crate::sync::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreBatchCommitDeletionTarget,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceHeadRef, SuccessorLink,
+    circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
+    package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef,
+    DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget,
+    StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
+    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreHistoryCut, StoreOperationMembershipAuthority,
+    StoreProtocolError, StoreRootRef, SuccessorLink,
 };
-use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::{
-    PreparedStoreOperationActivation, PreparedStoreOperationCommit,
-    StoreMembershipJournalCompletion, StoreOperationBatch, StoreOperationCommitPlan,
-    StoreOperationPublicationOutcome, StoreOutboundError,
+use crate::sync::store_objects::{run_blocking_object_verification, StoreObjectError};
+use crate::sync::store_outbound::StoreOutboundError;
+use crate::sync::{
+    audience_package, circle_control, device_join, invite, membership, owner_promotion, provider,
+    remote_object, service, store_commit, store_objects, store_reclaim, wrapped_store_key,
 };
 use std::future::Future;
 use std::pin::Pin;
+
+mod announcement;
+mod candidate;
+mod local_authority;
+mod plan;
+mod prepared;
+mod publication;
+mod support;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use announcement::*;
+pub(crate) use candidate::*;
+pub(crate) use local_authority::*;
+pub(crate) use plan::*;
+pub(crate) use prepared::*;
+pub(crate) use publication::*;
+pub(crate) use support::*;
+
+pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
+
+pub(crate) fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
+    current
+        .checked_add(1)
+        .ok_or(StoreOutboundError::SequenceExhausted { current })
+}
+
+pub(crate) fn next_store_sequence(
+    previous: Option<&StoreBatchCommitRef>,
+) -> Result<u64, StoreOutboundError> {
+    previous.map_or(Ok(1), |reference| {
+        successor_store_sequence(reference.coord.sequence())
+    })
+}
 
 pub(crate) async fn prepare_plan(
     db: &Database,
@@ -26,13 +68,13 @@ pub(crate) async fn prepare_plan(
     keypair: &UserKeypair,
 ) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
     let (root, registration_ref, registration, device_signer) =
-        crate::sync::store_outbound::load_local_store_authority(db, device_id, keypair).await?;
+        load_local_store_authority(db, device_id, keypair).await?;
     let previous = db.latest_local_store_position().await?;
     let dependencies =
         crate::sync::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
             .map(|frontier| frontier.commits().clone())
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let seq = crate::sync::store_outbound::next_store_sequence(previous.as_ref())?;
+    let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
@@ -69,7 +111,7 @@ pub(crate) async fn prepare_plan(
             ))
         })?;
     Ok(StoreOperationCommitPlan::new(
-        crate::sync::store_outbound::StoreOperationPlanCommon::new(
+        StoreOperationPlanCommon::new(
             root,
             registration_ref,
             registration,
@@ -123,13 +165,8 @@ pub(crate) async fn prepare_candidate(
         ),
         _ => None,
     };
-    let common = crate::sync::store_outbound::prepare_store_operation_candidate_common(
-        db,
-        storage,
-        plan.common(),
-        batch,
-    )
-    .await?;
+    let common =
+        prepare_store_operation_candidate_common(db, storage, plan.common(), batch).await?;
     let acknowledgement = match acknowledgement_evidence {
         Some((reference, value)) => Some(
             crate::sync::store_pull::retain_activated_acknowledgement(
@@ -198,10 +235,7 @@ pub(crate) async fn prepare_candidate(
     )
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let next_prefix = head_slot_prefix(
-        &device_id,
-        crate::sync::store_outbound::successor_store_sequence(common.commit.seq())?,
-    );
+    let next_prefix = head_slot_prefix(&device_id, successor_store_sequence(common.commit.seq())?);
     let next_slot = storage
         .allocate_protocol_slot(&head_context, &next_prefix, ".json")
         .await
@@ -247,9 +281,8 @@ pub(crate) async fn publish_prepared(
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
-    let root = crate::sync::store_outbound::required_store_root(db).await?;
-    let retained_operation_objects =
-        crate::sync::store_outbound::retained_store_operation_objects(&candidate.commit)?;
+    let root = required_store_root(db).await?;
+    let retained_operation_objects = retained_store_operation_objects(&candidate.commit)?;
     let head = candidate.head.clone();
     let prepared_head = candidate.prepared_head.clone();
     let history_summary = candidate.history_summary.clone();

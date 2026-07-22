@@ -382,9 +382,13 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
     );
 
     let (_, _, registration, device_signer) =
-        super::store_outbound::load_local_store_authority(&db, &device_id, &store.signer)
-            .await
-            .expect("load local device signer");
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            &db,
+            &device_id,
+            &store.signer,
+        )
+        .await
+        .expect("load local device signer");
     let forged_head = StoreDeviceHead::signed(
         current.activation_head().store_root_hash,
         current.activation_head().author_registration.clone(),
@@ -680,16 +684,17 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         .await
         .expect("load published snapshot")
         .expect("published snapshot is recorded");
-    let (_, _, author, device_signer) = super::store_outbound::load_local_store_authority(
-        &db,
-        &db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .expect("load snapshot device id")
-            .expect("snapshot device id exists"),
-        &store.signer,
-    )
-    .await
-    .expect("load snapshot author");
+    let (_, _, author, device_signer) =
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            &db,
+            &db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await
+                .expect("load snapshot device id")
+                .expect("snapshot device id exists"),
+            &store.signer,
+        )
+        .await
+        .expect("load snapshot author");
     let mut forged = meta;
     let summary = &mut forged.history_summary;
     let removal = summary
@@ -796,9 +801,13 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         dependencies,
     };
     let (root, registration_ref, registration, _) =
-        super::store_outbound::load_local_store_authority(&db, &device_id, &store.signer)
-            .await
-            .expect("load local Store authority");
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            &db,
+            &device_id,
+            &store.signer,
+        )
+        .await
+        .expect("load local Store authority");
 
     store.home.clear_exact_reads();
     crate::sync::store_engine::engine::pull::load_merge_conflict_resolution_authorization(

@@ -266,12 +266,3 @@ pub(crate) async fn prepare_store_operation_candidate_common(
         registration_activation,
     })
 }
-
-pub(crate) async fn prepare_store_operation_candidate(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    plan: StoreOperationCommitPlan,
-    batch: StoreOperationBatch,
-) -> Result<PreparedStoreOperationCommit, StoreOutboundError> {
-    crate::sync::store_engine::engine::operations::prepare_candidate(db, storage, plan, batch).await
-}

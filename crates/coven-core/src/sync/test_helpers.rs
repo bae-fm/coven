@@ -1377,7 +1377,7 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "provider administrator device id is absent".to_string())?;
         let (_, observer_registration, _, _) =
-            crate::sync::store_outbound::load_local_store_authority(
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
                 observer_db,
                 &observer_device_id,
                 &store.signer,
@@ -1562,13 +1562,14 @@ pub async fn promote_active_member_fixture(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Member Store device id is absent".to_string())?;
-    let (_, member_registration, _, _) = crate::sync::store_outbound::load_local_store_authority(
-        member_db,
-        &member_device_id,
-        member,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let (_, member_registration, _, _) =
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            member_db,
+            &member_device_id,
+            member,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     let request = Box::pin(crate::sync::owner_promotion::begin_owner_promotion(
         owner_db,
         &store.storage,

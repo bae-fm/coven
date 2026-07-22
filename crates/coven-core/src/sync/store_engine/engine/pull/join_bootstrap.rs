@@ -168,15 +168,16 @@ pub(in crate::sync::store_engine) fn prepare_device_join_bootstrap<'a>(
             }
             let owner_recovery =
                 verify_commit_owner_recovery_activation(storage, root, &commit).await?;
-            let (_, head_ref) = super::store_outbound::exact_next_announcement_slot(
-                storage,
-                root,
-                &commit.author_registration,
-                &author,
-                Some(&reference),
-            )
-            .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let (_, head_ref) =
+                crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+                    storage,
+                    root,
+                    &commit.author_registration,
+                    &author,
+                    Some(&reference),
+                )
+                .await
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
             let head_ref = head_ref.ok_or_else(|| {
                 StorePullError::Database(
                     "Merge bootstrap commit has no exact accepted activation head".to_string(),
@@ -293,15 +294,16 @@ pub(in crate::sync::store_engine) fn materialize_device_join_activation<'a>(
                     .to_string(),
             ));
         }
-        let (_, head_ref) = super::store_outbound::exact_next_announcement_slot(
-            storage,
-            root,
-            &commit.author_registration,
-            &author,
-            Some(reference),
-        )
-        .await
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let (_, head_ref) =
+            crate::sync::store_engine::engine::operations::exact_next_announcement_slot(
+                storage,
+                root,
+                &commit.author_registration,
+                &author,
+                Some(reference),
+            )
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         let head_ref = head_ref.ok_or_else(|| {
             StorePullError::Database(
                 "device join activation has no exact accepted activation head".to_string(),

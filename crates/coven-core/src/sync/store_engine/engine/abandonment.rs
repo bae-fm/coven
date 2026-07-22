@@ -9,7 +9,9 @@ use crate::sync::store_commit::{
     StoreDeviceRegistration,
 };
 use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::{load_local_store_authority, StoreOutboundError};
+use crate::sync::store_outbound::StoreOutboundError;
+
+use super::operations::load_local_store_authority;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeCandidateAbandonment {

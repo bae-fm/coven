@@ -9,7 +9,8 @@ use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
 use super::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
-use super::store_outbound::{PreparedStoreOperationCommit, StoreOutboundError};
+use super::store_engine::engine::operations::PreparedStoreOperationCommit;
+use super::store_outbound::StoreOutboundError;
 use super::store_reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,

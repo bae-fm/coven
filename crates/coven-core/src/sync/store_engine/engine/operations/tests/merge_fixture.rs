@@ -30,7 +30,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         let db = open_test_db();
         let (root, device_id) =
             initialize_exact_store(&db, &storage, "outbound-crash-test", &keypair).await;
-        let membership = super::super::super::membership_ops::load_and_persist_owner_anchor(
+        let membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
             &storage,
             &root,
             &crate::keys::public_key_hex(&keypair),
@@ -106,7 +106,7 @@ pub(super) async fn publish_competing_merge_head(
         .device_signer(&fixture.keypair)
         .expect("derive Merge device signer");
     let stream_id = batch.head.value.commit.coord.stream_id;
-    let package = super::super::super::audience_package::AudiencePackage::store(
+    let package = crate::sync::audience_package::AudiencePackage::store(
         fixture.root.store_root_hash,
         candidate.candidate_family(),
         candidate.write_id.clone(),
@@ -146,12 +146,11 @@ pub(super) async fn publish_competing_merge_head(
         .create_protocol_object(&package_prepared)
         .await
         .expect("publish competing package");
-    let membership =
-        super::super::super::pull::load_cycle_membership(&fixture.storage, &fixture.db)
-            .await
-            .expect("load competing commit membership")
-            .chain
-            .expect("Merge test Store has membership");
+    let membership = crate::sync::pull::load_cycle_membership(&fixture.storage, &fixture.db)
+        .await
+        .expect("load competing commit membership")
+        .chain
+        .expect("Merge test Store has membership");
     let predecessor = membership
         .write_grant_authority(&registration.author_pubkey)
         .expect("Merge test author has an active write grant");
@@ -319,8 +318,8 @@ pub(super) fn commit_stream(reference: &StoreBatchCommitRef) -> String {
 pub(super) async fn stored_remote_object(
     db: &Database,
     object: &crate::sync::storage::ExactObjectRef,
-) -> super::super::super::remote_object::RemoteObjectRecord {
-    let object_id = super::super::super::remote_object::remote_object_id(object);
+) -> crate::sync::remote_object::RemoteObjectRecord {
+    let object_id = crate::sync::remote_object::remote_object_id(object);
     db.call(move |conn| {
         let encoded: String = conn
             .query_row(
@@ -339,7 +338,7 @@ pub(super) async fn remote_object_exists(
     db: &Database,
     object: &crate::sync::storage::ExactObjectRef,
 ) -> bool {
-    let object_id = super::super::super::remote_object::remote_object_id(object);
+    let object_id = crate::sync::remote_object::remote_object_id(object);
     db.call(move |conn| {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",

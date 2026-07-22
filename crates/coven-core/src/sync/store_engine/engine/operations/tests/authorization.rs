@@ -10,14 +10,14 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     let store = TestStore::create(&owner_db, "operation-predecessor-membership", owner.clone())
         .await
         .expect("create Merge Store");
-    super::super::super::membership_ops::invite_member(
+    crate::sync::membership_ops::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
-        &super::super::super::hlc::Hlc::new("operation-predecessor-membership".to_string()),
+        &crate::sync::hlc::Hlc::new("operation-predecessor-membership".to_string()),
         &writer_pubkey,
         None,
-        super::super::super::membership::MemberRole::Member,
+        crate::sync::membership::MemberRole::Member,
         &encryption,
         store.storage.store_id(),
         "Operation predecessor membership",
@@ -38,7 +38,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     promote_active_member_fixture(&store, &owner_db, &writer_db, &owner, &writer, &encryption)
         .await
         .expect("promote operation author to Owner");
-    let before_removal = super::super::super::membership_ops::load_current_exact_chain(
+    let before_removal = crate::sync::membership_ops::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -53,11 +53,11 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
 
     let custody = TestCustody::default();
     let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    super::super::super::membership_ops::remove_member(
+    crate::sync::membership_ops::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
-        &super::super::super::hlc::Hlc::new("operation-membership-removal".to_string()),
+        &crate::sync::hlc::Hlc::new("operation-membership-removal".to_string()),
         &writer_pubkey,
         &encryption,
         &custody,
@@ -67,7 +67,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     )
     .await
     .expect("remove operation author after its predecessor cut");
-    let candidate = super::super::super::membership_ops::load_current_exact_chain(
+    let candidate = crate::sync::membership_ops::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -77,12 +77,10 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     .expect("load candidate membership after removal");
     assert!(!candidate.can_write_now(&writer_pubkey));
 
-    let plan = prepare_store_operation_commit(
+    let plan = prepare_plan(
         &writer_db,
         &store.storage,
-        StoreOperationPreparation {
-            membership: &candidate,
-        },
+        &candidate,
         &local_device_id(&writer_db).await,
         &writer,
     )
@@ -119,14 +117,14 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("create Merge Store");
-    super::super::super::membership_ops::invite_member(
+    crate::sync::membership_ops::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
-        &super::super::super::hlc::Hlc::new("direct-removal-predecessor-membership".to_string()),
+        &crate::sync::hlc::Hlc::new("direct-removal-predecessor-membership".to_string()),
         &writer_pubkey,
         None,
-        super::super::super::membership::MemberRole::Member,
+        crate::sync::membership::MemberRole::Member,
         &encryption,
         store.storage.store_id(),
         "Direct removal predecessor membership",
@@ -144,7 +142,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("activate operation author device");
-    let before_removal = super::super::super::membership_ops::load_current_exact_chain(
+    let before_removal = crate::sync::membership_ops::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -156,11 +154,11 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 
     let custody = TestCustody::default();
     let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    super::super::super::membership_ops::remove_member(
+    crate::sync::membership_ops::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
-        &super::super::super::hlc::Hlc::new("direct-membership-removal".to_string()),
+        &crate::sync::hlc::Hlc::new("direct-membership-removal".to_string()),
         &writer_pubkey,
         &encryption,
         &custody,
@@ -170,7 +168,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("remove operation author directly");
-    let after_removal = super::super::super::membership_ops::load_current_exact_chain(
+    let after_removal = crate::sync::membership_ops::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
@@ -216,8 +214,8 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         load_local_store_authority(&writer_db, &local_device_id(&writer_db).await, &writer)
             .await
             .expect("load removed writer registration");
-    let super::super::super::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
-    let order = super::super::super::store_commit::StoreCommitOrder {
+    let crate::sync::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = crate::sync::store_commit::StoreCommitOrder {
         seq: 1,
         predecessor: None,
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
@@ -252,15 +250,14 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await
     .expect("create Merge Store");
-    let predecessor_membership =
-        super::super::super::membership_ops::load_and_persist_owner_anchor(
-            &store.storage,
-            &store.root,
-            &owner_pubkey,
-            &owner_db,
-        )
-        .await
-        .expect("load predecessor membership");
+    let predecessor_membership = crate::sync::membership_ops::load_and_persist_owner_anchor(
+        &store.storage,
+        &store.root,
+        &owner_pubkey,
+        &owner_db,
+    )
+    .await
+    .expect("load predecessor membership");
     host_exec(
         &owner_db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -295,14 +292,14 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
 
     let new_member = UserKeypair::generate();
     let new_member_pubkey = pubkey_hex(&new_member);
-    super::super::super::membership_ops::invite_member(
+    crate::sync::membership_ops::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
-        &super::super::super::hlc::Hlc::new("new-direct-membership".to_string()),
+        &crate::sync::hlc::Hlc::new("new-direct-membership".to_string()),
         &new_member_pubkey,
         None,
-        super::super::super::membership::MemberRole::Member,
+        crate::sync::membership::MemberRole::Member,
         &encryption,
         store.storage.store_id(),
         "New Direct membership",
@@ -310,7 +307,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await
     .expect("publish new Direct membership");
-    let candidate = super::super::super::membership_ops::load_current_exact_chain(
+    let candidate = crate::sync::membership_ops::load_current_exact_chain(
         &store.storage,
         &store.root,
         Some(&owner_pubkey),
@@ -324,8 +321,8 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         load_local_store_authority(&owner_db, &local_device_id(&owner_db).await, &owner)
             .await
             .expect("load owner registration");
-    let super::super::super::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
-    let order = super::super::super::store_commit::StoreCommitOrder {
+    let crate::sync::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = crate::sync::store_commit::StoreCommitOrder {
         seq: predecessor.coord.sequence() + 1,
         predecessor: Some(predecessor.clone()),
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
@@ -361,7 +358,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .open_into(&owner_db)
         .await
         .expect("load exact founder membership");
-    let changeset = super::super::super::test_helpers::capture_bytes(
+    let changeset = crate::sync::test_helpers::capture_bytes(
         &open_test_db(),
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -379,10 +376,10 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         load_local_store_authority(&owner_db, &device_id, &owner)
             .await
             .expect("load exact local authority");
-    forged_registration.device_id = super::super::super::store_commit::StoreDeviceId::derive(
+    forged_registration.device_id = crate::sync::store_commit::StoreDeviceId::derive(
         &store.root,
-        &super::super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: super::super::super::store_commit::StoreCreationId::from_nonce(
+        &crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder {
+            creation_id: crate::sync::store_commit::StoreCreationId::from_nonce(
                 "forged-local-projection",
             ),
         },
@@ -403,7 +400,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
                 rows
             };
             for (commit, encoded) in rows {
-                let state: super::super::super::store_commit::ResolvedStoreDeviceState =
+                let state: crate::sync::store_commit::ResolvedStoreDeviceState =
                     serde_json::from_str(&encoded).map_err(|error| {
                         crate::database::DbError::Message(format!(
                             "parse test Store device snapshot: {error}"

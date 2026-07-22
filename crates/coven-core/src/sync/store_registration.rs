@@ -291,7 +291,10 @@ async fn prepare_self_retirement(
         .device_id
         .to_string();
     let (root, registration_ref, registration, device_signer) =
-        super::store_outbound::load_local_store_authority(db, &device_id, signer).await?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db, &device_id, signer,
+        )
+        .await?;
     let write_id = db.new_write_id();
     let previous = db
         .latest_local_store_position()

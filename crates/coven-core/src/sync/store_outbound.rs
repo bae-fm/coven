@@ -1,51 +1,23 @@
-//! Durable construction and ordered publication of local Store commits.
+//! Audience-package and blob preparation for Store commits.
 
-use std::future::Future;
-use std::pin::Pin;
-
-use super::membership::MembershipChain;
-use super::storage::{BlobWriteAuthority, ExactObjectRef, SyncStorage};
+use super::storage::{BlobWriteAuthority, SyncStorage};
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
-    circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
-    package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId,
-    DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
-    StoreDeviceHeadRef, StoreDeviceId, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreHistoryCut, StoreOperationMembershipAuthority, StoreProtocolError, StoreRootRef,
+    circle_package_semantic_prefix, package_semantic_prefix, CandidateFamilyId, ObjectHash,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceId,
 };
-use super::store_objects::{run_blocking_object_verification, StoreObjectError};
-use super::{
-    audience_package, circle, circle_control, device_join, gate, invite, membership,
-    owner_promotion, provider, remote_object, service, storage, store_commit, store_objects,
-    store_reclaim, wrapped_store_key,
-};
+use super::store_objects::StoreObjectError;
+use super::{audience_package, circle, gate, remote_object, storage};
 
-pub(crate) const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 use crate::database::{
     Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
     StoreWriteBlobFact, StoreWriteBlobFacts,
 };
-use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 
-mod announcement;
 mod audience_preparation;
-mod local_authority;
-mod operation_candidate;
-mod operation_plan;
-mod operation_publication;
-mod prepared_operation;
-mod publication_support;
 
-pub(crate) use announcement::*;
 pub(crate) use audience_preparation::*;
-pub(crate) use local_authority::*;
-pub(crate) use operation_candidate::*;
-pub(crate) use operation_plan::*;
-pub(crate) use operation_publication::*;
-pub(crate) use prepared_operation::*;
-pub(crate) use publication_support::*;
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: super::circle::Audience,
@@ -106,20 +78,5 @@ impl From<crate::database::DbError> for StoreOutboundError {
     }
 }
 
-pub(crate) fn successor_store_sequence(current: u64) -> Result<u64, StoreOutboundError> {
-    current
-        .checked_add(1)
-        .ok_or(StoreOutboundError::SequenceExhausted { current })
-}
-
-pub(crate) fn next_store_sequence(
-    previous: Option<&StoreBatchCommitRef>,
-) -> Result<u64, StoreOutboundError> {
-    previous.map_or(Ok(1), |reference| {
-        successor_store_sequence(reference.coord.sequence())
-    })
-}
-
 #[cfg(test)]
-#[path = "store_outbound/tests.rs"]
 mod tests;

@@ -14,7 +14,7 @@ use database::StoreEngineDatabase;
 pub(in crate::sync::store_engine) async fn prepare_acknowledgement_activation_for_test(
     db: &Database,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
-    candidate: crate::sync::store_outbound::PreparedStoreOperationCommit,
+    candidate: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
 ) -> Result<(), crate::database::DbError> {
     StoreEngineDatabase::new(db)
         .prepare_acknowledgement_activation(acknowledgement, candidate)
@@ -432,13 +432,17 @@ impl AuthorizedStoreEngine<'_> {
         identity: &UserKeypair,
     ) -> Result<u64, SyncCycleFailure> {
         let (root, registration, _, _) =
-            crate::sync::store_outbound::load_local_store_authority(self.db(), device_id, identity)
-                .await
-                .map_err(|error| {
-                    SyncCycleFailure::from(format!(
-                        "load local Store snapshot cadence authority: {error}"
-                    ))
-                })?;
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
+                self.db(),
+                device_id,
+                identity,
+            )
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::from(format!(
+                    "load local Store snapshot cadence authority: {error}"
+                ))
+            })?;
         let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &registration,

@@ -5,7 +5,12 @@ use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
 use crate::sync::store_objects::StoreObjectError;
-use crate::sync::store_outbound::*;
+use crate::sync::store_outbound::StoreOutboundError;
+
+use super::operations::{
+    blocked_status, publish_prepared_remote_objects, reject_excluded_merge_candidate,
+    required_store_root,
+};
 
 pub(crate) async fn drain_store_writes(
     db: &Database,

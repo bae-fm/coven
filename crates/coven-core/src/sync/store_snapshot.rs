@@ -39,9 +39,11 @@ pub(crate) async fn push_store_snapshot(
             SnapshotError::PublicationState("local Store device registration is absent".to_string())
         })?;
     let (root, registration_ref, registration, device_signer) =
-        super::store_outbound::load_local_store_authority(db, &device_id, keypair)
-            .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db, &device_id, keypair,
+        )
+        .await
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     if root.store_root_hash != store_root_hash {
         return Err(SnapshotError::PublicationState(
             "snapshot Store root differs from the activated local root".to_string(),
@@ -1104,9 +1106,11 @@ mod tests {
             .expect("load continued Store root")
             .expect("continued Store root exists");
         let (_, registration_ref, registration, _) =
-            super::super::store_outbound::load_local_store_authority(&db, &device_id, &signer)
-                .await
-                .expect("load continued snapshot authority");
+            crate::sync::store_engine::engine::operations::load_local_store_authority(
+                &db, &device_id, &signer,
+            )
+            .await
+            .expect("load continued snapshot authority");
         let published = db
             .latest_local_store_snapshot()
             .await

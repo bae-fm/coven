@@ -31,7 +31,7 @@ impl From<StoreEngineLoadError> for super::store_outbound::StoreOutboundError {
             StoreEngineLoadError::Database(error) => error.into(),
             StoreEngineLoadError::Object(error) => Self::Object(error),
             StoreEngineLoadError::MissingRoot => Self::MissingState {
-                key: super::store_outbound::STORE_ROOT_AUTHORITY,
+                key: engine::operations::STORE_ROOT_AUTHORITY,
             },
             StoreEngineLoadError::Invalid(reason) => Self::InvalidOutbound(reason),
         }
@@ -101,7 +101,7 @@ pub(crate) async fn drain_merge_acknowledgements_for_test(
 pub(crate) async fn prepare_merge_acknowledgement_activation_for_test(
     db: &Database,
     acknowledgement: super::store_commit::StoreAckRef,
-    candidate: super::store_outbound::PreparedStoreOperationCommit,
+    candidate: crate::sync::store_engine::engine::operations::PreparedStoreOperationCommit,
 ) -> Result<(), crate::database::DbError> {
     engine::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
 }

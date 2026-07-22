@@ -1309,7 +1309,10 @@ async fn prepare_circle_operation_request(
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     let (root, author_registration, author, device_signer) =
-        super::store_outbound::load_local_store_authority(db, device_id, signer).await?;
+        crate::sync::store_engine::engine::operations::load_local_store_authority(
+            db, device_id, signer,
+        )
+        .await?;
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let founder = db
