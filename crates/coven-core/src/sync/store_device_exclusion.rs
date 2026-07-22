@@ -586,11 +586,9 @@ async fn prepare_proposal(
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
     let device_id = local_device_id(db).await?;
     let authorization = Box::new(
-        Box::pin(super::device_join::load_current_device_join_authorization(
-            db, storage,
-        ))
-        .await
-        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
+        Box::pin(super::store::device_join::load_current_device_join_authorization(db, storage))
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
     );
     let plan = Box::new(
         Box::pin(crate::sync::store::operations::prepare_plan(
@@ -787,9 +785,9 @@ fn publish_outcome<'a>(
     Box::pin(async move {
         let _lock = db.lock_store_device_exclusion().await;
         reject_active_operation(db).await?;
-        let authorization = Box::pin(super::device_join::load_current_device_join_authorization(
-            db, storage,
-        ))
+        let authorization = Box::pin(
+            super::store::device_join::load_current_device_join_authorization(db, storage),
+        )
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
         let durable = Box::pin(prepare_outcome(
@@ -1164,9 +1162,10 @@ async fn prepare_replacement_candidate(
         ));
     };
     let device_id = local_device_id(db).await?;
-    let authorization = super::device_join::load_current_device_join_authorization(db, storage)
-        .await
-        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+    let authorization =
+        super::store::device_join::load_current_device_join_authorization(db, storage)
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
     let plan = crate::sync::store::operations::prepare_plan(
         db,
         storage,

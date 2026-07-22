@@ -1361,7 +1361,7 @@ pub fn install_active_device_fixture<'a>(
     let future = async move {
         let authorization = Box::new(
             Box::pin(
-                crate::sync::device_join::load_current_device_join_authorization(
+                crate::sync::store::device_join::load_current_device_join_authorization(
                     observer_db,
                     &store.storage,
                 ),
@@ -1395,12 +1395,12 @@ pub fn install_active_device_fixture<'a>(
                 "local Store device is not an effective provider administrator".to_string()
             })?;
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .map_err(|error| error.to_string())?;
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 observer_db,
                 &store.storage,
                 &authorization,
@@ -1413,7 +1413,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let access_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&store.storage)
                         .await
@@ -1426,21 +1426,23 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         let approval = Box::new(
-            Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                observer_db,
-                &store.storage,
-                None,
-                None,
-                &authorization,
-                &store.signer,
-                *access_request,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::authorize_device_provider_access(
+                    observer_db,
+                    &store.storage,
+                    None,
+                    None,
+                    &authorization,
+                    &store.signer,
+                    *access_request,
+                ),
+            )
             .await
             .map_err(|error| error.to_string())?,
         );
         let registration_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_registration_request(
+                crate::sync::store::device_join::prepare_device_registration_request(
                     &pending,
                     &store.storage,
                     None,
@@ -1453,7 +1455,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let provisional = Box::new(
             Box::pin(
-                crate::sync::device_join::accept_device_registration_request(
+                crate::sync::store::device_join::accept_device_registration_request(
                     observer_db,
                     &store.storage,
                     &authorization,
@@ -1465,12 +1467,14 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         let provider_ready = Box::new(
-            Box::pin(crate::sync::device_join::publish_device_provider_challenge(
-                observer_db,
-                &store.storage,
-                None,
-                *provisional,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::publish_device_provider_challenge(
+                    observer_db,
+                    &store.storage,
+                    None,
+                    *provisional,
+                ),
+            )
             .await
             .map_err(|error| error.to_string())?,
         );
@@ -1494,7 +1498,7 @@ pub fn install_active_device_fixture<'a>(
             ));
         }
         let readiness = Box::new(
-            Box::pin(crate::sync::device_join::bootstrap_pending_device(
+            Box::pin(crate::sync::store::device_join::bootstrap_pending_device(
                 local_db,
                 &pending,
                 &store.storage,
@@ -1508,7 +1512,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let completion = Box::new(
             Box::pin(
-                crate::sync::device_join::complete_device_provider_admission(
+                crate::sync::store::device_join::complete_device_provider_admission(
                     observer_db,
                     None,
                     &store.signer,
@@ -1519,7 +1523,7 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         let activation = Box::new(
-            Box::pin(crate::sync::device_join::finalize_device_join(
+            Box::pin(crate::sync::store::device_join::finalize_device_join(
                 observer_db,
                 &store.storage,
                 &authorization,
@@ -1529,7 +1533,7 @@ pub fn install_active_device_fixture<'a>(
             .await
             .map_err(|error| error.to_string())?,
         );
-        Box::pin(crate::sync::device_join::complete_device_join(
+        Box::pin(crate::sync::store::device_join::complete_device_join(
             local_db,
             &pending,
             &store.storage,
@@ -1629,7 +1633,7 @@ pub(crate) struct TestDropboxAccessAdministrator {
 
 #[cfg(test)]
 #[async_trait::async_trait]
-impl crate::sync::device_join::DeviceProviderAccessAdministrator
+impl crate::sync::store::device_join::DeviceProviderAccessAdministrator
     for TestDropboxAccessAdministrator
 {
     async fn grant_member_access(
@@ -1639,11 +1643,11 @@ impl crate::sync::device_join::DeviceProviderAccessAdministrator
         peer: &crate::sync::storage::ProviderDeviceBinding,
     ) -> Result<
         crate::sync::provider::ProviderAccessLocator,
-        crate::sync::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         let crate::sync::storage::ProviderPrincipalId::Dropbox { account_id } = &peer.principal
         else {
-            return Err(crate::sync::device_join::DeviceJoinError::Provider(
+            return Err(crate::sync::store::device_join::DeviceJoinError::Provider(
                 "test Dropbox access administrator received a non-Dropbox peer".to_string(),
             ));
         };
@@ -1698,12 +1702,12 @@ pub fn install_cross_principal_device_fixture<'a>(
         )
         .map_err(|error| error.to_string())?;
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .map_err(|error| error.to_string())?;
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 observer_db,
                 &store.storage,
                 &authorization,
@@ -1721,7 +1725,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         );
         let access_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&peer_storage)
                         .await
@@ -1737,27 +1741,29 @@ pub fn install_cross_principal_device_fixture<'a>(
             namespace_id: namespace_id.clone(),
         };
         let approval = Box::new(
-            Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                observer_db,
-                &store.storage,
-                Some(store.home.as_ref()),
-                Some(&access_administrator),
-                &authorization,
-                &store.signer,
-                *access_request,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::authorize_device_provider_access(
+                    observer_db,
+                    &store.storage,
+                    Some(store.home.as_ref()),
+                    Some(&access_administrator),
+                    &authorization,
+                    &store.signer,
+                    *access_request,
+                ),
+            )
             .await
             .map_err(|error| error.to_string())?,
         );
         if !matches!(
             approval.admission,
-            crate::sync::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+            crate::sync::store::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal admission".into());
         }
         let registration_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_registration_request(
+                crate::sync::store::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
                     Some(peer_home.as_ref()),
@@ -1770,7 +1776,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         );
         let provisional = Box::new(
             Box::pin(
-                crate::sync::device_join::accept_device_registration_request(
+                crate::sync::store::device_join::accept_device_registration_request(
                     observer_db,
                     &store.storage,
                     &authorization,
@@ -1782,18 +1788,20 @@ pub fn install_cross_principal_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         let provider_ready = Box::new(
-            Box::pin(crate::sync::device_join::publish_device_provider_challenge(
-                observer_db,
-                &store.storage,
-                Some(store.home.as_ref()),
-                *provisional,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::publish_device_provider_challenge(
+                    observer_db,
+                    &store.storage,
+                    Some(store.home.as_ref()),
+                    *provisional,
+                ),
+            )
             .await
             .map_err(|error| error.to_string())?,
         );
         Box::pin(store.open_into(local_db)).await?;
         let readiness = Box::new(
-            Box::pin(crate::sync::device_join::bootstrap_pending_device(
+            Box::pin(crate::sync::store::device_join::bootstrap_pending_device(
                 local_db,
                 &pending,
                 &peer_storage,
@@ -1807,13 +1815,13 @@ pub fn install_cross_principal_device_fixture<'a>(
         );
         if !matches!(
             readiness.provider,
-            crate::sync::device_join::DeviceProviderReadiness::CrossPrincipal(_)
+            crate::sync::store::device_join::DeviceProviderReadiness::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal readiness".into());
         }
         let completion = Box::new(
             Box::pin(
-                crate::sync::device_join::complete_device_provider_admission(
+                crate::sync::store::device_join::complete_device_provider_admission(
                     observer_db,
                     Some(store.home.as_ref()),
                     &store.signer,
@@ -1825,12 +1833,12 @@ pub fn install_cross_principal_device_fixture<'a>(
         );
         if !matches!(
             completion.admission,
-            crate::sync::device_join::DeviceProviderAdmission::CrossPrincipal(_)
+            crate::sync::store::device_join::DeviceProviderAdmission::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal completion".into());
         }
         let activation = Box::new(
-            Box::pin(crate::sync::device_join::finalize_device_join(
+            Box::pin(crate::sync::store::device_join::finalize_device_join(
                 observer_db,
                 &store.storage,
                 &authorization,
@@ -1840,7 +1848,7 @@ pub fn install_cross_principal_device_fixture<'a>(
             .await
             .map_err(|error| error.to_string())?,
         );
-        Box::pin(crate::sync::device_join::complete_device_join(
+        Box::pin(crate::sync::store::device_join::complete_device_join(
             local_db,
             &pending,
             &peer_storage,

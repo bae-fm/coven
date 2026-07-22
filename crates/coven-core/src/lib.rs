@@ -172,7 +172,9 @@ pub use sync::circle::{
     Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationId, CircleOperationInfo,
     CircleOperationKind, CircleOperationState, CircleRole,
 };
-pub use sync::device_join::{
+pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
+pub use sync::membership::{MemberInfo, MemberRole};
+pub use sync::store::device_join::{
     abandon_device_join, accept_device_registration_request, activate_device_join_cleanup,
     authorize_device_provider_access, begin_device_join, bootstrap_pending_device,
     cancel_device_join, close_device_provider_admission, close_joining_device,
@@ -193,8 +195,6 @@ pub use sync::device_join::{
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
 };
-pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
-pub use sync::membership::{MemberInfo, MemberRole};
 
 // Sync setup / restore / join bootstrap.
 pub use join_code::{decode_invite_code_info, decode_join_request, JoinCodeError};

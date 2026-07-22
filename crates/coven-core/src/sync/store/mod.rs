@@ -14,6 +14,8 @@ use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 pub(crate) mod abandonment;
 mod acknowledgements;
 mod database;
+#[doc(hidden)]
+pub mod device_join;
 mod error;
 pub(crate) mod operations;
 mod owner;
@@ -186,8 +188,8 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
 pub(crate) fn verify_device_join_cleanup_activation<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
-    activation: &'a super::device_join::DeviceJoinCleanupActivation,
-) -> pull::StorePullFuture<'a, super::device_join::JoinerJoinTerminal> {
+    activation: &'a device_join::DeviceJoinCleanupActivation,
+) -> pull::StorePullFuture<'a, device_join::JoinerJoinTerminal> {
     Box::pin(async move {
         let evidence = pull::load_device_join_cleanup_activation(storage, root, activation).await?;
         pull::verify_device_join_cleanup_activation(storage, root, evidence).await

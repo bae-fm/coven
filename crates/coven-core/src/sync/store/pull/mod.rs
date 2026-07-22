@@ -28,6 +28,7 @@ use crate::sync::storage::{
     BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     SyncStorage,
 };
+use crate::sync::store::device_join;
 use crate::sync::store::StoreError;
 use crate::sync::store_commit::{
     head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
@@ -54,9 +55,8 @@ use crate::sync::store_objects::{
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::sync::{
-    causal_grants, circle, circle_activation, circle_ops, device_join, gate, hlc, membership,
-    membership_ops, provider, remote_object, retained_replay, session, store_commit, store_objects,
-    store_reclaim,
+    causal_grants, circle, circle_activation, circle_ops, gate, hlc, membership, membership_ops,
+    provider, remote_object, retained_replay, session, store_commit, store_objects, store_reclaim,
 };
 
 mod ancestry;

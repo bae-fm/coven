@@ -1052,7 +1052,7 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::begin_device_join(
+        Ok(crate::sync::store::device_join::begin_device_join(
             &self.db,
             storage.as_ref(),
             &authorization,
@@ -1070,7 +1070,7 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::abandon_device_join(
+        Ok(crate::sync::store::device_join::abandon_device_join(
             &self.db,
             storage.as_ref(),
             &authorization,
@@ -1089,16 +1089,18 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         let exact = self.device_join_exact_storage()?;
-        Ok(crate::sync::device_join::authorize_device_provider_access(
-            &self.db,
-            storage.as_ref(),
-            Some(exact.as_ref()),
-            access_administrator,
-            &authorization,
-            &signer,
-            request,
+        Ok(
+            crate::sync::store::device_join::authorize_device_provider_access(
+                &self.db,
+                storage.as_ref(),
+                Some(exact.as_ref()),
+                access_administrator,
+                &authorization,
+                &signer,
+                request,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn accept_device_registration_request(
@@ -1109,7 +1111,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
-            crate::sync::device_join::accept_device_registration_request(
+            crate::sync::store::device_join::accept_device_registration_request(
                 &self.db,
                 storage.as_ref(),
                 &authorization,
@@ -1126,13 +1128,15 @@ impl CovenHandle {
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
         let storage = self.device_join_storage()?;
         let exact = self.device_join_exact_storage()?;
-        Ok(crate::sync::device_join::publish_device_provider_challenge(
-            &self.db,
-            storage.as_ref(),
-            Some(exact.as_ref()),
-            bootstrap,
+        Ok(
+            crate::sync::store::device_join::publish_device_provider_challenge(
+                &self.db,
+                storage.as_ref(),
+                Some(exact.as_ref()),
+                bootstrap,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn complete_device_provider_admission(
@@ -1142,7 +1146,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let exact = self.device_join_exact_storage()?;
         Ok(
-            crate::sync::device_join::complete_device_provider_admission(
+            crate::sync::store::device_join::complete_device_provider_admission(
                 &self.db,
                 Some(exact.as_ref()),
                 &signer,
@@ -1159,7 +1163,7 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::finalize_device_join(
+        Ok(crate::sync::store::device_join::finalize_device_join(
             &self.db,
             storage.as_ref(),
             &authorization,
@@ -1176,7 +1180,7 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::cancel_device_join(
+        Ok(crate::sync::store::device_join::cancel_device_join(
             &self.db,
             storage.as_ref(),
             &authorization,
@@ -1193,14 +1197,16 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let exact = self.device_join_exact_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        Ok(crate::sync::device_join::close_device_provider_admission(
-            &self.db,
-            storage.as_ref(),
-            Some(exact.as_ref()),
-            &signer,
-            cancellation,
+        Ok(
+            crate::sync::store::device_join::close_device_provider_admission(
+                &self.db,
+                storage.as_ref(),
+                Some(exact.as_ref()),
+                &signer,
+                cancellation,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn revoke_device_provider_admission_writes(
@@ -1213,7 +1219,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
-            crate::sync::device_join::revoke_device_provider_admission_writes(
+            crate::sync::store::device_join::revoke_device_provider_admission_writes(
                 &self.db,
                 storage.as_ref(),
                 &authorization,
@@ -1235,16 +1241,18 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::revoke_joining_device_writes(
-            &self.db,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            cancellation,
-            revocation_executor,
-            executor_grant,
+        Ok(
+            crate::sync::store::device_join::revoke_joining_device_writes(
+                &self.db,
+                storage.as_ref(),
+                &authorization,
+                &signer,
+                cancellation,
+                revocation_executor,
+                executor_grant,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn cleanup_cancelled_device_join(
@@ -1257,17 +1265,19 @@ impl CovenHandle {
         let exact = self.device_join_exact_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::prepare_device_join_cleanup(
-            &self.db,
-            storage.as_ref(),
-            exact.as_ref(),
-            &authorization,
-            &signer,
-            cancellation,
-            administrator_terminal,
-            joiner_terminal,
+        Ok(
+            crate::sync::store::device_join::prepare_device_join_cleanup(
+                &self.db,
+                storage.as_ref(),
+                exact.as_ref(),
+                &authorization,
+                &signer,
+                cancellation,
+                administrator_terminal,
+                joiner_terminal,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn activate_device_join_cleanup(
@@ -1278,15 +1288,17 @@ impl CovenHandle {
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::device_join::activate_device_join_cleanup(
-            &self.db,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            attempt_id,
-            receipt,
+        Ok(
+            crate::sync::store::device_join::activate_device_join_cleanup(
+                &self.db,
+                storage.as_ref(),
+                &authorization,
+                &signer,
+                attempt_id,
+                receipt,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub async fn complete_cancelled_device_join(
@@ -1294,7 +1306,7 @@ impl CovenHandle {
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
         let attempt_id = activation.receipt.attempt_id;
-        crate::sync::device_join::complete_owner_device_join_cleanup(
+        crate::sync::store::device_join::complete_owner_device_join_cleanup(
             &self.db, attempt_id, activation,
         )
         .await?;
@@ -1307,13 +1319,15 @@ impl CovenHandle {
         role: crate::DeviceJoinRole,
     ) -> Result<Option<crate::DeviceJoinStatus>, SyncError> {
         Ok(
-            crate::sync::device_join::load_store_device_join_status(&self.db, attempt_id, role)
-                .await?,
+            crate::sync::store::device_join::load_store_device_join_status(
+                &self.db, attempt_id, role,
+            )
+            .await?,
         )
     }
 
     pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
-        Ok(crate::sync::device_join::load_store_device_join_actions(&self.db).await?)
+        Ok(crate::sync::store::device_join::load_store_device_join_actions(&self.db).await?)
     }
 
     fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
@@ -1338,8 +1352,10 @@ impl CovenHandle {
         storage: &CloudSyncStorage,
     ) -> Result<crate::sync::membership::MembershipChain, SyncError> {
         Ok(
-            crate::sync::device_join::load_current_device_join_authorization(&self.db, storage)
-                .await?,
+            crate::sync::store::device_join::load_current_device_join_authorization(
+                &self.db, storage,
+            )
+            .await?,
         )
     }
 

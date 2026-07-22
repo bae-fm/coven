@@ -6,7 +6,7 @@ pub(in crate::sync::store) fn verify_device_join_cleanup_activation<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     activation: LoadedDeviceJoinCleanupActivation,
-) -> StorePullFuture<'a, crate::sync::device_join::JoinerJoinTerminal> {
+) -> StorePullFuture<'a, crate::sync::store::device_join::JoinerJoinTerminal> {
     Box::pin(async move {
         let membership =
             load_merge_predecessor_membership(storage, root, &activation.commit.membership_state)

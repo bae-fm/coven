@@ -671,7 +671,8 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // exposed only because `generate_restore_code` takes a caller-supplied
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
-pub use coven_core::sync::device_join::{
+pub use coven_core::sync::membership::MembershipCoord;
+pub use coven_core::sync::store::device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
     DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer,
@@ -683,7 +684,6 @@ pub use coven_core::sync::device_join::{
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
 };
-pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
     Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationId, CircleOperationInfo,

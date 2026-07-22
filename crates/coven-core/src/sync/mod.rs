@@ -17,7 +17,6 @@ pub mod circle_roster;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
-pub mod device_join;
 pub mod gate;
 pub mod hlc;
 #[doc(hidden)]

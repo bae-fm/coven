@@ -511,7 +511,7 @@ impl DeviceJoinClient {
             .map_err(BootstrapError::CloudHome)?;
         let pending = self.open_pending_journal()?;
         Ok(
-            crate::sync::device_join::prepare_device_provider_access_request(
+            crate::sync::store::device_join::prepare_device_provider_access_request(
                 &pending, binding, &signer, offer,
             )
             .await?,
@@ -525,13 +525,15 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
         let join = self.build_storage(&signer).await?;
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::device_join::observe_device_join_abandonment(
-            &pending,
-            &join.storage,
-            &self.code.store_root,
-            abandonment,
+        Ok(
+            crate::sync::store::device_join::observe_device_join_abandonment(
+                &pending,
+                &join.storage,
+                &self.code.store_root,
+                abandonment,
+            )
+            .await?,
         )
-        .await?)
     }
 
     pub fn device_join_status(
@@ -539,16 +541,12 @@ impl DeviceJoinClient {
         attempt_id: crate::DeviceJoinAttemptId,
     ) -> Result<Option<crate::DeviceJoinStatus>, BootstrapError> {
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::device_join::load_pending_device_join_status(
-            &pending, attempt_id,
-        )?)
+        Ok(crate::sync::store::device_join::load_pending_device_join_status(&pending, attempt_id)?)
     }
 
     pub fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, BootstrapError> {
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::device_join::load_pending_device_join_actions(
-            &pending,
-        )?)
+        Ok(crate::sync::store::device_join::load_pending_device_join_actions(&pending)?)
     }
 
     pub async fn close_pending_device_join(
@@ -558,7 +556,7 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
         let join = self.build_storage(&signer).await?;
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::device_join::close_joining_device(
+        Ok(crate::sync::store::device_join::close_joining_device(
             &pending,
             &join.storage,
             join.exact.as_ref(),
@@ -574,7 +572,7 @@ impl DeviceJoinClient {
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), BootstrapError> {
         let pending = self.open_pending_journal()?;
-        match crate::sync::device_join::load_pending_device_join_status(
+        match crate::sync::store::device_join::load_pending_device_join_status(
             &pending,
             activation.receipt.attempt_id,
         )? {
@@ -587,7 +585,7 @@ impl DeviceJoinClient {
             _ => {
                 let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
                 let join = self.build_storage(&signer).await?;
-                crate::sync::device_join::accept_joiner_device_join_cleanup(
+                crate::sync::store::device_join::accept_joiner_device_join_cleanup(
                     &pending,
                     &join.storage,
                     &self.code.store_root,
@@ -614,7 +612,7 @@ impl DeviceJoinClient {
             });
         }
         crate::keys::discard_pending_identity(&self.member_pubkey)?;
-        crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, activation)?;
+        crate::sync::store::device_join::complete_joiner_device_join_cleanup(&pending, activation)?;
         Ok(())
     }
 
@@ -628,7 +626,7 @@ impl DeviceJoinClient {
         let join = self.build_storage(&signer).await?;
         let pending = self.open_pending_journal()?;
         Ok(
-            crate::sync::device_join::prepare_device_registration_request(
+            crate::sync::store::device_join::prepare_device_registration_request(
                 &pending,
                 &join.storage,
                 Some(join.exact.as_ref()),
@@ -644,14 +642,14 @@ impl DeviceJoinClient {
         bootstrap: crate::ProviderReadyDeviceBootstrap,
         on_status: impl Fn(&str),
         cancel: &watch::Receiver<bool>,
-    ) -> Result<crate::sync::device_join::DeviceJoinReadiness, BootstrapError> {
+    ) -> Result<crate::sync::store::device_join::DeviceJoinReadiness, BootstrapError> {
         let offer = &bootstrap.bootstrap.request.approval.request.offer;
         self.require_offer(offer)?;
         let attempt = &bootstrap.bootstrap.publication_authorization.attempt;
         let pending = self.open_pending_journal()?;
         if let Some(record) = pending.load(attempt.attempt_id, crate::DeviceJoinRole::Joiner)? {
-            if let crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
-                crate::sync::device_join::JoinerJoinProgress::Ready(readiness),
+            if let crate::sync::store::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::store::device_join::JoinerJoinProgress::Ready(readiness),
             ) = &*record.progress
             {
                 if readiness.proof.attempt != *attempt {
@@ -701,7 +699,7 @@ impl DeviceJoinClient {
             .await?;
         let published_at = self.clock.now().to_rfc3339();
         on_status("Installing device registration...");
-        let readiness = crate::sync::device_join::bootstrap_pending_device(
+        let readiness = crate::sync::store::device_join::bootstrap_pending_device(
             &db,
             &pending,
             &join.storage,
@@ -744,18 +742,22 @@ impl DeviceJoinClient {
         let pending = self.open_pending_journal()?;
         let pending_record = pending.load(attempt_id, crate::DeviceJoinRole::Joiner)?;
         let pending_readiness = match pending_record.as_ref().map(|record| &*record.progress) {
-            Some(crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
-                crate::sync::device_join::JoinerJoinProgress::Ready(_),
-            )) => Some(crate::sync::device_join::observe_device_join_activation(
-                &pending,
-                &activation,
-            )?),
-            Some(crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
-                crate::sync::device_join::JoinerJoinProgress::ActivationObserved { .. },
-            )) => Some(crate::sync::device_join::observe_device_join_activation(
-                &pending,
-                &activation,
-            )?),
+            Some(crate::sync::store::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::store::device_join::JoinerJoinProgress::Ready(_),
+            )) => Some(
+                crate::sync::store::device_join::observe_device_join_activation(
+                    &pending,
+                    &activation,
+                )?,
+            ),
+            Some(crate::sync::store::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::store::device_join::JoinerJoinProgress::ActivationObserved { .. },
+            )) => Some(
+                crate::sync::store::device_join::observe_device_join_activation(
+                    &pending,
+                    &activation,
+                )?,
+            ),
             Some(_) => return Err(crate::DeviceJoinError::JournalConflict.into()),
             None => None,
         };
@@ -791,7 +793,7 @@ impl DeviceJoinClient {
             &self.migrations,
         )
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
-        let joined = crate::sync::device_join::materialize_device_join_activation(
+        let joined = crate::sync::store::device_join::materialize_device_join_activation(
             &db,
             &join.storage,
             activation.clone(),
@@ -834,8 +836,13 @@ impl DeviceJoinClient {
             config.cloud_home.s3_exact_slots = self.custom_s3_exact_slots;
         }
         config.save_to_config_yaml()?;
-        crate::sync::device_join::complete_device_join(&db, &pending, &join.storage, activation)
-            .await?;
+        crate::sync::store::device_join::complete_device_join(
+            &db,
+            &pending,
+            &join.storage,
+            activation,
+        )
+        .await?;
         crate::keys::discard_pending_identity(&self.member_pubkey)?;
         info!(store_id = %self.code.store_id, "joined Store device");
         Ok(config)

@@ -36,8 +36,8 @@ const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WriteRevocationRequest {
-    producer: crate::sync::device_join::DeviceJoinProducer,
-    authority: crate::sync::device_join::ProviderWriteAuthorityRef,
+    producer: crate::sync::store::device_join::DeviceJoinProducer,
+    authority: crate::sync::store::device_join::ProviderWriteAuthorityRef,
     locator: crate::sync::provider::ProviderAccessLocator,
     protected_slots: Vec<crate::storage::cloud::ObjectSlot>,
 }
@@ -67,16 +67,18 @@ impl ConfirmedWriteRevocation {
 }
 
 #[async_trait::async_trait]
-impl crate::sync::device_join::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRevocation {
+impl crate::sync::store::device_join::DeviceJoinWriteRevocationExecutor
+    for ConfirmedWriteRevocation
+{
     async fn revoke_write_authority(
         &self,
-        producer: crate::sync::device_join::DeviceJoinProducer,
-        authority: &crate::sync::device_join::ProviderWriteAuthorityRef,
+        producer: crate::sync::store::device_join::DeviceJoinProducer,
+        authority: &crate::sync::store::device_join::ProviderWriteAuthorityRef,
         locator: &crate::sync::provider::ProviderAccessLocator,
         protected_slots: &[crate::storage::cloud::ObjectSlot],
     ) -> Result<
         crate::sync::provider::ProviderAccessWithdrawal,
-        crate::sync::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         self.requests
             .lock()
@@ -433,7 +435,7 @@ fn exercise_pre_attempt_abandonment<'a>(
     member: &'a UserKeypair,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
+        use crate::sync::store::device_join::{DeviceJoinRole, DeviceJoinStatus};
 
         let authorization = Box::new(
             storage
@@ -442,12 +444,12 @@ fn exercise_pre_attempt_abandonment<'a>(
                 .expect("load exact Store membership"),
         );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -465,7 +467,7 @@ fn exercise_pre_attempt_abandonment<'a>(
         );
         let _request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&storage.storage)
                         .await
@@ -478,7 +480,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             .expect("prepare exact provider access request"),
         );
         let abandonment = Box::new(
-            Box::pin(crate::sync::device_join::abandon_device_join(
+            Box::pin(crate::sync::store::device_join::abandon_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -488,7 +490,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             .await
             .expect("abandon device join before attempt activation"),
         );
-        let retried = Box::pin(crate::sync::device_join::abandon_device_join(
+        let retried = Box::pin(crate::sync::store::device_join::abandon_device_join(
             owner_db,
             &storage.storage,
             &authorization,
@@ -499,25 +501,29 @@ fn exercise_pre_attempt_abandonment<'a>(
         .expect("retry device join abandonment");
         assert_eq!(retried, *abandonment);
 
-        let observed = Box::pin(crate::sync::device_join::observe_device_join_abandonment(
-            &pending,
-            &storage.storage,
-            &storage.root,
-            (*abandonment).clone(),
-        ))
+        let observed = Box::pin(
+            crate::sync::store::device_join::observe_device_join_abandonment(
+                &pending,
+                &storage.storage,
+                &storage.root,
+                (*abandonment).clone(),
+            ),
+        )
         .await
         .expect("observe exact abandonment");
-        let observed_retry = Box::pin(crate::sync::device_join::observe_device_join_abandonment(
-            &pending,
-            &storage.storage,
-            &storage.root,
-            (*abandonment).clone(),
-        ))
+        let observed_retry = Box::pin(
+            crate::sync::store::device_join::observe_device_join_abandonment(
+                &pending,
+                &storage.storage,
+                &storage.root,
+                (*abandonment).clone(),
+            ),
+        )
         .await
         .expect("retry exact abandonment observation");
         assert_eq!(observed_retry, observed);
         assert!(matches!(
-            crate::sync::device_join::load_store_device_join_status(
+            crate::sync::store::device_join::load_store_device_join_status(
                 owner_db,
                 abandonment.abandonment.attempt_id,
                 DeviceJoinRole::Owner,
@@ -527,7 +533,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             Some(DeviceJoinStatus::Abandoned { abandonment: durable }) if durable == *abandonment
         ));
         assert!(matches!(
-            crate::sync::device_join::load_pending_device_join_status(
+            crate::sync::store::device_join::load_pending_device_join_status(
                 &pending,
                 abandonment.abandonment.attempt_id,
             )
@@ -557,7 +563,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
     interruption: ExactCreateInterruption,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use crate::sync::device_join::{DeviceJoinRole, DeviceJoinStatus};
+        use crate::sync::store::device_join::{DeviceJoinRole, DeviceJoinStatus};
 
         let authorization = Box::new(
             storage
@@ -566,12 +572,12 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 .expect("load exact Store membership"),
         );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -590,7 +596,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
         let attempt_id = offer.attempt_id;
         let request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&storage.storage)
                         .await
@@ -610,15 +616,17 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 storage.home.fail_exact_create_after_call(1)
             }
         }
-        let first = Box::pin(crate::sync::device_join::authorize_device_provider_access(
-            owner_db,
-            &storage.storage,
-            None,
-            None,
-            &authorization,
-            owner,
-            (*request).clone(),
-        ))
+        let first = Box::pin(
+            crate::sync::store::device_join::authorize_device_provider_access(
+                owner_db,
+                &storage.storage,
+                None,
+                None,
+                &authorization,
+                owner,
+                (*request).clone(),
+            ),
+        )
         .await;
         let approval = match interruption {
             ExactCreateInterruption::BeforeVisibility => {
@@ -627,7 +635,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                     "the injected create fails before visibility"
                 );
                 assert!(matches!(
-                    crate::sync::device_join::load_store_device_join_status(
+                    crate::sync::store::device_join::load_store_device_join_status(
                         owner_db,
                         attempt_id,
                         DeviceJoinRole::ProviderAdministrator,
@@ -636,15 +644,17 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                     .expect("load provider create status"),
                     Some(DeviceJoinStatus::ProviderAccessGrantCreatePending { .. })
                 ));
-                Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                    owner_db,
-                    &storage.storage,
-                    None,
-                    None,
-                    &authorization,
-                    owner,
-                    *request,
-                ))
+                Box::pin(
+                    crate::sync::store::device_join::authorize_device_provider_access(
+                        owner_db,
+                        &storage.storage,
+                        None,
+                        None,
+                        &authorization,
+                        owner,
+                        *request,
+                    ),
+                )
                 .await
                 .expect("resume provider access grant creation")
             }
@@ -652,20 +662,22 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 first.expect("lost create response settles through exact readback")
             }
         };
-        let retry = Box::pin(crate::sync::device_join::authorize_device_provider_access(
-            owner_db,
-            &storage.storage,
-            None,
-            None,
-            &authorization,
-            owner,
-            (*approval.request).clone(),
-        ))
+        let retry = Box::pin(
+            crate::sync::store::device_join::authorize_device_provider_access(
+                owner_db,
+                &storage.storage,
+                None,
+                None,
+                &authorization,
+                owner,
+                (*approval.request).clone(),
+            ),
+        )
         .await
         .expect("retry completed provider access authorization");
         assert_eq!(retry, approval);
         assert!(matches!(
-            crate::sync::device_join::load_store_device_join_status(
+            crate::sync::store::device_join::load_store_device_join_status(
                 owner_db,
                 attempt_id,
                 DeviceJoinRole::ProviderAdministrator,
@@ -685,7 +697,7 @@ fn exercise_post_attempt_cancellation<'a>(
     joiner_disposition: JoinerCancellationDisposition,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use crate::sync::device_join::{
+        use crate::sync::store::device_join::{
             DeviceJoinRole, DeviceJoinStatus, JoinerJoinTerminal, ProviderAdminJoinTerminal,
         };
 
@@ -696,12 +708,12 @@ fn exercise_post_attempt_cancellation<'a>(
                 .expect("load exact Store membership"),
         );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -719,7 +731,7 @@ fn exercise_post_attempt_cancellation<'a>(
         );
         let access_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&storage.storage)
                         .await
@@ -732,22 +744,24 @@ fn exercise_post_attempt_cancellation<'a>(
             .expect("prepare exact provider access request"),
         );
         let approval = Box::new(
-            Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                owner_db,
-                &storage.storage,
-                None,
-                None,
-                &authorization,
-                owner,
-                *access_request,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::authorize_device_provider_access(
+                    owner_db,
+                    &storage.storage,
+                    None,
+                    None,
+                    &authorization,
+                    owner,
+                    *access_request,
+                ),
+            )
             .await
             .expect("authorize exact provider access"),
         );
         let joiner_access_locator = approval.access_grant.grant.locator.clone();
         let registration_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_registration_request(
+                crate::sync::store::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
                     None,
@@ -760,7 +774,7 @@ fn exercise_post_attempt_cancellation<'a>(
         );
         let provisional = Box::new(
             Box::pin(
-                crate::sync::device_join::accept_device_registration_request(
+                crate::sync::store::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
                     &authorization,
@@ -773,7 +787,7 @@ fn exercise_post_attempt_cancellation<'a>(
         );
         let attempt_id = provisional.publication_authorization.attempt.attempt_id;
         let cancellation = Box::new(
-            Box::pin(crate::sync::device_join::cancel_device_join(
+            Box::pin(crate::sync::store::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -783,7 +797,7 @@ fn exercise_post_attempt_cancellation<'a>(
             .await
             .expect("cancel exact active join attempt"),
         );
-        let cancellation_retry = Box::pin(crate::sync::device_join::cancel_device_join(
+        let cancellation_retry = Box::pin(crate::sync::store::device_join::cancel_device_join(
             owner_db,
             &storage.storage,
             &authorization,
@@ -795,26 +809,29 @@ fn exercise_post_attempt_cancellation<'a>(
         assert_eq!(cancellation_retry, *cancellation);
 
         let administrator_terminal = Box::new(
-            Box::pin(crate::sync::device_join::close_device_provider_admission(
-                owner_db,
-                &storage.storage,
-                None,
-                owner,
-                (*cancellation).clone(),
-            ))
+            Box::pin(
+                crate::sync::store::device_join::close_device_provider_admission(
+                    owner_db,
+                    &storage.storage,
+                    None,
+                    owner,
+                    (*cancellation).clone(),
+                ),
+            )
             .await
             .expect("close exact provider admission"),
         );
-        let administrator_retry =
-            Box::pin(crate::sync::device_join::close_device_provider_admission(
+        let administrator_retry = Box::pin(
+            crate::sync::store::device_join::close_device_provider_admission(
                 owner_db,
                 &storage.storage,
                 None,
                 owner,
                 (*cancellation).clone(),
-            ))
-            .await
-            .expect("retry exact provider admission closure");
+            ),
+        )
+        .await
+        .expect("retry exact provider admission closure");
         assert_eq!(administrator_retry, *administrator_terminal);
         assert!(matches!(
             administrator_terminal.as_ref(),
@@ -824,7 +841,7 @@ fn exercise_post_attempt_cancellation<'a>(
         let joiner_revocation = ConfirmedWriteRevocation::direct(joiner_access_locator.clone());
         let joiner_terminal = Box::new(match joiner_disposition {
             JoinerCancellationDisposition::Closure => {
-                Box::pin(crate::sync::device_join::close_joining_device(
+                Box::pin(crate::sync::store::device_join::close_joining_device(
                     &pending,
                     &storage.storage,
                     storage.home.as_ref(),
@@ -835,8 +852,8 @@ fn exercise_post_attempt_cancellation<'a>(
                 .await
                 .expect("close exact joining device")
             }
-            JoinerCancellationDisposition::WriteRevocation => {
-                Box::pin(crate::sync::device_join::revoke_joining_device_writes(
+            JoinerCancellationDisposition::WriteRevocation => Box::pin(
+                crate::sync::store::device_join::revoke_joining_device_writes(
                     owner_db,
                     &storage.storage,
                     &authorization,
@@ -849,10 +866,10 @@ fn exercise_post_attempt_cancellation<'a>(
                         .founder_provider_admin
                         .grant_id
                         .clone(),
-                ))
-                .await
-                .expect("revoke absent joining-device writes")
-            }
+                ),
+            )
+            .await
+            .expect("revoke absent joining-device writes"),
         });
         if matches!(
             joiner_disposition,
@@ -868,7 +885,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 provisional.request.registration_slot.clone(),
                 first_ack.clone(),
             ];
-            if let crate::sync::device_join::DeviceProviderResponseReservation::CrossPrincipal {
+            if let crate::sync::store::device_join::DeviceProviderResponseReservation::CrossPrincipal {
                 response_slot,
             } = &provisional.request.response
             {
@@ -877,10 +894,11 @@ fn exercise_post_attempt_cancellation<'a>(
             assert_eq!(
                 joiner_revocation.requests(),
                 vec![WriteRevocationRequest {
-                    producer: crate::sync::device_join::DeviceJoinProducer::Joiner,
-                    authority: crate::sync::device_join::ProviderWriteAuthorityRef::MemberAccess(
-                        provisional.request.approval.access_grant.grant_ref.clone(),
-                    ),
+                    producer: crate::sync::store::device_join::DeviceJoinProducer::Joiner,
+                    authority:
+                        crate::sync::store::device_join::ProviderWriteAuthorityRef::MemberAccess(
+                            provisional.request.approval.access_grant.grant_ref.clone(),
+                        ),
                     locator: joiner_access_locator.clone(),
                     protected_slots: expected_slots,
                 }],
@@ -888,7 +906,7 @@ fn exercise_post_attempt_cancellation<'a>(
         }
         let joiner_retry = match joiner_disposition {
             JoinerCancellationDisposition::Closure => {
-                Box::pin(crate::sync::device_join::close_joining_device(
+                Box::pin(crate::sync::store::device_join::close_joining_device(
                     &pending,
                     &storage.storage,
                     storage.home.as_ref(),
@@ -901,20 +919,22 @@ fn exercise_post_attempt_cancellation<'a>(
             }
             JoinerCancellationDisposition::WriteRevocation => {
                 let revocation = ConfirmedWriteRevocation::direct(joiner_access_locator);
-                let terminal = Box::pin(crate::sync::device_join::revoke_joining_device_writes(
-                    owner_db,
-                    &storage.storage,
-                    &authorization,
-                    owner,
-                    (*cancellation).clone(),
-                    &revocation,
-                    storage
-                        .protocol_root
-                        .descriptor
-                        .founder_provider_admin
-                        .grant_id
-                        .clone(),
-                ))
+                let terminal = Box::pin(
+                    crate::sync::store::device_join::revoke_joining_device_writes(
+                        owner_db,
+                        &storage.storage,
+                        &authorization,
+                        owner,
+                        (*cancellation).clone(),
+                        &revocation,
+                        storage
+                            .protocol_root
+                            .descriptor
+                            .founder_provider_admin
+                            .grant_id
+                            .clone(),
+                    ),
+                )
                 .await
                 .expect("retry absent joining-device write revocation");
                 assert!(revocation.requests().is_empty());
@@ -931,18 +951,19 @@ fn exercise_post_attempt_cancellation<'a>(
             ),
         });
         assert!(
-            crate::sync::device_join::load_store_device_join_actions(owner_db)
+            crate::sync::store::device_join::load_store_device_join_actions(owner_db)
                 .await
                 .expect("enumerate terminal Store join actions")
                 .contains(
-                    &crate::sync::device_join::DeviceJoinAction::TransferProviderAdminTerminal(
+                    &crate::sync::store::device_join::DeviceJoinAction::TransferProviderAdminTerminal(
                         (*administrator_terminal).clone(),
                     ),
                 )
         );
-        let joiner_action = crate::sync::device_join::DeviceJoinAction::TransferJoinerTerminal(
-            (*joiner_terminal).clone(),
-        );
+        let joiner_action =
+            crate::sync::store::device_join::DeviceJoinAction::TransferJoinerTerminal(
+                (*joiner_terminal).clone(),
+            );
         match joiner_disposition {
             JoinerCancellationDisposition::Closure => assert_eq!(
                 pending
@@ -951,7 +972,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 vec![joiner_action],
             ),
             JoinerCancellationDisposition::WriteRevocation => assert!(
-                crate::sync::device_join::load_store_device_join_actions(owner_db)
+                crate::sync::store::device_join::load_store_device_join_actions(owner_db)
                     .await
                     .expect("enumerate replacement joiner terminal")
                     .contains(&joiner_action),
@@ -959,23 +980,25 @@ fn exercise_post_attempt_cancellation<'a>(
         }
 
         storage.home.fail_exact_create_before_call(1);
-        let interrupted_cleanup = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
-            owner_db,
-            &storage.storage,
-            storage.home.as_ref(),
-            &authorization,
-            owner,
-            (*cancellation).clone(),
-            (*administrator_terminal).clone(),
-            (*joiner_terminal).clone(),
-        ))
+        let interrupted_cleanup = Box::pin(
+            crate::sync::store::device_join::prepare_device_join_cleanup(
+                owner_db,
+                &storage.storage,
+                storage.home.as_ref(),
+                &authorization,
+                owner,
+                (*cancellation).clone(),
+                (*administrator_terminal).clone(),
+                (*joiner_terminal).clone(),
+            ),
+        )
         .await;
         assert!(
             interrupted_cleanup.is_err(),
             "the cleanup-receipt create interruption surfaces"
         );
         assert!(matches!(
-            crate::sync::device_join::load_store_device_join_status(
+            crate::sync::store::device_join::load_store_device_join_status(
                 owner_db,
                 attempt_id,
                 DeviceJoinRole::Owner,
@@ -985,77 +1008,86 @@ fn exercise_post_attempt_cancellation<'a>(
             Some(DeviceJoinStatus::CleanupReceiptCreatePending { .. })
         ));
         let receipt = Box::new(
-            Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
+            Box::pin(
+                crate::sync::store::device_join::prepare_device_join_cleanup(
+                    owner_db,
+                    &storage.storage,
+                    storage.home.as_ref(),
+                    &authorization,
+                    owner,
+                    (*cancellation).clone(),
+                    (*administrator_terminal).clone(),
+                    (*joiner_terminal).clone(),
+                ),
+            )
+            .await
+            .expect("resume exact cleanup receipt"),
+        );
+        let receipt_retry = Box::pin(
+            crate::sync::store::device_join::prepare_device_join_cleanup(
                 owner_db,
                 &storage.storage,
                 storage.home.as_ref(),
                 &authorization,
                 owner,
                 (*cancellation).clone(),
-                (*administrator_terminal).clone(),
-                (*joiner_terminal).clone(),
-            ))
-            .await
-            .expect("resume exact cleanup receipt"),
-        );
-        let receipt_retry = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
-            owner_db,
-            &storage.storage,
-            storage.home.as_ref(),
-            &authorization,
-            owner,
-            (*cancellation).clone(),
-            *administrator_terminal,
-            *joiner_terminal,
-        ))
+                *administrator_terminal,
+                *joiner_terminal,
+            ),
+        )
         .await
         .expect("retry exact cleanup receipt");
         assert_eq!(receipt_retry, *receipt);
 
         let activation = Box::new(
-            Box::pin(crate::sync::device_join::activate_device_join_cleanup(
+            Box::pin(
+                crate::sync::store::device_join::activate_device_join_cleanup(
+                    owner_db,
+                    &storage.storage,
+                    &authorization,
+                    owner,
+                    attempt_id,
+                    (*receipt).clone(),
+                ),
+            )
+            .await
+            .expect("activate exact cleanup receipt"),
+        );
+        let activation_retry = Box::pin(
+            crate::sync::store::device_join::activate_device_join_cleanup(
                 owner_db,
                 &storage.storage,
                 &authorization,
                 owner,
                 attempt_id,
-                (*receipt).clone(),
-            ))
-            .await
-            .expect("activate exact cleanup receipt"),
-        );
-        let activation_retry = Box::pin(crate::sync::device_join::activate_device_join_cleanup(
-            owner_db,
-            &storage.storage,
-            &authorization,
-            owner,
-            attempt_id,
-            *receipt,
-        ))
+                *receipt,
+            ),
+        )
         .await
         .expect("retry exact cleanup activation");
         assert_eq!(activation_retry, *activation);
 
-        let owner_complete = crate::sync::device_join::complete_owner_device_join_cleanup(
+        let owner_complete = crate::sync::store::device_join::complete_owner_device_join_cleanup(
             owner_db,
             attempt_id,
             (*activation).clone(),
         )
         .await
         .expect("complete exact owner cleanup");
-        let owner_complete_retry = crate::sync::device_join::complete_owner_device_join_cleanup(
-            owner_db,
-            attempt_id,
-            (*activation).clone(),
-        )
-        .await
-        .expect("retry exact owner cleanup completion");
+        let owner_complete_retry =
+            crate::sync::store::device_join::complete_owner_device_join_cleanup(
+                owner_db,
+                attempt_id,
+                (*activation).clone(),
+            )
+            .await
+            .expect("retry exact owner cleanup completion");
         assert_eq!(owner_complete_retry, owner_complete);
         let mut forged_activation = (*activation).clone();
         forged_activation.activation.commit_hash =
             crate::sync::store_commit::ObjectHash::digest(b"forged cleanup activation");
         assert!(
-            crate::sync::device_join::accept_joiner_device_join_cleanup(
+            crate::sync::store::device_join::accept_joiner_device_join_cleanup(
                 &pending,
                 &storage.storage,
                 &storage.root,
@@ -1065,7 +1097,7 @@ fn exercise_post_attempt_cancellation<'a>(
             .is_err(),
             "joiner cleanup must reject an activation whose exact Store commit was not verified",
         );
-        crate::sync::device_join::accept_joiner_device_join_cleanup(
+        crate::sync::store::device_join::accept_joiner_device_join_cleanup(
             &pending,
             &storage.storage,
             &storage.root,
@@ -1073,17 +1105,20 @@ fn exercise_post_attempt_cancellation<'a>(
         )
         .await
         .expect("accept exact joiner cleanup activation");
-        let joiner_complete = crate::sync::device_join::complete_joiner_device_join_cleanup(
+        let joiner_complete = crate::sync::store::device_join::complete_joiner_device_join_cleanup(
             &pending,
             (*activation).clone(),
         )
         .expect("complete exact joiner cleanup");
         let joiner_complete_retry =
-            crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, *activation)
-                .expect("retry exact joiner cleanup completion");
+            crate::sync::store::device_join::complete_joiner_device_join_cleanup(
+                &pending,
+                *activation,
+            )
+            .expect("retry exact joiner cleanup completion");
         assert_eq!(joiner_complete_retry, joiner_complete);
         assert!(matches!(
-            crate::sync::device_join::load_store_device_join_status(
+            crate::sync::store::device_join::load_store_device_join_status(
                 owner_db,
                 attempt_id,
                 DeviceJoinRole::Owner,
@@ -1093,7 +1128,7 @@ fn exercise_post_attempt_cancellation<'a>(
             Some(DeviceJoinStatus::CleanupActivated { .. })
         ));
         assert!(matches!(
-            crate::sync::device_join::load_pending_device_join_status(&pending, attempt_id)
+            crate::sync::store::device_join::load_pending_device_join_status(&pending, attempt_id)
                 .expect("load joiner cancellation status"),
             Some(DeviceJoinStatus::CleanupActivated { .. })
         ));
@@ -1107,10 +1142,10 @@ fn exercise_missing_provider_administrator<'a>(
     member: &'a UserKeypair,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use crate::sync::device_join::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
         use crate::sync::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
         };
+        use crate::sync::store::device_join::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
 
         let authorization = Box::new(
             storage
@@ -1144,12 +1179,12 @@ fn exercise_missing_provider_administrator<'a>(
         )
         .expect("create peer exact storage");
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -1168,7 +1203,7 @@ fn exercise_missing_provider_administrator<'a>(
         let provider_locator = offer.provider_admin.access.clone();
         let request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&peer_storage)
                         .await
@@ -1184,21 +1219,23 @@ fn exercise_missing_provider_administrator<'a>(
             namespace_id: namespace_id.clone(),
         };
         let approval = Box::new(
-            Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                owner_db,
-                &storage.storage,
-                Some(storage.home.as_ref()),
-                Some(&access_administrator),
-                &authorization,
-                owner,
-                *request,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::authorize_device_provider_access(
+                    owner_db,
+                    &storage.storage,
+                    Some(storage.home.as_ref()),
+                    Some(&access_administrator),
+                    &authorization,
+                    owner,
+                    *request,
+                ),
+            )
             .await
             .expect("authorize cross-principal provider access"),
         );
         let registration_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_registration_request(
+                crate::sync::store::device_join::prepare_device_registration_request(
                     &pending,
                     &peer_storage,
                     Some(peer_home.as_ref()),
@@ -1211,7 +1248,7 @@ fn exercise_missing_provider_administrator<'a>(
         );
         let provisional = Box::new(
             Box::pin(
-                crate::sync::device_join::accept_device_registration_request(
+                crate::sync::store::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
                     &authorization,
@@ -1224,7 +1261,7 @@ fn exercise_missing_provider_administrator<'a>(
         );
         let attempt_id = provisional.publication_authorization.attempt.attempt_id;
         let cancellation = Box::new(
-            Box::pin(crate::sync::device_join::cancel_device_join(
+            Box::pin(crate::sync::store::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -1249,7 +1286,7 @@ fn exercise_missing_provider_administrator<'a>(
         let revocation = ConfirmedWriteRevocation::direct(provider_locator.clone());
         let administrator_terminal = Box::new(
             Box::pin(
-                crate::sync::device_join::revoke_device_provider_admission_writes(
+                crate::sync::store::device_join::revoke_device_provider_admission_writes(
                     owner_db,
                     &storage.storage,
                     &authorization,
@@ -1267,17 +1304,18 @@ fn exercise_missing_provider_administrator<'a>(
             .await
             .expect("revoke absent provider-administrator writes"),
         );
-        let crate::sync::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
-            &provisional.request.approval.admission
+        let crate::sync::store::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(
+            challenge,
+        ) = &provisional.request.approval.admission
         else {
             panic!("missing-provider test did not create a cross-principal challenge");
         };
         assert_eq!(
             revocation.requests(),
             vec![WriteRevocationRequest {
-                producer: crate::sync::device_join::DeviceJoinProducer::ProviderAdministrator,
+                producer: crate::sync::store::device_join::DeviceJoinProducer::ProviderAdministrator,
                 authority:
-                    crate::sync::device_join::ProviderWriteAuthorityRef::ProviderAdministrator(
+                    crate::sync::store::device_join::ProviderWriteAuthorityRef::ProviderAdministrator(
                         provisional
                             .request
                             .approval
@@ -1293,7 +1331,7 @@ fn exercise_missing_provider_administrator<'a>(
         );
         let retry_revocation = ConfirmedWriteRevocation::direct(provider_locator);
         let administrator_retry = Box::pin(
-            crate::sync::device_join::revoke_device_provider_admission_writes(
+            crate::sync::store::device_join::revoke_device_provider_admission_writes(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -1317,7 +1355,7 @@ fn exercise_missing_provider_administrator<'a>(
             ProviderAdminJoinTerminal::WriteRevoked(_)
         ));
         let joiner_terminal = Box::new(
-            Box::pin(crate::sync::device_join::close_joining_device(
+            Box::pin(crate::sync::store::device_join::close_joining_device(
                 &pending,
                 &storage.storage,
                 peer_home.as_ref(),
@@ -1333,39 +1371,43 @@ fn exercise_missing_provider_administrator<'a>(
             JoinerJoinTerminal::Cancelled(_)
         ));
         let receipt = Box::new(
-            Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
-                owner_db,
-                &storage.storage,
-                storage.home.as_ref(),
-                &authorization,
-                owner,
-                (*cancellation).clone(),
-                *administrator_terminal,
-                *joiner_terminal,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::prepare_device_join_cleanup(
+                    owner_db,
+                    &storage.storage,
+                    storage.home.as_ref(),
+                    &authorization,
+                    owner,
+                    (*cancellation).clone(),
+                    *administrator_terminal,
+                    *joiner_terminal,
+                ),
+            )
             .await
             .expect("prepare cleanup with revoked provider administrator"),
         );
         let activation = Box::new(
-            Box::pin(crate::sync::device_join::activate_device_join_cleanup(
-                owner_db,
-                &storage.storage,
-                &authorization,
-                owner,
-                attempt_id,
-                *receipt,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::activate_device_join_cleanup(
+                    owner_db,
+                    &storage.storage,
+                    &authorization,
+                    owner,
+                    attempt_id,
+                    *receipt,
+                ),
+            )
             .await
             .expect("activate cleanup with revoked provider administrator"),
         );
-        crate::sync::device_join::complete_owner_device_join_cleanup(
+        crate::sync::store::device_join::complete_owner_device_join_cleanup(
             owner_db,
             attempt_id,
             (*activation).clone(),
         )
         .await
         .expect("complete owner cleanup");
-        crate::sync::device_join::accept_joiner_device_join_cleanup(
+        crate::sync::store::device_join::accept_joiner_device_join_cleanup(
             &pending,
             &storage.storage,
             &storage.root,
@@ -1373,7 +1415,7 @@ fn exercise_missing_provider_administrator<'a>(
         )
         .await
         .expect("accept exact joiner cleanup activation");
-        crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, *activation)
+        crate::sync::store::device_join::complete_joiner_device_join_cleanup(&pending, *activation)
             .expect("complete joiner cleanup");
     })
 }
@@ -1392,12 +1434,12 @@ fn exercise_cancellation_against_inflight_registration<'a>(
                 .expect("load exact Store membership"),
         );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
         let offer = Box::new(
-            Box::pin(crate::sync::device_join::begin_device_join(
+            Box::pin(crate::sync::store::device_join::begin_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -1415,7 +1457,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
         );
         let access_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_provider_access_request(
+                crate::sync::store::device_join::prepare_device_provider_access_request(
                     &pending,
                     crate::sync::storage::SyncStorage::provider_binding(&storage.storage)
                         .await
@@ -1428,21 +1470,23 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .expect("prepare exact provider access request"),
         );
         let approval = Box::new(
-            Box::pin(crate::sync::device_join::authorize_device_provider_access(
-                owner_db,
-                &storage.storage,
-                None,
-                None,
-                &authorization,
-                owner,
-                *access_request,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::authorize_device_provider_access(
+                    owner_db,
+                    &storage.storage,
+                    None,
+                    None,
+                    &authorization,
+                    owner,
+                    *access_request,
+                ),
+            )
             .await
             .expect("authorize exact provider access"),
         );
         let registration_request = Box::new(
             Box::pin(
-                crate::sync::device_join::prepare_device_registration_request(
+                crate::sync::store::device_join::prepare_device_registration_request(
                     &pending,
                     &storage.storage,
                     None,
@@ -1455,7 +1499,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
         );
         let provisional = Box::new(
             Box::pin(
-                crate::sync::device_join::accept_device_registration_request(
+                crate::sync::store::device_join::accept_device_registration_request(
                     owner_db,
                     &storage.storage,
                     &authorization,
@@ -1467,12 +1511,14 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .expect("activate exact join attempt"),
         );
         let provider_ready = Box::new(
-            Box::pin(crate::sync::device_join::publish_device_provider_challenge(
-                owner_db,
-                &storage.storage,
-                None,
-                (*provisional).clone(),
-            ))
+            Box::pin(
+                crate::sync::store::device_join::publish_device_provider_challenge(
+                    owner_db,
+                    &storage.storage,
+                    None,
+                    (*provisional).clone(),
+                ),
+            )
             .await
             .expect("publish same-principal provider readiness"),
         );
@@ -1483,7 +1529,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .expect("open exact Store for joining device");
         let (registration_visible, release_registration_create) =
             storage.home.pause_after_exact_create_call(1);
-        let mut bootstrap = Box::pin(crate::sync::device_join::bootstrap_pending_device(
+        let mut bootstrap = Box::pin(crate::sync::store::device_join::bootstrap_pending_device(
             &joining_db,
             &pending,
             &storage.storage,
@@ -1499,7 +1545,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             ),
         }
         let cancellation = Box::new(
-            Box::pin(crate::sync::device_join::cancel_device_join(
+            Box::pin(crate::sync::store::device_join::cancel_device_join(
                 owner_db,
                 &storage.storage,
                 &authorization,
@@ -1510,18 +1556,20 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .expect("cancel while registration create is in flight"),
         );
         let administrator = Box::new(
-            Box::pin(crate::sync::device_join::close_device_provider_admission(
-                owner_db,
-                &storage.storage,
-                None,
-                owner,
-                (*cancellation).clone(),
-            ))
+            Box::pin(
+                crate::sync::store::device_join::close_device_provider_admission(
+                    owner_db,
+                    &storage.storage,
+                    None,
+                    owner,
+                    (*cancellation).clone(),
+                ),
+            )
             .await
             .expect("close provider admission during late create"),
         );
         let joiner = Box::new(
-            Box::pin(crate::sync::device_join::close_joining_device(
+            Box::pin(crate::sync::store::device_join::close_joining_device(
                 &pending,
                 &storage.storage,
                 storage.home.as_ref(),
@@ -1539,27 +1587,31 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             "a registration deleted by cancellation cannot complete bootstrap"
         );
         let receipt = Box::new(
-            Box::pin(crate::sync::device_join::prepare_device_join_cleanup(
-                owner_db,
-                &storage.storage,
-                storage.home.as_ref(),
-                &authorization,
-                owner,
-                *cancellation,
-                *administrator,
-                *joiner,
-            ))
+            Box::pin(
+                crate::sync::store::device_join::prepare_device_join_cleanup(
+                    owner_db,
+                    &storage.storage,
+                    storage.home.as_ref(),
+                    &authorization,
+                    owner,
+                    *cancellation,
+                    *administrator,
+                    *joiner,
+                ),
+            )
             .await
             .expect("prepare cleanup after in-flight registration"),
         );
-        Box::pin(crate::sync::device_join::activate_device_join_cleanup(
-            owner_db,
-            &storage.storage,
-            &authorization,
-            owner,
-            provisional.publication_authorization.attempt.attempt_id,
-            *receipt,
-        ))
+        Box::pin(
+            crate::sync::store::device_join::activate_device_join_cleanup(
+                owner_db,
+                &storage.storage,
+                &authorization,
+                owner,
+                provisional.publication_authorization.attempt.attempt_id,
+                *receipt,
+            ),
+        )
         .await
         .expect("activate cleanup after in-flight registration");
     })
@@ -5746,9 +5798,9 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
 
 struct SamePrincipalApprovalFixture {
     _pending_dir: tempfile::TempDir,
-    pending: crate::sync::device_join::DeviceJoinJournalDatabase,
+    pending: crate::sync::store::device_join::DeviceJoinJournalDatabase,
     authorization: crate::sync::membership::MembershipChain,
-    approval: crate::sync::device_join::DeviceProviderAdmissionApproval,
+    approval: crate::sync::store::device_join::DeviceProviderAdmissionApproval,
 }
 
 async fn prepare_same_principal_approval_fixture(
@@ -5778,11 +5830,11 @@ async fn prepare_same_principal_approval_fixture(
         .await
         .expect("load exact Store membership");
     let pending_dir = tempfile::tempdir().expect("create join directory");
-    let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+    let pending = crate::sync::store::device_join::DeviceJoinJournalDatabase::open(
         pending_dir.path().join("pending.sqlite"),
     )
     .expect("open join journal");
-    let offer = crate::sync::device_join::begin_device_join(
+    let offer = crate::sync::store::device_join::begin_device_join(
         owner_db,
         &storage.storage,
         &authorization,
@@ -5797,7 +5849,7 @@ async fn prepare_same_principal_approval_fixture(
     )
     .await
     .expect("begin exact device join");
-    let access_request = crate::sync::device_join::prepare_device_provider_access_request(
+    let access_request = crate::sync::store::device_join::prepare_device_provider_access_request(
         &pending,
         SyncStorage::provider_binding(&storage.storage)
             .await
@@ -5807,7 +5859,7 @@ async fn prepare_same_principal_approval_fixture(
     )
     .await
     .expect("prepare exact provider request");
-    let approval = crate::sync::device_join::authorize_device_provider_access(
+    let approval = crate::sync::store::device_join::authorize_device_provider_access(
         owner_db,
         &storage.storage,
         None,
@@ -5840,15 +5892,16 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
         "first-join-member",
     )
     .await;
-    let first_registration_request = crate::sync::device_join::prepare_device_registration_request(
-        &first.pending,
-        &storage.storage,
-        None,
-        &member,
-        first.approval,
-    )
-    .await
-    .expect("prepare first registration request");
+    let first_registration_request =
+        crate::sync::store::device_join::prepare_device_registration_request(
+            &first.pending,
+            &storage.storage,
+            None,
+            &member,
+            first.approval,
+        )
+        .await
+        .expect("prepare first registration request");
 
     let second_member = UserKeypair::generate();
     let second = prepare_same_principal_approval_fixture(
@@ -5860,7 +5913,7 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
     )
     .await;
 
-    crate::sync::device_join::accept_device_registration_request(
+    crate::sync::store::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
         &second.authorization,
@@ -5885,7 +5938,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         "invalid-embedded-approval",
     )
     .await;
-    let request = crate::sync::device_join::prepare_device_registration_request(
+    let request = crate::sync::store::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
         None,
@@ -5983,7 +6036,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
         "invalid-access-activation",
     )
     .await;
-    let valid_request = crate::sync::device_join::prepare_device_registration_request(
+    let valid_request = crate::sync::store::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
         None,
@@ -5996,7 +6049,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
     invalid_access.activation.commit_hash =
         crate::sync::store_commit::ObjectHash::digest(b"absent provider-access activation");
     let malformed_approval =
-        crate::sync::device_join::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
+        crate::sync::store::device_join::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
             valid_request.approval.request.as_ref().clone(),
             invalid_access,
             valid_request.approval.admission.clone(),
@@ -6006,7 +6059,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
                 .expect("load exact founder authority")
                 .2,
         );
-    let malformed_request = crate::sync::device_join::DeviceRegistrationRequest::signed(
+    let malformed_request = crate::sync::store::device_join::DeviceRegistrationRequest::signed(
         malformed_approval,
         valid_request.expected_registration.clone(),
         valid_request.registration_slot.clone(),
@@ -6014,7 +6067,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
         &member,
     )
     .expect("joiner signs malformed remote request fixture");
-    crate::sync::device_join::accept_device_registration_request(
+    crate::sync::store::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
         &fixture.authorization,
@@ -6023,7 +6076,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
     )
     .await
     .expect_err("Owner rejects the absent exact provider-access activation");
-    crate::sync::device_join::accept_device_registration_request(
+    crate::sync::store::device_join::accept_device_registration_request(
         &owner_db,
         &storage.storage,
         &fixture.authorization,
@@ -6146,7 +6199,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             result => panic!("unexpected exclusion outcome result: {result:?}"),
         }
 
-        crate::sync::device_join::prepare_device_registration_request(
+        crate::sync::store::device_join::prepare_device_registration_request(
             &approval.pending,
             &storage.storage,
             None,
@@ -6188,7 +6241,7 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
         .await
         .expect("remove the commit body behind its authenticated head");
 
-    crate::sync::device_join::prepare_device_registration_request(
+    crate::sync::store::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
         None,
@@ -6249,7 +6302,7 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .create_protocol_object(&garbage)
         .await
         .expect("publish unauthenticated next-head bytes");
-    crate::sync::device_join::prepare_device_registration_request(
+    crate::sync::store::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
         None,
@@ -6345,7 +6398,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .await
         .expect("publish authenticated malformed head");
 
-    crate::sync::device_join::prepare_device_registration_request(
+    crate::sync::store::device_join::prepare_device_registration_request(
         &fixture.pending,
         &storage.storage,
         None,
