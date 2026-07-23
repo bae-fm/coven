@@ -53,6 +53,9 @@ pub(super) fn verify_prepared_objects_are_signed(
             .iter()
             .map(|head| head.object.clone()),
     );
+    if let Some(intent) = &objects.close_intent {
+        signed.insert(intent.object.clone());
+    }
     for access in &objects.access {
         signed.insert(access.leaf.object.clone());
         signed.insert(access.envelope.object.clone());
@@ -253,7 +256,7 @@ pub(super) async fn prepare_circle_activation_objects(
     ) {
         Vec::new()
     } else {
-        draft.control.value.value.active_epoch.roster.heads.clone()
+        draft.control.value.access_epoch().roster.heads.clone()
     };
     let roster_resolutions =
         previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_resolutions.clone());
@@ -479,7 +482,7 @@ pub(super) async fn prepare_circle_activation_objects(
         };
         let (metadata_state, metadata_head) = if draft.policy.metadata_successor {
             let selects_authored_metadata =
-                draft.control.value.value.active_epoch.metadata.selected == draft.metadata.coord();
+                draft.control.value.access_epoch().metadata.selected == draft.metadata.coord();
             draft.metadata.author_roster = roster_state.clone();
             let prior_metadata = metadata_heads
                 .iter()
@@ -650,7 +653,8 @@ pub(super) async fn prepare_circle_activation_objects(
                     .control
                     .value
                     .value
-                    .active_epoch
+                    .state
+                    .access_epoch()
                     .metadata
                     .heads
                     .is_empty()
@@ -661,7 +665,8 @@ pub(super) async fn prepare_circle_activation_objects(
                     .control
                     .value
                     .value
-                    .active_epoch
+                    .state
+                    .access_epoch()
                     .metadata
                     .selected
                     .clone()
@@ -673,13 +678,13 @@ pub(super) async fn prepare_circle_activation_objects(
                     state_hash: if selected == draft.metadata.coord() {
                         draft.metadata.metadata_hash()
                     } else {
-                        draft.control.value.value.active_epoch.metadata.state_hash
+                        draft.control.value.access_epoch().metadata.state_hash
                     },
                 },
                 Some(metadata_head),
             )
         } else {
-            let metadata_state = draft.control.value.value.active_epoch.metadata.clone();
+            let metadata_state = draft.control.value.access_epoch().metadata.clone();
             if !draft.metadata.verify()
                 || metadata_state.selected != draft.metadata.coord()
                 || !metadata_entries.contains_key(&metadata_state.selected)
@@ -734,7 +739,8 @@ pub(super) async fn prepare_circle_activation_objects(
             .control
             .value
             .value
-            .active_epoch
+            .state
+            .access_epoch()
             .covered_control_heads
             .clone();
         if let Some(previous) = previous_control {
@@ -805,10 +811,11 @@ pub(super) async fn prepare_circle_activation_objects(
 
         let crate::sync::circle::CircleControlValue {
             order,
-            active_epoch,
+            state,
             author_authority,
             membership_authority: _,
         } = &mut draft.control.value.value;
+        let access_epoch = state.access_epoch_mut();
         order.device_id = author_registration.device_id.to_string();
         order.stream_id = control_stream;
         order.author_owner_grant = owner_grant.clone();
@@ -819,10 +826,10 @@ pub(super) async fn prepare_circle_activation_objects(
             .filter(|head| head.coord.stream_key().stream_id != control_stream)
             .map(|head| head.coord.clone())
             .collect();
-        active_epoch.roster = roster_state.clone();
-        active_epoch.metadata = metadata_state;
-        active_epoch.common.access_root = access_root;
-        active_epoch.covered_control_heads = control_frontier;
+        access_epoch.roster = roster_state.clone();
+        access_epoch.metadata = metadata_state;
+        access_epoch.common.access_root = access_root;
+        access_epoch.covered_control_heads = control_frontier;
         if let (
             Some((true, _, entry, _, _)),
             crate::sync::circle::MergeCircleOwnerAuthorityRef::Roster {
@@ -1017,6 +1024,10 @@ pub(super) async fn prepare_circle_activation_objects(
         .get("control-head")
         .map(|object| object.reference().clone());
     stream_activations.sort();
+    let close_intent = match draft.control.value.state() {
+        crate::sync::circle::CircleControlState::ActiveEpoch(_) => None,
+        crate::sync::circle::CircleControlState::EpochClose(close) => Some(close.intent.clone()),
+    };
     let transition = PreparedCircleTransition {
         circle_id: draft.circle_id,
         epoch_id: draft.epoch_id,
@@ -1024,6 +1035,7 @@ pub(super) async fn prepare_circle_activation_objects(
         roster: draft.roster,
         policy_objects,
         metadata: draft.metadata,
+        close_intent: draft.close_intent,
         access: draft.access,
         control: draft.control,
     };
@@ -1031,6 +1043,7 @@ pub(super) async fn prepare_circle_activation_objects(
         transition,
         CircleActivationObjects {
             control,
+            close_intent,
             roster_entries,
             roster_heads,
             roster_resolutions,
@@ -1151,7 +1164,7 @@ pub(super) async fn prepare_circle_operation_request(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-        let (creation, bootstrap_prepared) = match &request {
+        let (creation, additional_prepared) = match &request {
             CircleOperationRequest::Create {
                 name,
                 metadata_stamp,
@@ -1168,7 +1181,7 @@ pub(super) async fn prepare_circle_operation_request(
                     db.id_provider(),
                     signer,
                 )?,
-                None,
+                Vec::new(),
             ),
             CircleOperationRequest::Rename(request) => {
                 if request.circle_id != request.current.control.value.circle_id {
@@ -1200,7 +1213,7 @@ pub(super) async fn prepare_circle_operation_request(
                         db.id_provider(),
                         signer,
                     )?,
-                    None,
+                    Vec::new(),
                 )
             }
             CircleOperationRequest::AddMember(request) => {
@@ -1310,7 +1323,186 @@ pub(super) async fn prepare_circle_operation_request(
                         db.id_provider(),
                         signer,
                     )?,
-                    Some(bootstrap_prepared),
+                    vec![("bootstrap-image".to_string(), bootstrap_prepared)],
+                )
+            }
+            CircleOperationRequest::RemoveMember(request) => {
+                if request.circle_id != request.current.control.value.circle_id
+                    || request
+                        .roster_chain
+                        .try_resolved()
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                        != request.current.roster
+                {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle member-removal request differs from its current state".to_string(),
+                    ));
+                }
+                let keyring = match &request.current.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle member removal requires active local access".to_string(),
+                        ));
+                    }
+                };
+                let owner_grant = request
+                    .current
+                    .roster
+                    .active_grants()
+                    .find(|(_, record)| {
+                        record.member_pubkey == author_pubkey
+                            && record.role == crate::sync::circle::CircleRole::Owner
+                    })
+                    .map(|(grant, _)| grant)
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle member-removal author is not an active Owner".to_string(),
+                        )
+                    })?;
+                let roster_stream = StreamActivation::grant_authorized_stream_id(
+                    store_root_hash,
+                    &author_registration,
+                    owner_grant,
+                    StreamAnchorDomain::CircleRoster {
+                        circle_id: request.circle_id,
+                    },
+                );
+                let removal = request
+                    .roster_chain
+                    .signed_remove_member(
+                        &circle_device_id,
+                        roster_stream,
+                        request.member_pubkey.clone(),
+                        signer,
+                    )
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                let remaining_roster = request
+                    .roster_chain
+                    .resolved_with_successor(removal.clone())
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                let remaining_members = remaining_roster.members();
+                let close_id =
+                    crate::sync::circle::CircleEpochCloseId::from_operation_id(&operation_id);
+                let intent = crate::sync::circle::CircleEpochCloseIntent::signed(
+                    store_root_hash,
+                    request.circle_id,
+                    close_id,
+                    request.current.control.value.epoch_id(),
+                    request.current.control.value.roster_state_ref(),
+                    removal,
+                    remaining_roster.state_hash(),
+                    signer,
+                )?;
+                let intent_hash = intent.intent_hash();
+                let intent_prefix = crate::sync::circle::circle_epoch_close_intent_semantic_prefix(
+                    request.circle_id,
+                    close_id,
+                    intent_hash,
+                );
+                let intent_encryption = EncryptionService::from(
+                    MasterKeyring::from_serialized(keyring).map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse Circle epoch-close keyring: {error}"
+                        ))
+                    })?,
+                );
+                let intent_context = ProtocolObjectContext::circle(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseIntent,
+                    intent_encryption,
+                );
+                let intent_prepared = prepare_circle_object(
+                    storage,
+                    &intent_context,
+                    &intent_prefix,
+                    ".json",
+                    serde_json::to_vec(&intent)
+                        .expect("Circle epoch-close intent serialization cannot fail"),
+                )
+                .await?;
+                let intent_ref = crate::sync::circle::CircleEpochCloseIntentRef::from_intent(
+                    &intent,
+                    intent_prepared.reference().clone(),
+                )?;
+                let outcome_prefix =
+                    crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                        request.circle_id,
+                        close_id,
+                    );
+                let close_outcome_context = ProtocolObjectContext::store_encrypted(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseOutcome,
+                );
+                let outcome_slot = storage
+                    .allocate_protocol_slot(&close_outcome_context, &outcome_prefix, ".json")
+                    .await
+                    .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+                let mut participants = Vec::new();
+                for record in resolved_devices.devices.values() {
+                    if !matches!(
+                        record.status,
+                        crate::sync::store_commit::StoreDeviceStatus::Active
+                    ) {
+                        continue;
+                    }
+                    let registration = database
+                        .activated_store_device_registration(record.registration.clone())
+                        .await?;
+                    if !remaining_members.contains_key(&registration.author_pubkey) {
+                        continue;
+                    }
+                    let response_prefix =
+                        crate::sync::circle::circle_epoch_close_response_semantic_prefix(
+                            request.circle_id,
+                            close_id,
+                            record.registration.device_id,
+                        );
+                    let response_context = ProtocolObjectContext::store_encrypted(
+                        store_root_hash,
+                        ProtocolObjectDomain::CircleEpochCloseResponse,
+                    );
+                    let response_slot = storage
+                        .allocate_protocol_slot(&response_context, &response_prefix, ".json")
+                        .await
+                        .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+                    participants.push(crate::sync::circle::CircleEpochCloseParticipant {
+                        registration: record.registration.clone(),
+                        response_slot,
+                    });
+                }
+                participants.sort_by_key(|participant| participant.registration.device_id);
+                if participants.is_empty() {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle epoch close has no remaining active device".to_string(),
+                    ));
+                }
+                let provisional_frontier = order
+                    .predecessor_cut()
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                    .frontier();
+                (
+                    CircleTransitionDraft::close_epoch(
+                        candidate_family,
+                        &circle_device_id,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.current.control,
+                        &request.current.roster,
+                        &request.current.metadata,
+                        keyring,
+                        close_id,
+                        intent,
+                        intent_ref,
+                        device_state.clone(),
+                        participants,
+                        provisional_frontier,
+                        outcome_slot,
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    vec![("epoch-close-intent".to_string(), intent_prepared)],
                 )
             }
         };
@@ -1327,8 +1519,12 @@ pub(super) async fn prepare_circle_operation_request(
                 &device_signer,
             ))
             .await?;
-        if let Some(bootstrap) = bootstrap_prepared {
-            prepared_objects.insert("bootstrap-image".to_string(), bootstrap);
+        for (step, object) in additional_prepared {
+            if prepared_objects.insert(step.clone(), object).is_some() {
+                return Err(CircleOperationError::InvalidState(format!(
+                    "Circle preparation repeats upload step {step}"
+                )));
+            }
         }
         let circle_reference = creation.control_ref(objects, control_head_object);
         let commit = signed_circle_commit(

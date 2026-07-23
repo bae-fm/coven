@@ -430,7 +430,7 @@ pub(crate) enum CircleInactiveAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) struct CircleActiveState {
+pub(crate) struct CircleAccessibleState {
     pub(super) current: CircleCurrentControl,
     candidate_family: CandidateFamilyId,
     access: CircleAccessLeaf,
@@ -448,7 +448,8 @@ pub(crate) struct CircleInactiveState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CircleCurrentState {
-    Active(Box<CircleActiveState>),
+    Active(Box<CircleAccessibleState>),
+    Closing(Box<CircleAccessibleState>),
     Inactive(Box<CircleInactiveState>),
     ControlConflict { branches: Vec<CircleCurrentControl> },
 }
@@ -505,13 +506,23 @@ impl CircleCurrentState {
                 leaf,
                 active: Some(active),
                 ..
-            }) => Self::Active(Box::new(CircleActiveState {
-                current,
-                candidate_family,
-                access: leaf.value.clone(),
-                roster: active.roster.clone(),
-                metadata: active.metadata.clone(),
-            })),
+            }) => {
+                let accessible = Box::new(CircleAccessibleState {
+                    current,
+                    candidate_family,
+                    access: leaf.value.clone(),
+                    roster: active.roster.clone(),
+                    metadata: active.metadata.clone(),
+                });
+                match accessible.current.control.value.state() {
+                    crate::sync::circle::CircleControlState::ActiveEpoch(_) => {
+                        Self::Active(accessible)
+                    }
+                    crate::sync::circle::CircleControlState::EpochClose(_) => {
+                        Self::Closing(accessible)
+                    }
+                }
+            }
         };
         if state.verify() {
             Ok(state)
@@ -529,6 +540,7 @@ impl CircleCurrentState {
         }
         match self {
             Self::Active(active) => advance_resolved_control(active.current, next),
+            Self::Closing(closing) => advance_resolved_control(closing.current, next),
             Self::Inactive(inactive) => advance_resolved_control(inactive.current, next),
             Self::ControlConflict { mut branches } => {
                 let next_current = next
@@ -549,22 +561,16 @@ impl CircleCurrentState {
     pub(crate) fn verify(&self) -> bool {
         match self {
             Self::Active(active) => {
-                active.current.verify()
-                    && active
-                        .access
-                        .verify_for_control(&active.current.control, active.candidate_family)
-                    && matches!(
-                        active.access.disposition,
-                        CircleAccessDisposition::Active { .. }
-                    )
-                    && active.roster.verify()
-                    && active.metadata.verify()
-                    && active.metadata.circle_id == active.current.circle_id()
-                    && active.metadata.epoch_id == active.current.control.value.epoch_id()
-                    && active.metadata.key_fingerprint
-                        == active.current.control.value.key_fingerprint()
-                    && metadata_matches_control(&active.metadata, &active.current.control.value)
-                    && roster_matches_control(&active.roster, &active.current.control.value)
+                matches!(
+                    active.current.control.value.state(),
+                    crate::sync::circle::CircleControlState::ActiveEpoch(_)
+                ) && verify_accessible_state(active)
+            }
+            Self::Closing(closing) => {
+                matches!(
+                    closing.current.control.value.state(),
+                    crate::sync::circle::CircleControlState::EpochClose(_)
+                ) && verify_accessible_state(closing)
             }
             Self::Inactive(inactive) => {
                 inactive.current.verify()
@@ -594,6 +600,7 @@ impl CircleCurrentState {
     pub(crate) fn circle_id(&self) -> CircleId {
         match self {
             Self::Active(active) => active.current.circle_id(),
+            Self::Closing(closing) => closing.current.circle_id(),
             Self::Inactive(inactive) => inactive.current.circle_id(),
             Self::ControlConflict { branches } => branches[0].circle_id(),
         }
@@ -614,13 +621,13 @@ impl CircleCurrentState {
                 &active.roster,
                 &active.metadata,
             )),
-            Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Closing(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
         }
     }
 
     pub(crate) fn active_record_count(&self) -> usize {
         match self {
-            Self::Active(_) => 1,
+            Self::Active(_) | Self::Closing(_) => 1,
             Self::Inactive(_) => 0,
             Self::ControlConflict { branches } => branches.len(),
         }
@@ -635,17 +642,36 @@ impl CircleCurrentState {
                 roster: active.roster.clone(),
                 metadata: active.metadata.clone(),
             }),
-            Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Closing(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
         }
     }
 
     pub(super) fn resolved_control(&self) -> Option<&CircleCurrentControl> {
         match self {
             Self::Active(active) => Some(&active.current),
+            Self::Closing(closing) => Some(&closing.current),
             Self::Inactive(inactive) => Some(&inactive.current),
             Self::ControlConflict { .. } => None,
         }
     }
+}
+
+fn verify_accessible_state(state: &CircleAccessibleState) -> bool {
+    state.current.verify()
+        && state
+            .access
+            .verify_for_control(&state.current.control, state.candidate_family)
+        && matches!(
+            state.access.disposition,
+            CircleAccessDisposition::Active { .. }
+        )
+        && state.roster.verify()
+        && state.metadata.verify()
+        && state.metadata.circle_id == state.current.circle_id()
+        && state.metadata.epoch_id == state.current.control.value.epoch_id()
+        && state.metadata.key_fingerprint == state.current.control.value.key_fingerprint()
+        && metadata_matches_control(&state.metadata, &state.current.control.value)
+        && roster_matches_control(&state.roster, &state.current.control.value)
 }
 
 fn advance_resolved_control(

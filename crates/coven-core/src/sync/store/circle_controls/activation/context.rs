@@ -11,7 +11,7 @@ pub(super) async fn verify_control_membership(
     control: &PreparedCircleControl,
     founder_pubkey: &str,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.value.active_epoch.store_membership;
+    let state = &control.value.access_epoch().store_membership;
     let chain = Box::pin(
         crate::sync::store::membership::load_anchored_chain_at_exact_heads(
             storage,

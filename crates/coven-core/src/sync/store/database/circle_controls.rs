@@ -328,19 +328,30 @@ impl StoreDatabase {
                     &operation.commit_ref,
                     &[activation],
                 )?;
-                let deleted = tx
-                    .execute(
-                        "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
-                        rusqlite::params![
-                            journal.operation_id.as_str(),
-                            creation.circle_id.to_string()
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                if deleted != 1 {
-                    return Err(DbError::Message(
-                        "circle operation disappeared during activation".to_string(),
-                    ));
+                if matches!(
+                    journal.intent,
+                    crate::sync::store::circle_controls::CircleOperationIntent::RemoveMember { .. }
+                ) {
+                    let mut waiting = journal;
+                    waiting
+                        .wait_for_close_responses()
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    persist_circle_operation_row_on(&tx, waiting)?;
+                } else {
+                    let deleted = tx
+                        .execute(
+                            "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
+                            rusqlite::params![
+                                journal.operation_id.as_str(),
+                                creation.circle_id.to_string()
+                            ],
+                        )
+                        .map_err(DbError::from)?;
+                    if deleted != 1 {
+                        return Err(DbError::Message(
+                            "circle operation disappeared during activation".to_string(),
+                        ));
+                    }
                 }
                 tx.commit().map_err(DbError::from)
             })
@@ -361,6 +372,17 @@ fn update_circle_operation_on(
         .into_iter()
         .filter(|remote| uploaded_ids.contains(&remote.object_id()))
         .collect::<Vec<_>>();
+    persist_circle_operation_row_on(conn, journal)?;
+    for remote in uploaded {
+        mark_remote_object_uploaded_on(conn, remote)?;
+    }
+    Ok(())
+}
+
+fn persist_circle_operation_row_on(
+    conn: &Connection,
+    journal: CircleOperationJournal,
+) -> Result<(), DbError> {
     let row = PreparedCircleOperationRow::from_journal(journal)?;
     load_circle_operation_on(conn, &row.operation_id)?.ok_or_else(|| {
         DbError::Message(format!(
@@ -379,9 +401,6 @@ fn update_circle_operation_on(
         return Err(DbError::Message(
             "circle operation disappeared during publication".to_string(),
         ));
-    }
-    for remote in uploaded {
-        mark_remote_object_uploaded_on(conn, remote)?;
     }
     Ok(())
 }

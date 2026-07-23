@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use super::causal_grants::AuthorStreamId;
+use super::circle::CircleEpochCloseId;
 use super::circle::{generated_id_digest, AccessLeafId, CircleEpochId, CircleId};
 use super::circle_roster::{
     CircleAuthorStreamKey, CircleGrantCreationAuthority, CircleMaterializedRoster,
@@ -16,10 +17,11 @@ use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef}
 use super::storage::ExactObjectRef;
 use super::store_commit::{
     CommitFrontier, ObjectHash, OwnerRecoveryCursor, SnapshotImageRef, StoreDeviceRegistration,
-    SuccessorLink, STORE_PROTOCOL_VERSION,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, SuccessorLink, STORE_PROTOCOL_VERSION,
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
+use crate::storage::cloud::ObjectSlot;
 
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
 const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";
@@ -676,6 +678,228 @@ pub struct MergeActiveCircleEpoch {
     pub covered_control_heads: Vec<MergeCircleControlHeadRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseParticipant {
+    pub registration: StoreDeviceRegistrationRef,
+    pub response_slot: ObjectSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseIntent {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub epoch_id: CircleEpochId,
+    pub predecessor_roster: MergeCircleRosterStateRef,
+    pub removal: CircleRosterEntry,
+    pub remaining_roster_state_hash: ObjectHash,
+    pub owner_pubkey: String,
+    pub signature: String,
+}
+
+impl CircleEpochCloseIntent {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn signed(
+        store_root_hash: ObjectHash,
+        circle_id: CircleId,
+        close_id: CircleEpochCloseId,
+        epoch_id: CircleEpochId,
+        predecessor_roster: MergeCircleRosterStateRef,
+        removal: CircleRosterEntry,
+        remaining_roster_state_hash: ObjectHash,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let owner_pubkey = keys::public_key_hex(signer);
+        let mut intent = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            circle_id,
+            close_id,
+            epoch_id,
+            predecessor_roster,
+            removal,
+            remaining_roster_state_hash,
+            owner_pubkey,
+            signature: String::new(),
+        };
+        if !intent.verify_shape() {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        intent.signature = keys::sign_hex(signer, &intent.canonical_bytes()).1;
+        Ok(intent)
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            circle_id: CircleId,
+            close_id: CircleEpochCloseId,
+            epoch_id: CircleEpochId,
+            predecessor_roster: &'a MergeCircleRosterStateRef,
+            removal: &'a CircleRosterEntry,
+            remaining_roster_state_hash: ObjectHash,
+            owner_pubkey: &'a str,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.circle-epoch-close-intent.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            circle_id: self.circle_id,
+            close_id: self.close_id,
+            epoch_id: self.epoch_id,
+            predecessor_roster: &self.predecessor_roster,
+            removal: &self.removal,
+            remaining_roster_state_hash: self.remaining_roster_state_hash,
+            owner_pubkey: &self.owner_pubkey,
+        })
+        .expect("Circle epoch-close intent serialization cannot fail")
+    }
+
+    fn verify_shape(&self) -> bool {
+        self.version == STORE_PROTOCOL_VERSION
+            && self.removal.verify()
+            && self.removal.store_root_hash == self.store_root_hash
+            && self.removal.circle_id == self.circle_id
+            && self.removal.author_pubkey == self.owner_pubkey
+            && matches!(
+                self.removal.change,
+                super::circle_roster::CircleRosterChange::RemoveMember { .. }
+            )
+    }
+
+    pub fn verify(&self) -> bool {
+        self.verify_shape()
+            && keys::verify_signature_hex(
+                &self.owner_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
+    }
+
+    pub fn intent_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self).expect("Circle epoch-close intent serialization cannot fail"),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseIntentRef {
+    pub close_id: CircleEpochCloseId,
+    pub intent_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+impl CircleEpochCloseIntentRef {
+    pub(crate) fn from_intent(
+        intent: &CircleEpochCloseIntent,
+        object: ExactObjectRef,
+    ) -> Result<Self, CircleTransitionError> {
+        let reference = Self {
+            close_id: intent.close_id,
+            intent_hash: intent.intent_hash(),
+            object,
+        };
+        if reference.object.slot().logical_key()
+            != format!(
+                "{}.json",
+                circle_epoch_close_intent_semantic_prefix(
+                    intent.circle_id,
+                    intent.close_id,
+                    intent.intent_hash(),
+                )
+            )
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(reference)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochClose {
+    pub close_id: CircleEpochCloseId,
+    pub frozen_epoch: MergeActiveCircleEpoch,
+    pub intent: CircleEpochCloseIntentRef,
+    pub frozen_device_state: StoreDeviceStateRef,
+    pub participants: Vec<CircleEpochCloseParticipant>,
+    pub provisional_frontier: CommitFrontier,
+    pub outcome_slot: ObjectSlot,
+}
+
+impl CircleEpochClose {
+    fn verify_shape(&self, circle_id: CircleId) -> bool {
+        super::store_commit::validate_commit_frontier(&self.provisional_frontier).is_ok()
+            && self.intent.close_id == self.close_id
+            && !self.participants.is_empty()
+            && self
+                .participants
+                .windows(2)
+                .all(|pair| pair[0].registration.device_id < pair[1].registration.device_id)
+            && self.participants.iter().all(|participant| {
+                participant.response_slot.logical_key()
+                    == format!(
+                        "{}.json",
+                        circle_epoch_close_response_semantic_prefix(
+                            circle_id,
+                            self.close_id,
+                            participant.registration.device_id,
+                        )
+                    )
+            })
+            && self.outcome_slot.logical_key()
+                == format!(
+                    "{}.json",
+                    circle_epoch_close_outcome_semantic_prefix(circle_id, self.close_id)
+                )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleControlState {
+    ActiveEpoch(MergeActiveCircleEpoch),
+    EpochClose(CircleEpochClose),
+}
+
+impl CircleControlState {
+    pub(crate) fn access_epoch(&self) -> &MergeActiveCircleEpoch {
+        match self {
+            Self::ActiveEpoch(active) => active,
+            Self::EpochClose(close) => &close.frozen_epoch,
+        }
+    }
+
+    pub(crate) fn access_epoch_mut(&mut self) -> &mut MergeActiveCircleEpoch {
+        match self {
+            Self::ActiveEpoch(active) => active,
+            Self::EpochClose(close) => &mut close.frozen_epoch,
+        }
+    }
+
+    pub(crate) fn active_epoch(&self) -> Option<&MergeActiveCircleEpoch> {
+        match self {
+            Self::ActiveEpoch(active) => Some(active),
+            Self::EpochClose(_) => None,
+        }
+    }
+
+    pub(crate) fn active_epoch_mut(&mut self) -> Option<&mut MergeActiveCircleEpoch> {
+        match self {
+            Self::ActiveEpoch(active) => Some(active),
+            Self::EpochClose(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeCircleControlHeadRef {
@@ -713,7 +937,7 @@ impl MergeCircleOwnerAuthorityRef {
 #[serde(deny_unknown_fields)]
 pub struct CircleControlValue {
     pub order: MergeCircleControlOrder,
-    pub active_epoch: MergeActiveCircleEpoch,
+    pub state: CircleControlState,
     pub author_authority: MergeCircleOwnerAuthorityRef,
     pub membership_authority: MembershipGrantCreationAuthority,
 }
@@ -730,8 +954,20 @@ pub struct CircleControl {
 }
 
 impl CircleControl {
+    pub fn state(&self) -> &CircleControlState {
+        &self.value.state
+    }
+
+    pub fn active_epoch(&self) -> Option<&MergeActiveCircleEpoch> {
+        self.value.state.active_epoch()
+    }
+
+    pub(crate) fn access_epoch(&self) -> &MergeActiveCircleEpoch {
+        self.value.state.access_epoch()
+    }
+
     pub fn active_common(&self) -> &ActiveCircleEpochCore {
-        &self.value.active_epoch.common
+        &self.access_epoch().common
     }
 
     pub fn epoch_id(&self) -> CircleEpochId {
@@ -751,15 +987,15 @@ impl CircleControl {
     }
 
     pub fn roster_state_ref(&self) -> CircleRosterStateRef {
-        self.value.active_epoch.roster.clone()
+        self.access_epoch().roster.clone()
     }
 
     pub fn metadata_state_ref(&self) -> CircleMetadataStateRef {
-        self.value.active_epoch.metadata.clone()
+        self.access_epoch().metadata.clone()
     }
 
     pub fn store_membership_state_ref(&self) -> StoreMembershipStateRef {
-        self.value.active_epoch.store_membership.clone()
+        self.access_epoch().store_membership.clone()
     }
 
     pub fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
@@ -826,7 +1062,7 @@ impl CircleControl {
 
     pub fn verify(&self) -> bool {
         let order = &self.value.order;
-        let active_epoch = &self.value.active_epoch;
+        let access_epoch = self.access_epoch();
         let author_authority = &self.value.author_authority;
         let grant_id = author_authority.grant_id(&self.author_pubkey);
         let stream_key = CircleAuthorStreamKey {
@@ -835,15 +1071,15 @@ impl CircleControl {
             stream_id: order.stream_id,
             author_owner_grant: order.author_owner_grant.clone(),
         };
-        let covered_are_canonical = active_epoch
+        let covered_are_canonical = access_epoch
             .covered_control_heads
             .windows(2)
             .all(|pair| pair[0].coord.stream_key() < pair[1].coord.stream_key());
-        let own_predecessor = active_epoch
+        let own_predecessor = access_epoch
             .covered_control_heads
             .iter()
             .find(|head| head.coord.stream_key() == stream_key);
-        let expected_dependencies = active_epoch
+        let expected_dependencies = access_epoch
             .covered_control_heads
             .iter()
             .filter(|head| head.coord.stream_key() != stream_key)
@@ -857,9 +1093,9 @@ impl CircleControl {
         let authority_is_founder_roster = matches!(
             author_authority,
             MergeCircleOwnerAuthorityRef::Roster { roster, .. }
-                if roster == &active_epoch.roster
+                if roster == &access_epoch.roster
         );
-        let founder = order.seq == 1 && active_epoch.covered_control_heads.is_empty();
+        let founder = order.seq == 1 && access_epoch.covered_control_heads.is_empty();
         let continuity_is_valid = match (order.seq, own_predecessor) {
             (1, None) => order.previous_control_hash.is_none(),
             (seq, Some(predecessor)) if seq > 1 => {
@@ -872,11 +1108,16 @@ impl CircleControl {
             || (authority_is_founder_roster
                 && self.circle_id
                     == CircleId::founder(self.store_root_hash, &self.author_pubkey, &grant_id));
-        let common = &active_epoch.common;
+        let common = &access_epoch.common;
         let owners_are_canonical =
             !common.owners.is_empty() && common.owners.windows(2).all(|pair| pair[0] < pair[1]);
+        let state_is_valid = match &self.value.state {
+            CircleControlState::ActiveEpoch(_) => true,
+            CircleControlState::EpochClose(close) => !founder && close.verify_shape(self.circle_id),
+        };
         self.version == STORE_PROTOCOL_VERSION
             && owners_are_canonical
+            && state_is_valid
             && order_is_valid
             && continuity_is_valid
             && founder_identity_is_valid
@@ -1147,6 +1388,7 @@ pub(crate) struct CircleTransitionDraft {
     pub roster: CircleMaterializedRoster,
     pub policy: CircleTransitionDraftPolicy,
     pub metadata: CircleMetadata,
+    pub close_intent: Option<CircleEpochCloseIntent>,
     pub access: Vec<PreparedCircleAccess>,
     pub control: PreparedCircleControl,
 }
@@ -1283,6 +1525,7 @@ pub struct PreparedCircleTransition {
     pub roster: CircleMaterializedRoster,
     pub policy_objects: CircleTransitionPolicyObjects,
     pub metadata: CircleMetadata,
+    pub close_intent: Option<CircleEpochCloseIntent>,
     pub access: Vec<PreparedCircleAccess>,
     pub control: PreparedCircleControl,
 }
@@ -1356,7 +1599,10 @@ fn circle_successor_context<'a>(
     {
         return Err(CircleTransitionError::InvalidCurrentState);
     }
-    let active_epoch = &current_control.value.value.active_epoch;
+    let active_epoch = current_control
+        .value
+        .active_epoch()
+        .ok_or(CircleTransitionError::InvalidCurrentState)?;
     let (grant_id, record) = current_roster
         .active_grants()
         .find(|(_, record)| {
@@ -1488,13 +1734,13 @@ impl CircleTransitionDraft {
                 previous_control_hash: None,
                 dependencies: Vec::new(),
             },
-            active_epoch: MergeActiveCircleEpoch {
+            state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
                 common,
                 metadata: metadata_state,
                 roster: roster_state.clone(),
                 store_membership,
                 covered_control_heads: Vec::new(),
-            },
+            }),
             author_authority: MergeCircleOwnerAuthorityRef::Roster {
                 roster: roster_state,
                 grant_id: owner_grant.clone(),
@@ -1539,6 +1785,7 @@ impl CircleTransitionDraft {
             roster,
             policy: policy_objects,
             metadata,
+            close_intent: None,
             access,
             control,
         })
@@ -1621,13 +1868,13 @@ impl CircleTransitionDraft {
                     previous_control_hash: Some(current_control.coord.control_hash()),
                     dependencies: vec![current_control.coord.clone()],
                 },
-                active_epoch: MergeActiveCircleEpoch {
+                state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
                     common: active_epoch.common.clone(),
                     metadata: active_epoch.metadata.clone(),
                     roster: roster_state.clone(),
                     store_membership,
                     covered_control_heads: active_epoch.covered_control_heads.clone(),
-                },
+                }),
                 author_authority,
                 membership_authority,
             },
@@ -1643,7 +1890,12 @@ impl CircleTransitionDraft {
             key_fingerprint,
             &roster_state,
             &roster.members(),
-            &control_value.value.active_epoch.store_membership,
+            &control_value
+                .value
+                .state
+                .active_epoch()
+                .expect("member addition constructs an active epoch")
+                .store_membership,
             &store_members,
             Some((&member_pubkey, &bootstrap)),
             ids,
@@ -1651,7 +1903,13 @@ impl CircleTransitionDraft {
         )?;
         let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
         let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
-        control_value.value.active_epoch.common.access_root = access_root;
+        control_value
+            .value
+            .state
+            .active_epoch_mut()
+            .expect("member addition constructs an active epoch")
+            .common
+            .access_root = access_root;
         control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -1681,6 +1939,164 @@ impl CircleTransitionDraft {
                 metadata_successor: false,
             },
             metadata: current_metadata.clone(),
+            close_intent: None,
+            access,
+            control,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn close_epoch(
+        candidate_family: super::store_commit::CandidateFamilyId,
+        device_id: &str,
+        store_membership: StoreMembershipStateRef,
+        membership_authority: MembershipGrantCreationAuthority,
+        store_members: Vec<(String, MemberRole)>,
+        current_control: &PreparedCircleControl,
+        current_roster: &CircleMaterializedRoster,
+        current_metadata: &CircleMetadata,
+        keyring: &str,
+        close_id: CircleEpochCloseId,
+        close_intent: CircleEpochCloseIntent,
+        intent: CircleEpochCloseIntentRef,
+        frozen_device_state: StoreDeviceStateRef,
+        participants: Vec<CircleEpochCloseParticipant>,
+        provisional_frontier: CommitFrontier,
+        outcome_slot: ObjectSlot,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let context = circle_successor_context(
+            store_members,
+            current_control,
+            current_roster,
+            current_metadata,
+            keyring,
+            signer,
+        )?;
+        let CircleSuccessorContext {
+            store_members,
+            author_pubkey,
+            active_epoch,
+            grant_id,
+            author_authority,
+            key_fingerprint,
+        } = context;
+        let store_root_hash = current_control.value.store_root_hash;
+        let circle_id = current_control.value.circle_id;
+        let epoch_id = current_control.value.epoch_id();
+        if close_intent.close_id != close_id
+            || close_intent.intent_hash() != intent.intent_hash
+            || close_intent.circle_id != circle_id
+            || close_intent.epoch_id != epoch_id
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        let roster_state = active_epoch.roster.clone();
+        let mut control_value = CircleControl {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            circle_id,
+            value: CircleControlValue {
+                order: MergeCircleControlOrder {
+                    device_id: device_id.to_string(),
+                    stream_id: active_epoch
+                        .covered_control_heads
+                        .iter()
+                        .find(|head| {
+                            head.coord.author_pubkey == author_pubkey
+                                && head.coord.device_id == device_id
+                                && head.coord.author_owner_grant == grant_id
+                        })
+                        .map_or_else(
+                            || {
+                                AuthorStreamId::from_digest(generated_id_digest(
+                                    ids,
+                                    b"coven.circle-transition-draft-stream.v1\0",
+                                ))
+                            },
+                            |head| head.coord.stream_id,
+                        ),
+                    author_owner_grant: grant_id,
+                    seq: current_control
+                        .value
+                        .ordinal()
+                        .checked_add(1)
+                        .ok_or(CircleTransitionError::SequenceOverflow)?,
+                    previous_control_hash: Some(current_control.coord.control_hash()),
+                    dependencies: vec![current_control.coord.clone()],
+                },
+                state: CircleControlState::EpochClose(CircleEpochClose {
+                    close_id,
+                    frozen_epoch: MergeActiveCircleEpoch {
+                        common: active_epoch.common.clone(),
+                        metadata: active_epoch.metadata.clone(),
+                        roster: roster_state.clone(),
+                        store_membership,
+                        covered_control_heads: active_epoch.covered_control_heads.clone(),
+                    },
+                    intent,
+                    frozen_device_state,
+                    participants,
+                    provisional_frontier,
+                    outcome_slot,
+                }),
+                author_authority,
+                membership_authority,
+            },
+            author_pubkey,
+            signature: String::new(),
+        };
+        let leaves = prepare_access_material(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            epoch_id,
+            keyring,
+            key_fingerprint,
+            &roster_state,
+            &current_roster.members(),
+            &control_value.access_epoch().store_membership,
+            &store_members,
+            None,
+            ids,
+            signer,
+        )?;
+        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
+        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
+        control_value
+            .value
+            .state
+            .access_epoch_mut()
+            .common
+            .access_root = access_root;
+        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control_value.coord(),
+            bytes: serde_json::to_vec(&control_value)
+                .expect("circle control serialization cannot fail"),
+            value: control_value,
+        };
+        let access = prepare_access_envelopes(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            &control,
+            leaves,
+            proofs,
+            signer,
+        );
+        Ok(Self {
+            circle_id,
+            epoch_id,
+            keyring: keyring.to_string(),
+            roster: current_roster.clone(),
+            policy: CircleTransitionDraftPolicy {
+                roster: CircleRosterDraftPolicy::Inherited,
+                metadata_successor: false,
+            },
+            metadata: current_metadata.clone(),
+            close_intent: Some(close_intent),
             access,
             control,
         })
@@ -1769,13 +2185,13 @@ impl CircleTransitionDraft {
                 previous_control_hash: Some(current_control.coord.control_hash()),
                 dependencies: vec![current_control.coord.clone()],
             },
-            active_epoch: MergeActiveCircleEpoch {
+            state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
                 common: active_epoch.common.clone(),
                 metadata: active_epoch.metadata.clone(),
                 roster: active_epoch.roster.clone(),
                 store_membership,
                 covered_control_heads: active_epoch.covered_control_heads.clone(),
-            },
+            }),
             author_authority,
             membership_authority,
         };
@@ -1825,7 +2241,11 @@ impl CircleTransitionDraft {
             key_fingerprint,
             &roster_state,
             &current_roster.members(),
-            &control_value.active_epoch.store_membership,
+            &control_value
+                .state
+                .active_epoch()
+                .expect("rename constructs an active epoch")
+                .store_membership,
             &store_members,
             None,
             ids,
@@ -1833,8 +2253,12 @@ impl CircleTransitionDraft {
         )?;
         let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
         let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
-        control_value.active_epoch.common.access_root = access_root;
-        control_value.active_epoch.metadata = metadata_state;
+        let active_epoch = control_value
+            .state
+            .active_epoch_mut()
+            .expect("rename constructs an active epoch");
+        active_epoch.common.access_root = access_root;
+        active_epoch.metadata = metadata_state;
         let mut control_value = CircleControl {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
@@ -1870,6 +2294,7 @@ impl CircleTransitionDraft {
             roster: current_roster.clone(),
             policy: policy_objects,
             metadata,
+            close_intent: None,
             access,
             control,
         })
@@ -2004,6 +2429,29 @@ pub fn circle_metadata_head_prefix(
         "circles/{circle_id}/metadata/heads/{}/{}/{}/{}/{seq}",
         stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
     )
+}
+
+pub fn circle_epoch_close_outcome_semantic_prefix(
+    circle_id: CircleId,
+    close_id: CircleEpochCloseId,
+) -> String {
+    format!("circles/{circle_id}/epoch-close/{close_id}/outcome")
+}
+
+pub fn circle_epoch_close_intent_semantic_prefix(
+    circle_id: CircleId,
+    close_id: CircleEpochCloseId,
+    intent_hash: ObjectHash,
+) -> String {
+    format!("circles/{circle_id}/epoch-close/{close_id}/intent/{intent_hash}")
+}
+
+pub fn circle_epoch_close_response_semantic_prefix(
+    circle_id: CircleId,
+    close_id: CircleEpochCloseId,
+    device_id: super::store_commit::StoreDeviceId,
+) -> String {
+    format!("circles/{circle_id}/epoch-close/{close_id}/responses/{device_id}")
 }
 
 pub fn verify_circle_semantic_prefix(

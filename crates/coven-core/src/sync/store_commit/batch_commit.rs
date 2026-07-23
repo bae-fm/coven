@@ -1399,6 +1399,12 @@ pub(super) fn candidate_manifest(
             );
             for control in &operations.circle_controls {
                 let circle_id = control.circle_id();
+                if let Some(reference) = &control.objects().close_intent {
+                    objects.push(CandidateExclusiveObjectRef::CircleEpochCloseIntent {
+                        circle_id,
+                        reference: reference.clone(),
+                    });
+                }
                 if control
                     .objects()
                     .access
@@ -1444,6 +1450,9 @@ pub(super) fn candidate_manifest(
                 }
                 insert_candidate_exact_ref(&mut exact_refs, &access.leaf.object)?;
                 insert_candidate_exact_ref(&mut exact_refs, &access.envelope.object)?;
+            }
+            CandidateExclusiveObjectRef::CircleEpochCloseIntent { reference, .. } => {
+                insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
             }
             CandidateExclusiveObjectRef::StorePackage(reference) => {
                 insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
@@ -1491,6 +1500,26 @@ fn validate_candidate_object_path(
         }
         CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
             validate_circle_access_ref(*circle_id, family, access)?;
+            Ok(())
+        }
+        CandidateExclusiveObjectRef::CircleEpochCloseIntent {
+            circle_id,
+            reference,
+        } => {
+            let expected = format!(
+                "{}.json",
+                crate::sync::circle::circle_epoch_close_intent_semantic_prefix(
+                    *circle_id,
+                    reference.close_id,
+                    reference.intent_hash,
+                )
+            );
+            if reference.object.slot().logical_key() != expected {
+                return Err(StoreProtocolError::RelocatedCandidateObject {
+                    expected,
+                    actual: reference.object.slot().logical_key().to_string(),
+                });
+            }
             Ok(())
         }
     }

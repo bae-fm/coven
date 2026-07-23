@@ -1671,6 +1671,7 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
         ),
         objects: CircleActivationObjects {
             control: exact("circle-control.json".to_string(), b"control"),
+            close_intent: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
             roster_resolutions: BTreeMap::new(),

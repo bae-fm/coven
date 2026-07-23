@@ -438,9 +438,12 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         let predecessor = current.clone();
         let CircleControlValue {
             order,
-            active_epoch,
+            state: control_state,
             ..
         } = &mut current.control.value.value;
+        let active_epoch = control_state
+            .active_epoch_mut()
+            .expect("test branch has an active epoch");
         order.device_id = device_id.to_string();
         order.stream_id = stream_id;
         order.seq = 1;
@@ -469,9 +472,12 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         let predecessor_stream = predecessor.coordinate().stream_key();
         let CircleControlValue {
             order,
-            active_epoch,
+            state: control_state,
             ..
         } = &mut current.control.value.value;
+        let active_epoch = control_state
+            .active_epoch_mut()
+            .expect("test successor has an active epoch");
         let mut frontier = active_epoch.covered_control_heads.clone();
         frontier.retain(|head| head.coord.stream_key() != predecessor_stream);
         frontier.push(control_head_ref("own-predecessor", &predecessor));

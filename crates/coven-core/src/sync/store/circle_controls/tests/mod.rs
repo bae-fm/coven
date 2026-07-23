@@ -332,7 +332,15 @@ fn promote_store_member_access_without_adding_to_circle_roster(
         .map(|access| access.leaf.leaf_hash)
         .collect::<Vec<_>>();
     let (access_root, proofs) = crate::sync::circle_control::merkle_root_and_proofs(&leaf_hashes);
-    creation.control.value.value.active_epoch.common.access_root = access_root;
+    creation
+        .control
+        .value
+        .value
+        .state
+        .active_epoch_mut()
+        .expect("test transition has an active epoch")
+        .common
+        .access_root = access_root;
     creation.control.value.signature =
         keys::sign_hex(owner, &creation.control.value.canonical_bytes()).1;
     creation.control.coord = creation.control.value.coord();
@@ -374,6 +382,7 @@ fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitio
         roster: creation.roster.clone(),
         policy,
         metadata: creation.metadata.clone(),
+        close_intent: creation.close_intent.clone(),
         access: creation.access.clone(),
         control: creation.control.clone(),
     }

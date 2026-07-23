@@ -6,10 +6,11 @@ use super::CircleOperationError;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
-    circle_semantic_prefix, recipient_slot_with_peer, verify_circle_semantic_prefix,
-    AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleControl, CircleControlCoord,
-    CircleId, CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot,
-    MergeCircleOwnerAuthorityRef, PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
+    circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
+    verify_circle_semantic_prefix, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
+    CircleControl, CircleControlCoord, CircleControlState, CircleId, CircleMetadataHeadRef,
+    CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
+    PreparedCircleControl, ResolvedCircleRoster,
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::storage::{
@@ -74,7 +75,15 @@ pub(crate) async fn load_circle_authoring_roster_chain(
         commit_ref,
         commit,
         reference.circle_id(),
-        &control.value.value.active_epoch.roster,
+        &control
+            .value
+            .active_epoch()
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle authoring requires an active epoch".to_string(),
+                )
+            })?
+            .roster,
         encryption,
         reference.objects(),
         &mut consumed_stream_activations,
@@ -167,6 +176,111 @@ async fn load_verified_access_pairs(
         });
     }
     Ok(verified)
+}
+
+async fn verify_epoch_close(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+    control: &PreparedCircleControl,
+    objects: &CircleActivationObjects,
+    encryption: EncryptionService,
+    roster_chain: &crate::sync::circle::CircleRosterChain,
+) -> Result<(), CircleOperationError> {
+    let CircleControlState::EpochClose(close) = control.value.state() else {
+        if objects.close_intent.is_some() {
+            return Err(CircleOperationError::InvalidState(
+                "active Circle control carries an epoch-close intent".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+    if objects.close_intent.as_ref() != Some(&close.intent)
+        || close.frozen_device_state != commit.device_state
+        || close.provisional_frontier
+            != commit
+                .order
+                .predecessor_cut()
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                .frontier()
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch close differs from its activating Store cut".to_string(),
+        ));
+    }
+    let intent_prefix = circle_epoch_close_intent_semantic_prefix(
+        control.value.circle_id,
+        close.close_id,
+        close.intent.intent_hash,
+    );
+    let bytes = read_exact_circle_object(
+        storage,
+        &ProtocolObjectContext::circle(
+            commit.store_root_hash,
+            ProtocolObjectDomain::CircleEpochCloseIntent,
+            encryption,
+        ),
+        &close.intent.object,
+        &intent_prefix,
+    )
+    .await?;
+    let intent: crate::sync::circle::CircleEpochCloseIntent = serde_json::from_slice(&bytes)
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!("parse Circle epoch-close intent: {error}"))
+        })?;
+    if !intent.verify()
+        || intent.store_root_hash != commit.store_root_hash
+        || intent.circle_id != control.value.circle_id
+        || intent.close_id != close.close_id
+        || intent.epoch_id != close.frozen_epoch.common.epoch_id
+        || intent.predecessor_roster != close.frozen_epoch.roster
+        || intent.owner_pubkey != control.value.author_pubkey
+        || intent.intent_hash() != close.intent.intent_hash
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch-close intent failed exact verification".to_string(),
+        ));
+    }
+    let remaining = roster_chain
+        .resolved_with_successor(intent.removal)
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    if remaining.state_hash() != intent.remaining_roster_state_hash {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch-close intent names another remaining roster".to_string(),
+        ));
+    }
+    let remaining_members = remaining.members();
+    let devices = database
+        .resolved_store_device_state(&close.frozen_device_state)
+        .await?;
+    let mut expected = Vec::new();
+    for record in devices.devices.values() {
+        if !matches!(
+            record.status,
+            crate::sync::store_commit::StoreDeviceStatus::Active
+        ) {
+            continue;
+        }
+        let registration = database
+            .activated_store_device_registration(record.registration.clone())
+            .await?;
+        if remaining_members.contains_key(&registration.author_pubkey) {
+            expected.push(record.registration.clone());
+        }
+    }
+    expected.sort_by_key(|registration| registration.device_id);
+    if close
+        .participants
+        .iter()
+        .map(|participant| participant.registration.clone())
+        .collect::<Vec<_>>()
+        != expected
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch-close participants differ from the frozen active devices".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_circle_owner_authority(
@@ -430,12 +544,12 @@ async fn verify_covered_control_heads(
     commit: &StoreBatchCommit,
     control: &CircleControl,
 ) -> Result<(), CircleOperationError> {
-    let active_epoch = &control.value.active_epoch;
+    let access_epoch = control.access_epoch();
     let context = ProtocolObjectContext::store_encrypted(
         commit.store_root_hash,
         ProtocolObjectDomain::CircleControl,
     );
-    for reference in &active_epoch.covered_control_heads {
+    for reference in &access_epoch.covered_control_heads {
         let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
             circle_id: control.circle_id,
             control: &reference.coord,
@@ -912,7 +1026,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                         "circle control author lacks its exact historical Owner grant".to_string(),
                     ));
                 }
-                let resolved = load_circle_roster_state(
+                let roster_chain = load_circle_roster_chain(
                     database,
                     verified_prefix,
                     storage,
@@ -920,10 +1034,23 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     commit_ref,
                     commit,
                     reference.circle_id(),
-                    &control.value.value.active_epoch.roster,
+                    &control.value.roster_state_ref(),
                     encryption.clone(),
                     objects,
                     &mut consumed_stream_activations,
+                )
+                .await?;
+                let resolved = roster_chain
+                    .try_resolved()
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                verify_epoch_close(
+                    database,
+                    storage,
+                    commit,
+                    &control,
+                    objects,
+                    encryption.clone(),
+                    &roster_chain,
                 )
                 .await?;
                 let resolved_members = resolved.members();

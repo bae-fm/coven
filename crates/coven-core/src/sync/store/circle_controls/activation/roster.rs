@@ -699,7 +699,7 @@ pub(super) async fn load_circle_authority_roster(
     let roster = match &control.value.value.author_authority {
         MergeCircleOwnerAuthorityRef::Roster { roster, .. } => roster,
         MergeCircleOwnerAuthorityRef::ConflictResolution { .. } => {
-            &control.value.value.active_epoch.roster
+            &control.value.access_epoch().roster
         }
     };
     load_circle_roster_state(

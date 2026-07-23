@@ -305,6 +305,38 @@ pub(super) async fn publish_circle_operation(
             ));
         }
     }
+    match (&creation.close_intent, &reference.objects().close_intent) {
+        (Some(intent), Some(intent_ref))
+            if intent.close_id == intent_ref.close_id
+                && intent.intent_hash() == intent_ref.intent_hash =>
+        {
+            append_step(
+                database,
+                storage,
+                &mut journal,
+                "epoch-close-intent",
+                &ProtocolObjectContext::circle(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseIntent,
+                    circle_encryption.clone(),
+                ),
+                &crate::sync::circle::circle_epoch_close_intent_semantic_prefix(
+                    creation.circle_id,
+                    intent.close_id,
+                    intent.intent_hash(),
+                ),
+                &serde_json::to_vec(intent)
+                    .expect("Circle epoch-close intent serialization cannot fail"),
+            )
+            .await?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CircleOperationError::Journal(
+                "Circle epoch-close intent differs from its signed object graph".to_string(),
+            ));
+        }
+    }
     for (index, access) in creation.access.iter().enumerate() {
         append_step(
             database,

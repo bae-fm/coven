@@ -2217,6 +2217,11 @@ pub(crate) enum CandidateExclusiveObjectDomain {
         circle_id: CircleId,
         reference: super::store_commit::CircleAccessEnvelopeObjectRef,
     },
+    CircleEpochCloseIntent {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::circle_control::CircleEpochCloseIntentRef,
+    },
     CircleBootstrapImage {
         family: CandidateFamilyId,
         circle_id: CircleId,
@@ -2237,6 +2242,7 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => reference.package.candidate_family,
             Self::CircleAccessLeaf { family, .. }
             | Self::CircleAccessEnvelope { family, .. }
+            | Self::CircleEpochCloseIntent { family, .. }
             | Self::CircleBootstrapImage { family, .. } => *family,
         }
     }
@@ -2250,6 +2256,7 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => &reference.package.object,
             Self::CircleAccessLeaf { reference, .. } => &reference.object,
             Self::CircleAccessEnvelope { reference, .. } => &reference.object,
+            Self::CircleEpochCloseIntent { reference, .. } => &reference.object,
             Self::CircleBootstrapImage { reference, .. } => &reference.object,
         }
     }
@@ -2271,7 +2278,8 @@ impl CandidateExclusiveObjectDomain {
             | Self::MergeMembershipHead { .. }
             | Self::MergeMembershipWrappedStoreKey { .. }
             | Self::CircleAccessLeaf { .. }
-            | Self::CircleAccessEnvelope { .. } => None,
+            | Self::CircleAccessEnvelope { .. }
+            | Self::CircleEpochCloseIntent { .. } => None,
         }
     }
 
@@ -2306,6 +2314,15 @@ impl CandidateExclusiveObjectDomain {
                 circle_id,
                 reference,
             } => Some(RetainedAuthorityObjectDomain::CircleAccessEnvelope {
+                family: *family,
+                circle_id: *circle_id,
+                reference: reference.clone(),
+            }),
+            Self::CircleEpochCloseIntent {
+                family,
+                circle_id,
+                reference,
+            } => Some(RetainedAuthorityObjectDomain::CircleEpochCloseIntent {
                 family: *family,
                 circle_id: *circle_id,
                 reference: reference.clone(),
@@ -2386,6 +2403,16 @@ impl CandidateObjectGraph {
                             reference: bootstrap.clone(),
                         });
                     }
+                }
+                super::store_commit::CandidateExclusiveObjectRef::CircleEpochCloseIntent {
+                    circle_id,
+                    reference,
+                } => {
+                    objects.push(CandidateExclusiveObjectDomain::CircleEpochCloseIntent {
+                        family: manifest.family,
+                        circle_id: *circle_id,
+                        reference: reference.clone(),
+                    });
                 }
             }
         }
@@ -2650,6 +2677,16 @@ fn validate_candidate_exclusive_identity(
             canonical_semantic_bytes,
             &identity.object,
         ),
+        CandidateExclusiveObjectDomain::CircleEpochCloseIntent {
+            circle_id,
+            reference,
+            ..
+        } => validate_circle_epoch_close_intent_identity(
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        ),
         CandidateExclusiveObjectDomain::CircleBootstrapImage {
             circle_id,
             owner_pubkey,
@@ -2768,6 +2805,38 @@ fn validate_circle_access_envelope_identity(
         || envelope.leaf_id != reference.leaf_id
         || envelope.leaf_hash != reference.leaf_hash
         || reference.object != *object
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(())
+}
+
+fn validate_circle_epoch_close_intent_identity(
+    circle_id: CircleId,
+    reference: &super::circle_control::CircleEpochCloseIntentRef,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let intent: super::circle_control::CircleEpochCloseIntent =
+        serde_json::from_slice(canonical_semantic_bytes)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let parsed_bytes = serde_json::to_vec(&intent)
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let expected = format!(
+        "{}.json",
+        super::circle_control::circle_epoch_close_intent_semantic_prefix(
+            circle_id,
+            reference.close_id,
+            reference.intent_hash,
+        )
+    );
+    if parsed_bytes != canonical_semantic_bytes
+        || !intent.verify()
+        || intent.circle_id != circle_id
+        || intent.close_id != reference.close_id
+        || intent.intent_hash() != reference.intent_hash
+        || reference.object != *object
+        || reference.object.slot().logical_key() != expected
     {
         return Err(RemoteObjectRecordError::StoredReferenceMismatch);
     }
@@ -2970,6 +3039,11 @@ pub(crate) enum RetainedAuthorityObjectDomain {
         circle_id: CircleId,
         reference: super::store_commit::CircleAccessEnvelopeObjectRef,
     },
+    CircleEpochCloseIntent {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::circle_control::CircleEpochCloseIntentRef,
+    },
 }
 
 fn validate_retained_authority_identity(
@@ -3132,6 +3206,16 @@ fn validate_retained_authority_identity(
             reference,
         } => validate_circle_access_envelope_identity(
             *family,
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        )?,
+        RetainedAuthorityObjectDomain::CircleEpochCloseIntent {
+            circle_id,
+            reference,
+            ..
+        } => validate_circle_epoch_close_intent_identity(
             *circle_id,
             reference,
             canonical_semantic_bytes,

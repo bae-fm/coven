@@ -580,11 +580,20 @@ unaffected Circles continue.
 Member removal always closes the old epoch before activating future writes.
 The Owner activates an `EpochClose` containing:
 
-- the predecessor control;
-- the frozen old-epoch roster and active device set;
-- each device's last known old-epoch position;
+- the complete frozen old-epoch control state;
+- an exact ref to a Circle-encrypted, Owner-signed removal intent;
+- the frozen Store device-state ref;
+- every remaining member's active device registration and create-once response
+  slot;
 - a provisional `CommitFrontier`; and
 - one create-once outcome slot.
+
+The encrypted intent names the exact predecessor roster, signed removal, and
+resulting roster-state hash. Existing Circle members, including the member being
+removed, can verify that the public participant set contains every active device
+belonging to the resulting roster. Store members outside the Circle learn that
+an epoch is closing and which device slots participate, but not which identity
+is being removed.
 
 Active remaining devices freeze old-epoch publication, apply every accepted
 old-epoch commit they possess, and publish a signed response with their greatest

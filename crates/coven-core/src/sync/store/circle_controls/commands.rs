@@ -217,6 +217,101 @@ impl Store {
         .await
     }
 
+    pub(crate) async fn remove_circle_member(
+        &self,
+        device_id: &str,
+        circle_id: CircleId,
+        member_pubkey: String,
+        signer: &UserKeypair,
+    ) -> Result<crate::sync::circle::CircleOperationId, CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let identity_pubkey = keys::public_key_hex(signer);
+        let (current, activation_commit_ref) = database
+            .circle_authoring_context(circle_id, &identity_pubkey)
+            .await?;
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let (activation_commit, activation_author) =
+            crate::sync::store::pull::load_commit_with_author(
+                storage,
+                &root,
+                &activation_commit_ref,
+            )
+            .await?;
+        if activation_commit.candidate_family() != current.candidate_family {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} current state differs from its activating Store commit"
+            )));
+        }
+        let reference = activation_commit
+            .circle_controls()
+            .iter()
+            .find(|reference| {
+                reference.circle_id() == circle_id && reference.control() == &current.control.coord
+            })
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} current control is absent from its activating Store commit"
+                ))
+            })?;
+        let keyring = match &current.access.disposition {
+            crate::sync::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+            crate::sync::circle::CircleAccessDisposition::Inactive => {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle member removal requires active local access".to_string(),
+                ));
+            }
+        };
+        let roster_chain = super::activation::load_circle_authoring_roster_chain(
+            database,
+            storage,
+            &root,
+            &activation_commit_ref,
+            &activation_commit,
+            &activation_author,
+            reference,
+            &current.control,
+            keyring,
+        )
+        .await?;
+        let journal = Box::pin(prepare_circle_operation_request(
+            database,
+            storage,
+            device_id,
+            CircleOperationRequest::RemoveMember(Box::new(CircleRemoveMemberRequest {
+                circle_id,
+                member_pubkey,
+                current,
+                previous_control: reference.clone(),
+                roster_chain,
+            })),
+            signer,
+        ))
+        .await?;
+        if journal.circle_id() != circle_id {
+            return Err(CircleOperationError::InvalidState(
+                "prepared Circle member removal changed Circle identity".to_string(),
+            ));
+        }
+        let operation_id = journal.operation_id.clone();
+        database.insert_circle_operation(journal).await?;
+        Box::pin(publish_circle_operation(
+            database,
+            storage,
+            &operation_id,
+            signer,
+        ))
+        .await?;
+        Ok(operation_id)
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
@@ -264,6 +359,14 @@ pub(super) struct CircleAddMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
+pub(super) struct CircleRemoveMemberRequest {
+    pub(super) circle_id: CircleId,
+    pub(super) member_pubkey: String,
+    pub(super) current: CircleAuthoringState,
+    pub(super) previous_control: CircleControlRef,
+    pub(super) roster_chain: CircleRosterChain,
+}
+
 pub(super) enum CircleOperationRequest {
     Create {
         name: String,
@@ -271,6 +374,7 @@ pub(super) enum CircleOperationRequest {
     },
     Rename(Box<CircleRenameRequest>),
     AddMember(Box<CircleAddMemberRequest>),
+    RemoveMember(Box<CircleRemoveMemberRequest>),
 }
 
 impl CircleOperationRequest {
@@ -284,6 +388,9 @@ impl CircleOperationRequest {
                 member_pubkey: request.member_pubkey.clone(),
                 role: request.role,
             },
+            Self::RemoveMember(request) => CircleOperationIntent::RemoveMember {
+                member_pubkey: request.member_pubkey.clone(),
+            },
         }
     }
 
@@ -294,6 +401,9 @@ impl CircleOperationRequest {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
             Self::AddMember(request) => {
+                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
+            Self::RemoveMember(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
         }

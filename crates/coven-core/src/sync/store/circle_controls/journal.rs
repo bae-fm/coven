@@ -49,12 +49,16 @@ pub(crate) enum CircleOperationIntent {
         member_pubkey: String,
         role: crate::sync::circle::CircleRole,
     },
+    RemoveMember {
+        member_pubkey: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CircleOperationProgress {
     Ready(Box<PreparedCircleOperation>),
+    WaitingForCloseResponses(Box<PreparedCircleOperation>),
     Blocked {
         reason: String,
         operation: Box<PreparedCircleOperation>,
@@ -78,6 +82,7 @@ impl CircleOperationJournal {
     pub(crate) fn operation(&self) -> &PreparedCircleOperation {
         match &self.progress {
             CircleOperationProgress::Ready(operation)
+            | CircleOperationProgress::WaitingForCloseResponses(operation)
             | CircleOperationProgress::Blocked { operation, .. } => operation,
         }
     }
@@ -85,6 +90,7 @@ impl CircleOperationJournal {
     pub(crate) fn operation_mut(&mut self) -> &mut PreparedCircleOperation {
         match &mut self.progress {
             CircleOperationProgress::Ready(operation)
+            | CircleOperationProgress::WaitingForCloseResponses(operation)
             | CircleOperationProgress::Blocked { operation, .. } => operation,
         }
     }
@@ -122,7 +128,37 @@ impl CircleOperationJournal {
                     ))
                 })
         };
-        let mut materials = Vec::with_capacity(access_refs.len() * 3);
+        let mut materials = Vec::with_capacity(access_refs.len() * 3 + 1);
+        let [circle_reference] = commit.circle_controls() else {
+            return Err(CircleOperationError::Journal(
+                "Circle operation commit must activate exactly one Circle control".to_string(),
+            ));
+        };
+        match (
+            &circle_reference.objects().close_intent,
+            &operation.creation.close_intent,
+        ) {
+            (Some(reference), Some(intent))
+                if reference.close_id == intent.close_id
+                    && reference.intent_hash == intent.intent_hash() =>
+            {
+                let prepared = prepared_for(&reference.object)?;
+                materials.push(crate::sync::remote_object::CandidateObjectMaterial {
+                    object: reference.object.clone(),
+                    canonical_semantic_bytes: serde_json::to_vec(intent).map_err(|error| {
+                        CircleOperationError::Journal(format!("Circle epoch-close intent: {error}"))
+                    })?,
+                    stored_bytes: prepared.stored_bytes().to_vec(),
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(CircleOperationError::Journal(
+                    "Circle epoch-close intent does not match its signed candidate graph"
+                        .to_string(),
+                ));
+            }
+        }
         let mut bootstrap_blobs = BTreeMap::new();
         for (access, reference) in operation.creation.access.iter().zip(access_refs) {
             let leaf = prepared_for(&reference.leaf.object)?;
@@ -243,6 +279,9 @@ impl CircleOperationJournal {
     pub(crate) fn state(&self) -> CircleOperationState {
         match &self.progress {
             CircleOperationProgress::Ready(_) => CircleOperationState::Pending,
+            CircleOperationProgress::WaitingForCloseResponses(_) => {
+                CircleOperationState::WaitingForCloseResponses
+            }
             CircleOperationProgress::Blocked { reason, .. } => CircleOperationState::Blocked {
                 reason: reason.clone(),
             },
@@ -258,6 +297,18 @@ impl CircleOperationJournal {
         };
         let operation = operation.clone();
         self.progress = CircleOperationProgress::Blocked { reason, operation };
+        Ok(())
+    }
+
+    pub(crate) fn wait_for_close_responses(&mut self) -> Result<(), CircleOperationError> {
+        let CircleOperationProgress::Ready(operation) = &mut self.progress else {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} is not ready to enter close-response waiting",
+                self.operation_id
+            )));
+        };
+        let operation = operation.clone();
+        self.progress = CircleOperationProgress::WaitingForCloseResponses(operation);
         Ok(())
     }
 
@@ -290,6 +341,7 @@ impl CircleOperationJournal {
             CircleOperationIntent::Create { .. } => CircleOperationKind::Create,
             CircleOperationIntent::Rename { .. } => CircleOperationKind::Rename,
             CircleOperationIntent::AddMember { .. } => CircleOperationKind::AddMember,
+            CircleOperationIntent::RemoveMember { .. } => CircleOperationKind::RemoveMember,
         }
     }
 }

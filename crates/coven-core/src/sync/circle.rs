@@ -159,17 +159,41 @@ impl fmt::Display for CircleOperationId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CircleEpochCloseId(ObjectHash);
+
+impl CircleEpochCloseId {
+    pub(crate) fn from_operation_id(operation_id: &CircleOperationId) -> Self {
+        Self(ObjectHash::digest(
+            &[
+                b"coven.circle-epoch-close-id.v1\0".as_slice(),
+                operation_id.as_str().as_bytes(),
+            ]
+            .concat(),
+        ))
+    }
+}
+
+impl fmt::Display for CircleEpochCloseId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircleOperationKind {
     Create,
     Rename,
     AddMember,
+    RemoveMember,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationState {
     Pending,
+    WaitingForCloseResponses,
     Blocked { reason: String },
 }
 
@@ -627,6 +651,7 @@ mod tests {
         );
         let objects = super::super::store_commit::CircleActivationObjects {
             control: control_object,
+            close_intent: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
             roster_resolutions: BTreeMap::new(),
@@ -1001,7 +1026,11 @@ mod tests {
         )
         .expect("construct founder circle");
         let mut control = creation.control.value.clone();
-        let CircleControlValue { active_epoch, .. } = &mut control.value;
+        let active_epoch = control
+            .value
+            .state
+            .active_epoch_mut()
+            .expect("test control has an active epoch");
         active_epoch.common.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
         active_epoch.common.owners.sort();
         assert_ne!(active_epoch.common.owners[0], control.author_pubkey);
@@ -1149,7 +1178,11 @@ mod tests {
         assert_eq!(publication_fingerprint, control.value.key_fingerprint());
 
         let mut second_value = control.value.clone();
-        let CircleControlValue { active_epoch, .. } = &mut second_value.value;
+        let active_epoch = second_value
+            .value
+            .state
+            .active_epoch_mut()
+            .expect("test control has an active epoch");
         active_epoch.common.access_root = ObjectHash::digest(b"different founder access root");
         second_value.signature = keys::sign_hex(&author, &second_value.canonical_bytes()).1;
         let second_control = PreparedCircleControl {

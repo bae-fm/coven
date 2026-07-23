@@ -44,6 +44,9 @@ pub(crate) enum ProtectedObjectDomain {
     CircleMetadata,
     CirclePackage,
     CircleBootstrapImage,
+    CircleEpochCloseIntent,
+    CircleEpochCloseOutcome,
+    CircleEpochCloseResponse,
     CircleAccessLeaf,
     CircleAccessEnvelope,
 }
@@ -432,6 +435,30 @@ impl ProtectedObjectDomain {
                 },
                 extension: ".db",
             },
+            Self::CircleEpochCloseIntent => ProtocolObjectMetadata {
+                aad_label: b"circle-epoch-close-intent",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 6,
+                    fixed_components: &[(0, "circles"), (2, "epoch-close"), (4, "intent")],
+                }]),
+                extension: ".json",
+            },
+            Self::CircleEpochCloseOutcome => ProtocolObjectMetadata {
+                aad_label: b"circle-epoch-close-outcome",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "circles"), (2, "epoch-close"), (4, "outcome")],
+                }]),
+                extension: ".json",
+            },
+            Self::CircleEpochCloseResponse => ProtocolObjectMetadata {
+                aad_label: b"circle-epoch-close-response",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 6,
+                    fixed_components: &[(0, "circles"), (2, "epoch-close"), (4, "responses")],
+                }]),
+                extension: ".json",
+            },
             Self::CircleAccessLeaf => ProtocolObjectMetadata {
                 aad_label: b"circle-access-leaf",
                 path: ProtocolPathRule::CircleCandidate {
@@ -547,6 +574,12 @@ impl ProtocolObjectDomain {
         CircleProtocolObjectDomain(ProtectedObjectDomain::CirclePackage);
     pub const CircleBootstrapImage: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleBootstrapImage);
+    pub const CircleEpochCloseIntent: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseIntent);
+    pub const CircleEpochCloseOutcome: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseOutcome);
+    pub const CircleEpochCloseResponse: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseResponse);
 }
 
 /// Authenticated storage context for one immutable semantic object.
@@ -1671,6 +1704,21 @@ mod tests {
                 domain: ProtectedObjectDomain::CircleBootstrapImage,
                 valid: &["circles/circle/candidates/family/bootstraps/owner/epoch/recipient/hash"],
                 cross_domain: "circles/circle/candidates/family/packages/device/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleEpochCloseIntent,
+                valid: &["circles/circle/epoch-close/close/intent/hash"],
+                cross_domain: "circles/circle/epoch-close/close/outcome",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleEpochCloseOutcome,
+                valid: &["circles/circle/epoch-close/close/outcome"],
+                cross_domain: "circles/circle/epoch-close/close/responses/device",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleEpochCloseResponse,
+                valid: &["circles/circle/epoch-close/close/responses/device"],
+                cross_domain: "circles/circle/epoch-close/close/outcome",
             },
             DomainPathCase {
                 domain: ProtectedObjectDomain::CircleAccessLeaf,

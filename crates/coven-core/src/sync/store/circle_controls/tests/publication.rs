@@ -1,5 +1,24 @@
 use super::*;
 
+fn open_circle_routing_test_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "documents",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")],
+        vec![crate::migration::Migration::sql(
+            1,
+            "Circle routing schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
 #[tokio::test]
 async fn merge_publication_handles_every_exact_create_failure_boundary() {
     tokio::spawn(async {
@@ -423,6 +442,88 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         2,
         "row publication and Circle bootstrap must both own the blob"
     );
+}
+
+#[tokio::test]
+async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) = persist_merge_operation(&db, "circle-member-removal").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-removal-owner".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle removal Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let member_db = open_circle_routing_test_db();
+    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .await
+        .expect("activate Store member device");
+
+    let (_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        signer.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = crate::sync::cycle::init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        owner_storage,
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+
+    let operation_id = components
+        .remove_circle_member(circle_id, member_pubkey)
+        .await
+        .expect("activate Circle epoch close");
+
+    let operation = StoreDatabase::new(&db)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read Circle removal operation")
+        .expect("Circle removal waits for close responses");
+    assert_eq!(operation.kind(), CircleOperationKind::RemoveMember);
+    assert_eq!(
+        operation.state(),
+        CircleOperationState::WaitingForCloseResponses
+    );
+    assert_eq!(activation_count(&db, circle_id).await, 3);
+    assert!(StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .is_err());
 }
 
 #[tokio::test]

@@ -1169,6 +1169,21 @@ impl SyncComponents {
             .map_err(|error| SyncCycleFailure::operation("add Circle member", error))
     }
 
+    pub async fn remove_circle_member(
+        &self,
+        circle_id: super::circle::CircleId,
+        member_pubkey: String,
+    ) -> Result<super::circle::CircleOperationId, super::store::CircleOperationError> {
+        self.store
+            .remove_circle_member(
+                &self.device_id,
+                circle_id,
+                member_pubkey,
+                &self.user_keypair,
+            )
+            .await
+    }
+
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,

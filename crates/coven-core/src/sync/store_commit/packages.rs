@@ -65,6 +65,7 @@ pub struct CircleMetadataObjectRef {
 #[serde(deny_unknown_fields)]
 pub struct CircleActivationObjects {
     pub control: ExactObjectRef,
+    pub close_intent: Option<crate::sync::circle::CircleEpochCloseIntentRef>,
     #[serde(with = "ordered_map_entries")]
     pub roster_entries: BTreeMap<CircleRosterCoord, ExactObjectRef>,
     pub roster_heads: Vec<CircleRosterHeadRef>,
@@ -619,6 +620,10 @@ pub struct CandidateObjectManifest {
 pub enum CandidateExclusiveObjectRef {
     StorePackage(StorePackageRef),
     CirclePackage(CirclePackageRef),
+    CircleEpochCloseIntent {
+        circle_id: CircleId,
+        reference: crate::sync::circle::CircleEpochCloseIntentRef,
+    },
     CircleAccess {
         circle_id: CircleId,
         access: CircleAccessObjectRef,
