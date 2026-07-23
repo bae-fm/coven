@@ -404,25 +404,7 @@ pub(crate) fn persist_exact_remote_object_on(
         .validate()
         .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
     let object_id = remote.object_id();
-    if load_reclaimed_store_package_on(conn, object_id)?.is_some() {
-        return Err(DbError::Message(format!(
-            "prepared {domain} {object_id} is a reclaimed Store package"
-        )));
-    }
-    let inert_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
-             )",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if inert_exists {
-        return Err(DbError::Message(format!(
-            "prepared {domain} {object_id} is already protocol-inert"
-        )));
-    }
+    ensure_remote_object_is_writable_on(conn, object_id, domain)?;
     let existing = conn
         .query_row(
             "SELECT state FROM remote_objects WHERE object_id = ?1",
@@ -452,6 +434,59 @@ pub(crate) fn persist_exact_remote_object_on(
     )
     .map_err(DbError::from)?;
     Ok(())
+}
+
+fn ensure_remote_object_is_writable_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+    domain: &str,
+) -> Result<(), DbError> {
+    if load_reclaimed_store_package_on(conn, object_id)?.is_some() {
+        return Err(DbError::Message(format!(
+            "prepared {domain} {object_id} is a reclaimed Store package"
+        )));
+    }
+    let inert_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
+             )",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if inert_exists {
+        return Err(DbError::Message(format!(
+            "prepared {domain} {object_id} is already protocol-inert"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn persist_prepared_remote_object_on(
+    conn: &Connection,
+    remote: &RemoteObjectRecord,
+    owner: &StoreBatchCommitRef,
+    domain: &str,
+) -> Result<(), DbError> {
+    remote
+        .validate()
+        .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
+    let object_id = remote.object_id();
+    ensure_remote_object_is_writable_on(conn, object_id, domain)?;
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(DbError::from)?;
+    if !exists {
+        return persist_exact_remote_object_on(conn, remote, domain);
+    }
+    let existing = load_remote_object_on(conn, object_id)?;
+    let merged = merge_prepared_remote_object(existing, remote, owner)?;
+    update_remote_object_on(conn, object_id, &merged)
 }
 
 pub(crate) fn update_remote_object_on(

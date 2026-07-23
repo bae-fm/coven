@@ -245,6 +245,187 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
 }
 
 #[tokio::test]
+async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
+    let blob_decl = crate::sync::session::BlobDecl::new(
+        "files",
+        crate::blob::Provenance::HostProvided,
+        crate::blob::CacheFill::CacheEager,
+    );
+    let db = crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "documents",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")
+        .carries_blob(blob_decl)],
+        vec![crate::migration::Migration::sql(
+            1,
+            "Circle member bootstrap schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    );
+    let (store, signer, founder) = persist_merge_operation(&db, "circle-member-bootstrap").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+    let (_temp, store_dir) = temp_store_dir();
+    let blob_id = "00000000-0000-4000-8000-000000000001";
+    let blob_bytes = b"Circle bootstrap attachment";
+    let insert = format!(
+        "INSERT INTO documents (id, audience, size, hash, _updated_at)
+         VALUES ('{blob_id}', '{circle_id}', {}, '{}', '0000000001500-0000-owner')",
+        blob_bytes.len(),
+        crate::blob::content_hash(blob_bytes),
+    );
+    let tables = db.synced_tables().to_vec();
+    let write_id = db.new_write_id();
+    let routing = EncryptionService::from_key([42; 32]);
+    db.call(move |connection| {
+        StoreDatabase::run_internal_store_write_transaction_on(
+            connection,
+            &tables,
+            Some(&routing),
+            write_id,
+            |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
+        )
+    })
+    .await
+    .expect("capture scoped Circle blob row");
+    crate::blob::local_files::store(&store_dir, "files", blob_id, blob_bytes)
+        .await
+        .expect("stage Circle blob");
+    let writer = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        "circle-member-bootstrap",
+        signer.clone(),
+    )
+    .expect("construct Circle blob writer");
+    let components = crate::sync::cycle::init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        writer,
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("open scoped Circle Store");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish Circle row and blob");
+    let owner_pubkey = keys::public_key_hex(&signer);
+
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            owner_pubkey.clone(),
+            CircleRole::Owner,
+        )
+        .await
+        .expect("activate Circle member successor");
+
+    let (current, _) = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &owner_pubkey)
+        .await
+        .expect("load successor Circle state");
+    let CircleAccessDisposition::Active {
+        bootstrap: Some(bootstrap),
+        ..
+    } = current.access.disposition
+    else {
+        panic!("successor access must carry its bootstrap image");
+    };
+    assert_eq!(bootstrap.schema_version, db.schema_version());
+    assert_eq!(bootstrap.sync_routing_hash, db.sync_routing_hash());
+    let [blob] = bootstrap.blobs.as_slice() else {
+        panic!("Circle bootstrap must pin its one exact blob");
+    };
+    assert_eq!(
+        blob.locator().audience(),
+        crate::blob::locator::RemoteAudience::Circle(circle_id)
+    );
+    let blob = blob.clone();
+    assert_eq!(activation_count(&db, circle_id).await, 2);
+    assert!(StoreDatabase::new(&db)
+        .get_circle_operations()
+        .await
+        .expect("list completed Circle operations")
+        .is_empty());
+    let object_id = crate::sync::remote_object::remote_object_id(&bootstrap.image.object);
+    let record = db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("load bootstrap image ownership");
+    let record: crate::sync::remote_object::RemoteObjectRecord =
+        serde_json::from_str(&record).expect("parse bootstrap image ownership");
+    assert!(matches!(
+        record,
+        crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(ref shared)
+            if matches!(
+                shared.identity.domain,
+                crate::sync::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+            )
+    ));
+    let blob_object_id = crate::sync::remote_object::remote_object_id(blob.object());
+    let blob_record = db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [blob_object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read bootstrap blob ownership");
+    let blob_record: crate::sync::remote_object::RemoteObjectRecord =
+        serde_json::from_str(&blob_record).expect("parse bootstrap blob ownership");
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(blob_record) = blob_record
+    else {
+        panic!("Circle bootstrap blob must remain shared");
+    };
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        blob_record.state
+    else {
+        panic!("Circle bootstrap blob must remain verified");
+    };
+    assert_eq!(
+        ownership
+            .activated
+            .iter()
+            .filter(|owner| {
+                matches!(
+                    owner,
+                    crate::sync::remote_object::SharedObjectOwner::StoreCommit(_)
+                )
+            })
+            .count(),
+        2,
+        "row publication and Circle bootstrap must both own the blob"
+    );
+}
+
+#[tokio::test]
 async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
     for corrupt in [false, true] {
         let temp = tempfile::tempdir().expect("create database directory");

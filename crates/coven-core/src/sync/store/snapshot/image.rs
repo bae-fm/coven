@@ -288,6 +288,22 @@ pub fn create_snapshot(
         .map(|snapshot| snapshot.db_image)
 }
 
+pub(crate) fn create_circle_snapshot_with_host_blobs(
+    conn: &Connection,
+    temp_dir: &Path,
+    tables: &[SyncedTable],
+    routing_encryption: &crate::encryption::EncryptionService,
+    circle_id: crate::sync::circle::CircleId,
+) -> Result<CreatedSnapshot, SnapshotError> {
+    create_snapshot_for_audience_with_host_blobs(
+        conn,
+        temp_dir,
+        tables,
+        Some(routing_encryption),
+        &crate::sync::circle::Audience::Circle(circle_id),
+    )
+}
+
 #[cfg(test)]
 fn create_circle_snapshot(
     conn: &Connection,
@@ -296,14 +312,8 @@ fn create_circle_snapshot(
     routing_encryption: &crate::encryption::EncryptionService,
     circle_id: crate::sync::circle::CircleId,
 ) -> Result<Vec<u8>, SnapshotError> {
-    create_snapshot_for_audience_with_host_blobs(
-        conn,
-        temp_dir,
-        tables,
-        Some(routing_encryption),
-        &crate::sync::circle::Audience::Circle(circle_id),
-    )
-    .map(|snapshot| snapshot.db_image)
+    create_circle_snapshot_with_host_blobs(conn, temp_dir, tables, routing_encryption, circle_id)
+        .map(|snapshot| snapshot.db_image)
 }
 
 pub(crate) fn create_snapshot_with_host_blobs(
@@ -374,7 +384,19 @@ fn create_snapshot_for_audience_with_host_blobs(
         return Err(e);
     }
 
-    let blobs = snapshot_blob_facts(conn, &snapshot_path, temp_dir, tables)?;
+    let blobs = match snapshot_blob_facts(conn, &snapshot_path, temp_dir, tables) {
+        Ok(blobs) => blobs,
+        Err(error) => {
+            cleanup_snapshot_path(&snapshot_path);
+            return Err(error);
+        }
+    };
+    if matches!(audience, crate::sync::circle::Audience::Circle(_)) {
+        if let Err(error) = strip_circle_snapshot_transport_state(&snapshot_path) {
+            cleanup_snapshot_path(&snapshot_path);
+            return Err(error);
+        }
+    }
 
     // Read the cleared snapshot file. The storage implementation seals it at the
     // final cloud key so the AEAD context can bind that key.
@@ -641,12 +663,17 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "retained_replay_objects",
 ];
 
+// Circle projection keeps this closed graph only until `snapshot_blob_facts`
+// extracts the exact signed references. The final image strips every transport
+// and ownership row; recipient installation rebuilds them from the bootstrap.
 const CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "_coven_audience",
     "_coven_row_routes",
     "remote_objects",
     "blob_locators",
     "row_blob_locators",
+    "retained_merge_materializations",
+    "retained_replay_objects",
 ];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
@@ -750,10 +777,48 @@ fn clear_non_synced(
     tx.commit()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
 
-    // Reclaim the pages freed by the DELETEs so the blob shrinks.
-    conn.execute_batch("VACUUM")
-        .map_err(|e| SnapshotError::ClearFailed(format!("vacuum: {e}")))?;
+    // Circle projection removes its temporary transport graph after blob facts
+    // are extracted and vacuums once after that final deletion.
+    if matches!(audience, crate::sync::circle::Audience::Store) {
+        conn.execute_batch("VACUUM")
+            .map_err(|e| SnapshotError::ClearFailed(format!("vacuum: {e}")))?;
+    }
     Ok(())
+}
+
+fn strip_circle_snapshot_transport_state(path: &Path) -> Result<(), SnapshotError> {
+    let mut conn = Connection::open(path).map_err(|error| {
+        SnapshotError::ClearFailed(format!(
+            "open Circle snapshot transport projection: {error}"
+        ))
+    })?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    tx.execute_batch(
+        "DELETE FROM row_blob_locators;
+         DELETE FROM blob_locators;
+         DELETE FROM retained_replay_objects;
+         DELETE FROM remote_objects;
+         DELETE FROM retained_merge_materializations;",
+    )
+    .map_err(|error| {
+        SnapshotError::ClearFailed(format!("strip Circle snapshot transport state: {error}"))
+    })?;
+    tx.commit()
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    conn.execute_batch("VACUUM").map_err(|error| {
+        SnapshotError::ClearFailed(format!(
+            "vacuum Circle snapshot transport projection: {error}"
+        ))
+    })?;
+    conn.close().map_err(|(_, error)| {
+        SnapshotError::ClearFailed(format!(
+            "close Circle snapshot transport projection: {error}"
+        ))
+    })
 }
 
 fn scope_authenticated_blob_graph(
@@ -1442,7 +1507,12 @@ mod tests {
                      (SELECT COUNT(*) FROM _coven_row_routes),
                      (SELECT COUNT(*) FROM _coven_audience),
                      (SELECT COUNT(*) FROM circle_current_state),
-                     (SELECT COUNT(*) FROM protocol_state)",
+                     (SELECT COUNT(*) FROM protocol_state),
+                     (SELECT COUNT(*) FROM remote_objects),
+                     (SELECT COUNT(*) FROM blob_locators),
+                     (SELECT COUNT(*) FROM row_blob_locators),
+                     (SELECT COUNT(*) FROM retained_merge_materializations),
+                     (SELECT COUNT(*) FROM retained_replay_objects)",
                 [],
                 |row| {
                     Ok((
@@ -1452,6 +1522,11 @@ mod tests {
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
                     ))
                 },
             )
@@ -1463,6 +1538,11 @@ mod tests {
                 "Circle paragraph".to_string(),
                 2,
                 2,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
             )

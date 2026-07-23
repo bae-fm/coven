@@ -54,6 +54,17 @@ rebuild the deleted choice.
   discovery would otherwise violate canonical order.
 - Founder Circle creation and rename have durable operations and Store-commit
   activation.
+- Circle member addition authors a roster successor, retains the predecessor
+  roster needed to verify the Owner grant, inherits metadata without inventing
+  a metadata successor, and activates recipient access through the durable
+  operation journal.
+- Member-addition bootstrap images are created at an atomic materialized Store
+  frontier through the authenticated Circle routing projection. The signed
+  recipient leaf names the exact image and a canonical set of existing Circle
+  blob references; the activating Store commit retains ownership of both.
+- Circle images contain application rows and authenticated routing state, not
+  source-device transport or ownership tables. Exact blob references are
+  extracted before that state is removed and are signed outside the image.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -535,6 +546,23 @@ Adding access creates:
 The bootstrap contains the Circle state needed at its coverage point and pins
 every required Store ancestor, routing fact, control, key generation, and blob.
 The member installs it atomically before applying later Circle packages.
+
+The Owner publishes all pending Store writes before taking the bootstrap cut.
+Every blob retained by the cut must already have an activated exact Circle
+locator; member addition fails if any locator or remote object is absent. The
+bootstrap does not regenerate or re-upload those blob bytes. Its activating
+Store commit adds ownership of the exact existing objects.
+
+The database image excludes `remote_objects`, blob-locator indexes, and retained
+replay state. Recipient installation reconstructs the exact blob bindings and
+ownership atomically from the signed bootstrap and its activating Store commit;
+it never copies source-device ownership bookkeeping.
+
+The successor control proves its author against the predecessor roster. Its
+closed object graph therefore retains the exact predecessor heads as well as
+the new roster frontier. Only founder preparation replaces provisional roster
+coordinates after exact slots are allocated; later transitions never rewrite
+historical grant coordinates.
 
 Re-adding a former member is the same operation with a new active access leaf
 and current bootstrap. Prior possession of an old key grants no current

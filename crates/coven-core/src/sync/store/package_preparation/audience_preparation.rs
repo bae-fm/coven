@@ -565,36 +565,12 @@ pub(super) fn close_prepared_blobs(
     let mut indexed_blobs = Vec::with_capacity(exact_blobs.len());
     for blob in exact_blobs.into_values() {
         let locator_hash = blob.stored.locator().locator_hash();
-        let remote = super::remote_object::RemoteObjectRecord::SharedLiveSet(
-            super::remote_object::SharedObjectRecord {
-                identity: super::remote_object::SharedLiveSetObjectRef {
-                    domain: super::remote_object::SharedLiveSetObjectDomain::StoredBlob,
-                    semantic_hash: ObjectHash::digest(&blob.stored.locator().to_bytes()),
-                    object: blob.stored.object().clone(),
-                },
-                bytes: super::remote_object::RemoteObjectBytes::blob(
-                    blob.stored.locator().to_bytes(),
-                    blob.stored.object().clone(),
-                )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
-                state: if blob.uploaded_verified {
-                    super::remote_object::OwnedObjectState::UploadedVerified {
-                        ownership: super::remote_object::SharedObjectOwnership {
-                            pending: std::collections::BTreeSet::from([owner.clone()]),
-                            activated: std::collections::BTreeSet::new(),
-                            nonactivated: Vec::new(),
-                        },
-                    }
-                } else {
-                    super::remote_object::OwnedObjectState::Prepared {
-                        ownership: super::remote_object::PendingCandidateOwnership {
-                            pending: std::collections::BTreeSet::from([owner.clone()]),
-                            nonactivated: Vec::new(),
-                        },
-                    }
-                },
-            },
-        );
+        let remote = super::remote_object::RemoteObjectRecord::candidate_owned_blob(
+            &blob.stored,
+            owner.clone(),
+            blob.uploaded_verified,
+        )
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let prepared = PreparedAudienceBlob::from_remote(
             blob.audience,
             &locator_hash.to_string(),

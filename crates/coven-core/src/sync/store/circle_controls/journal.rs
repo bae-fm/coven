@@ -39,8 +39,16 @@ pub(crate) enum CircleTransitionHistory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CircleOperationIntent {
-    Create { name: String },
-    Rename { name: String },
+    Create {
+        name: String,
+    },
+    Rename {
+        name: String,
+    },
+    AddMember {
+        member_pubkey: String,
+        role: crate::sync::circle::CircleRole,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +122,8 @@ impl CircleOperationJournal {
                     ))
                 })
         };
-        let mut materials = Vec::with_capacity(access_refs.len() * 2);
+        let mut materials = Vec::with_capacity(access_refs.len() * 3);
+        let mut bootstrap_blobs = BTreeMap::new();
         for (access, reference) in operation.creation.access.iter().zip(access_refs) {
             let leaf = prepared_for(&reference.leaf.object)?;
             materials.push(crate::sync::remote_object::CandidateObjectMaterial {
@@ -134,10 +143,45 @@ impl CircleOperationJournal {
                 )?,
                 stored_bytes: envelope.stored_bytes().to_vec(),
             });
+            if let Some(bootstrap) = &reference.bootstrap {
+                let image = prepared_for(&bootstrap.object)?;
+                materials.push(crate::sync::remote_object::CandidateObjectMaterial {
+                    object: bootstrap.object.clone(),
+                    canonical_semantic_bytes: Vec::new(),
+                    stored_bytes: image.stored_bytes().to_vec(),
+                });
+            }
+            if let crate::sync::circle::CircleAccessDisposition::Active {
+                bootstrap: Some(bootstrap),
+                ..
+            } = &access.leaf.value.disposition
+            {
+                for blob in &bootstrap.blobs {
+                    let object_id = crate::sync::remote_object::remote_object_id(blob.object());
+                    if bootstrap_blobs
+                        .insert(object_id, blob.clone())
+                        .is_some_and(|existing| existing != *blob)
+                    {
+                        return Err(CircleOperationError::Journal(format!(
+                            "Circle bootstrap blob {object_id} has conflicting exact references"
+                        )));
+                    }
+                }
+            }
         }
         let mut remotes = crate::sync::remote_object::CandidateObjectGraph::from_commit(&commit)
             .and_then(|graph| graph.close(&commit, &operation.commit_ref, materials))
             .map_err(|error| CircleOperationError::Journal(error.to_string()))?;
+        for blob in bootstrap_blobs.into_values() {
+            remotes.push(
+                crate::sync::remote_object::RemoteObjectRecord::candidate_owned_blob(
+                    &blob,
+                    operation.commit_ref.clone(),
+                    true,
+                )
+                .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+            );
+        }
         let commit_prepared = operation
             .prepared_objects
             .get("store-commit")
@@ -245,6 +289,7 @@ impl CircleOperationJournal {
         match self.intent {
             CircleOperationIntent::Create { .. } => CircleOperationKind::Create,
             CircleOperationIntent::Rename { .. } => CircleOperationKind::Rename,
+            CircleOperationIntent::AddMember { .. } => CircleOperationKind::AddMember,
         }
     }
 }

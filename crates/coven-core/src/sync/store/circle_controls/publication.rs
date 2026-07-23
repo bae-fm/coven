@@ -130,112 +130,178 @@ pub(super) async fn publish_circle_operation(
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     }
 
-    let metadata_encryption = circle_encryption
-        .service_for_fingerprint(creation.metadata.key_fingerprint.as_bytes())
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "Circle metadata key fingerprint is absent from its keyring: {error}"
-            ))
-        })?;
-    append_step(
-        database,
-        storage,
-        &mut journal,
-        "metadata",
-        &ProtocolObjectContext::circle(
-            store_root_hash,
-            ProtocolObjectDomain::CircleMetadata,
-            metadata_encryption,
-        ),
-        &circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
-            circle_id: creation.circle_id,
-            coord: &creation.metadata.coord(),
-        }),
-        &serde_json::to_vec(&creation.metadata).expect("circle metadata serialization cannot fail"),
-    )
-    .await?;
     let CircleTransitionPolicyObjects {
-        roster_entry,
-        roster_head,
+        roster,
         metadata_head,
         ..
     } = &creation.policy_objects;
-    append_step(
-        database,
-        storage,
-        &mut journal,
-        "metadata-head",
-        &ProtocolObjectContext::circle(
-            store_root_hash,
-            ProtocolObjectDomain::CircleMetadata,
-            circle_encryption.clone(),
-        ),
-        &circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-            circle_id: creation.circle_id,
-            head: reference
-                .objects()
-                .metadata_heads
-                .iter()
-                .find(|head| head.coord == metadata_head.coord())
-                .ok_or_else(|| {
-                    CircleOperationError::Journal(
-                        "prepared metadata head is absent from its signed object graph".to_string(),
-                    )
-                })?,
-        }),
-        &serde_json::to_vec(metadata_head).expect("circle metadata head serialization cannot fail"),
-    )
-    .await?;
-    match (roster_entry, roster_head) {
-        (Some(roster_entry), Some(roster_head)) => {
-            let roster_context = ProtocolObjectContext::circle(
+    if let Some(metadata_head) = metadata_head {
+        let metadata_encryption = circle_encryption
+            .service_for_fingerprint(creation.metadata.key_fingerprint.as_bytes())
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle metadata key fingerprint is absent from its keyring: {error}"
+                ))
+            })?;
+        append_step(
+            database,
+            storage,
+            &mut journal,
+            "metadata",
+            &ProtocolObjectContext::circle(
                 store_root_hash,
-                ProtocolObjectDomain::CircleRoster,
+                ProtocolObjectDomain::CircleMetadata,
+                metadata_encryption,
+            ),
+            &circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
+                circle_id: creation.circle_id,
+                coord: &creation.metadata.coord(),
+            }),
+            &serde_json::to_vec(&creation.metadata)
+                .expect("circle metadata serialization cannot fail"),
+        )
+        .await?;
+        append_step(
+            database,
+            storage,
+            &mut journal,
+            "metadata-head",
+            &ProtocolObjectContext::circle(
+                store_root_hash,
+                ProtocolObjectDomain::CircleMetadata,
                 circle_encryption.clone(),
+            ),
+            &circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+                circle_id: creation.circle_id,
+                head: reference
+                    .objects()
+                    .metadata_heads
+                    .iter()
+                    .find(|head| head.coord == metadata_head.coord())
+                    .ok_or_else(|| {
+                        CircleOperationError::Journal(
+                            "prepared metadata head is absent from its signed object graph"
+                                .to_string(),
+                        )
+                    })?,
+            }),
+            &serde_json::to_vec(metadata_head)
+                .expect("circle metadata head serialization cannot fail"),
+        )
+        .await?;
+    }
+    if let Some(roster) = roster {
+        let roster_context = ProtocolObjectContext::circle(
+            store_root_hash,
+            ProtocolObjectDomain::CircleRoster,
+            circle_encryption.clone(),
+        );
+        append_step(
+            database,
+            storage,
+            &mut journal,
+            "roster-entry",
+            &roster_context,
+            &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
+                circle_id: creation.circle_id,
+                coord: &roster.entry.coord(),
+            }),
+            &serde_json::to_vec(&roster.entry)
+                .expect("circle roster entry serialization cannot fail"),
+        )
+        .await?;
+        append_step(
+            database,
+            storage,
+            &mut journal,
+            "roster-head",
+            &roster_context,
+            &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
+                circle_id: creation.circle_id,
+                head: reference
+                    .objects()
+                    .roster_heads
+                    .iter()
+                    .find(|head| head.coord == roster.head.entry_coord())
+                    .ok_or_else(|| {
+                        CircleOperationError::Journal(
+                            "prepared roster head is absent from its signed object graph"
+                                .to_string(),
+                        )
+                    })?,
+            }),
+            &serde_json::to_vec(&roster.head)
+                .expect("circle roster head serialization cannot fail"),
+        )
+        .await?;
+    }
+    let bootstrap_access = creation
+        .access
+        .iter()
+        .zip(&reference.objects().access)
+        .filter_map(|(access, object)| {
+            let CircleAccessDisposition::Active {
+                bootstrap: Some(bootstrap),
+                ..
+            } = &access.leaf.value.disposition
+            else {
+                return None;
+            };
+            Some((access, object, bootstrap))
+        })
+        .collect::<Vec<_>>();
+    match bootstrap_access.as_slice() {
+        [] => {
+            if journal
+                .operation()
+                .prepared_objects
+                .contains_key("bootstrap-image")
+            {
+                return Err(CircleOperationError::Journal(
+                    "Circle operation carries an unsigned bootstrap image".to_string(),
+                ));
+            }
+        }
+        [(access, object, bootstrap)] if object.bootstrap.as_ref() == Some(&bootstrap.image) => {
+            for blob in &bootstrap.blobs {
+                storage.verify_blob_object(blob).await.map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "verify Circle bootstrap blob {}: {error}",
+                        crate::sync::remote_object::remote_object_id(blob.object())
+                    ))
+                })?;
+            }
+            let prefix = crate::sync::store_commit::circle_bootstrap_image_semantic_prefix(
+                access.leaf.value.circle_id,
+                commit.candidate_family(),
+                &access.leaf.value.owner_pubkey,
+                access.leaf.value.epoch_id,
+                &access.leaf.value.recipient_slot,
+                bootstrap.image.image_hash,
             );
-            append_step(
+            append_hashed_step(
                 database,
                 storage,
                 &mut journal,
-                "roster-entry",
-                &roster_context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
-                    circle_id: creation.circle_id,
-                    coord: &roster_entry.coord(),
-                }),
-                &serde_json::to_vec(roster_entry)
-                    .expect("circle roster entry serialization cannot fail"),
-            )
-            .await?;
-            append_step(
-                database,
-                storage,
-                &mut journal,
-                "roster-head",
-                &roster_context,
-                &circle_semantic_prefix(CircleSemanticSlot::RosterHead {
-                    circle_id: creation.circle_id,
-                    head: reference
-                        .objects()
-                        .roster_heads
-                        .iter()
-                        .find(|head| head.coord == roster_head.entry_coord())
-                        .ok_or_else(|| {
-                            CircleOperationError::Journal(
-                                "prepared roster head is absent from its signed object graph"
-                                    .to_string(),
-                            )
-                        })?,
-                }),
-                &serde_json::to_vec(roster_head)
-                    .expect("circle roster head serialization cannot fail"),
+                "bootstrap-image",
+                &ProtocolObjectContext::circle(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleBootstrapImage,
+                    circle_encryption.clone(),
+                ),
+                &prefix,
+                bootstrap.image.image_hash,
             )
             .await?;
         }
-        (None, None) => {}
+        [_] => {
+            return Err(CircleOperationError::Journal(
+                "Circle bootstrap access differs from its signed object graph".to_string(),
+            ));
+        }
         _ => {
-            return Err(CircleOperationError::InvalidState(
-                "Circle transition must carry both an authored roster entry and head".to_string(),
+            return Err(CircleOperationError::Journal(
+                "one Circle operation cannot activate multiple bootstrap images".to_string(),
             ));
         }
     }
@@ -463,6 +529,40 @@ async fn append_step(
     semantic_prefix: &str,
     bytes: &[u8],
 ) -> Result<(), CircleOperationError> {
+    let persisted = create_or_read_step(storage, journal, step, context, semantic_prefix).await?;
+    if persisted != bytes {
+        return Err(CircleOperationError::InvalidState(format!(
+            "circle upload step {step:?} differs from its prepared journal bytes"
+        )));
+    }
+    complete_step(database, journal, step).await
+}
+
+async fn append_hashed_step(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    journal: &mut CircleOperationJournal,
+    step: &str,
+    context: &ProtocolObjectContext,
+    semantic_prefix: &str,
+    expected_hash: crate::sync::store_commit::ObjectHash,
+) -> Result<(), CircleOperationError> {
+    let persisted = create_or_read_step(storage, journal, step, context, semantic_prefix).await?;
+    if crate::sync::store_commit::ObjectHash::digest(&persisted) != expected_hash {
+        return Err(CircleOperationError::InvalidState(format!(
+            "circle upload step {step:?} differs from its signed image hash"
+        )));
+    }
+    complete_step(database, journal, step).await
+}
+
+async fn create_or_read_step(
+    storage: &dyn SyncStorage,
+    journal: &CircleOperationJournal,
+    step: &str,
+    context: &ProtocolObjectContext,
+    semantic_prefix: &str,
+) -> Result<Vec<u8>, CircleOperationError> {
     let prepared = journal
         .operation()
         .prepared_objects
@@ -474,25 +574,23 @@ async fn append_step(
             ))
         })?;
     if journal.operation().uploaded.contains(step) {
-        let persisted =
-            load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix).await?;
-        if persisted != bytes {
-            return Err(CircleOperationError::InvalidState(format!(
-                "circle upload step {step:?} differs from its durable journal bytes"
-            )));
-        }
-        return Ok(());
+        return load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix)
+            .await;
     }
     storage
         .create_protocol_object(&prepared)
         .await
         .map_err(crate::sync::store_objects::StoreObjectError::from)?;
-    let persisted =
-        load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix).await?;
-    if persisted != bytes {
-        return Err(CircleOperationError::InvalidState(format!(
-            "circle upload step {step:?} differs from its prepared journal bytes"
-        )));
+    load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix).await
+}
+
+async fn complete_step(
+    database: &StoreDatabase,
+    journal: &mut CircleOperationJournal,
+    step: &str,
+) -> Result<(), CircleOperationError> {
+    if journal.operation().uploaded.contains(step) {
+        return Ok(());
     }
     journal.operation_mut().uploaded.insert(step.to_string());
     database.update_circle_operation(journal.clone()).await?;

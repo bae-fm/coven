@@ -163,6 +163,7 @@ impl fmt::Display for CircleOperationId {
 pub enum CircleOperationKind {
     Create,
     Rename,
+    AddMember,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

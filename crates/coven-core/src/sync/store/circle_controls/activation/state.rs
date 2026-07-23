@@ -394,6 +394,13 @@ fn retained_access_matches(
         && reference.leaf.object.stored_hash() == access.leaf.leaf_hash
         && u64::try_from(access.leaf.bytes.len())
             .is_ok_and(|size| reference.leaf.object.stored_size() == size)
+        && reference.bootstrap
+            == match &access.leaf.value.disposition {
+                crate::sync::circle::CircleAccessDisposition::Active { bootstrap, .. } => {
+                    bootstrap.as_ref().map(|bootstrap| bootstrap.image.clone())
+                }
+                crate::sync::circle::CircleAccessDisposition::Inactive => None,
+            }
 }
 
 #[derive(Debug, Clone)]

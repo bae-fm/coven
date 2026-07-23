@@ -7,9 +7,9 @@ use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::sync::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleOperationId,
-    CircleOperationKind, CircleOperationState, CircleRole, CircleSemanticSlot,
-    CircleTransitionDraft, CircleTransitionDraftPolicy, CircleTransitionPolicyObjects,
-    PreparedCircleTransition,
+    CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
+    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
+    CircleTransitionPolicyObjects, PreparedCircleTransition,
 };
 use crate::sync::cloud_storage::{CloudCipher, CloudCipherAccess};
 use crate::sync::membership::MemberRole;
@@ -350,8 +350,22 @@ fn promote_store_member_access_without_adding_to_circle_roster(
 }
 
 fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitionDraft {
+    let roster = creation.policy_objects.roster.as_ref().map_or(
+        CircleRosterDraftPolicy::Inherited,
+        |roster| {
+            assert_eq!(roster.entry.seq, 1, "test transition must be a founder");
+            assert!(
+                roster.entry.previous_hash.is_none(),
+                "test transition must be a founder"
+            );
+            CircleRosterDraftPolicy::Founder {
+                entry: roster.entry.clone(),
+            }
+        },
+    );
     let policy = CircleTransitionDraftPolicy {
-        roster_entry: creation.policy_objects.roster_entry.clone(),
+        roster,
+        metadata_successor: creation.policy_objects.metadata_head.is_some(),
     };
     CircleTransitionDraft {
         circle_id: creation.circle_id,

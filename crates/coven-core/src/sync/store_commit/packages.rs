@@ -49,6 +49,7 @@ pub struct CircleAccessLeafObjectRef {
 pub struct CircleAccessObjectRef {
     pub leaf: CircleAccessLeafObjectRef,
     pub envelope: CircleAccessEnvelopeObjectRef,
+    pub bootstrap: Option<SnapshotImageRef>,
 }
 
 /// Exact Circle-metadata object and the epoch key that must open it.

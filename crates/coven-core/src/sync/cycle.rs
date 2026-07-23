@@ -1120,6 +1120,55 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn add_circle_member(
+        &self,
+        store_dir: &StoreDir,
+        circle_id: super::circle::CircleId,
+        member_pubkey: String,
+        role: super::circle::CircleRole,
+    ) -> Result<(), SyncCycleFailure> {
+        let routing_encryption = self.current_encryption().ok_or_else(|| {
+            SyncCycleFailure::operation(
+                "add Circle member",
+                super::store::CircleOperationError::BrowsableStorage,
+            )
+        })?;
+        let operation_stamp = self.hlc.now().to_string();
+        let authorization = self.store.authorize().await?;
+        authorization
+            .prepare_pending_store_write(
+                &self.device_id,
+                &operation_stamp,
+                &self.user_keypair,
+                store_dir,
+            )
+            .await?;
+        authorization.drain_store_writes().await.map_err(|error| {
+            SyncCycleFailure::operation("publish pending writes before Circle bootstrap", error)
+        })?;
+        let bootstrap = authorization
+            .capture_circle_snapshot_cut(
+                store_dir.as_ref().to_path_buf(),
+                &routing_encryption,
+                circle_id,
+            )
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("capture Circle member bootstrap", error)
+            })?;
+        self.store
+            .add_circle_member(
+                &self.device_id,
+                circle_id,
+                member_pubkey,
+                role,
+                bootstrap,
+                &self.user_keypair,
+            )
+            .await
+            .map_err(|error| SyncCycleFailure::operation("add Circle member", error))
+    }
+
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,

@@ -27,8 +27,8 @@ pub(crate) use crate::database::remote_object_records::load_protocol_inert_objec
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::mark_remote_object_uploaded_on;
 pub(crate) use crate::database::remote_object_records::mark_reusable_retained_authority_uploaded_on;
-pub(crate) use crate::database::remote_object_records::merge_prepared_remote_object;
 pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
+pub(crate) use crate::database::remote_object_records::persist_prepared_remote_object_on;
 pub(crate) use crate::database::remote_object_records::record_reclaimed_store_package_on;
 pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
 pub(crate) use crate::database::remote_object_records::update_remote_object_on;

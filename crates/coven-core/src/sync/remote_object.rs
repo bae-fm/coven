@@ -381,6 +381,40 @@ impl RemoteObjectRecord {
         Ok(record)
     }
 
+    pub(crate) fn candidate_owned_blob(
+        stored: &crate::blob::locator::StoredBlobRef,
+        owner: StoreBatchCommitRef,
+        uploaded_verified: bool,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let locator_bytes = stored.locator().to_bytes();
+        let ownership = PendingCandidateOwnership {
+            pending: BTreeSet::from([owner]),
+            nonactivated: Vec::new(),
+        };
+        let state = if uploaded_verified {
+            OwnedObjectState::UploadedVerified {
+                ownership: SharedObjectOwnership {
+                    pending: ownership.pending,
+                    activated: BTreeSet::new(),
+                    nonactivated: ownership.nonactivated,
+                },
+            }
+        } else {
+            OwnedObjectState::Prepared { ownership }
+        };
+        let record = Self::SharedLiveSet(SharedObjectRecord {
+            identity: SharedLiveSetObjectRef {
+                domain: SharedLiveSetObjectDomain::StoredBlob,
+                semantic_hash: ObjectHash::digest(&locator_bytes),
+                object: stored.object().clone(),
+            },
+            bytes: RemoteObjectBytes::blob(locator_bytes, stored.object().clone())?,
+            state,
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
     pub(crate) fn merge_blob_activation(
         &mut self,
         stored: &crate::blob::locator::StoredBlobRef,
@@ -515,6 +549,7 @@ impl RemoteObjectRecord {
             )),
             SharedLiveSetObjectDomain::StoredBlob => None,
             SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => None,
+            SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => None,
         };
         if let Some((family, domain)) = package_domain {
             let identity = CandidateExclusiveTarget {
@@ -890,7 +925,8 @@ impl RemoteObjectRecord {
                             RemoteObjectRecordError::InvalidDomain(error.to_string())
                         })?;
                     }
-                    SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => {}
+                    SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                    | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {}
                     SharedLiveSetObjectDomain::StorePackage { reference } => {
                         validate_package_reference(
                             reference,
@@ -2136,7 +2172,17 @@ pub(crate) struct CandidateExclusiveTarget {
 
 impl CandidateExclusiveTarget {
     fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
-        validate_semantic_hash(self.semantic_hash, bytes)
+        match &self.domain {
+            CandidateExclusiveObjectDomain::CircleBootstrapImage { reference, .. }
+                if bytes.is_empty() && self.semantic_hash == reference.image_hash =>
+            {
+                Ok(())
+            }
+            CandidateExclusiveObjectDomain::CircleBootstrapImage { .. } => {
+                Err(RemoteObjectRecordError::StoredReferenceMismatch)
+            }
+            _ => validate_semantic_hash(self.semantic_hash, bytes),
+        }
     }
 }
 
@@ -2171,6 +2217,14 @@ pub(crate) enum CandidateExclusiveObjectDomain {
         circle_id: CircleId,
         reference: super::store_commit::CircleAccessEnvelopeObjectRef,
     },
+    CircleBootstrapImage {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        owner_pubkey: String,
+        epoch_id: super::circle::CircleEpochId,
+        recipient_slot: String,
+        reference: super::store_commit::SnapshotImageRef,
+    },
 }
 
 impl CandidateExclusiveObjectDomain {
@@ -2181,9 +2235,9 @@ impl CandidateExclusiveObjectDomain {
             | Self::MergeMembershipWrappedStoreKey { family, .. } => *family,
             Self::StorePackage { reference } => reference.candidate_family,
             Self::CirclePackage { reference } => reference.package.candidate_family,
-            Self::CircleAccessLeaf { family, .. } | Self::CircleAccessEnvelope { family, .. } => {
-                *family
-            }
+            Self::CircleAccessLeaf { family, .. }
+            | Self::CircleAccessEnvelope { family, .. }
+            | Self::CircleBootstrapImage { family, .. } => *family,
         }
     }
 
@@ -2196,6 +2250,7 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => &reference.package.object,
             Self::CircleAccessLeaf { reference, .. } => &reference.object,
             Self::CircleAccessEnvelope { reference, .. } => &reference.object,
+            Self::CircleBootstrapImage { reference, .. } => &reference.object,
         }
     }
 
@@ -2207,6 +2262,11 @@ impl CandidateExclusiveObjectDomain {
             Self::CirclePackage { reference } => Some(SharedLiveSetObjectDomain::CirclePackage {
                 reference: reference.clone(),
             }),
+            Self::CircleBootstrapImage { reference, .. } => {
+                Some(SharedLiveSetObjectDomain::CircleBootstrapImage {
+                    reference: reference.clone(),
+                })
+            }
             Self::MergeMembershipEntry { .. }
             | Self::MergeMembershipHead { .. }
             | Self::MergeMembershipWrappedStoreKey { .. }
@@ -2250,7 +2310,9 @@ impl CandidateExclusiveObjectDomain {
                 circle_id: *circle_id,
                 reference: reference.clone(),
             }),
-            Self::StorePackage { .. } | Self::CirclePackage { .. } => None,
+            Self::StorePackage { .. }
+            | Self::CirclePackage { .. }
+            | Self::CircleBootstrapImage { .. } => None,
         }
     }
 }
@@ -2258,9 +2320,9 @@ impl CandidateExclusiveObjectDomain {
 impl SharedLiveSetObjectDomain {
     fn package_object(&self) -> Result<&ExactObjectRef, RemoteObjectRecordError> {
         match self {
-            Self::StoredBlob | Self::StoreSnapshotImage { .. } => {
-                Err(RemoteObjectRecordError::DomainMismatch)
-            }
+            Self::StoredBlob
+            | Self::StoreSnapshotImage { .. }
+            | Self::CircleBootstrapImage { .. } => Err(RemoteObjectRecordError::DomainMismatch),
             Self::StorePackage { reference } => Ok(&reference.object),
             Self::CirclePackage { reference } => Ok(&reference.package.object),
         }
@@ -2314,6 +2376,16 @@ impl CandidateObjectGraph {
                         circle_id: *circle_id,
                         reference: access.envelope.clone(),
                     });
+                    if let Some(bootstrap) = &access.bootstrap {
+                        objects.push(CandidateExclusiveObjectDomain::CircleBootstrapImage {
+                            family: manifest.family,
+                            circle_id: *circle_id,
+                            owner_pubkey: access.leaf.owner_pubkey.clone(),
+                            epoch_id: access.leaf.epoch_id,
+                            recipient_slot: access.leaf.recipient_slot.clone(),
+                            reference: bootstrap.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -2354,18 +2426,36 @@ impl CandidateObjectGraph {
             let material = exact
                 .remove(&object)
                 .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
+            let (semantic_hash, bytes) = match &domain {
+                CandidateExclusiveObjectDomain::CircleBootstrapImage { reference, .. } => {
+                    object
+                        .verify(&material.stored_bytes)
+                        .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))?;
+                    (
+                        reference.image_hash,
+                        RemoteObjectBytes::external_exact(
+                            material.canonical_semantic_bytes,
+                            object.clone(),
+                        )?,
+                    )
+                }
+                _ => (
+                    ObjectHash::digest(&material.canonical_semantic_bytes),
+                    RemoteObjectBytes::inline(
+                        material.canonical_semantic_bytes,
+                        material.stored_bytes,
+                        object.clone(),
+                    )?,
+                ),
+            };
             let record = RemoteObjectRecord::CandidateExclusive(CandidateObjectRecord {
                 identity: CandidateExclusiveTarget {
                     family: domain.family(),
                     domain,
-                    semantic_hash: ObjectHash::digest(&material.canonical_semantic_bytes),
+                    semantic_hash,
                     object: object.clone(),
                 },
-                bytes: RemoteObjectBytes::inline(
-                    material.canonical_semantic_bytes,
-                    material.stored_bytes,
-                    object,
-                )?,
+                bytes,
                 state: CandidateObjectState::Prepared {
                     ownership: PendingCandidateOwnership {
                         pending: BTreeSet::from([owner.clone()]),
@@ -2434,7 +2524,52 @@ fn validate_access_pairs(
         {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
-        index += 2;
+        let bootstrap = match &leaf.disposition {
+            super::circle_control::CircleAccessDisposition::Active { bootstrap, .. } => {
+                bootstrap.as_ref()
+            }
+            super::circle_control::CircleAccessDisposition::Inactive => None,
+        };
+        match bootstrap {
+            Some(bootstrap) => {
+                let Some(CandidateExclusiveObjectDomain::CircleBootstrapImage {
+                    family: bootstrap_family,
+                    circle_id: bootstrap_circle,
+                    owner_pubkey,
+                    epoch_id,
+                    recipient_slot,
+                    reference,
+                }) = objects.get(index + 2)
+                else {
+                    return Err(RemoteObjectRecordError::DomainMismatch);
+                };
+                let material = materials
+                    .get(&reference.object)
+                    .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
+                if bootstrap_family != family
+                    || bootstrap_circle != circle_id
+                    || owner_pubkey != &leaf.owner_pubkey
+                    || *epoch_id != leaf.epoch_id
+                    || recipient_slot != &leaf.recipient_slot
+                    || reference != &bootstrap.image
+                    || !bootstrap.verify_for_access(&leaf)
+                    || !material.canonical_semantic_bytes.is_empty()
+                    || reference.object.verify(&material.stored_bytes).is_err()
+                {
+                    return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                }
+                index += 3;
+            }
+            None => {
+                if matches!(
+                    objects.get(index + 2),
+                    Some(CandidateExclusiveObjectDomain::CircleBootstrapImage { .. })
+                ) {
+                    return Err(RemoteObjectRecordError::DomainMismatch);
+                }
+                index += 2;
+            }
+        }
     }
     Ok(())
 }
@@ -2515,6 +2650,30 @@ fn validate_candidate_exclusive_identity(
             canonical_semantic_bytes,
             &identity.object,
         ),
+        CandidateExclusiveObjectDomain::CircleBootstrapImage {
+            circle_id,
+            owner_pubkey,
+            epoch_id,
+            recipient_slot,
+            reference,
+            ..
+        } => {
+            let expected_prefix = super::store_commit::circle_bootstrap_image_semantic_prefix(
+                *circle_id,
+                identity.family,
+                owner_pubkey,
+                *epoch_id,
+                recipient_slot,
+                reference.image_hash,
+            );
+            if !canonical_semantic_bytes.is_empty()
+                || reference.object != identity.object
+                || reference.object.slot().logical_key() != format!("{expected_prefix}.db")
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2636,6 +2795,16 @@ impl SharedLiveSetObjectRef {
             SharedLiveSetObjectDomain::StoreSnapshotImage { .. } => {
                 Err(RemoteObjectRecordError::StoredReferenceMismatch)
             }
+            SharedLiveSetObjectDomain::CircleBootstrapImage { reference }
+                if bytes.is_empty()
+                    && self.semantic_hash == reference.image_hash
+                    && self.object == reference.object =>
+            {
+                Ok(())
+            }
+            SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {
+                Err(RemoteObjectRecordError::StoredReferenceMismatch)
+            }
             _ => validate_semantic_hash(self.semantic_hash, bytes),
         }
     }
@@ -2646,6 +2815,9 @@ impl SharedLiveSetObjectRef {
 pub(crate) enum SharedLiveSetObjectDomain {
     StoredBlob,
     StoreSnapshotImage {
+        reference: super::store_commit::SnapshotImageRef,
+    },
+    CircleBootstrapImage {
         reference: super::store_commit::SnapshotImageRef,
     },
     StorePackage {

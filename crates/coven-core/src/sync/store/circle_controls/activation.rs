@@ -31,7 +31,7 @@ mod state;
 pub(crate) use context::{load_exact_slot_bytes, verify_control_context};
 use context::{read_exact_circle_object, verify_control_membership};
 use metadata::load_circle_metadata_state;
-use roster::{load_circle_authority_roster, load_circle_roster_state};
+use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle_roster_state};
 #[cfg(test)]
 use state::CircleCurrentControl;
 pub(crate) use state::{
@@ -44,6 +44,42 @@ struct VerifiedAccessPair {
     reference: CircleAccessObjectRef,
     envelope: AccessEnvelope,
     leaf_bytes: Vec<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn load_circle_authoring_roster_chain(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    author: &StoreDeviceRegistration,
+    reference: &crate::sync::store_commit::CircleControlRef,
+    control: &PreparedCircleControl,
+    keyring: &str,
+) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
+    verify_control_context(reference, control, commit_ref, commit, author)?;
+    let encryption =
+        EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "parse Circle authoring access keyring: {error}"
+            ))
+        })?);
+    let mut consumed_stream_activations = BTreeSet::new();
+    load_circle_roster_chain(
+        database,
+        &VerifiedStreamActivationPrefix::empty(),
+        storage,
+        root,
+        commit_ref,
+        commit,
+        reference.circle_id(),
+        &control.value.value.active_epoch.roster,
+        encryption,
+        reference.objects(),
+        &mut consumed_stream_activations,
+    )
+    .await
 }
 
 async fn load_verified_access_pairs(

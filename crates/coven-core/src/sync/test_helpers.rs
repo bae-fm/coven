@@ -261,8 +261,9 @@ fn install_test_circle_current_state(
 
     use crate::storage::cloud::ObjectSlot;
     use crate::sync::circle::{
-        CircleMetadataHead, CircleRole, CircleRosterHead, CircleTransitionDraft,
-        CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
+        CircleMetadataHead, CircleRole, CircleRosterDraftPolicy, CircleRosterHead,
+        CircleRosterPolicyObjects, CircleTransitionDraft, CircleTransitionPolicyObjects,
+        PreparedCircleTransition, StoreMembershipStateRef,
     };
     use crate::sync::membership::{
         MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
@@ -408,11 +409,13 @@ fn install_test_circle_current_state(
     )]);
     let mut metadata_heads = Vec::new();
     let (policy_objects, head_object) = {
-        let roster_entry = draft
-            .policy
-            .roster_entry
-            .clone()
-            .expect("founder Circle contains a roster entry");
+        let CircleRosterDraftPolicy::Founder {
+            entry: roster_entry,
+        } = &draft.policy.roster
+        else {
+            panic!("founder Circle contains a founder roster entry");
+        };
+        let roster_entry = roster_entry.clone();
         let roster_bytes =
             serde_json::to_vec(&roster_entry).expect("serialize test Circle roster entry");
         let roster_object = exact_object(&format!("{label}/roster-entry"), &roster_bytes);
@@ -528,9 +531,11 @@ fn install_test_circle_current_state(
         );
         (
             CircleTransitionPolicyObjects {
-                roster_entry: Some(roster_entry),
-                roster_head: Some(roster_head),
-                metadata_head,
+                roster: Some(CircleRosterPolicyObjects {
+                    entry: roster_entry,
+                    head: roster_head,
+                }),
+                metadata_head: Some(metadata_head),
                 control_head,
             },
             Some(control_head_object),

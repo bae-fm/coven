@@ -56,6 +56,9 @@ pub(super) fn verify_prepared_objects_are_signed(
     for access in &objects.access {
         signed.insert(access.leaf.object.clone());
         signed.insert(access.envelope.object.clone());
+        if let Some(bootstrap) = &access.bootstrap {
+            signed.insert(bootstrap.object.clone());
+        }
     }
     for (step, prepared) in &operation.prepared_objects {
         if step != "store-head" && !signed.contains(prepared.reference()) {
@@ -142,6 +145,56 @@ pub(super) fn prepare_circle_object_at(
         .map_err(CircleOperationError::from)
 }
 
+async fn verified_circle_bootstrap_blobs(
+    storage: &dyn SyncStorage,
+    circle_id: crate::sync::circle::CircleId,
+    snapshot: &crate::sync::store::snapshot::CreatedSnapshot,
+) -> Result<Vec<crate::blob::locator::StoredBlobRef>, CircleOperationError> {
+    let mut blobs = Vec::with_capacity(snapshot.blobs.len());
+    for captured in &snapshot.blobs {
+        let crate::sync::store::snapshot::SnapshotBlobAudience::Circle {
+            circle_id: captured_circle,
+            ..
+        } = captured.audience
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle bootstrap contains a Store-audience blob".to_string(),
+            ));
+        };
+        let previous = captured.fact.previous.as_ref().ok_or_else(|| {
+            CircleOperationError::InvalidState(format!(
+                "Circle bootstrap blob {}/{} has no activated exact remote binding",
+                captured.fact.blob.namespace, captured.fact.blob.id
+            ))
+        })?;
+        if captured_circle != circle_id
+            || previous.authority.remote_audience()
+                != crate::blob::locator::RemoteAudience::Circle(circle_id)
+            || previous.stored.locator().audience()
+                != crate::blob::locator::RemoteAudience::Circle(circle_id)
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle bootstrap blob belongs to another audience".to_string(),
+            ));
+        }
+        storage
+            .verify_blob_object(&previous.stored)
+            .await
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "verify Circle bootstrap blob {}/{}: {error}",
+                    captured.fact.blob.namespace, captured.fact.blob.id
+                ))
+            })?;
+        blobs.push(previous.stored.clone());
+    }
+    blobs.sort_by_cached_key(|blob| {
+        serde_json::to_vec(blob).expect("stored blob reference serialization cannot fail")
+    });
+    blobs.dedup();
+    Ok(blobs)
+}
+
 pub(super) async fn prepare_circle_activation_objects(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -194,6 +247,14 @@ pub(super) async fn prepare_circle_activation_objects(
         previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_entries.clone());
     let mut roster_heads =
         previous_objects.map_or_else(Vec::new, |objects| objects.roster_heads.clone());
+    let mut roster_frontier = if matches!(
+        &draft.policy.roster,
+        crate::sync::circle::CircleRosterDraftPolicy::Founder { .. }
+    ) {
+        Vec::new()
+    } else {
+        draft.control.value.value.active_epoch.roster.heads.clone()
+    };
     let roster_resolutions =
         previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_resolutions.clone());
     let mut metadata_entries =
@@ -203,11 +264,8 @@ pub(super) async fn prepare_circle_activation_objects(
     let mut prepared = BTreeMap::new();
     let mut stream_activations = Vec::new();
 
-    let roster_entry = &mut draft.policy.roster_entry;
     let policy_objects = {
         let owner_grant = draft.metadata.author_owner_grant.clone();
-        let selects_authored_metadata =
-            draft.control.value.value.active_epoch.metadata.selected == draft.metadata.coord();
         let roster_stream = StreamActivation::grant_authorized_stream_id(
             store_root_hash,
             author_registration,
@@ -241,7 +299,22 @@ pub(super) async fn prepare_circle_activation_objects(
             ));
         }
 
-        let prepared_roster = if let Some(entry) = roster_entry {
+        let roster_policy = std::mem::replace(
+            &mut draft.policy.roster,
+            crate::sync::circle::CircleRosterDraftPolicy::Inherited,
+        );
+        let roster_successor = match roster_policy {
+            crate::sync::circle::CircleRosterDraftPolicy::Inherited => None,
+            crate::sync::circle::CircleRosterDraftPolicy::Founder { entry } => {
+                Some((true, None, entry))
+            }
+            crate::sync::circle::CircleRosterDraftPolicy::Successor { predecessor, entry } => {
+                Some((false, Some(predecessor), entry))
+            }
+        };
+        let prepared_roster = if let Some((founder, predecessor_chain, mut entry)) =
+            roster_successor
+        {
             entry.stream_id = roster_stream;
             entry.signature = keys::sign_hex(identity_signer, &entry.canonical_bytes()).1;
             let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
@@ -253,49 +326,108 @@ pub(super) async fn prepare_circle_activation_objects(
                 &roster_context,
                 &entry_prefix,
                 ".json",
-                serde_json::to_vec(entry).expect("Circle roster entry serialization cannot fail"),
+                serde_json::to_vec(&entry).expect("Circle roster entry serialization cannot fail"),
             )
             .await?;
             prepared.insert("roster-entry".to_string(), entry_prepared.clone());
             roster_entries.insert(entry.coord(), entry_prepared.reference().clone());
 
             let stream_key = entry.coord().stream_key();
-            if roster_heads
+            let prior_roster = roster_frontier
                 .iter()
-                .any(|head| head.coord.stream_key() == stream_key)
+                .find(|head| head.coord.stream_key() == stream_key)
+                .cloned();
+            let (current_slot, seq, predecessor, activation_id, activation) =
+                if let Some(reference) = &prior_roster {
+                    let prefix = circle_semantic_prefix(CircleSemanticSlot::RosterHead {
+                        circle_id: draft.circle_id,
+                        head: reference,
+                    });
+                    let bytes =
+                        load_exact_slot_bytes(storage, &roster_context, &reference.object, &prefix)
+                            .await?;
+                    let head: crate::sync::circle::CircleRosterHead =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "parse predecessor Circle roster head: {error}"
+                            ))
+                        })?;
+                    if !head.verify_for_registration(author)
+                        || head.entry_coord() != reference.coord
+                        || head.head_hash() != reference.head_hash
+                    {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle roster predecessor head failed verification".to_string(),
+                        ));
+                    }
+                    (
+                        head.successor.next_slot.clone(),
+                        head.seq.checked_add(1).ok_or_else(|| {
+                            CircleOperationError::InvalidState(
+                                "Circle roster sequence overflow".to_string(),
+                            )
+                        })?,
+                        Some(reference.object.clone()),
+                        head.successor.activation,
+                        None,
+                    )
+                } else {
+                    let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, 1);
+                    let current_slot = storage
+                        .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
+                        .await
+                        .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+                    let activation = StreamActivation::grant_authorized(
+                        store_root_hash,
+                        author_registration.clone(),
+                        owner_grant.clone(),
+                        GrantStreamAnchor::CircleRoster {
+                            circle_id: draft.circle_id,
+                            first_slot: current_slot.clone(),
+                        },
+                    );
+                    (
+                        current_slot,
+                        1,
+                        None,
+                        activation.activation_id(),
+                        Some(activation),
+                    )
+                };
+            if entry.seq != seq
+                || entry.previous_hash
+                    != prior_roster
+                        .as_ref()
+                        .map(|reference| reference.coord.entry_hash)
             {
                 return Err(CircleOperationError::InvalidState(
-                    "Circle founder roster stream is already active".to_string(),
+                    "Circle roster successor differs from its exact author-stream predecessor"
+                        .to_string(),
                 ));
             }
-            let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, 1);
-            let current_slot = storage
-                .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
-                .await
-                .map_err(crate::sync::store_objects::StoreObjectError::from)?;
-            let activation = StreamActivation::grant_authorized(
-                store_root_hash,
-                author_registration.clone(),
-                owner_grant.clone(),
-                GrantStreamAnchor::CircleRoster {
-                    circle_id: draft.circle_id,
-                    first_slot: current_slot.clone(),
-                },
-            );
+            let current_prefix = circle_roster_head_prefix(draft.circle_id, &stream_key, seq);
             let next_slot = storage
                 .allocate_protocol_slot(
                     &roster_context,
-                    &circle_roster_head_prefix(draft.circle_id, &stream_key, 2),
+                    &circle_roster_head_prefix(
+                        draft.circle_id,
+                        &stream_key,
+                        seq.checked_add(1).ok_or_else(|| {
+                            CircleOperationError::InvalidState(
+                                "Circle roster sequence overflow".to_string(),
+                            )
+                        })?,
+                    ),
                     ".json",
                 )
                 .await
                 .map_err(crate::sync::store_objects::StoreObjectError::from)?;
             let head = crate::sync::circle::CircleRosterHead::signed(
-                entry,
+                &entry,
                 entry_prepared.reference().clone(),
                 SuccessorLink {
-                    activation: activation.activation_id(),
-                    predecessor: None,
+                    activation: activation_id,
+                    predecessor,
                     next_slot,
                 },
                 device_signer,
@@ -310,217 +442,253 @@ pub(super) async fn prepare_circle_activation_objects(
             let head_ref =
                 CircleRosterHeadRef::from_stored_head(&head, head_prepared.reference().clone());
             prepared.insert("roster-head".to_string(), head_prepared);
+            roster_frontier.retain(|reference| reference.coord.stream_key() != stream_key);
+            roster_frontier.push(head_ref.clone());
+            roster_frontier.sort_by_key(|head| head.coord.stream_key());
             roster_heads.push(head_ref.clone());
-            roster_heads.sort_by_key(|head| head.coord.stream_key());
-            stream_activations.push(activation);
-            Some((entry.clone(), head, head_ref))
+            roster_heads.sort();
+            if let Some(activation) = activation {
+                stream_activations.push(activation);
+            }
+            Some((founder, predecessor_chain, entry, head, head_ref))
         } else {
             None
         };
 
-        if let Some((entry, head, reference)) = &prepared_roster {
+        if let Some((_, predecessor_chain, entry, head, reference)) = &prepared_roster {
             let exact_head =
                 crate::sync::circle::ExactCircleRosterHead::bind(head.clone(), reference.clone())
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            draft.roster = crate::sync::circle::CircleRosterChain::from_entries_with_heads(
-                vec![entry.clone()],
-                vec![exact_head],
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-            .resolved();
+            let chain = match predecessor_chain {
+                Some(predecessor) => predecessor.with_exact_successor(entry.clone(), exact_head),
+                None => crate::sync::circle::CircleRosterChain::from_entries_with_heads(
+                    vec![entry.clone()],
+                    vec![exact_head],
+                ),
+            }
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            draft.roster = chain
+                .try_resolved()
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         }
 
         let roster_state = crate::sync::circle::MergeCircleRosterStateRef {
-            heads: roster_heads.clone(),
+            heads: roster_frontier,
             resolutions: roster_resolutions.keys().cloned().collect(),
             state_hash: draft.roster.state_hash,
         };
-        draft.metadata.author_roster = roster_state.clone();
-
-        let prior_metadata = metadata_heads
-            .iter()
-            .find(|head| head.coord.stream_id == metadata_stream)
-            .cloned();
-        let (metadata_slot, metadata_seq, metadata_previous, metadata_activation) =
-            if let Some(reference) = &prior_metadata {
-                let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                    circle_id: draft.circle_id,
-                    head: reference,
-                });
-                let bytes =
-                    load_exact_slot_bytes(storage, &metadata_context, &reference.object, &prefix)
-                        .await?;
-                let head: crate::sync::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse predecessor Circle metadata head: {error}"
-                        ))
-                    })?;
-                if !head.verify_for_registration(author) || head.coord() != reference.coord {
-                    return Err(CircleOperationError::InvalidState(
-                        "Circle metadata predecessor head failed verification".to_string(),
-                    ));
-                }
-                (
-                    head.successor.next_slot.clone(),
-                    head.seq.checked_add(1).ok_or_else(|| {
-                        CircleOperationError::InvalidState(
-                            "Circle metadata sequence overflow".to_string(),
-                        )
-                    })?,
-                    Some(head.tip_hash),
-                    None,
-                )
-            } else {
-                let stream_key = crate::sync::circle::CircleAuthorStreamKey {
-                    author_pubkey: draft.metadata.author_pubkey.clone(),
-                    device_id: draft.metadata.device_id.clone(),
-                    stream_id: metadata_stream,
-                    author_owner_grant: owner_grant.clone(),
-                };
-                let prefix = circle_metadata_head_prefix(draft.circle_id, &stream_key, 1);
-                let slot = storage
-                    .allocate_protocol_slot(&metadata_context, &prefix, ".json")
-                    .await
-                    .map_err(crate::sync::store_objects::StoreObjectError::from)?;
-                let activation = StreamActivation::grant_authorized(
-                    store_root_hash,
-                    author_registration.clone(),
-                    owner_grant.clone(),
-                    GrantStreamAnchor::CircleMetadata {
+        let (metadata_state, metadata_head) = if draft.policy.metadata_successor {
+            let selects_authored_metadata =
+                draft.control.value.value.active_epoch.metadata.selected == draft.metadata.coord();
+            draft.metadata.author_roster = roster_state.clone();
+            let prior_metadata = metadata_heads
+                .iter()
+                .find(|head| head.coord.stream_id == metadata_stream)
+                .cloned();
+            let (metadata_slot, metadata_seq, metadata_previous, metadata_activation) =
+                if let Some(reference) = &prior_metadata {
+                    let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
                         circle_id: draft.circle_id,
-                        first_slot: slot.clone(),
-                    },
-                );
-                (slot, 1, None, Some(activation))
-            };
-        draft.metadata.stream_id = metadata_stream;
-        draft.metadata.seq = metadata_seq;
-        draft.metadata.previous_hash = metadata_previous;
-        draft.metadata.dependencies = metadata_heads
-            .iter()
-            .map(|head| head.coord.clone())
-            .collect();
-        draft.metadata.signature =
-            keys::sign_hex(identity_signer, &draft.metadata.canonical_bytes()).1;
-        let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
-            circle_id: draft.circle_id,
-            coord: &draft.metadata.coord(),
-        });
-        let metadata_prepared = prepare_circle_object(
-            storage,
-            &metadata_context,
-            &metadata_prefix,
-            ".json",
-            serde_json::to_vec(&draft.metadata).expect("Circle metadata serialization cannot fail"),
-        )
-        .await?;
-        prepared.insert("metadata".to_string(), metadata_prepared.clone());
-        metadata_entries.insert(
-            draft.metadata.coord(),
-            CircleMetadataObjectRef {
-                key_fingerprint: draft.metadata.key_fingerprint,
-                object: metadata_prepared.reference().clone(),
-            },
-        );
-        let metadata_activation_id = match &metadata_activation {
-            Some(activation) => activation.activation_id(),
-            None => {
-                let reference = prior_metadata.as_ref().expect("prior metadata head");
-                let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
-                    circle_id: draft.circle_id,
-                    head: reference,
-                });
-                let bytes =
-                    load_exact_slot_bytes(storage, &metadata_context, &reference.object, &prefix)
-                        .await?;
-                let head: crate::sync::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse predecessor Circle metadata head: {error}"
-                        ))
-                    })?;
-                head.successor.activation
-            }
-        };
-        let metadata_stream_key = draft.metadata.coord().stream_key();
-        let metadata_next_slot = storage
-            .allocate_protocol_slot(
+                        head: reference,
+                    });
+                    let bytes = load_exact_slot_bytes(
+                        storage,
+                        &metadata_context,
+                        &reference.object,
+                        &prefix,
+                    )
+                    .await?;
+                    let head: crate::sync::circle::CircleMetadataHead =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "parse predecessor Circle metadata head: {error}"
+                            ))
+                        })?;
+                    if !head.verify_for_registration(author) || head.coord() != reference.coord {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle metadata predecessor head failed verification".to_string(),
+                        ));
+                    }
+                    (
+                        head.successor.next_slot.clone(),
+                        head.seq.checked_add(1).ok_or_else(|| {
+                            CircleOperationError::InvalidState(
+                                "Circle metadata sequence overflow".to_string(),
+                            )
+                        })?,
+                        Some(head.tip_hash),
+                        None,
+                    )
+                } else {
+                    let stream_key = crate::sync::circle::CircleAuthorStreamKey {
+                        author_pubkey: draft.metadata.author_pubkey.clone(),
+                        device_id: draft.metadata.device_id.clone(),
+                        stream_id: metadata_stream,
+                        author_owner_grant: owner_grant.clone(),
+                    };
+                    let prefix = circle_metadata_head_prefix(draft.circle_id, &stream_key, 1);
+                    let slot = storage
+                        .allocate_protocol_slot(&metadata_context, &prefix, ".json")
+                        .await
+                        .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+                    let activation = StreamActivation::grant_authorized(
+                        store_root_hash,
+                        author_registration.clone(),
+                        owner_grant.clone(),
+                        GrantStreamAnchor::CircleMetadata {
+                            circle_id: draft.circle_id,
+                            first_slot: slot.clone(),
+                        },
+                    );
+                    (slot, 1, None, Some(activation))
+                };
+            draft.metadata.stream_id = metadata_stream;
+            draft.metadata.seq = metadata_seq;
+            draft.metadata.previous_hash = metadata_previous;
+            draft.metadata.dependencies = metadata_heads
+                .iter()
+                .map(|head| head.coord.clone())
+                .collect();
+            draft.metadata.signature =
+                keys::sign_hex(identity_signer, &draft.metadata.canonical_bytes()).1;
+            let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
+                circle_id: draft.circle_id,
+                coord: &draft.metadata.coord(),
+            });
+            let metadata_prepared = prepare_circle_object(
+                storage,
                 &metadata_context,
-                &circle_metadata_head_prefix(
-                    draft.circle_id,
-                    &metadata_stream_key,
-                    metadata_seq.checked_add(1).ok_or_else(|| {
-                        CircleOperationError::InvalidState(
-                            "Circle metadata sequence overflow".to_string(),
-                        )
-                    })?,
-                ),
+                &metadata_prefix,
                 ".json",
+                serde_json::to_vec(&draft.metadata)
+                    .expect("Circle metadata serialization cannot fail"),
             )
-            .await
-            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
-        let metadata_head = crate::sync::circle::CircleMetadataHead::signed(
-            &draft.metadata,
-            metadata_prepared.reference().clone(),
-            SuccessorLink {
-                activation: metadata_activation_id,
-                predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
-                next_slot: metadata_next_slot,
-            },
-            device_signer,
-        );
-        let metadata_head_prefix =
-            circle_metadata_head_prefix(draft.circle_id, &metadata_stream_key, metadata_seq);
-        let metadata_head_prepared = prepare_circle_object_at(
-            storage,
-            &metadata_context,
-            metadata_slot,
-            &metadata_head_prefix,
-            serde_json::to_vec(&metadata_head)
-                .expect("Circle metadata head serialization cannot fail"),
-        )?;
-        let metadata_head_ref = CircleMetadataHeadRef::from_stored_head(
-            &metadata_head,
-            metadata_head_prepared.reference().clone(),
-        );
-        prepared.insert("metadata-head".to_string(), metadata_head_prepared);
-        metadata_heads.retain(|head| head.coord.stream_id != metadata_stream);
-        metadata_heads.push(metadata_head_ref);
-        metadata_heads.sort_by_key(|head| head.coord.stream_key());
-        if let Some(activation) = metadata_activation {
-            stream_activations.push(activation);
-        }
+            .await?;
+            prepared.insert("metadata".to_string(), metadata_prepared.clone());
+            metadata_entries.insert(
+                draft.metadata.coord(),
+                CircleMetadataObjectRef {
+                    key_fingerprint: draft.metadata.key_fingerprint,
+                    object: metadata_prepared.reference().clone(),
+                },
+            );
+            let metadata_activation_id = match &metadata_activation {
+                Some(activation) => activation.activation_id(),
+                None => {
+                    let reference = prior_metadata.as_ref().expect("prior metadata head");
+                    let prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataHead {
+                        circle_id: draft.circle_id,
+                        head: reference,
+                    });
+                    let bytes = load_exact_slot_bytes(
+                        storage,
+                        &metadata_context,
+                        &reference.object,
+                        &prefix,
+                    )
+                    .await?;
+                    let head: crate::sync::circle::CircleMetadataHead =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "parse predecessor Circle metadata head: {error}"
+                            ))
+                        })?;
+                    head.successor.activation
+                }
+            };
+            let metadata_stream_key = draft.metadata.coord().stream_key();
+            let metadata_next_slot = storage
+                .allocate_protocol_slot(
+                    &metadata_context,
+                    &circle_metadata_head_prefix(
+                        draft.circle_id,
+                        &metadata_stream_key,
+                        metadata_seq.checked_add(1).ok_or_else(|| {
+                            CircleOperationError::InvalidState(
+                                "Circle metadata sequence overflow".to_string(),
+                            )
+                        })?,
+                    ),
+                    ".json",
+                )
+                .await
+                .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+            let metadata_head = crate::sync::circle::CircleMetadataHead::signed(
+                &draft.metadata,
+                metadata_prepared.reference().clone(),
+                SuccessorLink {
+                    activation: metadata_activation_id,
+                    predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
+                    next_slot: metadata_next_slot,
+                },
+                device_signer,
+            );
+            let metadata_head_prefix =
+                circle_metadata_head_prefix(draft.circle_id, &metadata_stream_key, metadata_seq);
+            let metadata_head_prepared = prepare_circle_object_at(
+                storage,
+                &metadata_context,
+                metadata_slot,
+                &metadata_head_prefix,
+                serde_json::to_vec(&metadata_head)
+                    .expect("Circle metadata head serialization cannot fail"),
+            )?;
+            let metadata_head_ref = CircleMetadataHeadRef::from_stored_head(
+                &metadata_head,
+                metadata_head_prepared.reference().clone(),
+            );
+            prepared.insert("metadata-head".to_string(), metadata_head_prepared);
+            metadata_heads.retain(|head| head.coord.stream_id != metadata_stream);
+            metadata_heads.push(metadata_head_ref);
+            metadata_heads.sort_by_key(|head| head.coord.stream_key());
+            if let Some(activation) = metadata_activation {
+                stream_activations.push(activation);
+            }
 
-        let selected = if selects_authored_metadata
-            || draft
-                .control
-                .value
-                .value
-                .active_epoch
-                .metadata
-                .heads
-                .is_empty()
-        {
-            draft.metadata.coord()
-        } else {
-            draft
-                .control
-                .value
-                .value
-                .active_epoch
-                .metadata
-                .selected
-                .clone()
-        };
-        let metadata_state = crate::sync::circle::MergeCircleMetadataStateRef {
-            heads: metadata_heads.clone(),
-            selected: selected.clone(),
-            state_hash: if selected == draft.metadata.coord() {
-                draft.metadata.metadata_hash()
+            let selected = if selects_authored_metadata
+                || draft
+                    .control
+                    .value
+                    .value
+                    .active_epoch
+                    .metadata
+                    .heads
+                    .is_empty()
+            {
+                draft.metadata.coord()
             } else {
-                draft.control.value.value.active_epoch.metadata.state_hash
-            },
+                draft
+                    .control
+                    .value
+                    .value
+                    .active_epoch
+                    .metadata
+                    .selected
+                    .clone()
+            };
+            (
+                crate::sync::circle::MergeCircleMetadataStateRef {
+                    heads: metadata_heads.clone(),
+                    selected: selected.clone(),
+                    state_hash: if selected == draft.metadata.coord() {
+                        draft.metadata.metadata_hash()
+                    } else {
+                        draft.control.value.value.active_epoch.metadata.state_hash
+                    },
+                },
+                Some(metadata_head),
+            )
+        } else {
+            let metadata_state = draft.control.value.value.active_epoch.metadata.clone();
+            if !draft.metadata.verify()
+                || metadata_state.selected != draft.metadata.coord()
+                || !metadata_entries.contains_key(&metadata_state.selected)
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle transition inherited invalid selected metadata".to_string(),
+                ));
+            }
+            (metadata_state, None)
         };
 
         for access in &mut draft.access {
@@ -656,7 +824,7 @@ pub(super) async fn prepare_circle_activation_objects(
         active_epoch.common.access_root = access_root;
         active_epoch.covered_control_heads = control_frontier;
         if let (
-            Some((entry, _, _)),
+            Some((true, _, entry, _, _)),
             crate::sync::circle::MergeCircleOwnerAuthorityRef::Roster {
                 roster, created_at, ..
             },
@@ -760,8 +928,9 @@ pub(super) async fn prepare_circle_activation_objects(
         }
 
         CircleTransitionPolicyObjects {
-            roster_entry: prepared_roster.as_ref().map(|(entry, _, _)| entry.clone()),
-            roster_head: prepared_roster.map(|(_, head, _)| head),
+            roster: prepared_roster.map(|(_, _, entry, head, _)| {
+                crate::sync::circle::CircleRosterPolicyObjects { entry, head }
+            }),
             metadata_head,
             control_head,
         }
@@ -826,6 +995,12 @@ pub(super) async fn prepare_circle_activation_objects(
                 leaf_hash: access.envelope.leaf_hash,
                 object: envelope.reference().clone(),
             },
+            bootstrap: match &access.leaf.value.disposition {
+                CircleAccessDisposition::Active { bootstrap, .. } => {
+                    bootstrap.as_ref().map(|bootstrap| bootstrap.image.clone())
+                }
+                CircleAccessDisposition::Inactive => None,
+            },
         });
     }
 
@@ -880,9 +1055,9 @@ pub(super) async fn prepare_circle_operation(
         database,
         storage,
         device_id,
-        metadata_stamp,
         CircleOperationRequest::Create {
             name: name.to_string(),
+            metadata_stamp: metadata_stamp.to_string(),
         },
         signer,
     ))
@@ -893,7 +1068,6 @@ pub(super) async fn prepare_circle_operation_request(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
-    metadata_stamp: &str,
     request: CircleOperationRequest,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
@@ -912,7 +1086,6 @@ pub(super) async fn prepare_circle_operation_request(
     let operation_id = CircleOperationId::from_write_id(write_id.clone());
     let history = request.history();
     let intent = request.intent();
-    let name = request.name();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
         let current = crate::sync::store::membership::load_and_persist_owner_anchor(
             storage, &root, &founder, database,
@@ -978,19 +1151,25 @@ pub(super) async fn prepare_circle_operation_request(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-        let creation = match &request {
-            CircleOperationRequest::Create { .. } => CircleTransitionDraft::founder(
-                store_root_hash,
-                candidate_family,
-                &circle_device_id,
+        let (creation, bootstrap_prepared) = match &request {
+            CircleOperationRequest::Create {
                 name,
                 metadata_stamp,
-                membership_state.clone(),
-                membership_authority.clone(),
-                members,
-                db.id_provider(),
-                signer,
-            )?,
+            } => (
+                CircleTransitionDraft::founder(
+                    store_root_hash,
+                    candidate_family,
+                    &circle_device_id,
+                    name,
+                    metadata_stamp,
+                    membership_state.clone(),
+                    membership_authority.clone(),
+                    members,
+                    db.id_provider(),
+                    signer,
+                )?,
+                None,
+            ),
             CircleOperationRequest::Rename(request) => {
                 if request.circle_id != request.current.control.value.circle_id {
                     return Err(CircleOperationError::InvalidState(
@@ -1005,21 +1184,134 @@ pub(super) async fn prepare_circle_operation_request(
                         ));
                     }
                 };
-                CircleTransitionDraft::rename(
-                    candidate_family,
-                    &circle_device_id,
-                    name,
-                    metadata_stamp,
-                    membership_state.clone(),
-                    membership_authority.clone(),
-                    members,
-                    &request.current.control,
-                    &request.current.roster,
-                    &request.current.metadata,
-                    keyring,
-                    db.id_provider(),
+                (
+                    CircleTransitionDraft::rename(
+                        candidate_family,
+                        &circle_device_id,
+                        &request.name,
+                        &request.metadata_stamp,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.current.control,
+                        &request.current.roster,
+                        &request.current.metadata,
+                        keyring,
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    None,
+                )
+            }
+            CircleOperationRequest::AddMember(request) => {
+                if request.circle_id != request.current.control.value.circle_id {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle member-addition request differs from its current control"
+                            .to_string(),
+                    ));
+                }
+                let keyring = match &request.current.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle member addition requires active local access".to_string(),
+                        ));
+                    }
+                };
+                let owner_grant = request
+                    .current
+                    .roster
+                    .active_grants()
+                    .find(|(_, record)| {
+                        record.member_pubkey == author_pubkey
+                            && record.role == crate::sync::circle::CircleRole::Owner
+                    })
+                    .map(|(grant, _)| grant)
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "Circle member-addition author is not an active Owner".to_string(),
+                        )
+                    })?;
+                let roster_stream = StreamActivation::grant_authorized_stream_id(
+                    store_root_hash,
+                    &author_registration,
+                    owner_grant,
+                    StreamAnchorDomain::CircleRoster {
+                        circle_id: request.circle_id,
+                    },
+                );
+                let keyring_value = crate::encryption::MasterKeyring::from_serialized(keyring)
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse Circle bootstrap keyring: {error}"
+                        ))
+                    })?;
+                let circle_encryption = crate::encryption::EncryptionService::from(keyring_value);
+                let recipient_slot = crate::sync::circle::recipient_slot(
                     signer,
-                )?
+                    &request.member_pubkey,
+                    request.circle_id,
+                )?;
+                let bootstrap_blobs = verified_circle_bootstrap_blobs(
+                    storage,
+                    request.circle_id,
+                    &request.bootstrap.snapshot,
+                )
+                .await?;
+                let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
+                let image_prefix =
+                    crate::sync::store_commit::circle_bootstrap_image_semantic_prefix(
+                        request.circle_id,
+                        candidate_family,
+                        &author_pubkey,
+                        request.current.control.value.epoch_id(),
+                        &recipient_slot,
+                        image_hash,
+                    );
+                let image_context = ProtocolObjectContext::circle(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleBootstrapImage,
+                    circle_encryption,
+                );
+                let bootstrap_prepared = prepare_circle_object(
+                    storage,
+                    &image_context,
+                    &image_prefix,
+                    ".db",
+                    request.bootstrap.snapshot.db_image.clone(),
+                )
+                .await?;
+                let bootstrap = crate::sync::circle::CircleBootstrapRef {
+                    coverage: request.bootstrap.coverage.clone(),
+                    schema_version: db.schema_version(),
+                    sync_routing_hash: db.sync_routing_hash(),
+                    image: crate::sync::store_commit::SnapshotImageRef {
+                        image_hash,
+                        object: bootstrap_prepared.reference().clone(),
+                    },
+                    blobs: bootstrap_blobs,
+                };
+                (
+                    CircleTransitionDraft::add_member(
+                        candidate_family,
+                        &circle_device_id,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.current.control,
+                        &request.current.roster,
+                        request.roster_chain.clone(),
+                        &request.current.metadata,
+                        keyring,
+                        roster_stream,
+                        request.member_pubkey.clone(),
+                        request.role,
+                        bootstrap,
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    Some(bootstrap_prepared),
+                )
             }
         };
         let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
@@ -1035,6 +1327,9 @@ pub(super) async fn prepare_circle_operation_request(
                 &device_signer,
             ))
             .await?;
+        if let Some(bootstrap) = bootstrap_prepared {
+            prepared_objects.insert("bootstrap-image".to_string(), bootstrap);
+        }
         let circle_reference = creation.control_ref(objects, control_head_object);
         let commit = signed_circle_commit(
             store_root_hash,

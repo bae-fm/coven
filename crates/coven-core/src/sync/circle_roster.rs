@@ -1078,6 +1078,42 @@ impl CircleRosterChain {
         Self::from_entries_and_head_refs(entries, head_refs)
     }
 
+    pub(crate) fn with_exact_successor(
+        &self,
+        entry: CircleRosterEntry,
+        head: ExactCircleRosterHead,
+    ) -> Result<Self, CircleRosterError> {
+        if head.head().entry_coord() != entry.coord() {
+            return Err(CircleRosterError::MissingConflictHeads);
+        }
+        let stream = entry.coord().stream_key();
+        let mut entries = self.entries.clone();
+        entries.push(entry);
+        let mut head_refs = self.head_refs.clone();
+        head_refs.retain(|reference| reference.coord.stream_key() != stream);
+        head_refs.push(head.reference().clone());
+        head_refs.sort_by_key(|reference| reference.coord.stream_key());
+        Self::from_entries_head_refs_and_checkpoint(
+            entries,
+            head_refs,
+            self.resolution_checkpoint.clone(),
+        )
+    }
+
+    pub(crate) fn resolved_with_successor(
+        &self,
+        entry: CircleRosterEntry,
+    ) -> Result<ResolvedCircleRoster, CircleRosterError> {
+        let mut entries = self.entries.clone();
+        entries.push(entry);
+        Self::from_entries_head_refs_and_checkpoint(
+            entries,
+            self.head_refs.clone(),
+            self.resolution_checkpoint.clone(),
+        )?
+        .try_resolved()
+    }
+
     pub(crate) fn validate_exact_heads(
         entries: &[CircleRosterEntry],
         heads: &[ExactCircleRosterHead],

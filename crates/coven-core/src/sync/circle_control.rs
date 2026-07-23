@@ -436,11 +436,25 @@ pub struct CircleBootstrapRef {
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,
     pub image: SnapshotImageRef,
+    pub blobs: Vec<crate::blob::locator::StoredBlobRef>,
 }
 
 impl CircleBootstrapRef {
-    fn verify_for_access(&self, access: &CircleAccessLeaf) -> bool {
+    pub(crate) fn verify_for_access(&self, access: &CircleAccessLeaf) -> bool {
         if super::store_commit::validate_commit_frontier(&self.coverage).is_err() {
+            return false;
+        }
+        let blobs_are_canonical = self.blobs.windows(2).all(|pair| {
+            serde_json::to_vec(&pair[0]).expect("stored blob reference serialization cannot fail")
+                < serde_json::to_vec(&pair[1])
+                    .expect("stored blob reference serialization cannot fail")
+        });
+        if !blobs_are_canonical
+            || self.blobs.iter().any(|blob| {
+                blob.locator().audience()
+                    != crate::blob::locator::RemoteAudience::Circle(access.circle_id)
+            })
+        {
             return false;
         }
         let semantic_prefix = super::store_commit::circle_bootstrap_image_semantic_prefix(
@@ -1094,16 +1108,35 @@ pub struct PreparedCircleAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CircleRosterPolicyObjects {
+    pub entry: CircleRosterEntry,
+    pub head: CircleRosterHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CircleTransitionPolicyObjects {
-    pub roster_entry: Option<CircleRosterEntry>,
-    pub roster_head: Option<CircleRosterHead>,
-    pub metadata_head: CircleMetadataHead,
+    pub roster: Option<CircleRosterPolicyObjects>,
+    pub metadata_head: Option<CircleMetadataHead>,
     pub control_head: CircleControlHead,
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum CircleRosterDraftPolicy {
+    Inherited,
+    Founder {
+        entry: CircleRosterEntry,
+    },
+    Successor {
+        predecessor: CircleRosterChain,
+        entry: CircleRosterEntry,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct CircleTransitionDraftPolicy {
-    pub roster_entry: Option<CircleRosterEntry>,
+    pub roster: CircleRosterDraftPolicy,
+    pub metadata_successor: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1142,6 +1175,7 @@ fn prepare_access_material(
     roster_members: &std::collections::BTreeMap<String, super::circle::CircleRole>,
     store_membership: &StoreMembershipStateRef,
     store_members: &[(String, MemberRole)],
+    bootstrap_recipient: Option<(&str, &CircleBootstrapRef)>,
     ids: &dyn crate::id_provider::IdProvider,
     signer: &UserKeypair,
 ) -> Result<Vec<PreparedAccessMaterial>, CircleTransitionError> {
@@ -1155,7 +1189,9 @@ fn prepare_access_material(
                     keyring: keyring.to_string(),
                     key_fingerprint,
                     roster: roster_state.clone(),
-                    bootstrap: None,
+                    bootstrap: bootstrap_recipient
+                        .filter(|(target, _)| *target == recipient_pubkey)
+                        .map(|(_, bootstrap)| bootstrap.clone()),
                 }
             } else {
                 CircleAccessDisposition::Inactive
@@ -1273,6 +1309,83 @@ impl PreparedCircleTransition {
     }
 }
 
+struct CircleSuccessorContext<'a> {
+    store_members: Vec<(String, MemberRole)>,
+    author_pubkey: String,
+    active_epoch: &'a MergeActiveCircleEpoch,
+    grant_id: MembershipGrantId,
+    author_authority: MergeCircleOwnerAuthorityRef,
+    key_fingerprint: KeyFingerprint,
+}
+
+fn circle_successor_context<'a>(
+    mut store_members: Vec<(String, MemberRole)>,
+    current_control: &'a PreparedCircleControl,
+    current_roster: &CircleMaterializedRoster,
+    current_metadata: &CircleMetadata,
+    keyring: &str,
+    signer: &UserKeypair,
+) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
+    if !current_control.verify()
+        || !current_roster.verify()
+        || !current_metadata.verify()
+        || current_control.value.circle_id != current_metadata.circle_id
+        || current_control.value.epoch_id() != current_metadata.epoch_id
+    {
+        return Err(CircleTransitionError::InvalidCurrentState);
+    }
+    let author_pubkey = keys::public_key_hex(signer);
+    store_members.sort_by(|left, right| left.0.cmp(&right.0));
+    store_members.dedup_by(|left, right| left.0 == right.0);
+    if !store_members
+        .iter()
+        .any(|(pubkey, role)| pubkey == &author_pubkey && role.can_write())
+    {
+        return Err(CircleTransitionError::AuthorNotStoreWriter);
+    }
+    if current_roster.members().get(&author_pubkey) != Some(&super::circle::CircleRole::Owner) {
+        return Err(CircleTransitionError::AuthorNotCircleOwner);
+    }
+    let key_fingerprint = EncryptionService::from(
+        MasterKeyring::from_serialized(keyring)
+            .map_err(|_| CircleTransitionError::InvalidCurrentState)?,
+    )
+    .seal_key_fingerprint();
+    if key_fingerprint != current_control.value.key_fingerprint()
+        || current_metadata.key_fingerprint != key_fingerprint
+    {
+        return Err(CircleTransitionError::InvalidCurrentState);
+    }
+    let active_epoch = &current_control.value.value.active_epoch;
+    let (grant_id, record) = current_roster
+        .active_grants()
+        .find(|(_, record)| {
+            record.member_pubkey == author_pubkey && record.role == super::circle::CircleRole::Owner
+        })
+        .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
+    let author_authority = match &record.creation_authority {
+        CircleGrantCreationAuthority::Entry(created_at) => MergeCircleOwnerAuthorityRef::Roster {
+            roster: active_epoch.roster.clone(),
+            grant_id: grant_id.clone(),
+            created_at: created_at.clone(),
+        },
+        CircleGrantCreationAuthority::ConflictResolution(resolution) => {
+            MergeCircleOwnerAuthorityRef::ConflictResolution {
+                conflict_hash: resolution.conflict_hash,
+                resolution_hash: resolution.resolution_hash,
+            }
+        }
+    };
+    Ok(CircleSuccessorContext {
+        store_members,
+        author_pubkey,
+        active_epoch,
+        grant_id: grant_id.clone(),
+        author_authority,
+        key_fingerprint,
+    })
+}
+
 impl CircleTransitionDraft {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn founder(
@@ -1354,6 +1467,7 @@ impl CircleTransitionDraft {
             &roster.members(),
             &store_membership,
             &store_members,
+            None,
             ids,
             signer,
         )?;
@@ -1404,7 +1518,10 @@ impl CircleTransitionDraft {
             value: control_value,
         };
         let policy_objects = CircleTransitionDraftPolicy {
-            roster_entry: Some(roster_objects.entry),
+            roster: CircleRosterDraftPolicy::Founder {
+                entry: roster_objects.entry,
+            },
+            metadata_successor: true,
         };
         let access = prepare_access_envelopes(
             store_root_hash,
@@ -1428,6 +1545,148 @@ impl CircleTransitionDraft {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_member(
+        candidate_family: super::store_commit::CandidateFamilyId,
+        device_id: &str,
+        store_membership: StoreMembershipStateRef,
+        membership_authority: MembershipGrantCreationAuthority,
+        store_members: Vec<(String, MemberRole)>,
+        current_control: &PreparedCircleControl,
+        current_roster: &CircleMaterializedRoster,
+        current_roster_chain: CircleRosterChain,
+        current_metadata: &CircleMetadata,
+        keyring: &str,
+        roster_stream: AuthorStreamId,
+        member_pubkey: String,
+        role: super::circle::CircleRole,
+        bootstrap: CircleBootstrapRef,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        if current_roster_chain.try_resolved()? != *current_roster {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        let context = circle_successor_context(
+            store_members,
+            current_control,
+            current_roster,
+            current_metadata,
+            keyring,
+            signer,
+        )?;
+        let CircleSuccessorContext {
+            store_members,
+            author_pubkey,
+            active_epoch,
+            grant_id,
+            author_authority,
+            key_fingerprint,
+        } = context;
+        if !store_members
+            .iter()
+            .any(|(pubkey, _)| pubkey == &member_pubkey)
+        {
+            return Err(CircleTransitionError::MemberNotInStore(member_pubkey));
+        }
+        let entry = current_roster_chain.signed_set_member(
+            device_id,
+            roster_stream,
+            member_pubkey.clone(),
+            role,
+            signer,
+        )?;
+        let roster = current_roster_chain.resolved_with_successor(entry.clone())?;
+        let roster_state = MergeCircleRosterStateRef {
+            heads: active_epoch.roster.heads.clone(),
+            resolutions: active_epoch.roster.resolutions.clone(),
+            state_hash: roster.state_hash,
+        };
+        let store_root_hash = current_control.value.store_root_hash;
+        let circle_id = current_control.value.circle_id;
+        let epoch_id = current_control.value.epoch_id();
+        let mut control_value = CircleControl {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            circle_id,
+            value: CircleControlValue {
+                order: MergeCircleControlOrder {
+                    device_id: device_id.to_string(),
+                    stream_id: roster_stream,
+                    author_owner_grant: grant_id.clone(),
+                    seq: current_control
+                        .value
+                        .ordinal()
+                        .checked_add(1)
+                        .ok_or(CircleTransitionError::SequenceOverflow)?,
+                    previous_control_hash: Some(current_control.coord.control_hash()),
+                    dependencies: vec![current_control.coord.clone()],
+                },
+                active_epoch: MergeActiveCircleEpoch {
+                    common: active_epoch.common.clone(),
+                    metadata: active_epoch.metadata.clone(),
+                    roster: roster_state.clone(),
+                    store_membership,
+                    covered_control_heads: active_epoch.covered_control_heads.clone(),
+                },
+                author_authority,
+                membership_authority,
+            },
+            author_pubkey,
+            signature: String::new(),
+        };
+        let leaves = prepare_access_material(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            epoch_id,
+            keyring,
+            key_fingerprint,
+            &roster_state,
+            &roster.members(),
+            &control_value.value.active_epoch.store_membership,
+            &store_members,
+            Some((&member_pubkey, &bootstrap)),
+            ids,
+            signer,
+        )?;
+        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
+        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
+        control_value.value.active_epoch.common.access_root = access_root;
+        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control_value.coord(),
+            bytes: serde_json::to_vec(&control_value)
+                .expect("circle control serialization cannot fail"),
+            value: control_value,
+        };
+        let access = prepare_access_envelopes(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            &control,
+            leaves,
+            proofs,
+            signer,
+        );
+        Ok(Self {
+            circle_id,
+            epoch_id,
+            keyring: keyring.to_string(),
+            roster,
+            policy: CircleTransitionDraftPolicy {
+                roster: CircleRosterDraftPolicy::Successor {
+                    predecessor: current_roster_chain,
+                    entry,
+                },
+                metadata_successor: false,
+            },
+            metadata: current_metadata.clone(),
+            access,
+            control,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn rename(
         candidate_family: super::store_commit::CandidateFamilyId,
         device_id: &str,
@@ -1435,7 +1694,7 @@ impl CircleTransitionDraft {
         metadata_stamp: &str,
         store_membership: StoreMembershipStateRef,
         membership_authority: MembershipGrantCreationAuthority,
-        mut store_members: Vec<(String, MemberRole)>,
+        store_members: Vec<(String, MemberRole)>,
         current_control: &PreparedCircleControl,
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
@@ -1446,66 +1705,31 @@ impl CircleTransitionDraft {
         if name.trim().is_empty() {
             return Err(CircleTransitionError::EmptyName);
         }
-        if !current_control.verify()
-            || !current_roster.verify()
-            || !current_metadata.verify()
-            || current_control.value.circle_id != current_metadata.circle_id
-            || current_control.value.epoch_id() != current_metadata.epoch_id
-        {
-            return Err(CircleTransitionError::InvalidCurrentState);
-        }
-        let author_pubkey = keys::public_key_hex(signer);
-        store_members.sort_by(|left, right| left.0.cmp(&right.0));
-        store_members.dedup_by(|left, right| left.0 == right.0);
-        if !store_members
-            .iter()
-            .any(|(pubkey, role)| pubkey == &author_pubkey && role.can_write())
-        {
-            return Err(CircleTransitionError::AuthorNotStoreWriter);
-        }
-        if current_roster.members().get(&author_pubkey) != Some(&super::circle::CircleRole::Owner) {
-            return Err(CircleTransitionError::AuthorNotCircleOwner);
-        }
-        let parsed_keyring = MasterKeyring::from_serialized(keyring)
-            .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
-        let key_fingerprint = EncryptionService::from(parsed_keyring).seal_key_fingerprint();
-        if key_fingerprint != current_control.value.key_fingerprint()
-            || current_metadata.key_fingerprint != key_fingerprint
-        {
-            return Err(CircleTransitionError::InvalidCurrentState);
-        }
+        let context = circle_successor_context(
+            store_members,
+            current_control,
+            current_roster,
+            current_metadata,
+            keyring,
+            signer,
+        )?;
+        let CircleSuccessorContext {
+            store_members,
+            author_pubkey,
+            active_epoch,
+            grant_id,
+            author_authority,
+            key_fingerprint,
+        } = context;
         let store_root_hash = current_control.value.store_root_hash;
         let circle_id = current_control.value.circle_id;
         let epoch_id = current_control.value.epoch_id();
         let roster_state = current_control.value.roster_state_ref();
 
-        let active_epoch = &current_control.value.value.active_epoch;
-        let (grant_id, record) = current_roster
-            .active_grants()
-            .find(|(_, record)| {
-                record.member_pubkey == author_pubkey
-                    && record.role == super::circle::CircleRole::Owner
-            })
-            .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
-        let author_authority = match &record.creation_authority {
-            CircleGrantCreationAuthority::Entry(created_at) => {
-                MergeCircleOwnerAuthorityRef::Roster {
-                    roster: active_epoch.roster.clone(),
-                    grant_id: grant_id.clone(),
-                    created_at: created_at.clone(),
-                }
-            }
-            CircleGrantCreationAuthority::ConflictResolution(resolution) => {
-                MergeCircleOwnerAuthorityRef::ConflictResolution {
-                    conflict_hash: resolution.conflict_hash,
-                    resolution_hash: resolution.resolution_hash,
-                }
-            }
-        };
         let own_head = active_epoch.metadata.heads.iter().find(|head| {
             head.coord.author_pubkey == author_pubkey
                 && head.coord.device_id == device_id
-                && head.coord.author_owner_grant == *grant_id
+                && head.coord.author_owner_grant == grant_id
         });
         let author_stream_id = own_head.map_or_else(
             || {
@@ -1603,6 +1827,7 @@ impl CircleTransitionDraft {
             &current_roster.members(),
             &control_value.active_epoch.store_membership,
             &store_members,
+            None,
             ids,
             signer,
         )?;
@@ -1625,7 +1850,10 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let policy_objects = CircleTransitionDraftPolicy { roster_entry: None };
+        let policy_objects = CircleTransitionDraftPolicy {
+            roster: CircleRosterDraftPolicy::Inherited,
+            metadata_successor: true,
+        };
         let access = prepare_access_envelopes(
             store_root_hash,
             candidate_family,
@@ -1845,6 +2073,8 @@ pub enum CircleTransitionError {
     MembershipGrantPolicy,
     #[error("circle recipient has an invalid Ed25519 public key: {0}")]
     InvalidRecipient(String),
+    #[error("circle member is not a current Store member: {0}")]
+    MemberNotInStore(String),
     #[error("circle roster: {0}")]
     Roster(#[from] CircleRosterError),
 }

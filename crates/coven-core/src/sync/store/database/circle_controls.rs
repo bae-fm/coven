@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use super::{StoreDatabase, StoreDatabaseTransaction};
 use crate::database::{
     candidate_graph_exact_objects, load_activated_registration_on, load_circle_operation_on,
-    mark_remote_object_uploaded_on, persist_exact_remote_object_on,
+    mark_remote_object_uploaded_on, persist_prepared_remote_object_on,
     required_store_root_authority_on, DbError, PreparedCircleOperationRow,
     VerifiedMergeMaterialization,
 };
@@ -22,12 +22,18 @@ impl StoreDatabase {
         let remotes = journal
             .closed_remote_objects()
             .map_err(|error| DbError::Message(error.to_string()))?;
+        let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.database
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 for remote in &remotes {
-                    persist_exact_remote_object_on(&tx, remote, "Circle candidate graph")?;
+                    persist_prepared_remote_object_on(
+                        &tx,
+                        remote,
+                        &owner,
+                        "Circle candidate graph",
+                    )?;
                 }
                 tx.execute(
                     "INSERT INTO circle_operations (operation_id, circle_id, payload)
@@ -294,6 +300,20 @@ impl StoreDatabase {
                     .iter()
                     .map(remote_object_id)
                     .collect::<Vec<_>>();
+                for access in &creation.access {
+                    if let crate::sync::circle::CircleAccessDisposition::Active {
+                        bootstrap: Some(bootstrap),
+                        ..
+                    } = &access.leaf.value.disposition
+                    {
+                        object_ids.extend(
+                            bootstrap
+                                .blobs
+                                .iter()
+                                .map(|blob| remote_object_id(blob.object())),
+                        );
+                    }
+                }
                 object_ids.push(remote_object_id(&operation.commit_ref.object));
                 if let Some(head_object_id) = head_object_id {
                     object_ids.push(head_object_id);

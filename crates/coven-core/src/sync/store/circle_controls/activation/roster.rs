@@ -31,6 +31,38 @@ pub(super) async fn load_circle_roster_state(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<ResolvedCircleRoster, CircleOperationError> {
+    load_circle_roster_chain(
+        database,
+        verified_prefix,
+        storage,
+        root,
+        commit_ref,
+        commit,
+        circle_id,
+        state,
+        encryption,
+        objects,
+        consumed_stream_activations,
+    )
+    .await?
+    .try_resolved()
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn load_circle_roster_chain(
+    database: &StoreDatabase,
+    verified_prefix: &VerifiedStreamActivationPrefix,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    circle_id: CircleId,
+    state: &crate::sync::circle::MergeCircleRosterStateRef,
+    encryption: EncryptionService,
+    objects: &CircleActivationObjects,
+    consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
+) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
     let store_root_hash = commit.store_root_hash;
     if state.heads.is_empty()
         || !state
@@ -137,7 +169,7 @@ pub(super) async fn load_circle_roster_state(
             "Circle roster state hash differs from its effective assignments".to_string(),
         ));
     }
-    Ok(resolved)
+    Ok(chain)
 }
 
 async fn load_circle_roster_entries_from_heads(

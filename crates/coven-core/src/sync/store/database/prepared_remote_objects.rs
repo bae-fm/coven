@@ -8,7 +8,7 @@ use crate::sync::session::SyncedTable;
 use crate::sync::storage::ExactObjectRef;
 use crate::sync::store_commit::{ObjectHash, StoreBatchCommit, StoreBatchCommitRef};
 use crate::write::WriteId;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::path::PathBuf;
 
 use super::candidate_records::parse_prepared_merge_candidate_on;
@@ -129,37 +129,12 @@ impl StoreDatabase {
         }
         validate_prepared_audience_blob_graph(&object_ids, audiences)?;
         for remote in remote_objects {
-            let object_id = remote.object_id();
-            let existing = conn
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let persisted = match existing {
-                Some(state) => {
-                    let existing: RemoteObjectRecord = serde_json::from_str(&state).map_err(
-                        |error| {
-                            DbError::Message(format!(
-                                "prepared remote object {object_id} has invalid closed state: {error}"
-                            ))
-                        },
-                    )?;
-                    merge_prepared_remote_object(existing, remote, commit_ref)?
-                }
-                None => remote.clone(),
-            };
-            let state = serde_json::to_string(&persisted).map_err(|error| {
-                DbError::Message(format!("serialize closed remote object: {error}"))
-            })?;
-            conn.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
-                 ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
-                (object_id.to_string(), state),
-            )
-            .map_err(DbError::from)?;
+            persist_prepared_remote_object_on(
+                conn,
+                remote,
+                commit_ref,
+                "candidate audience object",
+            )?;
         }
         let commit_remote = RemoteObjectRecord::candidate_commit(
             commit_ref.clone(),

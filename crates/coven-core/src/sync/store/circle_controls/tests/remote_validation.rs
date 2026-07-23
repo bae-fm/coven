@@ -77,6 +77,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             object: envelope.reference().clone(),
             ..original_ref.envelope
         },
+        bootstrap: None,
     });
     let author = crate::sync::store::database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())

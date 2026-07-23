@@ -1653,6 +1653,7 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
                 ObjectHash::digest(provider_id.as_bytes()),
             ),
         },
+        bootstrap: None,
     };
     let control = test_circle_control_coord(&fixture, control_hash);
     let mut operations = fixture

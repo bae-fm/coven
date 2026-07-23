@@ -7,8 +7,8 @@ pub use image::{
     SnapshotBlobReconcile, SnapshotError,
 };
 pub(crate) use image::{
-    create_snapshot_with_host_blobs, install_snapshot_blob_graph, should_create_snapshot,
-    CreatedSnapshot, SnapshotBlobAudience,
+    create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
+    install_snapshot_blob_graph, should_create_snapshot, CreatedSnapshot, SnapshotBlobAudience,
 };
 
 use crate::keys::UserKeypair;
@@ -25,6 +25,16 @@ pub(crate) struct SnapshotCut {
     pub(crate) coverage: CommitFrontier,
 }
 
+enum SnapshotCutProjection {
+    Store {
+        routing_encryption: Option<crate::encryption::EncryptionService>,
+    },
+    Circle {
+        routing_encryption: crate::encryption::EncryptionService,
+        circle_id: crate::sync::circle::CircleId,
+    },
+}
+
 impl super::AuthorizedStore<'_> {
     pub(crate) async fn capture_snapshot_cut(
         &self,
@@ -32,7 +42,39 @@ impl super::AuthorizedStore<'_> {
         tables: Vec<crate::sync::session::SyncedTable>,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<SnapshotCut, crate::database::DbError> {
-        let routing_encryption = routing_encryption.cloned();
+        self.capture_projected_snapshot_cut(
+            temp_dir,
+            tables,
+            SnapshotCutProjection::Store {
+                routing_encryption: routing_encryption.cloned(),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn capture_circle_snapshot_cut(
+        &self,
+        temp_dir: std::path::PathBuf,
+        routing_encryption: &crate::encryption::EncryptionService,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<SnapshotCut, crate::database::DbError> {
+        self.capture_projected_snapshot_cut(
+            temp_dir,
+            self.db().synced_tables().to_vec(),
+            SnapshotCutProjection::Circle {
+                routing_encryption: routing_encryption.clone(),
+                circle_id,
+            },
+        )
+        .await
+    }
+
+    async fn capture_projected_snapshot_cut(
+        &self,
+        temp_dir: std::path::PathBuf,
+        tables: Vec<crate::sync::session::SyncedTable>,
+        projection: SnapshotCutProjection,
+    ) -> Result<SnapshotCut, crate::database::DbError> {
         self.db()
             .call(move |connection| {
                 let pending: i64 = connection
@@ -51,12 +93,26 @@ impl super::AuthorizedStore<'_> {
                         "snapshot cut refused while unpublished Store writes exist".to_string(),
                     ));
                 }
-                let snapshot = create_snapshot_with_host_blobs(
-                    connection,
-                    &temp_dir,
-                    &tables,
-                    routing_encryption.as_ref(),
-                )
+                let snapshot = match projection {
+                    SnapshotCutProjection::Store { routing_encryption } => {
+                        create_snapshot_with_host_blobs(
+                            connection,
+                            &temp_dir,
+                            &tables,
+                            routing_encryption.as_ref(),
+                        )
+                    }
+                    SnapshotCutProjection::Circle {
+                        routing_encryption,
+                        circle_id,
+                    } => create_circle_snapshot_with_host_blobs(
+                        connection,
+                        &temp_dir,
+                        &tables,
+                        &routing_encryption,
+                        circle_id,
+                    ),
+                }
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
                 let coverage = CommitFrontier::from_refs(
                     crate::sync::store::database::StoreDatabase::materialized_frontier_on(
