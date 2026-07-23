@@ -50,6 +50,56 @@ pub(crate) struct CircleReplayEpochIndex {
 }
 
 impl CircleReplayEpochIndex {
+    fn record_control(
+        &mut self,
+        circle_id: crate::sync::circle::CircleId,
+        control: &crate::sync::circle::PreparedCircleControl,
+    ) -> Result<(), DbError> {
+        let control_key = (circle_id, control.coord.clone());
+        match self.control_epochs.entry(control_key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(control.value.epoch_id());
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if *entry.get() == control.value.epoch_id() => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(DbError::Message(format!(
+                    "Circle replay index maps one control for {circle_id} to conflicting epochs"
+                )));
+            }
+        }
+        let crate::sync::circle::CircleEpochOrigin::Closed {
+            closed_epoch_id,
+            cutoff,
+            ..
+        } = &control.value.active_common().origin
+        else {
+            return Ok(());
+        };
+        match self.cutoffs.entry((circle_id, *closed_epoch_id)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(cutoff.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == cutoff => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} has conflicting cutoffs for epoch {closed_epoch_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn include_verified_activations(
+        &mut self,
+        activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+    ) -> Result<(), DbError> {
+        for activation in activations {
+            self.record_control(activation.circle_id, &activation.control)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn permits(
         &self,
         commit_ref: &StoreBatchCommitRef,
@@ -86,6 +136,12 @@ impl CircleReplayEpochIndex {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn circle_replay_epoch_index(
+        &self,
+    ) -> Result<CircleReplayEpochIndex, DbError> {
+        self.sqlite().call(Self::circle_replay_epoch_index_on).await
+    }
+
     pub(crate) fn circle_replay_epoch_index_on(
         conn: &Connection,
     ) -> Result<CircleReplayEpochIndex, DbError> {
@@ -104,8 +160,10 @@ impl StoreDatabase {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(DbError::from)?;
         drop(statement);
-        let mut control_epochs = BTreeMap::new();
-        let mut cutoffs = BTreeMap::new();
+        let mut index = CircleReplayEpochIndex {
+            control_epochs: BTreeMap::new(),
+            cutoffs: BTreeMap::new(),
+        };
         for (encoded_circle_id, encoded_control) in rows {
             let circle_id = encoded_circle_id.parse().map_err(|error| {
                 DbError::Message(format!(
@@ -123,39 +181,9 @@ impl StoreDatabase {
                         "Circle replay index activation for {circle_id} disappeared"
                     ))
                 })?;
-            let epoch_id = activation.control.value.epoch_id();
-            if control_epochs
-                .insert((circle_id, control), epoch_id)
-                .is_some()
-            {
-                return Err(DbError::Message(format!(
-                    "Circle replay index duplicates a control for {circle_id}"
-                )));
-            }
-            let crate::sync::circle::CircleEpochOrigin::Closed {
-                closed_epoch_id,
-                cutoff,
-                ..
-            } = &activation.control.value.active_common().origin
-            else {
-                continue;
-            };
-            match cutoffs.entry((circle_id, *closed_epoch_id)) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(cutoff.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == cutoff => {}
-                std::collections::btree_map::Entry::Occupied(_) => {
-                    return Err(DbError::Message(format!(
-                        "Circle {circle_id} has conflicting cutoffs for epoch {closed_epoch_id}"
-                    )));
-                }
-            }
+            index.record_control(circle_id, &activation.control)?;
         }
-        Ok(CircleReplayEpochIndex {
-            control_epochs,
-            cutoffs,
-        })
+        Ok(index)
     }
 
     fn canonical_retained_merge_packages(

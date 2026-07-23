@@ -321,12 +321,23 @@ pub(super) async fn apply_candidate(
     merge_candidate: &MergeCandidate,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
     identity: Option<&crate::keys::UserKeypair>,
+    latest_membership: &MembershipChain,
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
     let device_operations =
         resolve_candidate_device_operations(database, storage, root, merge_candidate).await?;
+    let membership_objects =
+        verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
+            .await?;
+    let local_store_membership = local_store_membership_after_candidate(
+        latest_membership,
+        root,
+        &merge_candidate.predecessor_membership,
+        membership_objects.as_ref(),
+        identity,
+    )?;
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     let circle_activations = if candidate.commit.control().is_some() {
         verify_merge_membership_control(storage, root, &candidate.commit_ref, &candidate.commit)
@@ -340,7 +351,7 @@ pub(super) async fn apply_candidate(
             &candidate.commit_ref,
             &candidate.commit,
             &candidate.author,
-            identity,
+            identity.filter(|_| local_store_membership.allows_circle_access()),
             &verified_prefix,
         )
         .await
@@ -361,6 +372,7 @@ pub(super) async fn apply_candidate(
         &candidate.commit,
         verified_circle_activations.circles(),
         &candidate.author,
+        local_store_membership,
     )
     .await
     {
@@ -429,7 +441,9 @@ pub(super) async fn apply_candidate(
         packages,
         device_operations,
         verified_circle_activations,
+        membership_objects,
         loaded_predecessor_memberships,
+        local_store_membership,
         routing_key,
     ))
     .await?;
@@ -442,6 +456,80 @@ pub(super) async fn apply_candidate(
         .await;
     }
     Ok(outcome)
+}
+
+fn local_store_membership_after_candidate(
+    latest: &MembershipChain,
+    root: &StoreRootRef,
+    predecessor: &MembershipChain,
+    membership_objects: Option<&VerifiedMergeMembershipClosure>,
+    identity: Option<&crate::keys::UserKeypair>,
+) -> Result<LocalStoreMembership, StorePullError> {
+    let candidate = if let Some(membership_objects) = membership_objects {
+        let proof = &membership_objects.proof;
+        let mut successor = predecessor.clone();
+        match (&proof.resolution, &proof.resolution_value) {
+            (Some(reference), Some(value)) => successor
+                .apply_resolutions(root.store_root_hash, &[(reference.clone(), value.clone())])
+                .map_err(|error| StorePullError::Database(error.to_string()))?,
+            (None, None) => {}
+            _ => {
+                return Err(StorePullError::Database(
+                    "verified Merge membership proof has incomplete resolution evidence"
+                        .to_string(),
+                ))
+            }
+        }
+        successor
+            .add_entry(proof.entry_value.clone())
+            .and_then(|()| successor.activate_head_ref(proof.head.clone()))
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        successor
+    } else {
+        predecessor.clone()
+    };
+    let candidate_state = LocalStoreMembership::from_membership(&candidate, identity)
+        .map_err(StorePullMembershipError::State)
+        .map_err(StorePullError::Membership)?;
+    if candidate.causally_includes(latest) {
+        return Ok(candidate_state);
+    }
+    if latest.causally_includes(&candidate) {
+        let latest_state = LocalStoreMembership::from_membership(latest, identity)
+            .map_err(StorePullMembershipError::State)
+            .map_err(StorePullError::Membership);
+        return Ok(historical_local_store_membership(
+            latest_state?,
+            candidate_state,
+        ));
+    }
+    Err(StorePullError::Membership(
+        StorePullMembershipError::Message(
+            "latest Store membership and exact candidate membership are causally incomparable"
+                .to_string(),
+        ),
+    ))
+}
+
+pub(super) fn historical_local_store_membership(
+    latest: LocalStoreMembership,
+    candidate: LocalStoreMembership,
+) -> LocalStoreMembership {
+    if matches!(latest, LocalStoreMembership::Removed)
+        || matches!(candidate, LocalStoreMembership::Removed)
+    {
+        LocalStoreMembership::Removed
+    } else if matches!(latest, LocalStoreMembership::Current)
+        && matches!(candidate, LocalStoreMembership::Current)
+    {
+        LocalStoreMembership::Current
+    } else if matches!(latest, LocalStoreMembership::IdentityNotSupplied)
+        || matches!(candidate, LocalStoreMembership::IdentityNotSupplied)
+    {
+        LocalStoreMembership::IdentityNotSupplied
+    } else {
+        LocalStoreMembership::NotYetMember
+    }
 }
 
 pub(crate) struct PreparedMergeMaterializationPackage {
@@ -744,6 +832,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     gates: &super::gate::Gates,
     synced_tables: &[SyncedTable],
     routing_key: Option<&super::circle::RowRoutingKey>,
+    local_store_membership: LocalStoreMembership,
     timestamp_policy: IncomingTimestampPolicy,
     materialization: PreparedMergeMaterialization,
 ) -> Result<AppliedMergeMaterialization, DbError> {
@@ -762,7 +851,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         circle_activations,
         package_application,
     } = materialization;
-    let inactive_circles = circle_activations
+    let mut inactive_circles = circle_activations
         .circles()
         .iter()
         .filter_map(|activation| {
@@ -847,6 +936,30 @@ pub(crate) fn apply_prepared_merge_materialization_on(
             },
             &winning_rows,
         )?;
+    }
+    if gates.has_scoped_graph() && !local_store_membership.retains_circle_rows() {
+        let mut statement = conn
+            .prepare(
+                "SELECT DISTINCT circle_id
+                 FROM _coven_audience
+                 WHERE circle_id IS NOT NULL
+                 ORDER BY circle_id",
+            )
+            .map_err(DbError::from)?;
+        let circles = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in circles {
+            inactive_circles.insert(encoded.parse().map_err(|error| {
+                DbError::Message(format!(
+                    "parse materialized Circle audience {encoded}: {error}"
+                ))
+            })?);
+        }
+        crate::sync::store::database::StoreDatabase::remove_local_circle_access_on(conn)?;
     }
     let mut removal_session = rusqlite::session::Session::new(conn).map_err(DbError::from)?;
     for table in synced_tables {
@@ -1121,7 +1234,9 @@ async fn commit_candidate(
     packages: Vec<PreparedMergeMaterializationPackage>,
     device_operations: VerifiedStoreDeviceOperations,
     verified_circle_activations: VerifiedCircleActivations,
+    membership: Option<VerifiedMergeMembershipClosure>,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+    local_store_membership: LocalStoreMembership,
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
@@ -1180,9 +1295,6 @@ async fn commit_candidate(
         ),
         None => None,
     };
-    let membership =
-        verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
-            .await?;
     let registrations = candidate
         .commit
         .device_registrations()
@@ -1302,6 +1414,7 @@ async fn commit_candidate(
                 &gates,
                 &synced_tables,
                 routing_key.as_ref(),
+                local_store_membership,
                 IncomingTimestampPolicy::Received { receiver_wall_ms },
                 materialization,
             )?;
@@ -1347,6 +1460,7 @@ async fn commit_candidate(
                         &retracted,
                         None,
                         true,
+                        local_store_membership,
                     )?;
                     let projection_changeset = super::retained_replay::replace_live_projection(
                         &tx,

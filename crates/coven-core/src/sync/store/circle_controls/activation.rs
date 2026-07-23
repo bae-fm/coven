@@ -910,7 +910,7 @@ pub(crate) async fn load_circle_activations(
         commit_ref,
         commit,
         author,
-        identity,
+        Some(identity),
         founder_pubkey,
         &verified_prefix,
     ))
@@ -924,7 +924,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
-    identity: &UserKeypair,
+    identity: Option<&UserKeypair>,
     founder_pubkey: &str,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
@@ -1107,6 +1107,15 @@ pub(crate) async fn load_circle_activations_with_prefix(
             founder_pubkey,
         ))
         .await?;
+        let Some(identity) = identity else {
+            activations.push(VerifiedCircleReference {
+                reference: reference.clone(),
+                circle_id: reference.circle_id(),
+                control,
+                local_access: None,
+            });
+            continue;
+        };
         let own_pubkey = keys::public_key_hex(identity);
         if !checkpoint_members
             .iter()

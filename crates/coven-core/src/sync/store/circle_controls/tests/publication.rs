@@ -1,7 +1,10 @@
 use super::*;
 
-fn open_circle_routing_test_db() -> Database {
-    crate::sync::test_helpers::open_test_db_schema(
+fn circle_routing_test_schema() -> (
+    Vec<crate::sync::session::SyncedTable>,
+    Vec<crate::migration::Migration>,
+) {
+    (
         vec![crate::sync::session::SyncedTable::new(
             "documents",
             crate::sync::session::RowIdentity::IndependentUuid,
@@ -36,6 +39,25 @@ async fn circle_blob_opening_error(
         Ok(_) => panic!("invalid Circle blob authority must fail"),
         Err(error) => error,
     }
+}
+
+fn open_circle_routing_test_db() -> Database {
+    let (tables, migrations) = circle_routing_test_schema();
+    crate::sync::test_helpers::open_test_db_schema(tables, migrations)
+}
+
+fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
+    let (tables, migrations) = circle_routing_test_schema();
+    Database::open(
+        path,
+        tables,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "test-device".to_string(),
+        &migrations,
+    )
+    .expect("open copied Circle routing database")
+    .0
 }
 
 #[tokio::test]
@@ -811,6 +833,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         &package_commit,
         &[],
         &package_author,
+        crate::sync::store::pull::LocalStoreMembership::Current,
     )
     .await
     {
@@ -823,6 +846,18 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         }
     };
     assert_eq!(loaded_packages.len(), 1);
+    let candidate_base_temp =
+        tempfile::tempdir().expect("create candidate base database directory");
+    let candidate_base_path = candidate_base_temp.path().join("pre-close.sqlite3");
+    let copied_path = candidate_base_path.clone();
+    db.call(move |connection| {
+        connection
+            .execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
+            .map(|_| ())
+            .map_err(DbError::from)
+    })
+    .await
+    .expect("copy pre-close Circle database");
 
     let controls = StoreDatabase::new(&db)
         .closing_circle_controls()
@@ -926,11 +961,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("read closing Circle controls after finalization")
         .is_empty());
-    let successor = StoreDatabase::new(&db)
+    let (successor, successor_commit_ref) = StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
-        .expect("load successor Circle authoring state")
-        .0;
+        .expect("load successor Circle authoring state");
     assert_ne!(successor.control.value.epoch_id(), prior_epoch);
     assert_ne!(successor.control.value.key_fingerprint(), prior_fingerprint);
     assert!(!successor.roster.members().contains_key(&member_pubkey));
@@ -975,7 +1009,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("key differs from its exact activated authority"),
         "{substitution_error}"
     );
-    let mut absent_control = prior_control;
+    let mut absent_control = prior_control.clone();
     absent_control.control_hash = ObjectHash::digest(b"absent Circle control");
     let absent_authority = crate::blob::RowBlobAuthority::Remote(
         crate::sync::audience_package::PackageAudience::Circle {
@@ -1102,6 +1136,277 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .expect("Circle removal retains its signed close intent"),
         &[(response_ref, response)],
     ));
+    assert!(db
+        .call(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM documents
+                         WHERE id = '00000000-0000-4000-8000-000000000001'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read accepted pre-cutoff Circle row after replay"));
+
+    store.home.clear_exact_reads();
+    let accepted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
+        &StoreDatabase::new(&db),
+        &store.storage,
+        &package_commit_ref,
+        &package_commit,
+        &[],
+        &package_author,
+        crate::sync::store::pull::LocalStoreMembership::Current,
+    )
+    .await
+    {
+        Ok(packages) => packages,
+        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+            panic!("load accepted Circle package after cutoff: {error}")
+        }
+        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+            panic!("load accepted Circle package after cutoff: {error}")
+        }
+    };
+    assert_eq!(accepted_after_cutoff.len(), 1);
+    let package_slot = package_commit.circle_packages()[0]
+        .package
+        .object
+        .slot()
+        .clone();
+    assert!(store.home.exact_reads().contains(&package_slot));
+
+    let accepted_stream_position = cutoff
+        .commits()
+        .get(&package_commit_ref.coord.stream_id)
+        .expect("Circle cutoff covers the package author stream");
+    let mut beyond_cutoff = accepted_stream_position.clone();
+    beyond_cutoff.coord.sequence = beyond_cutoff
+        .coord
+        .sequence()
+        .checked_add(1)
+        .expect("test cutoff sequence has a successor");
+    beyond_cutoff.commit_hash = ObjectHash::digest(b"Circle package beyond cutoff");
+    store.home.clear_exact_reads();
+    let omitted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
+        &StoreDatabase::new(&db),
+        &store.storage,
+        &beyond_cutoff,
+        &package_commit,
+        &[],
+        &package_author,
+        crate::sync::store::pull::LocalStoreMembership::Current,
+    )
+    .await
+    {
+        Ok(packages) => packages,
+        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+            panic!("classify later Circle package against cutoff: {error}")
+        }
+        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+            panic!("classify later Circle package against cutoff: {error}")
+        }
+    };
+    assert!(omitted_after_cutoff.is_empty());
+    assert!(!store.home.exact_reads().contains(&package_slot));
+
+    let mut cutoff_collision = accepted_stream_position.clone();
+    cutoff_collision.commit_hash = ObjectHash::digest(b"Circle cutoff coordinate collision");
+    store.home.clear_exact_reads();
+    let collision = crate::sync::store::pull::load_applicable_circle_packages(
+        &StoreDatabase::new(&db),
+        &store.storage,
+        &cutoff_collision,
+        &package_commit,
+        &[],
+        &package_author,
+        crate::sync::store::pull::LocalStoreMembership::Current,
+    )
+    .await;
+    assert!(matches!(
+        collision,
+        Err(crate::sync::store::pull::PullCircleActivationError::Database(error))
+            if error
+                .to_string()
+                .contains("conflicts with its accepted epoch cutoff")
+    ));
+    assert!(!store.home.exact_reads().contains(&package_slot));
+
+    let (successor_commit, successor_author) = crate::sync::store::pull::load_commit_with_author(
+        &store.storage,
+        &store.root,
+        &successor_commit_ref,
+    )
+    .await
+    .expect("load exact successor Circle commit");
+    let device_signer = successor_author
+        .device_signer(&signer)
+        .expect("open successor Circle commit signer");
+    let candidate_coord = successor_commit_ref.coord.clone();
+    let sequence = candidate_coord.sequence();
+    let candidate_family = successor_commit.candidate_family();
+    let candidate_write_id = successor_commit.write_id.clone();
+    let original_package =
+        crate::sync::audience_package::AudiencePackage::parse(&loaded_packages[0].bytes)
+            .expect("parse accepted pre-close Circle package");
+    let candidate_package = crate::sync::audience_package::AudiencePackage::circle(
+        successor_commit.store_root_hash,
+        candidate_family,
+        candidate_write_id.clone(),
+        candidate_coord.clone(),
+        db.schema_version(),
+        circle_id,
+        prior_control.clone(),
+        prior_fingerprint,
+        original_package.changeset().to_vec(),
+        original_package.blob_bindings().to_vec(),
+    )
+    .expect("build exact old-control package for combined Circle candidate");
+    let candidate_package_bytes = candidate_package.to_bytes();
+    let candidate_package_prefix = crate::sync::store_commit::circle_package_semantic_prefix(
+        circle_id,
+        candidate_family,
+        &candidate_coord.stream_id.to_string(),
+        sequence,
+        ObjectHash::digest(&candidate_package_bytes),
+    );
+    let candidate_package_context = ProtocolObjectContext::circle(
+        successor_commit.store_root_hash,
+        ProtocolObjectDomain::CirclePackage,
+        historical_access.encryption.clone(),
+    );
+    let candidate_package_slot = store
+        .storage
+        .allocate_protocol_slot(
+            &candidate_package_context,
+            &candidate_package_prefix,
+            ".pkg",
+        )
+        .await
+        .expect("allocate exact old-control package slot");
+    let candidate_package_object = store
+        .storage
+        .prepare_protocol_object(
+            &candidate_package_context,
+            candidate_package_slot,
+            &candidate_package_prefix,
+            candidate_package_bytes.clone(),
+        )
+        .expect("prepare exact old-control package");
+    crate::sync::store_objects::create_exact_object(&store.storage, &candidate_package_object)
+        .await
+        .expect("publish exact old-control package");
+    let circle_packages = [crate::sync::store_commit::CirclePackageInput {
+        circle_id,
+        control: prior_control,
+        key_fingerprint: prior_fingerprint,
+        package: crate::sync::store_commit::StorePackageInput {
+            candidate_family,
+            schema_version: db.schema_version(),
+            bytes: &candidate_package_bytes,
+            object: candidate_package_object.reference().clone(),
+        },
+    }];
+    let candidate_commit = StoreBatchCommit::signed_operations(
+        successor_commit.store_root_hash,
+        candidate_write_id,
+        candidate_coord.clone(),
+        successor_commit.author_registration.clone(),
+        &successor_author,
+        successor_commit.order.clone(),
+        successor_commit.membership_state.clone(),
+        successor_commit.device_state.clone(),
+        crate::sync::store_commit::StoreOperationMembershipAuthority {
+            predecessor: successor_commit
+                .membership_authority
+                .clone()
+                .expect("successor Circle commit carries membership authority"),
+        },
+        crate::sync::store_commit::StoreCommitOperationsInput {
+            acknowledgement: None,
+            control: None,
+            device_join_attempt_decisions: Vec::new(),
+            device_join_outcomes: Vec::new(),
+            device_join_cleanup_receipts: Vec::new(),
+            provider_access_grants: Vec::new(),
+            provider_access_withdrawals: Vec::new(),
+            device_registrations: Vec::new(),
+            device_exclusion_proposals: Vec::new(),
+            device_exclusion_outcomes: Vec::new(),
+            stream_activations: successor_commit.stream_activations().to_vec(),
+            circle_controls: successor_commit.circle_controls().to_vec(),
+            store_package: None,
+            circle_packages: &circle_packages,
+        },
+        &device_signer,
+    )
+    .expect("sign combined successor-control and old-package candidate");
+    let candidate_commit_prefix = commit_semantic_prefix(
+        candidate_family,
+        &candidate_coord.stream_id.to_string(),
+        sequence,
+        candidate_commit.commit_hash(),
+    );
+    let candidate_commit_context = ProtocolObjectContext::signed_plaintext(
+        successor_commit.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let candidate_commit_slot = store
+        .storage
+        .allocate_protocol_slot(&candidate_commit_context, &candidate_commit_prefix, ".json")
+        .await
+        .expect("allocate combined Circle candidate slot");
+    let candidate_commit_object = store
+        .storage
+        .prepare_protocol_object(
+            &candidate_commit_context,
+            candidate_commit_slot,
+            &candidate_commit_prefix,
+            candidate_commit.to_bytes(),
+        )
+        .expect("prepare combined Circle candidate");
+    let candidate_commit_ref = StoreBatchCommitRef::from_commit(
+        &candidate_commit,
+        candidate_coord,
+        candidate_commit_object.reference().clone(),
+    )
+    .expect("bind combined Circle candidate reference");
+    assert!(!cutoff.covers_commit(&candidate_commit_ref));
+    candidate_commit
+        .verify_circle_package(circle_id, &candidate_package_bytes)
+        .expect("combined Circle candidate binds its exact old-control package");
+
+    let candidate_base_database = open_circle_routing_test_db_at(&candidate_base_path);
+    store.home.clear_exact_reads();
+    let omitted_by_candidate_successor =
+        match crate::sync::store::pull::load_applicable_circle_packages(
+            &StoreDatabase::new(&candidate_base_database),
+            &store.storage,
+            &candidate_commit_ref,
+            &candidate_commit,
+            std::slice::from_ref(&activation),
+            &successor_author,
+            crate::sync::store::pull::LocalStoreMembership::Current,
+        )
+        .await
+        {
+            Ok(packages) => packages,
+            Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+                panic!("classify package against candidate successor cutoff: {error}")
+            }
+            Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+                panic!("classify package against candidate successor cutoff: {error}")
+            }
+        };
+    assert!(omitted_by_candidate_successor.is_empty());
+    assert!(!store
+        .home
+        .exact_reads()
+        .contains(candidate_package_object.reference().slot()));
 }
 
 #[tokio::test]

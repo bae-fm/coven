@@ -512,6 +512,52 @@ impl StoreDatabase {
         Ok(state)
     }
 
+    pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT circle_id, state
+                 FROM circle_current_state
+                 ORDER BY circle_id",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+
+        for (circle_id, payload) in rows {
+            let state =
+                Self::parse_circle_current_state(&circle_id, &payload)?.without_local_access();
+            let payload = serde_json::to_vec(&state).map_err(|error| {
+                DbError::Message(format!("serialize public Circle current state: {error}"))
+            })?;
+            let changed = conn
+                .execute(
+                    "UPDATE circle_current_state
+                     SET state = ?2
+                     WHERE circle_id = ?1",
+                    rusqlite::params![circle_id, payload],
+                )
+                .map_err(DbError::from)?;
+            if changed != 1 {
+                return Err(DbError::Message(
+                    "Circle current state changed while removing local access".to_string(),
+                ));
+            }
+        }
+        conn.execute_batch(
+            "DELETE FROM circle_access_cache;
+             DELETE FROM circle_roster_cache;
+             DELETE FROM circle_metadata_cache;",
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    }
+
     pub(crate) fn reduce_circle_current_state_on(
         conn: &Connection,
         candidate_family: crate::sync::store_commit::CandidateFamilyId,

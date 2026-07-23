@@ -1862,6 +1862,13 @@ impl MembershipChain {
         members.into_iter().collect()
     }
 
+    pub(crate) fn contains_member_history(&self, pubkey: &str) -> bool {
+        self.state
+            .grants
+            .values()
+            .any(|state| state.record().member_pubkey == pubkey)
+    }
+
     pub fn active_wrapped_keys_for(&self, recipient_pubkey: &str) -> Vec<WrappedStoreKeyRef> {
         let active_grants = self.active_grant_ids(recipient_pubkey);
         self.entries_with_coords()

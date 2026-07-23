@@ -97,7 +97,8 @@ pub(crate) use join_activation::*;
 pub(crate) use join_validation::*;
 pub(crate) use model::{
     commit_stream_id, held_commit, held_dependency, held_package, parse_candidate_circle_package,
-    parse_candidate_store_package, Candidate, LoadedCirclePackage, StorePullFuture,
+    parse_candidate_store_package, Candidate, LoadedCirclePackage, LocalStoreMembership,
+    StorePullFuture,
 };
 pub use model::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
@@ -225,6 +226,10 @@ pub fn pull_store_commits<'a>(
         let db = database.sqlite();
         let root = required_pull_root(database, store_root_hash).await?;
         let verified_root = load_store_protocol_root(storage, &root).await?.value;
+        membership
+            .ensure_resolved()
+            .map_err(StorePullMembershipError::State)
+            .map_err(StorePullError::Membership)?;
         let routing_key = if db.gates().has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
                 StorePullError::Database(
@@ -588,6 +593,7 @@ pub fn pull_store_commits<'a>(
                             &candidate,
                             &loaded_predecessor_memberships,
                             identity,
+                            membership,
                             routing_key.as_ref(),
                         ))
                         .await?

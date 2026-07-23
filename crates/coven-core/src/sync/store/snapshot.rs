@@ -100,6 +100,7 @@ impl super::AuthorizedStore<'_> {
                     &std::collections::BTreeSet::new(),
                     Some(&cutoff),
                     false,
+                    super::pull::LocalStoreMembership::Current,
                 )?;
                 transaction
                     .rollback()

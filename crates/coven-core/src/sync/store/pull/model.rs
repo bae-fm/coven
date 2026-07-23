@@ -122,6 +122,46 @@ pub struct VerifiedStoreDeviceHead {
     pub author: StoreDeviceRegistration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreMembership {
+    Current,
+    NotYetMember,
+    Removed,
+    IdentityNotSupplied,
+}
+
+impl LocalStoreMembership {
+    pub(crate) fn from_membership(
+        membership: &MembershipChain,
+        identity: Option<&crate::keys::UserKeypair>,
+    ) -> Result<Self, crate::sync::membership::MembershipError> {
+        membership.ensure_resolved()?;
+        let Some(identity) = identity else {
+            return Ok(Self::IdentityNotSupplied);
+        };
+        let identity = crate::keys::public_key_hex(identity);
+        if membership
+            .current_members()
+            .iter()
+            .any(|(member, _)| member == &identity)
+        {
+            Ok(Self::Current)
+        } else if membership.contains_member_history(&identity) {
+            Ok(Self::Removed)
+        } else {
+            Ok(Self::NotYetMember)
+        }
+    }
+
+    pub(crate) fn allows_circle_access(self) -> bool {
+        matches!(self, Self::Current)
+    }
+
+    pub(crate) fn retains_circle_rows(self) -> bool {
+        !matches!(self, Self::Removed)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorePullError {
     #[error("{0}")]
@@ -148,6 +188,8 @@ pub enum StorePullMembershipError {
     Object(#[source] StoreObjectError),
     #[error("{0}")]
     Chain(#[source] super::membership_ops::AnchoredChainError),
+    #[error("{0}")]
+    State(#[source] crate::sync::membership::MembershipError),
     #[error("{0}")]
     Message(String),
 }

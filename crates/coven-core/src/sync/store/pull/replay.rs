@@ -239,6 +239,7 @@ pub(crate) fn replay_retained_merge_projection_on(
     retracted: &BTreeSet<StoreBatchCommitRef>,
     history_cut: Option<&CommitFrontier>,
     include_local_write_overlays: bool,
+    local_store_membership: LocalStoreMembership,
 ) -> Result<rusqlite::Connection, DbError> {
     super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
     let baseline =
@@ -373,6 +374,9 @@ pub(crate) fn replay_retained_merge_projection_on(
                     if !circle_epochs.permits(materialization.commit_ref(), *circle_id, control)? {
                         continue;
                     }
+                    if !local_store_membership.retains_circle_rows() {
+                        continue;
+                    }
                 }
                 retained_packages.push(package.clone());
             }
@@ -446,6 +450,7 @@ pub(crate) fn replay_retained_merge_projection_on(
                 gates,
                 synced_tables,
                 routing_key,
+                local_store_membership,
                 timestamp_policy,
                 replay_materialization,
             )

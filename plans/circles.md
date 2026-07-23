@@ -81,6 +81,26 @@ rebuild the deleted choice.
 - Later-discovered old-epoch packages reopen their exact retained verified
   activation. Package decryption, key selection, and writer authority therefore
   remain available while the Circle's current state is closing.
+- Pull derives effective Store membership from both the latest verified
+  membership chain and the exact chain resulting from each candidate. When the
+  candidate causally includes the latest chain, its result governs. When the
+  latest chain causally includes the candidate result, Circle access requires
+  active membership at both points, and removal at either point requires
+  pruning. Causally incomparable chains fail without materialization.
+- The temporal membership rule prevents a later removal from exposing an older
+  package, a later admission from exposing a pre-admission package, and a
+  re-add from exposing packages authored during the removed interval. An
+  admitting candidate that causally follows the supplied chain can transition
+  the local identity from not-yet-member or removed to current.
+- A removed Store member does not read or decrypt Circle packages. The same
+  transaction applies Store-visible control, mirror, and frontier state; prunes
+  Circle rows and private routes; removes local access, roster, and metadata
+  caches; and retains each resolved public Circle control as inactive with no
+  grant. Public conflict branches remain intact so a verified successor after
+  re-add can advance the retained control.
+- A missing or corrupt Circle package for an active effective member holds its
+  Store commit without partially applying rows, controls, routing, or frontier
+  state.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host

@@ -673,6 +673,22 @@ impl CircleCurrentState {
         }
     }
 
+    pub(crate) fn without_local_access(self) -> Self {
+        match self {
+            Self::Active(accessible) | Self::Closing(accessible) => {
+                Self::Inactive(Box::new(CircleInactiveState {
+                    current: accessible.current,
+                    access: CircleInactiveAccess::NotGranted,
+                }))
+            }
+            Self::Inactive(inactive) => Self::Inactive(Box::new(CircleInactiveState {
+                current: inactive.current,
+                access: CircleInactiveAccess::NotGranted,
+            })),
+            Self::ControlConflict { branches } => Self::ControlConflict { branches },
+        }
+    }
+
     pub(crate) fn verify(&self) -> bool {
         match self {
             Self::Active(active) => {
