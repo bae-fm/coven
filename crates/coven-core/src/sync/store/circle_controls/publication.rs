@@ -21,6 +21,7 @@ pub(super) async fn publish_circle_operation(
     storage: &dyn SyncStorage,
     operation_id: &CircleOperationId,
     identity: &UserKeypair,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<(), CircleOperationError> {
     let db = database.sqlite();
     let mut journal = database
@@ -257,10 +258,15 @@ pub(super) async fn publish_circle_operation(
             ));
         }
         for blob in &bootstrap.blobs {
-            storage.verify_blob_object(blob).await.map_err(|error| {
+            let stored = blob.stored().ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle bootstrap row blob has no exact stored locator".to_string(),
+                )
+            })?;
+            storage.verify_blob_object(stored).await.map_err(|error| {
                 CircleOperationError::InvalidState(format!(
                     "verify Circle bootstrap blob {}: {error}",
-                    crate::sync::remote_object::remote_object_id(blob.object())
+                    crate::sync::remote_object::remote_object_id(stored.object())
                 ))
             })?;
         }
@@ -461,6 +467,7 @@ pub(super) async fn publish_circle_operation(
         &author,
         identity,
         &founder,
+        routing_key,
     )
     .await?;
     let expected = expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;

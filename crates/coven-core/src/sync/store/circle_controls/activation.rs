@@ -37,8 +37,8 @@ use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle
 use state::CircleCurrentControl;
 pub(crate) use state::{
     CircleAuthoringState, CircleCurrentState, CirclePackageAccess, VerifiedCircleAccess,
-    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleReference,
-    VerifiedStreamActivationPrefix, VerifiedStreamActivations,
+    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleBootstrap,
+    VerifiedCircleReference, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
 };
 
 struct VerifiedAccessPair {
@@ -901,6 +901,7 @@ pub(crate) async fn load_circle_activations(
     author: &StoreDeviceRegistration,
     identity: &UserKeypair,
     founder_pubkey: &str,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     Box::pin(load_circle_activations_with_prefix(
@@ -912,6 +913,7 @@ pub(crate) async fn load_circle_activations(
         author,
         Some(identity),
         founder_pubkey,
+        routing_key,
         &verified_prefix,
     ))
     .await
@@ -926,6 +928,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
     author: &StoreDeviceRegistration,
     identity: Option<&UserKeypair>,
     founder_pubkey: &str,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     commit_ref
@@ -942,6 +945,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
         ));
     }
     let mut activations = Vec::with_capacity(commit.circle_controls().len());
+    let mut bootstraps = Vec::new();
     let mut consumed_stream_activations = BTreeSet::new();
     for reference in commit.circle_controls() {
         let objects = reference.objects();
@@ -1266,13 +1270,118 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     commit,
                     reference.circle_id(),
                     &metadata_state,
-                    encryption,
+                    encryption.clone(),
                     objects,
                     root,
                     commit_ref,
                     &mut consumed_stream_activations,
                 )
                 .await?;
+                if let CircleAccessDisposition::Active {
+                    bootstrap: Some(bootstrap),
+                    ..
+                } = &leaf.disposition
+                {
+                    if bootstrap.schema_version != database.sqlite().schema_version()
+                        || bootstrap.sync_routing_hash != database.sqlite().sync_routing_hash()
+                    {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle bootstrap schema or routing contract differs from the local Store"
+                                .to_string(),
+                        ));
+                    }
+                    let image_prefix =
+                        crate::sync::store_commit::circle_bootstrap_image_semantic_prefix(
+                            leaf.circle_id,
+                            leaf.candidate_family,
+                            &leaf.owner_pubkey,
+                            leaf.epoch_id,
+                            &leaf.recipient_slot,
+                            bootstrap.image.image_hash,
+                        );
+                    let image_bytes = read_exact_circle_object(
+                        storage,
+                        &ProtocolObjectContext::circle(
+                            commit.store_root_hash,
+                            ProtocolObjectDomain::CircleBootstrapImage,
+                            encryption,
+                        ),
+                        &bootstrap.image.object,
+                        &image_prefix,
+                    )
+                    .await?;
+                    crate::sync::store::snapshot::verify_circle_bootstrap_image(
+                        &image_bytes,
+                        bootstrap,
+                        leaf.circle_id,
+                        database.sqlite().synced_tables(),
+                        routing_key,
+                    )
+                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                    for binding in &bootstrap.blobs {
+                        let crate::blob::RowBlobAuthority::Remote(
+                            crate::sync::audience_package::PackageAudience::Circle {
+                                circle_id,
+                                control: blob_control,
+                                key_fingerprint,
+                            },
+                        ) = binding.authority()
+                        else {
+                            return Err(CircleOperationError::InvalidState(
+                                "Circle bootstrap row blob lacks Circle package authority"
+                                    .to_string(),
+                            ));
+                        };
+                        let blob_activation = database
+                            .verified_circle_activation(*circle_id, blob_control.clone())
+                            .await?
+                            .ok_or_else(|| {
+                                CircleOperationError::InvalidState(
+                                    "Circle bootstrap blob authority is not retained".to_string(),
+                                )
+                            })?;
+                        let current_control = control.clone();
+                        let historical_control = blob_control.clone();
+                        let lineage_circle_id = *circle_id;
+                        let is_in_control_history = database
+                            .sqlite()
+                            .call(move |connection| {
+                                StoreDatabase::verified_circle_control_covers_on(
+                                    connection,
+                                    lineage_circle_id,
+                                    &current_control,
+                                    &historical_control,
+                                )
+                            })
+                            .await?;
+                        if *key_fingerprint != blob_activation.control.value.key_fingerprint()
+                            || !is_in_control_history
+                        {
+                            return Err(CircleOperationError::InvalidState(
+                                "Circle bootstrap blob authority is outside its control history"
+                                    .to_string(),
+                            ));
+                        }
+                        let stored = binding.stored().ok_or_else(|| {
+                            CircleOperationError::InvalidState(
+                                "Circle bootstrap row blob has no exact locator".to_string(),
+                            )
+                        })?;
+                        storage.verify_blob_object(stored).await.map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "verify Circle bootstrap blob {}: {error}",
+                                crate::sync::remote_object::remote_object_id(stored.object())
+                            ))
+                        })?;
+                    }
+                    bootstraps.push(VerifiedCircleBootstrap::new(
+                        leaf.circle_id,
+                        control.coord.clone(),
+                        leaf,
+                        bootstrap.clone(),
+                        image_bytes,
+                    )?);
+                }
                 Some(VerifiedCircleActive {
                     roster: resolved,
                     metadata,
@@ -1308,6 +1417,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
     Ok(VerifiedCircleActivations {
         circles: activations,
         stream_activations,
+        bootstraps,
     })
 }
 

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use super::verify_control_context;
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::sync::circle::{
-    AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleControl, CircleControlCoord,
-    CircleId, CircleMetadata, PreparedAccessLeaf, PreparedCircleAccess, PreparedCircleControl,
+    AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
+    CircleControlCoord, CircleId, CircleMetadata, PreparedAccessLeaf, PreparedCircleAccess,
+    PreparedCircleControl,
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::store::circle_controls::CircleOperationError;
@@ -34,6 +35,62 @@ pub(crate) struct VerifiedCircleAccess {
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VerifiedCircleBootstrap {
+    circle_id: CircleId,
+    control: CircleControlCoord,
+    reference: CircleBootstrapRef,
+    image_bytes: Vec<u8>,
+}
+
+impl VerifiedCircleBootstrap {
+    pub(super) fn new(
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        access: &CircleAccessLeaf,
+        reference: CircleBootstrapRef,
+        image_bytes: Vec<u8>,
+    ) -> Result<Self, CircleOperationError> {
+        let verified = Self {
+            circle_id,
+            control,
+            reference,
+            image_bytes,
+        };
+        verified.verify_for_access(access)?;
+        Ok(verified)
+    }
+
+    fn verify_for_access(&self, access: &CircleAccessLeaf) -> Result<(), CircleOperationError> {
+        if self.circle_id != access.circle_id
+            || !self.reference.verify_for_access(access)
+            || self.reference.image.image_hash != ObjectHash::digest(&self.image_bytes)
+        {
+            return Err(CircleOperationError::InvalidState(
+                "verified Circle bootstrap differs from its signed access leaf".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn circle_id(&self) -> CircleId {
+        self.circle_id
+    }
+
+    pub(crate) fn control(&self) -> &CircleControlCoord {
+        &self.control
+    }
+
+    pub(crate) fn reference(&self) -> &CircleBootstrapRef {
+        &self.reference
+    }
+
+    pub(crate) fn image_bytes(&self) -> &[u8] {
+        &self.image_bytes
+    }
 }
 
 #[derive(Clone)]
@@ -231,6 +288,7 @@ impl VerifiedStreamActivationPrefix {
 pub(crate) struct VerifiedCircleActivations {
     pub(super) circles: Vec<VerifiedCircleReference>,
     pub(super) stream_activations: VerifiedStreamActivations,
+    pub(super) bootstraps: Vec<VerifiedCircleBootstrap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +296,7 @@ pub(crate) struct VerifiedCircleActivations {
 struct RetainedCircleActivations {
     activating_commit: StoreBatchCommitRef,
     circles: Vec<RetainedCircleReference>,
+    bootstraps: Vec<VerifiedCircleBootstrap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +333,7 @@ impl VerifiedCircleActivations {
         Ok(Self {
             circles: Vec::new(),
             stream_activations: VerifiedStreamActivations::none(commit, commit_ref)?,
+            bootstraps: Vec::new(),
         })
     }
 
@@ -291,6 +351,7 @@ impl VerifiedCircleActivations {
             stream_activations: VerifiedStreamActivations::from_verified_store_control(
                 commit, commit_ref,
             )?,
+            bootstraps: Vec::new(),
         })
     }
 
@@ -302,6 +363,10 @@ impl VerifiedCircleActivations {
         &self.stream_activations
     }
 
+    pub(crate) fn bootstraps(&self) -> &[VerifiedCircleBootstrap] {
+        &self.bootstraps
+    }
+
     pub(crate) fn to_retained(&self) -> Result<Vec<u8>, CircleOperationError> {
         let retained = RetainedCircleActivations {
             activating_commit: self.stream_activations.activating_commit.clone(),
@@ -310,6 +375,7 @@ impl VerifiedCircleActivations {
                 .iter()
                 .map(RetainedCircleReference::from_verified)
                 .collect(),
+            bootstraps: self.bootstraps.clone(),
         };
         serde_json::to_vec(&retained).map_err(|error| {
             CircleOperationError::InvalidState(format!(
@@ -361,12 +427,57 @@ impl VerifiedCircleActivations {
                 retained.verify_and_open(commit, commit_ref, author, recipient_pubkey, reference)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut expected_bootstraps = BTreeMap::new();
+        for circle in &circles {
+            let Some(access) = circle.local_access.as_ref() else {
+                continue;
+            };
+            let CircleAccessDisposition::Active {
+                bootstrap: Some(reference),
+                ..
+            } = &access.leaf.value.disposition
+            else {
+                continue;
+            };
+            if expected_bootstraps
+                .insert(
+                    (circle.circle_id, circle.control.coord.clone()),
+                    (&access.leaf.value, reference),
+                )
+                .is_some()
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "retained Circle activations repeat a bootstrap recipient".to_string(),
+                ));
+            }
+        }
+        if retained.bootstraps.len() != expected_bootstraps.len() {
+            return Err(CircleOperationError::InvalidState(
+                "retained Circle bootstrap set is incomplete".to_string(),
+            ));
+        }
+        for bootstrap in &retained.bootstraps {
+            let (access, reference) = expected_bootstraps
+                .remove(&(bootstrap.circle_id, bootstrap.control.clone()))
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(
+                        "retained Circle bootstrap has no signed access leaf".to_string(),
+                    )
+                })?;
+            if bootstrap.reference != *reference {
+                return Err(CircleOperationError::InvalidState(
+                    "retained Circle bootstrap reference differs from its access leaf".to_string(),
+                ));
+            }
+            bootstrap.verify_for_access(access)?;
+        }
         Ok(Self {
             circles,
             stream_activations: VerifiedStreamActivations::from_verified_circle_commit(
                 commit, commit_ref,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+            bootstraps: retained.bootstraps,
         })
     }
 }

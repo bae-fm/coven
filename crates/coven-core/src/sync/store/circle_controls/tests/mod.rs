@@ -75,7 +75,23 @@ async fn publish_circle_operation(
     operation_id: &CircleOperationId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    super::publish_circle_operation(&StoreDatabase::new(db), storage, operation_id, signer).await
+    let root = StoreDatabase::new(db)
+        .local_store_root_ref()
+        .await?
+        .expect("Circle test Store root is installed");
+    let routing_key = crate::sync::circle::derive_row_routing_key(
+        &crate::encryption::EncryptionService::from_key([42; 32]),
+        root.store_root_hash,
+    )
+    .expect("derive Circle test routing key");
+    super::publish_circle_operation(
+        &StoreDatabase::new(db),
+        storage,
+        operation_id,
+        signer,
+        Some(&routing_key),
+    )
+    .await
 }
 
 async fn resume_circle_operations(
@@ -83,9 +99,14 @@ async fn resume_circle_operations(
     storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
-        .await?
-        .resume_circle_operations(signer)
+    let store = crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone()).await?;
+    let routing_key = crate::sync::circle::derive_row_routing_key(
+        &crate::encryption::EncryptionService::from_key([42; 32]),
+        store.store_root().store_root_hash,
+    )
+    .expect("derive Circle test routing key");
+    store
+        .resume_circle_operations(signer, Some(&routing_key))
         .await
 }
 
@@ -116,6 +137,11 @@ async fn load_circle_activations(
     identity: &UserKeypair,
     founder_pubkey: &str,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
+    let routing_key = crate::sync::circle::derive_row_routing_key(
+        &crate::encryption::EncryptionService::from_key([42; 32]),
+        root.store_root_hash,
+    )
+    .expect("derive Circle test routing key");
     super::load_circle_activations(
         &StoreDatabase::new(db),
         storage,
@@ -125,6 +151,7 @@ async fn load_circle_activations(
         author,
         identity,
         founder_pubkey,
+        Some(&routing_key),
     )
     .await
 }

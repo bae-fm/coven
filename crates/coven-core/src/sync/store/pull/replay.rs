@@ -249,6 +249,37 @@ pub(crate) fn replay_retained_merge_projection_on(
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(DbError::from)?;
     let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
+    let circle_bootstraps =
+        crate::sync::store::database::StoreDatabase::circle_bootstrap_replay_inputs_on(live)?;
+    let mut circle_bootstrap_cuts = BTreeMap::new();
+    for (activation_commit, bootstrap) in &circle_bootstraps {
+        crate::sync::store::snapshot::verify_circle_bootstrap_image(
+            bootstrap.image_bytes(),
+            bootstrap.reference(),
+            bootstrap.circle_id(),
+            synced_tables,
+            routing_key,
+        )
+        .map_err(|error| {
+            DbError::Message(format!(
+                "verify retained Circle {} bootstrap: {error}",
+                bootstrap.circle_id()
+            ))
+        })?;
+        apply_circle_bootstrap_projection_on(&replay, synced_tables, activation_commit, bootstrap)?;
+        if circle_bootstrap_cuts
+            .insert(
+                bootstrap.circle_id(),
+                bootstrap.reference().coverage.clone(),
+            )
+            .is_some()
+        {
+            return Err(DbError::Message(format!(
+                "retained replay has duplicate Circle {} bootstraps",
+                bootstrap.circle_id()
+            )));
+        }
+    }
     let retained =
         crate::sync::store::database::StoreDatabase::load_retained_merge_replay_inputs_on(live)?;
     let circle_epochs =
@@ -371,6 +402,12 @@ pub(crate) fn replay_retained_merge_projection_on(
                     ..
                 } = package.audience()
                 {
+                    if circle_bootstrap_cuts
+                        .get(circle_id)
+                        .is_some_and(|cut| cut.covers_commit(materialization.commit_ref()))
+                    {
+                        continue;
+                    }
                     if !circle_epochs.permits(materialization.commit_ref(), *circle_id, control)? {
                         continue;
                     }
@@ -452,6 +489,7 @@ pub(crate) fn replay_retained_merge_projection_on(
                 routing_key,
                 local_store_membership,
                 timestamp_policy,
+                Some(&circle_bootstrap_cuts),
                 replay_materialization,
             )
             .map_err(|error| {
@@ -529,6 +567,172 @@ pub(crate) fn replay_retained_merge_projection_on(
         tx.commit().map_err(DbError::from)?;
     }
     Ok(replay)
+}
+
+fn apply_circle_bootstrap_projection_on(
+    replay: &rusqlite::Connection,
+    synced_tables: &[SyncedTable],
+    activation_commit: &StoreBatchCommitRef,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+) -> Result<(), DbError> {
+    let source = crate::sync::store::snapshot::open_database_image(bootstrap.image_bytes())
+        .map_err(|error| {
+            DbError::Message(format!("open retained Circle bootstrap image: {error}"))
+        })?;
+    let mut projection_tables = synced_tables
+        .iter()
+        .map(|table| table.name().to_string())
+        .collect::<Vec<_>>();
+    projection_tables.extend([
+        "_coven_audience".to_string(),
+        "_coven_row_routes".to_string(),
+    ]);
+    projection_tables.sort();
+    projection_tables.dedup();
+    let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+    tx.pragma_update(None, "defer_foreign_keys", "ON")
+        .map_err(DbError::from)?;
+    for table in &projection_tables {
+        super::super::retained_replay::copy_table(&source, &tx, table).map_err(|error| {
+            DbError::Message(format!(
+                "install exact Circle {} bootstrap table {table}: {error}",
+                bootstrap.circle_id()
+            ))
+        })?;
+    }
+    install_circle_bootstrap_blob_graph_on(&tx, activation_commit, bootstrap)?;
+    tx.commit().map_err(DbError::from)
+}
+
+fn install_circle_bootstrap_blob_graph_on(
+    conn: &rusqlite::Connection,
+    activation_commit: &StoreBatchCommitRef,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+) -> Result<(), DbError> {
+    install_circle_bootstrap_remote_objects_on(conn, activation_commit, bootstrap)?;
+    for binding in &bootstrap.reference().blobs {
+        let stored = binding.stored().ok_or_else(|| {
+            DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
+        })?;
+        let object_id = remote_object::remote_object_id(stored.object());
+        let crate::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
+            return Err(DbError::Message(
+                "Circle bootstrap row blob lacks remote package authority".to_string(),
+            ));
+        };
+        let locator_hash = stored.locator().locator_hash().to_string();
+        let locator_inserted = conn
+            .execute(
+                "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
+             ON CONFLICT(remote_object_id) DO NOTHING",
+                rusqlite::params![object_id.to_string(), &locator_hash],
+            )
+            .map_err(DbError::from)?;
+        if locator_inserted == 0 {
+            let retained_locator_hash: String = conn
+                .query_row(
+                    "SELECT locator_hash FROM blob_locators WHERE remote_object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if retained_locator_hash != locator_hash {
+                return Err(DbError::Message(format!(
+                    "Circle bootstrap blob locator conflicts for {object_id}"
+                )));
+            }
+        }
+        let encoded_authority = serde_json::to_string(authority).map_err(|error| {
+            DbError::Message(format!(
+                "serialize Circle bootstrap blob authority: {error}"
+            ))
+        })?;
+        let binding_inserted = conn
+            .execute(
+                "INSERT INTO row_blob_locators
+             (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
+                rusqlite::params![
+                    binding.table(),
+                    binding.row_id(),
+                    binding.column(),
+                    binding.row_stamp(),
+                    &encoded_authority,
+                    object_id.to_string(),
+                ],
+            )
+            .map_err(DbError::from)?;
+        if binding_inserted == 0 {
+            let (retained_authority, retained_object): (String, String) = conn
+                .query_row(
+                    "SELECT audience_authority, remote_object_id
+                     FROM row_blob_locators
+                     WHERE table_name = ?1 AND row_id = ?2
+                       AND column_name = ?3 AND row_stamp = ?4",
+                    rusqlite::params![
+                        binding.table(),
+                        binding.row_id(),
+                        binding.column(),
+                        binding.row_stamp(),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            if retained_authority != encoded_authority || retained_object != object_id.to_string() {
+                return Err(DbError::Message(format!(
+                    "Circle bootstrap row blob binding conflicts for {}.{}.{} at {}",
+                    binding.table(),
+                    binding.row_id(),
+                    binding.column(),
+                    binding.row_stamp(),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn install_circle_bootstrap_remote_objects_on(
+    conn: &rusqlite::Connection,
+    activation_commit: &StoreBatchCommitRef,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+) -> Result<(), DbError> {
+    for binding in &bootstrap.reference().blobs {
+        let stored = binding.stored().ok_or_else(|| {
+            DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
+        })?;
+        let object_id = remote_object::remote_object_id(stored.object());
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let remote = if exists {
+            let mut remote = crate::database::load_remote_object_on(conn, object_id)?;
+            remote
+                .merge_blob_activation(stored, activation_commit)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            remote
+        } else {
+            remote_object::RemoteObjectRecord::activated_blob(stored, activation_commit.clone())
+                .map_err(|error| DbError::Message(error.to_string()))?
+        };
+        conn.execute(
+            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+             ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
+            rusqlite::params![
+                object_id.to_string(),
+                serde_json::to_string(&remote).map_err(|error| {
+                    DbError::Message(format!("serialize Circle bootstrap blob: {error}"))
+                })?,
+            ],
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
 }
 
 fn retained_membership_bytes_on(

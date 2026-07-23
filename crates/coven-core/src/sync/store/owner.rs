@@ -208,11 +208,23 @@ impl Store {
     pub(crate) async fn resume_operations(
         &self,
         identity: &UserKeypair,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<(), SyncCycleFailure> {
         self.resume_device_exclusion(identity)
             .await
             .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
-        self.resume_circle_operations(identity)
+        let routing_key = routing_encryption
+            .map(|encryption| {
+                crate::sync::circle::derive_row_routing_key(
+                    encryption,
+                    self.store_root().store_root_hash,
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                SyncCycleFailure::operation("derive Circle operation routing key", error)
+            })?;
+        self.resume_circle_operations(identity, routing_key.as_ref())
             .await
             .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }

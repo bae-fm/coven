@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
     Vec<crate::sync::session::SyncedTable>,
@@ -389,13 +390,14 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     );
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
+    let captured_write_id = write_id.clone();
     let routing = EncryptionService::from_key([42; 32]);
     db.call(move |connection| {
         StoreDatabase::run_internal_store_write_transaction_on(
             connection,
             &tables,
             Some(&routing),
-            write_id,
+            captured_write_id,
             |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
         )
     })
@@ -426,11 +428,136 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
         .expect("publish Circle row and blob");
+    let historical_commit = match db
+        .write_status(&write_id)
+        .await
+        .expect("load historical Circle write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("historical Circle write was not published: {status:?}"),
+    };
     let historical_blob = db
         .row_blob_ref("documents", blob_id)
         .await
         .expect("load blob reference from the founder control");
 
+    let concurrent_writer = UserKeypair::generate();
+    let concurrent_writer_pubkey = keys::public_key_hex(&concurrent_writer);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-bootstrap-concurrent-writer".to_string()),
+        &concurrent_writer_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle bootstrap Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite concurrent Store writer");
+    let concurrent_db = crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "documents",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")
+        .carries_blob(crate::sync::session::BlobDecl::new(
+            "files",
+            crate::blob::Provenance::HostProvided,
+            crate::blob::CacheFill::CacheEager,
+        ))],
+        vec![crate::migration::Migration::sql(
+            1,
+            "Circle member bootstrap schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    );
+    install_active_device_fixture(
+        &store,
+        &db,
+        &concurrent_db,
+        &concurrent_writer,
+        "2026-07-23T00:00:01Z",
+    )
+    .await
+    .expect("activate concurrent Store writer device");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            concurrent_writer_pubkey,
+            CircleRole::Member,
+        )
+        .await
+        .expect("add concurrent Circle writer");
+    let concurrent_bootstrap_commit = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .expect("load concurrent writer Circle bootstrap commit")
+        .1;
+    let concurrent_store = store
+        .loaded_store(&concurrent_db)
+        .await
+        .expect("load concurrent Circle writer Store");
+    let (_concurrent_temp, concurrent_store_dir) = temp_store_dir();
+    concurrent_store
+        .authorize()
+        .await
+        .expect("authorize concurrent Circle writer")
+        .pull(
+            &concurrent_store_dir,
+            &concurrent_writer,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("install concurrent Circle writer bootstrap");
+    let late_id = "00000000-0000-4000-8000-000000000002";
+    let late_bytes = b"late concurrent Circle attachment";
+    let late_insert = format!(
+        "INSERT INTO documents (id, audience, size, hash, _updated_at)
+         VALUES ('{late_id}', '{circle_id}', {}, '{}', '0000000001600-0000-concurrent')",
+        late_bytes.len(),
+        crate::blob::content_hash(late_bytes),
+    );
+    let concurrent_tables = concurrent_db.synced_tables().to_vec();
+    let late_write_id = concurrent_db.new_write_id();
+    let captured_late_write_id = late_write_id.clone();
+    concurrent_db
+        .call(move |connection| {
+            StoreDatabase::run_internal_store_write_transaction_on(
+                connection,
+                &concurrent_tables,
+                Some(&EncryptionService::from_key([42; 32])),
+                captured_late_write_id,
+                |transaction| {
+                    transaction
+                        .execute_batch(&late_insert)
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("capture late concurrent Circle row");
+    crate::blob::local_files::store(&concurrent_store_dir, "files", late_id, late_bytes)
+        .await
+        .expect("stage late concurrent Circle blob");
+    let concurrent_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        concurrent_writer.clone(),
+    )
+    .expect("construct concurrent Circle writer storage");
     components
         .add_circle_member(
             &store_dir,
@@ -440,11 +567,130 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("activate Circle member successor");
+    let concurrent_authorization =
+        crate::sync::store::Store::authorize_borrowed(&concurrent_storage, &concurrent_db)
+            .await
+            .expect("authorize concurrent Circle writer Store");
+    let concurrent_device_id = concurrent_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read concurrent Circle writer device id")
+        .expect("concurrent Circle writer device id is installed");
+    concurrent_authorization
+        .drain_uploads(
+            &concurrent_store_dir,
+            &crate::clock::SystemClock,
+            &concurrent_db.hlc(),
+            Some(&EncryptionService::from_key([42; 32])),
+            None,
+        )
+        .await
+        .expect("publish late concurrent Circle blob");
+    assert!(
+        concurrent_authorization
+            .prepare_pending_store_write(
+                &concurrent_device_id,
+                "2026-07-23T00:00:02Z",
+                &concurrent_writer,
+                &concurrent_store_dir,
+            )
+            .await
+            .expect("prepare late concurrent Circle package"),
+        "late concurrent Circle package must be prepared"
+    );
+    assert_eq!(
+        concurrent_authorization
+            .drain_store_writes()
+            .await
+            .expect("publish late concurrent Circle package"),
+        1
+    );
+    let late_commit = match concurrent_db
+        .write_status(&late_write_id)
+        .await
+        .expect("load late concurrent Circle write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("late concurrent Circle write was not published: {status:?}"),
+    };
     let member_store = store
         .loaded_store(&member_db)
         .await
         .expect("load Circle member Store");
     let (member_temp, member_store_dir) = temp_store_dir();
+    let target_control = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .expect("load target Circle bootstrap control")
+        .0
+        .control
+        .coord;
+    let encoded_target_control =
+        serde_json::to_string(&target_control).expect("serialize target Circle bootstrap control");
+    let target_blob_object = crate::sync::remote_object::remote_object_id(
+        historical_blob
+            .stored()
+            .expect("published historical blob has an exact stored reference")
+            .object(),
+    )
+    .to_string();
+    member_db.fail_next_merge_materialization_at(
+        crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+    );
+    let injected = member_store
+        .authorize()
+        .await
+        .expect("authorize Circle member Store for failed bootstrap")
+        .pull(
+            &member_store_dir,
+            &member,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect_err("injected bootstrap projection replacement must fail");
+    assert!(
+        injected.to_string().contains("injected failure"),
+        "{injected}"
+    );
+    let partial_state = member_db
+        .call({
+            let blob_id = blob_id.to_string();
+            move |connection| {
+                connection
+                    .query_row(
+                        "SELECT
+                           EXISTS(SELECT 1 FROM documents WHERE id = ?1),
+                           EXISTS(
+                               SELECT 1 FROM circle_bootstrap_coverage WHERE circle_id = ?2
+                           ),
+                           EXISTS(
+                               SELECT 1 FROM circle_control_activations
+                               WHERE circle_id = ?2 AND control_coord = ?3
+                           ),
+                           EXISTS(
+                               SELECT 1 FROM remote_objects WHERE object_id = ?4
+                           )",
+                        rusqlite::params![
+                            blob_id,
+                            circle_id.to_string(),
+                            encoded_target_control,
+                            target_blob_object,
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, bool>(0)?,
+                                row.get::<_, bool>(1)?,
+                                row.get::<_, bool>(2)?,
+                                row.get::<_, bool>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(DbError::from)
+            }
+        })
+        .await
+        .expect("inspect failed bootstrap transaction");
+    assert_eq!(partial_state, (false, false, false, false));
     let member_pull = member_store
         .authorize()
         .await
@@ -461,10 +707,222 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{:?}",
         member_pull.held_positions
     );
-    let (current, _) = StoreDatabase::new(&member_db)
+    let installed_ids = member_db
+        .call(|connection| {
+            let mut statement = connection
+                .prepare("SELECT id FROM documents ORDER BY id")
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            Ok(rows)
+        })
+        .await
+        .expect("list installed recipient rows");
+    assert!(
+        installed_ids.iter().any(|installed| installed == blob_id),
+        "recipient rows after bootstrap replay: {installed_ids:?}"
+    );
+    let installed_row = member_db
+        .call({
+            let blob_id = blob_id.to_string();
+            move |connection| {
+                connection
+                    .query_row(
+                        "SELECT audience, size, hash, _updated_at
+                         FROM documents WHERE id = ?1",
+                        [&blob_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(DbError::from)
+            }
+        })
+        .await
+        .expect("recipient bootstrap installs the preexisting Circle row");
+    assert_eq!(
+        installed_row,
+        (
+            circle_id.to_string(),
+            blob_bytes.len() as i64,
+            crate::blob::content_hash(blob_bytes),
+            "0000000001500-0000-owner".to_string(),
+        )
+    );
+    let installed_late_row = member_db
+        .call({
+            let late_id = late_id.to_string();
+            move |connection| {
+                connection
+                    .query_row(
+                        "SELECT audience, size, hash, _updated_at
+                         FROM documents WHERE id = ?1",
+                        [&late_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(DbError::from)
+            }
+        })
+        .await
+        .expect("recipient replay installs the late concurrent Circle row");
+    assert_eq!(
+        installed_late_row,
+        (
+            circle_id.to_string(),
+            late_bytes.len() as i64,
+            crate::blob::content_hash(late_bytes),
+            "0000000001600-0000-concurrent".to_string(),
+        )
+    );
+    let installed_blob = member_db
+        .row_blob_ref("documents", blob_id)
+        .await
+        .expect("recipient bootstrap installs the exact row blob graph");
+    assert_eq!(installed_blob, historical_blob);
+    let replay_blob_decls = member_db.blob_decls();
+    let replay_gates = member_db.gates();
+    let replay_tables = member_db.synced_tables().to_vec();
+    let replay_routing_key = crate::sync::circle::derive_row_routing_key(
+        &EncryptionService::from_key([42; 32]),
+        store.root.store_root_hash,
+    )
+    .expect("derive bootstrap replay routing key");
+    let replay_historical_id = blob_id.to_string();
+    let replay_late_id = late_id.to_string();
+    let (retained_count, retained_late_count, sabotaged_count, sabotaged_late_count) = member_db
+        .call(move |connection| {
+            let tx = connection.unchecked_transaction().map_err(DbError::from)?;
+            let retained = crate::sync::store::pull::replay_retained_merge_projection_on(
+                &tx,
+                &replay_blob_decls,
+                &replay_gates,
+                &replay_tables,
+                Some(&replay_routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                crate::sync::store::pull::LocalStoreMembership::Current,
+            )?;
+            let retained_count: i64 = retained.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [replay_historical_id.as_str()],
+                |row| row.get(0),
+            )?;
+            let retained_late_count: i64 = retained.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [replay_late_id.as_str()],
+                |row| row.get(0),
+            )?;
+            tx.execute("DELETE FROM circle_bootstrap_coverage", [])
+                .map_err(DbError::from)?;
+            let sabotaged = crate::sync::store::pull::replay_retained_merge_projection_on(
+                &tx,
+                &replay_blob_decls,
+                &replay_gates,
+                &replay_tables,
+                Some(&replay_routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                crate::sync::store::pull::LocalStoreMembership::Current,
+            )?;
+            let sabotaged_count: i64 = sabotaged.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [replay_historical_id.as_str()],
+                |row| row.get(0),
+            )?;
+            let sabotaged_late_count: i64 = sabotaged.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [replay_late_id.as_str()],
+                |row| row.get(0),
+            )?;
+            tx.rollback().map_err(DbError::from)?;
+            Ok::<_, DbError>((
+                retained_count,
+                retained_late_count,
+                sabotaged_count,
+                sabotaged_late_count,
+            ))
+        })
+        .await
+        .expect("sabotage retained Circle bootstrap replay input");
+    assert_eq!(retained_count, 1);
+    assert_eq!(retained_late_count, 1);
+    assert_eq!(sabotaged_count, 0);
+    assert_eq!(sabotaged_late_count, 1);
+    let coverage_count = member_db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                    [circle_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read durable recipient Circle bootstrap coverage");
+    assert_eq!(coverage_count, 1);
+    let (current, member_bootstrap_commit) = StoreDatabase::new(&member_db)
         .circle_authoring_context(circle_id, &member_pubkey)
         .await
         .expect("load Circle member successor state");
+    member_db
+        .call({
+            let activation_commit = member_bootstrap_commit.clone();
+            move |connection| {
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                transaction
+                    .execute(
+                        "UPDATE circle_bootstrap_coverage
+                         SET image_hash = ?2
+                         WHERE circle_id = ?1",
+                        rusqlite::params![
+                            circle_id.to_string(),
+                            crate::sync::store_commit::ObjectHash::digest(
+                                b"corrupt Circle bootstrap image hash"
+                            )
+                            .to_string(),
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+                    &transaction,
+                    &activation_commit,
+                )?;
+                let verified = retained.as_verified()?;
+                let error = StoreDatabase::record_circle_bootstrap_coverage_on(
+                    &transaction,
+                    &activation_commit,
+                    verified.circle_activations(),
+                )
+                .expect_err("idempotent bootstrap recording must reject a changed image hash");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("differs from its exact reference"),
+                    "{error}"
+                );
+                transaction.rollback().map_err(DbError::from)
+            }
+        })
+        .await
+        .expect("reject corrupted Circle bootstrap coverage");
     crate::sync::store::blob::materialize_row_blob(
         &StoreDatabase::new(&db),
         &store_dir,
@@ -551,15 +1009,22 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     };
     assert_eq!(bootstrap.schema_version, db.schema_version());
     assert_eq!(bootstrap.sync_routing_hash, db.sync_routing_hash());
+    assert!(
+        !bootstrap.coverage.covers_commit(&late_commit),
+        "the bootstrap must not claim the concurrently published package"
+    );
     let [blob] = bootstrap.blobs.as_slice() else {
         panic!("Circle bootstrap must pin its one exact blob");
     };
     assert_eq!(
-        blob.locator().audience(),
+        blob.stored()
+            .expect("Circle bootstrap row blob has an exact locator")
+            .locator()
+            .audience(),
         crate::blob::locator::RemoteAudience::Circle(circle_id)
     );
     let blob = blob.clone();
-    assert_eq!(activation_count(&db, circle_id).await, 2);
+    assert_eq!(activation_count(&db, circle_id).await, 3);
     assert!(StoreDatabase::new(&db)
         .get_circle_operations()
         .await
@@ -588,7 +1053,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 crate::sync::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
             )
     ));
-    let blob_object_id = crate::sync::remote_object::remote_object_id(blob.object());
+    let blob_object_id = crate::sync::remote_object::remote_object_id(
+        blob.stored()
+            .expect("Circle bootstrap row blob has an exact locator")
+            .object(),
+    );
     let blob_record = db
         .call(move |connection| {
             connection
@@ -612,19 +1081,24 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     else {
         panic!("Circle bootstrap blob must remain verified");
     };
+    let store_commit_owners = ownership
+        .activated
+        .iter()
+        .filter_map(|owner| match owner {
+            crate::sync::remote_object::SharedObjectOwner::StoreCommit(commit) => {
+                Some(commit.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        ownership
-            .activated
-            .iter()
-            .filter(|owner| {
-                matches!(
-                    owner,
-                    crate::sync::remote_object::SharedObjectOwner::StoreCommit(_)
-                )
-            })
-            .count(),
-        2,
-        "row publication and Circle bootstrap must both own the blob"
+        store_commit_owners,
+        BTreeSet::from([
+            historical_commit,
+            concurrent_bootstrap_commit,
+            member_bootstrap_commit,
+        ]),
+        "the row package and both signed Circle bootstraps must own the blob"
     );
 }
 
@@ -829,6 +1303,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let loaded_packages = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &store.storage,
+        &store.root,
         &package_commit_ref,
         &package_commit,
         &[],
@@ -1156,6 +1631,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let accepted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &store.storage,
+        &store.root,
         &package_commit_ref,
         &package_commit,
         &[],
@@ -1195,6 +1671,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let omitted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &store.storage,
+        &store.root,
         &beyond_cutoff,
         &package_commit,
         &[],
@@ -1220,6 +1697,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let collision = crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &store.storage,
+        &store.root,
         &cutoff_collision,
         &package_commit,
         &[],
@@ -1386,6 +1864,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         match crate::sync::store::pull::load_applicable_circle_packages(
             &StoreDatabase::new(&candidate_base_database),
             &store.storage,
+            &store.root,
             &candidate_commit_ref,
             &candidate_commit,
             std::slice::from_ref(&activation),

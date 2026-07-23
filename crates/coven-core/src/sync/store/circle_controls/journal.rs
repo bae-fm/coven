@@ -227,10 +227,15 @@ impl CircleOperationJournal {
             } = &access.leaf.value.disposition
             {
                 for blob in &bootstrap.blobs {
-                    let object_id = crate::sync::remote_object::remote_object_id(blob.object());
+                    let stored = blob.stored().ok_or_else(|| {
+                        CircleOperationError::Journal(
+                            "Circle bootstrap row blob has no exact stored locator".to_string(),
+                        )
+                    })?;
+                    let object_id = crate::sync::remote_object::remote_object_id(stored.object());
                     if bootstrap_blobs
-                        .insert(object_id, blob.clone())
-                        .is_some_and(|existing| existing != *blob)
+                        .insert(object_id, stored.clone())
+                        .is_some_and(|existing| existing != *stored)
                     {
                         return Err(CircleOperationError::Journal(format!(
                             "Circle bootstrap blob {object_id} has conflicting exact references"

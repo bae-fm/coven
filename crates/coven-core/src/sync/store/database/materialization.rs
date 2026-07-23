@@ -261,6 +261,11 @@ impl StoreDatabaseTransaction<'_, '_> {
                 conn,
                 &materialization,
             )?;
+        StoreDatabase::record_circle_bootstrap_coverage_on(
+            conn,
+            materialization.commit_ref(),
+            materialization.circle_activations(),
+        )?;
         let activation = ReclaimCommitActivation::new(
             materialization.commit_ref().clone(),
             crate::sync::store_commit::StoreDeviceHeadRef {

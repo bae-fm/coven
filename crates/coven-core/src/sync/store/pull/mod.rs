@@ -539,7 +539,15 @@ pub fn pull_store_commits<'a>(
 
         loop {
             let mut progressed = false;
-            let keys = candidates.keys().cloned().collect::<Vec<_>>();
+            let mut keys = candidates.keys().cloned().collect::<Vec<_>>();
+            keys.sort_by_key(|key| {
+                (
+                    candidates.get(key).is_none_or(|candidate| {
+                        candidate.candidate.commit.circle_controls().is_empty()
+                    }),
+                    key.clone(),
+                )
+            });
             for key in keys {
                 let candidate = candidates.get(&key).ok_or_else(|| {
                     StorePullError::Database(

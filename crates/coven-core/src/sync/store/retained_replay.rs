@@ -26,7 +26,6 @@ const GENESIS_PRESERVED_TABLES: &[&str] = &[
     "store_protocol_root_authority",
     "store_device_registration_activations",
 ];
-const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayTableDisposition {
@@ -42,6 +41,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ("blob_locators", ReplayTableDisposition::Replace),
     ("blob_make_remote_intents", ReplayTableDisposition::Preserve),
     ("circle_access_cache", ReplayTableDisposition::Replace),
+    (
+        "circle_bootstrap_coverage",
+        ReplayTableDisposition::Preserve,
+    ),
     (
         "circle_control_activations",
         ReplayTableDisposition::Replace,
@@ -469,22 +472,8 @@ impl RetainedReplayBaseline {
 }
 
 fn open_image(image: &[u8]) -> Result<Connection, DbError> {
-    if image.len() < 20 || &image[..SQLITE_DATABASE_HEADER.len()] != SQLITE_DATABASE_HEADER {
-        return Err(DbError::Message(
-            "retained replay image is not a SQLite database".to_string(),
-        ));
-    }
-    let mut image = image.to_vec();
-    // sqlite3_deserialize cannot use an image whose header requests WAL. File
-    // databases carry that mode in bytes 18 and 19; the private in-memory copy
-    // has no WAL file, so it must use rollback journaling.
-    image[18] = 1;
-    image[19] = 1;
-    let mut connection = Connection::open_in_memory().map_err(DbError::from)?;
-    connection
-        .deserialize_read_exact(rusqlite::MAIN_DB, image.as_slice(), image.len(), false)
-        .map_err(DbError::from)?;
-    Ok(connection)
+    crate::database::open_database_image(image)
+        .map_err(|error| DbError::Message(format!("open retained replay database image: {error}")))
 }
 
 pub(crate) fn replace_live_projection(
@@ -525,9 +514,16 @@ pub(crate) fn replace_live_projection(
         )
         .map_err(DbError::from)?;
     if violations {
-        return Err(DbError::Message(
-            "retained replay projection violates foreign keys".to_string(),
-        ));
+        let violation: (String, Option<i64>, String, i64) = target
+            .query_row(
+                "SELECT * FROM pragma_foreign_key_check LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(DbError::from)?;
+        return Err(DbError::Message(format!(
+            "retained replay projection violates foreign keys: {violation:?}"
+        )));
     }
     let mut changeset = Vec::new();
     host_changes
@@ -536,7 +532,7 @@ pub(crate) fn replace_live_projection(
     Ok(changeset)
 }
 
-fn copy_table(
+pub(crate) fn copy_table(
     source: &Connection,
     target: &rusqlite::Transaction<'_>,
     table: &str,

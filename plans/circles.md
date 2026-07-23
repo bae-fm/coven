@@ -60,11 +60,31 @@ rebuild the deleted choice.
   operation journal.
 - Member-addition bootstrap images are created at an atomic materialized Store
   frontier through the authenticated Circle routing projection. The signed
-  recipient leaf names the exact image and a canonical set of existing Circle
-  blob references; the activating Store commit retains ownership of both.
+  recipient leaf names the exact image and a canonical set of row-bound
+  `RowBlobRef` values, including each blob's historical package control; the
+  activating Store commit retains ownership of the image and every referenced
+  blob. Each later bootstrap commit adds its own ownership of shared blobs, so
+  retracting one activation cannot retire an object still required by another.
 - Circle images contain application rows and authenticated routing state, not
   source-device transport or ownership tables. Exact blob references are
   extracted before that state is removed and are signed outside the image.
+  Verification requires the Store routing key and recomputes the exact closure
+  of target-Circle rows plus their required Store ancestors. It rejects every
+  unrelated Store, Local, other-Circle, or unscoped row outside that closure.
+- Recipient pull exact-reads and verifies the signed image and every referenced
+  blob before its SQLite transaction. It then installs the image, access,
+  control, blob graph, retained replay input, and exact per-Circle coverage in
+  one transaction. Projection-replacement failure rolls all of them back.
+- Retained replay seeds each Circle from its latest verified bootstrap, skips
+  only packages and inactive-access pruning covered by that Circle's exact cut,
+  and applies uncovered packages normally. A package authored before
+  member-addition but published after the bootstrap cut may use a causally
+  covering successor access only when epoch and key fingerprint are identical;
+  writer authority still comes from the exact historical control roster.
+- A replacement bootstrap must cover its predecessor cut and descend from its
+  predecessor control. Terminal retraction atomically retires coverage owned by
+  the retracted activation so replay removes the former recipient's projection
+  instead of retaining an orphaned image.
 - Circle member removal activates an exact frozen epoch close with a
   Circle-encrypted signed intent, frozen device state, canonical remaining
   participants, and reserved response and outcome slots. Remaining devices
@@ -133,11 +153,11 @@ rebuild the deleted choice.
 
 ### Required before Circles are complete
 
-- use the authenticated routing boundary for Circle snapshot, bootstrap, and
+- use the authenticated routing boundary for standalone Circle snapshot and
   restore images;
 - complete Circle membership, access, close cancellation, device exclusion,
   conflict resolution, deletion, and durable restart;
-- add Circle bootstrap, acknowledgement, snapshot, restore, and reclamation;
+- add Circle acknowledgement, standalone snapshot, restore, and reclamation;
 - finish audience-aware blob movement and retention;
 - expose the application API and errors described here; and
 - update all Coven documentation and dependent applications to the finished
@@ -150,11 +170,14 @@ rebuild the deleted choice.
    authentication, destination-only moves, and final-component validation are
    implemented. Store snapshot creation, bootstrap, and restore installation
    use the same authenticated routing boundary. Adversarial routing arrival
-   orders converge through independent audience and content resolution. Circle
-   images must use and verify the same boundary.
-1. Finish Circle authority, roster, metadata, access, epoch, and lifecycle
-   operations.
-1. Finish Circle packages, pull, bootstrap, acknowledgement, snapshots,
+   orders converge through independent audience and content resolution.
+   Recipient Circle bootstrap images use and verify that boundary atomically.
+1. **In progress.** Create, rename, member addition, recipient bootstrap
+   installation, member-removal epoch close, and successor activation are
+   implemented. Finish Store-member removal, rotation-required handling,
+   control resolution, close cancellation, device exclusion, deletion, and
+   restart coverage.
+1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,
    and dependent application updates.
@@ -622,6 +645,11 @@ The database image excludes `remote_objects`, blob-locator indexes, and retained
 replay state. Recipient installation reconstructs the exact blob bindings and
 ownership atomically from the signed bootstrap and its activating Store commit;
 it never copies source-device ownership bookkeeping.
+
+Every Store commit whose signed access leaf names a bootstrap owns that image
+and every exact blob named by the bootstrap. Ownership is per activating
+commit, even when several recipient bootstraps reuse one blob object. Exact
+retraction removes only that commit's ownership.
 
 The successor control proves its author against the predecessor roster. Its
 closed object graph therefore retains the exact predecessor heads as well as

@@ -13,6 +13,7 @@ pub(crate) async fn load_circle_payload_activations(
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
     identity: Option<&crate::keys::UserKeypair>,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     verified_prefix: &VerifiedStreamActivationPrefix,
 ) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
     if commit.circle_controls().is_empty() && commit.stream_activations().is_empty() {
@@ -39,6 +40,7 @@ pub(crate) async fn load_circle_payload_activations(
             author,
             identity,
             &founder,
+            routing_key,
             verified_prefix,
         ),
     )
@@ -49,6 +51,7 @@ pub(crate) async fn load_circle_payload_activations(
 pub(crate) async fn load_applicable_circle_packages(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
@@ -108,58 +111,108 @@ pub(crate) async fn load_applicable_circle_packages(
                 db.schema_version()
             )));
         }
-        let context = if let Some(activation) = same_commit {
-            let Some(access) = activation
+        let exact_access = if let Some(activation) = same_commit {
+            activation
                 .package_access()
                 .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?
-            else {
-                debug!(
-                    circle_id = %reference.circle_id,
-                    control = ?reference.control,
-                    "skipping Circle package without active local access"
-                );
-                continue;
-            };
-            if !access.writers.contains(&author.author_pubkey) {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package author is not a member of {} at its exact control",
-                    reference.circle_id
-                )));
-            }
-            if access.key_fingerprint != reference.key_fingerprint {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package key for {} differs from its activated control",
-                    reference.circle_id
-                )));
-            }
-            access.encryption
         } else {
-            let Some(access) = database
+            database
                 .circle_package_access(reference.circle_id, reference.control.clone())
+                .await
+                .map_err(PullCircleActivationError::Database)?
+        };
+        let access = if let Some(access) = exact_access {
+            access
+        } else {
+            let Some(keyring) = database
+                .circle_historical_package_keyring(
+                    reference.circle_id,
+                    reference.control.clone(),
+                    reference.key_fingerprint,
+                )
                 .await
                 .map_err(PullCircleActivationError::Database)?
             else {
                 debug!(
                     circle_id = %reference.circle_id,
                     control = ?reference.control,
-                    "skipping Circle package without durable local access"
+                    "skipping Circle package without active local or successor access"
                 );
                 continue;
             };
-            if !access.writers.contains(&author.author_pubkey) {
+            let Some((historical, historical_commit_ref)) = database
+                .verified_circle_activation_context(reference.circle_id, reference.control.clone())
+                .await
+                .map_err(PullCircleActivationError::Database)?
+            else {
                 return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package author is not a member of {} at its exact control",
+                    "Circle {} historical package control is not retained",
                     reference.circle_id
                 )));
-            }
-            if access.key_fingerprint != reference.key_fingerprint {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package key for {} differs from durable access",
+            };
+            let (historical_commit, historical_author) =
+                super::load_commit_with_author(storage, root, &historical_commit_ref)
+                    .await
+                    .map_err(|error| {
+                        PullCircleActivationError::Invalid(format!(
+                            "load Circle {} historical package control: {error}",
+                            reference.circle_id
+                        ))
+                    })?;
+            let roster_chain =
+                crate::sync::store::circle_controls::activation::load_circle_control_roster_chain(
+                    database,
+                    storage,
+                    root,
+                    &historical_commit_ref,
+                    &historical_commit,
+                    &historical_author,
+                    &historical.reference,
+                    &historical.control,
+                    &keyring,
+                )
+                .await
+                .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
+            let roster = roster_chain.try_resolved().map_err(|error| {
+                PullCircleActivationError::Invalid(format!(
+                    "resolve Circle {} historical package roster: {error}",
                     reference.circle_id
-                )));
+                ))
+            })?;
+            let encryption = crate::encryption::EncryptionService::from(
+                crate::encryption::MasterKeyring::from_serialized(&keyring).map_err(|error| {
+                    PullCircleActivationError::Invalid(format!(
+                        "parse Circle {} successor keyring: {error}",
+                        reference.circle_id
+                    ))
+                })?,
+            )
+            .service_for_fingerprint(reference.key_fingerprint.as_bytes())
+            .map_err(|error| {
+                PullCircleActivationError::Invalid(format!(
+                    "select Circle {} historical package key: {error}",
+                    reference.circle_id
+                ))
+            })?;
+            crate::sync::store::circle_controls::CirclePackageAccess {
+                encryption,
+                key_fingerprint: reference.key_fingerprint,
+                writers: roster.members().keys().cloned().collect(),
             }
-            access.encryption
         };
+        if !access.writers.contains(&author.author_pubkey) {
+            return Err(PullCircleActivationError::Invalid(format!(
+                "Circle package author is not a member of {} at its exact control",
+                reference.circle_id
+            )));
+        }
+        if access.key_fingerprint != reference.key_fingerprint {
+            return Err(PullCircleActivationError::Invalid(format!(
+                "Circle package key for {} differs from its activated control",
+                reference.circle_id
+            )));
+        };
+        let context = access.encryption;
         let blob_protection = BlobSpoolProtection::Opaque(context.clone());
         let package = load_circle_package(storage, commit_ref, commit, reference, context)
             .await

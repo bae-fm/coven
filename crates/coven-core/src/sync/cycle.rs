@@ -1176,6 +1176,13 @@ impl SyncComponents {
             .map_err(|error| {
                 SyncCycleFailure::operation("capture Circle member bootstrap", error)
             })?;
+        let routing_key = super::circle::derive_row_routing_key(
+            &routing_encryption,
+            self.store.store_root().store_root_hash,
+        )
+        .map_err(|error| {
+            SyncCycleFailure::operation("derive Circle bootstrap routing key", error)
+        })?;
         self.store
             .add_circle_member(
                 &self.device_id,
@@ -1183,6 +1190,7 @@ impl SyncComponents {
                 member_pubkey,
                 role,
                 bootstrap,
+                &routing_key,
                 &self.user_keypair,
             )
             .await
@@ -1250,7 +1258,9 @@ impl SyncComponents {
         store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
-        self.store.resume_operations(&self.user_keypair).await?;
+        self.store
+            .resume_operations(&self.user_keypair, self.routing_encryption.as_ref())
+            .await?;
         let authorization = self.store.authorize().await?;
         run_single_sync_cycle_with_authorization(
             &self.device_id,

@@ -33,6 +33,17 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            circle_bootstrap_coverage,
+            "
+    circle_id TEXT PRIMARY KEY,
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
+    activation_commit TEXT NOT NULL CHECK (json_valid(activation_commit)),
+    exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
+    image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
+    bootstrap_ref BLOB NOT NULL CHECK (length(bootstrap_ref) > 0)
+"
+        );
+        $visit!(
             retained_merge_materializations,
             "
     device_id TEXT NOT NULL,

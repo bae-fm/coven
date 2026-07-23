@@ -108,7 +108,7 @@ mod circle_operation_records;
 mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
-pub(crate) use connection_io::{attach_session, capture_changeset};
+pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
 mod database_open;
 mod database_runtime;
 mod local_state;

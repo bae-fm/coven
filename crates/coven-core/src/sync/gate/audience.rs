@@ -583,74 +583,12 @@ pub(crate) fn retain_snapshot_audience_rows(
             "audience row projection requires a Circle".to_string(),
         ));
     };
+    let retained = circle_snapshot_retained_rows(conn, gates, *circle_id)?;
     let mut tables = gates
         .synced_table_names()
         .map(str::to_string)
         .collect::<Vec<_>>();
     tables.sort();
-    let mut retained = BTreeSet::<(String, String)>::new();
-    let mut pending = VecDeque::new();
-    for table in &tables {
-        let row_ids = query_mapped_rows(
-            conn,
-            &format!("SELECT id FROM {}", quote_ident(table)),
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for row_id in row_ids {
-            if live_row_audience(conn, gates, table, &row_id)? == Audience::Circle(*circle_id) {
-                pending.push_back((table.clone(), row_id));
-            }
-        }
-    }
-
-    while let Some((table, row_id)) = pending.pop_front() {
-        if !retained.insert((table.clone(), row_id.clone())) {
-            continue;
-        }
-        for (child_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
-            if !gates.is_synced_table(&parent_table) {
-                continue;
-            }
-            let parent_key = query_row_optional(
-                conn,
-                &format!(
-                    "SELECT {} FROM {} WHERE id = ?1",
-                    quote_ident(&child_column),
-                    quote_ident(&table),
-                ),
-                [&row_id],
-                |row| row.get::<_, Option<String>>(0),
-            )?
-            .ok_or_else(|| GateError::MissingAudienceRow {
-                table: table.clone(),
-                row_id: row_id.clone(),
-            })?;
-            let Some(parent_key) = parent_key else {
-                continue;
-            };
-            let parent_id =
-                row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
-                    .ok_or_else(|| GateError::MissingAudienceParent {
-                        table: table.clone(),
-                        row_id: Some(row_id.clone()),
-                        parent: parent_table.clone(),
-                    })?;
-            let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
-            if parent_audience != Audience::Store && parent_audience != *audience {
-                return Err(GateError::InvalidAudience {
-                    table: table.clone(),
-                    value: audience.column_value(),
-                    reason: format!(
-                        "Circle snapshot relationship through {child_column} references \
-                         {parent_table}.{parent_id} in {parent_audience:?}"
-                    ),
-                });
-            }
-            pending.push_back((parent_table, parent_id));
-        }
-    }
-
     conn.execute_batch(
         "CREATE TEMP TABLE snapshot_retained_rows (
              table_name TEXT NOT NULL,
@@ -701,6 +639,82 @@ pub(crate) fn retain_snapshot_audience_rows(
     Ok(())
 }
 
+fn circle_snapshot_retained_rows(
+    conn: &Connection,
+    gates: &Gates,
+    circle_id: CircleId,
+) -> Result<BTreeSet<(String, String)>, GateError> {
+    let audience = Audience::Circle(circle_id);
+    let mut tables = gates
+        .synced_table_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tables.sort();
+    let mut retained = BTreeSet::<(String, String)>::new();
+    let mut pending = VecDeque::new();
+    for table in &tables {
+        let row_ids = query_mapped_rows(
+            conn,
+            &format!("SELECT id FROM {}", quote_ident(table)),
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        for row_id in row_ids {
+            if live_row_audience(conn, gates, table, &row_id)? == audience {
+                pending.push_back((table.clone(), row_id));
+            }
+        }
+    }
+
+    while let Some((table, row_id)) = pending.pop_front() {
+        if !retained.insert((table.clone(), row_id.clone())) {
+            continue;
+        }
+        for (child_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
+            if !gates.is_synced_table(&parent_table) {
+                continue;
+            }
+            let parent_key = query_row_optional(
+                conn,
+                &format!(
+                    "SELECT {} FROM {} WHERE id = ?1",
+                    quote_ident(&child_column),
+                    quote_ident(&table),
+                ),
+                [&row_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: table.clone(),
+                row_id: row_id.clone(),
+            })?;
+            let Some(parent_key) = parent_key else {
+                continue;
+            };
+            let parent_id =
+                row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
+                    .ok_or_else(|| GateError::MissingAudienceParent {
+                        table: table.clone(),
+                        row_id: Some(row_id.clone()),
+                        parent: parent_table.clone(),
+                    })?;
+            let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
+            if parent_audience != Audience::Store && parent_audience != audience {
+                return Err(GateError::InvalidAudience {
+                    table: table.clone(),
+                    value: audience.column_value(),
+                    reason: format!(
+                        "Circle snapshot relationship through {child_column} references \
+                         {parent_table}.{parent_id} in {parent_audience:?}"
+                    ),
+                });
+            }
+            pending.push_back((parent_table, parent_id));
+        }
+    }
+    Ok(retained)
+}
+
 pub(crate) fn validate_snapshot_routing_state(
     conn: &Connection,
     gates: &Gates,
@@ -711,6 +725,26 @@ pub(crate) fn validate_snapshot_routing_state(
         return Err(GateError::InvalidMaterializedRouting(
             "Local rows cannot enter a snapshot".to_string(),
         ));
+    }
+    if let Audience::Circle(circle_id) = snapshot_audience {
+        let expected = circle_snapshot_retained_rows(conn, gates, *circle_id)?;
+        for table in gates.synced_table_names() {
+            let row_ids = query_mapped_rows(
+                conn,
+                &format!("SELECT id FROM {}", quote_ident(table)),
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            for row_id in row_ids {
+                if expected.contains(&(table.to_string(), row_id.clone())) {
+                    continue;
+                }
+                return Err(GateError::InvalidMaterializedRouting(format!(
+                    "Circle {circle_id} snapshot contains row {table}.{row_id} \
+                     outside its exact audience closure"
+                )));
+            }
+        }
     }
     if !gates.has_scoped_graph() {
         return Ok(());

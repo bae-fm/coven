@@ -155,7 +155,7 @@ async fn verified_circle_bootstrap_blobs(
     storage: &dyn SyncStorage,
     circle_id: crate::sync::circle::CircleId,
     snapshot: &crate::sync::store::snapshot::CreatedSnapshot,
-) -> Result<Vec<crate::blob::locator::StoredBlobRef>, CircleOperationError> {
+) -> Result<Vec<crate::blob::RowBlobRef>, CircleOperationError> {
     let mut blobs = Vec::with_capacity(snapshot.blobs.len());
     for captured in &snapshot.blobs {
         let crate::sync::store::snapshot::SnapshotBlobAudience::Circle {
@@ -192,12 +192,29 @@ async fn verified_circle_bootstrap_blobs(
                     captured.fact.blob.namespace, captured.fact.blob.id
                 ))
             })?;
-        blobs.push(previous.stored.clone());
+        blobs.push(
+            crate::blob::RowBlobRef::new(
+                captured.fact.table.clone(),
+                captured.fact.row_id.clone(),
+                captured.fact.row_stamp.clone(),
+                captured.fact.column.clone(),
+                captured.fact.blob.clone(),
+                captured.fact.plaintext_size,
+                captured.fact.plaintext_hash,
+                crate::blob::RowBlobAuthority::Remote(previous.authority.clone()),
+                Some(previous.stored.clone()),
+            )
+            .map_err(CircleOperationError::InvalidState)?,
+        );
     }
     blobs.sort_by_cached_key(|blob| {
-        serde_json::to_vec(blob).expect("stored blob reference serialization cannot fail")
+        serde_json::to_vec(blob).expect("row blob reference serialization cannot fail")
     });
-    blobs.dedup();
+    if blobs.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CircleOperationError::InvalidState(
+            "Circle bootstrap repeats an exact row blob binding".to_string(),
+        ));
+    }
     Ok(blobs)
 }
 

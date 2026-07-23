@@ -399,7 +399,13 @@ impl StoreDatabase {
                             bootstrap
                                 .blobs
                                 .iter()
-                                .map(|blob| remote_object_id(blob.object())),
+                                .map(|blob| {
+                                    remote_object_id(
+                                        blob.stored()
+                                            .expect("verified bootstrap remote blob has a locator")
+                                            .object(),
+                                    )
+                                }),
                         );
                     }
                 }

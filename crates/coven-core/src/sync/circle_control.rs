@@ -438,7 +438,7 @@ pub struct CircleBootstrapRef {
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,
     pub image: SnapshotImageRef,
-    pub blobs: Vec<crate::blob::locator::StoredBlobRef>,
+    pub blobs: Vec<crate::blob::RowBlobRef>,
 }
 
 impl CircleBootstrapRef {
@@ -447,14 +447,24 @@ impl CircleBootstrapRef {
             return false;
         }
         let blobs_are_canonical = self.blobs.windows(2).all(|pair| {
-            serde_json::to_vec(&pair[0]).expect("stored blob reference serialization cannot fail")
+            serde_json::to_vec(&pair[0]).expect("row blob reference serialization cannot fail")
                 < serde_json::to_vec(&pair[1])
-                    .expect("stored blob reference serialization cannot fail")
+                    .expect("row blob reference serialization cannot fail")
         });
         if !blobs_are_canonical
             || self.blobs.iter().any(|blob| {
-                blob.locator().audience()
-                    != crate::blob::locator::RemoteAudience::Circle(access.circle_id)
+                !matches!(
+                    blob.authority(),
+                    crate::blob::RowBlobAuthority::Remote(
+                        super::audience_package::PackageAudience::Circle {
+                            circle_id,
+                            ..
+                        }
+                    ) if *circle_id == access.circle_id
+                ) || blob.stored().is_none_or(|stored| {
+                    stored.locator().audience()
+                        != crate::blob::locator::RemoteAudience::Circle(access.circle_id)
+                })
             })
         {
             return false;

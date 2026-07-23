@@ -171,11 +171,17 @@ impl AuthorizedStore<'_> {
             self.database()
                 .begin_circle_operation_finalization(journal.clone())
                 .await?;
+            let routing_key = crate::sync::circle::derive_row_routing_key(
+                routing_encryption,
+                self.store_root().store_root_hash,
+            )
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             Box::pin(publish_circle_operation(
                 self.database(),
                 self.storage(),
                 &journal.operation_id,
                 identity,
+                Some(&routing_key),
             ))
             .await?;
         }

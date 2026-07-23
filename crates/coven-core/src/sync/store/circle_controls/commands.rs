@@ -39,6 +39,7 @@ impl Store {
             storage,
             &operation_id,
             signer,
+            None,
         ))
         .await?;
         Ok(circle_id)
@@ -114,6 +115,7 @@ impl Store {
             storage,
             &operation_id,
             signer,
+            None,
         ))
         .await
     }
@@ -126,6 +128,7 @@ impl Store {
         member_pubkey: String,
         role: CircleRole,
         bootstrap: crate::sync::store::snapshot::SnapshotCut,
+        routing_key: &crate::sync::circle::RowRoutingKey,
         signer: &UserKeypair,
     ) -> Result<(), CircleOperationError> {
         if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
@@ -213,6 +216,7 @@ impl Store {
             storage,
             &operation_id,
             signer,
+            Some(routing_key),
         ))
         .await
     }
@@ -307,6 +311,7 @@ impl Store {
             storage,
             &operation_id,
             signer,
+            None,
         ))
         .await?;
         Ok(operation_id)
@@ -315,6 +320,7 @@ impl Store {
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
+        routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         let database = self.database();
         let storage = &**self.storage();
@@ -330,6 +336,7 @@ impl Store {
                 storage,
                 &journal.operation_id,
                 identity,
+                routing_key,
             ))
             .await
             {

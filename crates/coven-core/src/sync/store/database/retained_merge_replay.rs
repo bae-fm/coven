@@ -142,6 +142,246 @@ impl StoreDatabase {
         self.sqlite().call(Self::circle_replay_epoch_index_on).await
     }
 
+    pub(crate) fn record_circle_bootstrap_coverage_on(
+        conn: &Connection,
+        activation_commit: &StoreBatchCommitRef,
+        activations: &VerifiedCircleActivations,
+    ) -> Result<(), DbError> {
+        for bootstrap in activations.bootstraps() {
+            let activation = activations
+                .circles()
+                .iter()
+                .find(|activation| {
+                    activation.circle_id == bootstrap.circle_id()
+                        && activation.control.coord == *bootstrap.control()
+                })
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "verified Circle bootstrap has no activating control".to_string(),
+                    )
+                })?;
+            let circle_id = bootstrap.circle_id().to_string();
+            let control_coord = serde_json::to_string(bootstrap.control()).map_err(|error| {
+                DbError::Message(format!("serialize Circle bootstrap control: {error}"))
+            })?;
+            let encoded_commit = serde_json::to_string(activation_commit).map_err(|error| {
+                DbError::Message(format!("serialize Circle bootstrap activation: {error}"))
+            })?;
+            let encoded_cut =
+                serde_json::to_string(&bootstrap.reference().coverage).map_err(|error| {
+                    DbError::Message(format!("serialize Circle bootstrap coverage: {error}"))
+                })?;
+            let encoded_ref = serde_json::to_vec(bootstrap.reference()).map_err(|error| {
+                DbError::Message(format!("serialize Circle bootstrap reference: {error}"))
+            })?;
+            let encoded_image_hash = bootstrap.reference().image.image_hash.to_string();
+            let existing: Option<(String, String, String, String, Vec<u8>)> = conn
+                .query_row(
+                    "SELECT control_coord, activation_commit, exact_cut, image_hash, bootstrap_ref
+                     FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                    [&circle_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((prior_control, prior_commit, prior_cut, prior_image_hash, prior_ref)) =
+                existing
+            {
+                let prior_reference: crate::sync::circle::CircleBootstrapRef =
+                    serde_json::from_slice(&prior_ref).map_err(|error| {
+                        DbError::Message(format!("parse prior Circle bootstrap reference: {error}"))
+                    })?;
+                if serde_json::to_vec(&prior_reference).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize prior Circle bootstrap reference: {error}"
+                    ))
+                })? != prior_ref
+                    || serde_json::to_string(&prior_reference.coverage).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize prior Circle bootstrap coverage: {error}"
+                        ))
+                    })? != prior_cut
+                    || prior_reference.image.image_hash.to_string() != prior_image_hash
+                {
+                    return Err(DbError::Message(
+                        "retained Circle bootstrap row differs from its exact reference"
+                            .to_string(),
+                    ));
+                }
+                if (
+                    prior_control.as_str(),
+                    prior_commit.as_str(),
+                    prior_cut.as_str(),
+                    prior_image_hash.as_str(),
+                    &prior_ref,
+                ) == (
+                    control_coord.as_str(),
+                    encoded_commit.as_str(),
+                    encoded_cut.as_str(),
+                    encoded_image_hash.as_str(),
+                    &encoded_ref,
+                ) {
+                    continue;
+                }
+                let prior_control: crate::sync::circle::CircleControlCoord =
+                    serde_json::from_str(&prior_control).map_err(|error| {
+                        DbError::Message(format!("parse prior Circle bootstrap control: {error}"))
+                    })?;
+                let prior_cut: CommitFrontier =
+                    serde_json::from_str(&prior_cut).map_err(|error| {
+                        DbError::Message(format!("parse prior Circle bootstrap coverage: {error}"))
+                    })?;
+                let prior_activation = Self::verified_circle_activation_on(
+                    conn,
+                    bootstrap.circle_id(),
+                    &prior_control,
+                )?
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "prior Circle bootstrap activation is not retained".to_string(),
+                    )
+                })?;
+                if !bootstrap.reference().coverage.covers(&prior_cut)
+                    || !Self::verified_circle_control_covers_on(
+                        conn,
+                        bootstrap.circle_id(),
+                        &activation.control,
+                        &prior_activation.control.coord,
+                    )?
+                {
+                    return Err(DbError::Message(format!(
+                        "Circle {} bootstrap conflicts with its retained predecessor",
+                        bootstrap.circle_id()
+                    )));
+                }
+            }
+            conn.execute(
+                "INSERT INTO circle_bootstrap_coverage
+                 (circle_id, control_coord, activation_commit, exact_cut, image_hash, bootstrap_ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(circle_id) DO UPDATE SET
+                   control_coord = excluded.control_coord,
+                   activation_commit = excluded.activation_commit,
+                   exact_cut = excluded.exact_cut,
+                   image_hash = excluded.image_hash,
+                   bootstrap_ref = excluded.bootstrap_ref",
+                rusqlite::params![
+                    circle_id,
+                    control_coord,
+                    encoded_commit,
+                    encoded_cut,
+                    encoded_image_hash,
+                    encoded_ref,
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn circle_bootstrap_replay_inputs_on(
+        conn: &Connection,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+        )>,
+        DbError,
+    > {
+        let mut statement = conn
+            .prepare(
+                "SELECT circle_id, control_coord, activation_commit, exact_cut,
+                        image_hash, bootstrap_ref
+                 FROM circle_bootstrap_coverage ORDER BY circle_id",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut bootstraps = Vec::with_capacity(rows.len());
+        for (circle_id, control, activation_commit, exact_cut, image_hash, encoded_reference) in
+            rows
+        {
+            let circle_id: crate::sync::circle::CircleId = circle_id.parse().map_err(|error| {
+                DbError::Message(format!("parse retained Circle bootstrap id: {error}"))
+            })?;
+            let control = serde_json::from_str(&control).map_err(|error| {
+                DbError::Message(format!("parse retained Circle bootstrap control: {error}"))
+            })?;
+            let activation_commit: StoreBatchCommitRef = serde_json::from_str(&activation_commit)
+                .map_err(|error| {
+                DbError::Message(format!(
+                    "parse retained Circle bootstrap activation: {error}"
+                ))
+            })?;
+            let exact_cut: CommitFrontier = serde_json::from_str(&exact_cut).map_err(|error| {
+                DbError::Message(format!("parse retained Circle bootstrap coverage: {error}"))
+            })?;
+            let reference: crate::sync::circle::CircleBootstrapRef =
+                serde_json::from_slice(&encoded_reference).map_err(|error| {
+                    DbError::Message(format!(
+                        "parse retained Circle bootstrap reference: {error}"
+                    ))
+                })?;
+            if serde_json::to_vec(&reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize retained Circle bootstrap reference: {error}"
+                ))
+            })? != encoded_reference
+                || reference.coverage != exact_cut
+                || reference.image.image_hash.to_string() != image_hash
+            {
+                return Err(DbError::Message(
+                    "retained Circle bootstrap row differs from its exact reference".to_string(),
+                ));
+            }
+            let retained =
+                Self::load_retained_merge_materialization_by_ref_on(conn, &activation_commit)?;
+            let mut matching =
+                retained
+                    .circle_activations()
+                    .bootstraps()
+                    .iter()
+                    .filter(|bootstrap| {
+                        bootstrap.circle_id() == circle_id
+                            && bootstrap.control() == &control
+                            && bootstrap.reference() == &reference
+                    });
+            let bootstrap = matching.next().cloned().ok_or_else(|| {
+                DbError::Message(
+                    "retained Circle bootstrap coverage has no exact replay input".to_string(),
+                )
+            })?;
+            if matching.next().is_some() {
+                return Err(DbError::Message(
+                    "retained Circle bootstrap coverage has duplicate replay inputs".to_string(),
+                ));
+            }
+            bootstraps.push((activation_commit, bootstrap));
+        }
+        Ok(bootstraps)
+    }
+
     pub(crate) fn circle_replay_epoch_index_on(
         conn: &Connection,
     ) -> Result<CircleReplayEpochIndex, DbError> {
@@ -531,7 +771,7 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(crate) fn retain_snapshot_author_exclusion_activations_on(
+    pub(crate) fn retain_snapshot_replay_inputs_on(
         conn: &rusqlite::Transaction<'_>,
     ) -> Result<(), DbError> {
         let mut statement = conn
@@ -547,8 +787,72 @@ impl StoreDatabase {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(DbError::from)?;
         drop(statement);
-        let mut retained = Vec::with_capacity(references.len());
-        for encoded in references {
+        let mut required = references.into_iter().collect::<BTreeSet<_>>();
+        let mut bootstrap_statement = conn
+            .prepare(
+                "SELECT circle_id, activation_commit, exact_cut
+                 FROM circle_bootstrap_coverage ORDER BY circle_id",
+            )
+            .map_err(DbError::from)?;
+        let bootstrap_rows = bootstrap_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(bootstrap_statement);
+        let mut bootstrap_cuts = BTreeMap::new();
+        for (circle_id, activation_commit, exact_cut) in bootstrap_rows {
+            let circle_id: crate::sync::circle::CircleId = circle_id.parse().map_err(|error| {
+                DbError::Message(format!("snapshot Circle bootstrap id: {error}"))
+            })?;
+            let cut: CommitFrontier = serde_json::from_str(&exact_cut).map_err(|error| {
+                DbError::Message(format!("snapshot Circle bootstrap coverage: {error}"))
+            })?;
+            if bootstrap_cuts.insert(circle_id, cut).is_some() {
+                return Err(DbError::Message(
+                    "snapshot has duplicate Circle bootstrap coverage".to_string(),
+                ));
+            }
+            required.insert(activation_commit);
+        }
+        let mut materialization_statement = conn
+            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
+            .map_err(DbError::from)?;
+        let materialization_refs = materialization_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(materialization_statement);
+        for encoded in materialization_refs {
+            let reference: StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::Message(format!("snapshot retained Circle commit: {error}"))
+                })?;
+            let materialization =
+                Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
+            let has_uncovered_circle_package = materialization.packages().iter().any(|package| {
+                let crate::sync::audience_package::PackageAudience::Circle { circle_id, .. } =
+                    package.audience()
+                else {
+                    return false;
+                };
+                bootstrap_cuts
+                    .get(circle_id)
+                    .is_none_or(|cut| !cut.covers_commit(&reference))
+            });
+            if has_uncovered_circle_package {
+                required.insert(encoded);
+            }
+        }
+        let mut retained = Vec::with_capacity(required.len());
+        for encoded in required {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::Message(format!(
@@ -575,13 +879,13 @@ impl StoreDatabase {
                 || input_hash != ObjectHash::digest(&canonical_input).to_string()
             {
                 return Err(DbError::Message(
-                    "snapshot author exclusion activation differs from its retained input"
+                    "snapshot retained replay activation differs from its retained input"
                         .to_string(),
                 ));
             }
             let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
                 .map_err(|error| {
-                    DbError::Message(format!("snapshot author exclusion retained input: {error}"))
+                    DbError::Message(format!("snapshot retained replay input: {error}"))
                 })?;
             retained.push((reference, input_hash, canonical_input, input));
         }
@@ -1620,6 +1924,22 @@ impl StoreDatabase {
         Ok(())
     }
 
+    fn retire_circle_bootstrap_coverage_on(
+        conn: &Connection,
+        activation_commit: &StoreBatchCommitRef,
+    ) -> Result<usize, DbError> {
+        let encoded = serde_json::to_string(activation_commit).map_err(|error| {
+            DbError::Message(format!(
+                "serialize retracted Circle bootstrap activation: {error}"
+            ))
+        })?;
+        conn.execute(
+            "DELETE FROM circle_bootstrap_coverage WHERE activation_commit = ?1",
+            [encoded],
+        )
+        .map_err(DbError::from)
+    }
+
     pub(crate) fn retract_verified_merge_materializations_on(
         conn: &rusqlite::Transaction<'_>,
         retractions: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
@@ -1836,6 +2156,7 @@ impl StoreDatabase {
                     "retracted Merge device state disappeared".to_string(),
                 ));
             }
+            Self::retire_circle_bootstrap_coverage_on(conn, &candidate)?;
             let deleted = conn
                 .execute(
                     "DELETE FROM retained_merge_materializations
@@ -2062,5 +2383,78 @@ mod tests {
             &BTreeSet::from([root, child]),
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
+        let database = crate::sync::test_helpers::open_test_db();
+        let activation = StoreBatchCommitRef {
+            coord: StoreCommitCoord {
+                stream_id: crate::sync::causal_grants::AuthorStreamId::from_bytes([23; 32]),
+                sequence: 7,
+            },
+            commit_hash: ObjectHash::digest(b"Circle bootstrap retraction activation"),
+            object: test_object("store-v1/test/circle-bootstrap-retraction/commit.json"),
+        };
+        let encoded_activation =
+            serde_json::to_string(&activation).expect("serialize bootstrap activation");
+        database
+            .call(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO circle_bootstrap_coverage
+                         (circle_id, control_coord, activation_commit, exact_cut, image_hash,
+                          bootstrap_ref)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            "00000000-0000-4000-8000-000000000001",
+                            "{}",
+                            encoded_activation,
+                            "{}",
+                            ObjectHash::digest(b"Circle bootstrap retraction image").to_string(),
+                            b"{}".as_slice(),
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                assert_eq!(
+                    StoreDatabase::retire_circle_bootstrap_coverage_on(&transaction, &activation,)?,
+                    1
+                );
+                let retained: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM circle_bootstrap_coverage",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                assert_eq!(retained, 0);
+                transaction.rollback().map_err(DbError::from)?;
+                let retained: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM circle_bootstrap_coverage",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                assert_eq!(retained, 1);
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                assert_eq!(
+                    StoreDatabase::retire_circle_bootstrap_coverage_on(&transaction, &activation,)?,
+                    1
+                );
+                transaction.commit().map_err(DbError::from)?;
+                let retained: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM circle_bootstrap_coverage",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                assert_eq!(retained, 0);
+                Ok(())
+            })
+            .await
+            .expect("retire retracted Circle bootstrap coverage");
     }
 }

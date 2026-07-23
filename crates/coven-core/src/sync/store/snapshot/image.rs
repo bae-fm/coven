@@ -622,6 +622,131 @@ pub(crate) fn install_snapshot_blob_graph(
     result
 }
 
+pub(crate) fn verify_circle_bootstrap_image(
+    image: &[u8],
+    reference: &crate::sync::circle::CircleBootstrapRef,
+    circle_id: crate::sync::circle::CircleId,
+    tables: &[SyncedTable],
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+) -> Result<(), SnapshotError> {
+    if crate::sync::store_commit::ObjectHash::digest(image) != reference.image.image_hash {
+        return Err(SnapshotError::ClearFailed(
+            "Circle bootstrap image differs from its signed hash".to_string(),
+        ));
+    }
+    let connection = open_database_image(image)?;
+    let schema_version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    if schema_version != reference.schema_version {
+        return Err(SnapshotError::ClearFailed(format!(
+            "Circle bootstrap schema is {schema_version}, expected {}",
+            reference.schema_version
+        )));
+    }
+    let routing_contract =
+        crate::sync::routing_contract::SyncRoutingContract::from_connection(&connection, tables)
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    if routing_contract.hash() != reference.sync_routing_hash {
+        return Err(SnapshotError::ClearFailed(
+            "Circle bootstrap routing contract differs from its signed hash".to_string(),
+        ));
+    }
+    let gates = crate::sync::gate::Gates::from_tables(&connection, tables)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    if gates.has_scoped_graph() {
+        let routing_key = routing_key.ok_or_else(|| {
+            SnapshotError::ClearFailed(
+                "scoped Circle bootstrap verification requires Store routing authentication"
+                    .to_string(),
+            )
+        })?;
+        crate::sync::gate::validate_snapshot_routing_state(
+            &connection,
+            &gates,
+            routing_key,
+            &crate::sync::circle::Audience::Circle(circle_id),
+        )
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    }
+    let declarations = crate::blob::decl::BlobDecls::from_tables(&connection, tables)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let rows = declarations
+        .publication_blobs_in_db(&connection)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    if rows.len() != reference.blobs.len() {
+        return Err(SnapshotError::ClearFailed(
+            "Circle bootstrap blob closure does not exactly cover its image rows".to_string(),
+        ));
+    }
+    for row in &rows {
+        let mut matching = reference.blobs.iter().filter(|binding| {
+            row.table == binding.table()
+                && row.row_id == binding.row_id()
+                && row.row_stamp == binding.row_stamp()
+                && row.column == binding.column()
+        });
+        let binding = matching.next().ok_or_else(|| {
+            SnapshotError::ClearFailed(
+                "Circle bootstrap image row has no exact signed blob binding".to_string(),
+            )
+        })?;
+        if matching.next().is_some()
+            || &row.blob != binding.blob()
+            || row.plaintext_size != binding.plaintext_size()
+            || row.plaintext_hash != binding.plaintext_hash().to_string()
+            || !matches!(
+                binding.authority(),
+                crate::blob::RowBlobAuthority::Remote(
+                    crate::sync::audience_package::PackageAudience::Circle {
+                        circle_id: binding_circle,
+                        ..
+                    }
+                ) if *binding_circle == circle_id
+            )
+            || binding.stored().is_none()
+        {
+            return Err(SnapshotError::ClearFailed(
+                "Circle bootstrap blob closure differs from an exact image row".to_string(),
+            ));
+        }
+    }
+    for table in crate::db::user_table_names(&connection)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?
+    {
+        if tables.iter().any(|synced| synced.name() == table)
+            || matches!(table.as_str(), "_coven_audience" | "_coven_row_routes")
+        {
+            continue;
+        }
+        let count: i64 = connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {}",
+                    crate::sync::session::quote_ident(&table)
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        if count != 0 {
+            return Err(SnapshotError::ClearFailed(format!(
+                "Circle bootstrap retains non-projection table {table:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn open_database_image(image: &[u8]) -> Result<Connection, SnapshotError> {
+    let connection = crate::database::open_database_image(image)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    Ok(connection)
+}
+
 /// Delete every non-synced table's rows from the snapshot copy at `path`,
 /// keeping all table schemas intact.
 ///
@@ -657,6 +782,7 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "store_author_exclusion_activations",
     "circle_control_activations",
     "circle_access_cache",
+    "circle_bootstrap_coverage",
     "circle_roster_cache",
     "circle_metadata_cache",
     "circle_current_state",
@@ -716,7 +842,7 @@ fn clear_non_synced(
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
     if matches!(audience, crate::sync::circle::Audience::Store) {
-        crate::sync::store::StoreDatabase::retain_snapshot_author_exclusion_activations_on(&tx)
+        crate::sync::store::StoreDatabase::retain_snapshot_replay_inputs_on(&tx)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
         crate::sync::store::StoreDatabase::retain_snapshot_device_states_on(&tx, coverage)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
@@ -1215,6 +1341,260 @@ mod tests {
             .value
     }
 
+    fn circle_bootstrap_reference(
+        source: &Database,
+        image: &[u8],
+    ) -> crate::sync::circle::CircleBootstrapRef {
+        let image_hash = crate::sync::store_commit::ObjectHash::digest(image);
+        crate::sync::circle::CircleBootstrapRef {
+            coverage: CommitFrontier(BTreeMap::new()),
+            schema_version: source.schema_version(),
+            sync_routing_hash: source.sync_routing_hash(),
+            image: crate::sync::store_commit::SnapshotImageRef {
+                image_hash,
+                object: crate::sync::storage::ExactObjectRef::new(
+                    crate::storage::cloud::ObjectSlot::logical(
+                        "circle-bootstrap-routing.db".to_string(),
+                    )
+                    .expect("construct Circle bootstrap routing slot"),
+                    image.len() as u64,
+                    image_hash,
+                ),
+            },
+            blobs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn circle_bootstrap_verification_requires_authenticated_routing() {
+        let source = open_scoped_snapshot_test_db();
+        crate::sync::test_helpers::TestStore::create(
+            &source,
+            "circle-bootstrap-routing-key",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Circle bootstrap routing Store");
+        let circle_id = seed_scoped_snapshot_rows(&source).await;
+        let image_dir = tempfile::tempdir().expect("Circle bootstrap routing image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = source.synced_tables().to_vec();
+        let image = source
+            .call(move |connection| {
+                create_circle_snapshot(
+                    connection,
+                    &image_path,
+                    &tables,
+                    &crate::encryption::EncryptionService::from_key([42; 32]),
+                    circle_id,
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create Circle bootstrap routing image");
+        let reference = circle_bootstrap_reference(&source, &image);
+
+        let error = verify_circle_bootstrap_image(
+            &image,
+            &reference,
+            circle_id,
+            source.synced_tables(),
+            None,
+        )
+        .expect_err("scoped Circle bootstrap verification must require its routing key");
+        assert!(
+            error
+                .to_string()
+                .contains("requires Store routing authentication"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
+        let source = open_scoped_snapshot_test_db();
+        crate::sync::test_helpers::TestStore::create(
+            &source,
+            "circle-bootstrap-store-row",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Circle bootstrap Store-row Store");
+        let circle_id = seed_scoped_snapshot_rows(&source).await;
+        let image_dir = tempfile::tempdir().expect("Circle bootstrap Store-row image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = source.synced_tables().to_vec();
+        let image = source
+            .call(move |connection| {
+                create_circle_snapshot(
+                    connection,
+                    &image_path,
+                    &tables,
+                    &crate::encryption::EncryptionService::from_key([42; 32]),
+                    circle_id,
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create Circle projection for Store-row tampering");
+        let routing_key = crate::sync::circle::derive_row_routing_key(
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            StoreDatabase::new(&source)
+                .local_store_root_ref()
+                .await
+                .expect("read Store-row Store root")
+                .expect("Store-row Store root is installed")
+                .store_root_hash,
+        )
+        .expect("derive Store-row routing key");
+        let store_row_id = "00000000-0000-4000-8000-000000000008";
+        let store_row_stamp = "0000000001008-0000-owner";
+        let store_routing_id =
+            crate::sync::circle::row_routing_id(&routing_key, "documents", store_row_id)
+                .to_string();
+        let image = edit_snapshot_image(image_dir.path(), image, |connection| {
+            connection
+                .execute(
+                    "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
+                    (store_row_id, "Store row in Circle image", store_row_stamp),
+                )
+                .expect("insert scoped Store row into Circle bootstrap");
+            connection
+                .execute(
+                    "INSERT INTO _coven_row_routes VALUES (?1, 'documents', ?2, ?3)",
+                    (&store_routing_id, store_row_id, store_row_stamp),
+                )
+                .expect("insert scoped Store row route into Circle bootstrap");
+            connection
+                .execute(
+                    "INSERT INTO _coven_audience VALUES (?1, NULL, ?2)",
+                    (&store_routing_id, store_row_stamp),
+                )
+                .expect("insert scoped Store audience mirror into Circle bootstrap");
+        });
+        let reference = circle_bootstrap_reference(&source, &image);
+
+        let error = verify_circle_bootstrap_image(
+            &image,
+            &reference,
+            circle_id,
+            source.synced_tables(),
+            Some(&routing_key),
+        )
+        .expect_err("Circle bootstrap must reject a scoped Store row");
+        assert!(
+            error
+                .to_string()
+                .contains("outside its exact audience closure"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circle_bootstrap_verification_rejects_unscoped_rows() {
+        let source = crate::sync::test_helpers::open_test_db_schema(
+            vec![
+                SyncedTable::new(
+                    "documents",
+                    crate::sync::session::RowIdentity::IndependentUuid,
+                )
+                .scoped_by("audience"),
+                SyncedTable::new(
+                    "settings",
+                    crate::sync::session::RowIdentity::IndependentUuid,
+                ),
+            ],
+            vec![Migration::sql(
+                1,
+                "Circle bootstrap unscoped schema",
+                "CREATE TABLE documents (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     body TEXT NOT NULL,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;
+                 CREATE TABLE settings (
+                     id TEXT PRIMARY KEY,
+                     value TEXT NOT NULL,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )],
+        );
+        crate::sync::test_helpers::TestStore::create(
+            &source,
+            "circle-bootstrap-unscoped-row",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Circle bootstrap unscoped-row Store");
+        let circle_id = source
+            .call(|connection| {
+                Ok::<_, crate::database::DbError>(
+                    crate::sync::test_helpers::install_test_active_circle(
+                        connection,
+                        "circle-bootstrap-unscoped",
+                    )
+                    .0,
+                )
+            })
+            .await
+            .expect("install Circle bootstrap unscoped Circle");
+        let image_dir = tempfile::tempdir().expect("Circle bootstrap unscoped image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = source.synced_tables().to_vec();
+        let image = source
+            .call(move |connection| {
+                create_circle_snapshot(
+                    connection,
+                    &image_path,
+                    &tables,
+                    &crate::encryption::EncryptionService::from_key([42; 32]),
+                    circle_id,
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create Circle bootstrap unscoped image");
+        let image = edit_snapshot_image(image_dir.path(), image, |connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings VALUES (?1, ?2, ?3)",
+                    (
+                        "00000000-0000-4000-8000-000000000009",
+                        "not Circle-scoped",
+                        "0000000001000-0000-owner",
+                    ),
+                )
+                .expect("insert unscoped row into Circle bootstrap");
+        });
+        let reference = circle_bootstrap_reference(&source, &image);
+        let routing_key = crate::sync::circle::derive_row_routing_key(
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            StoreDatabase::new(&source)
+                .local_store_root_ref()
+                .await
+                .expect("read unscoped-row Store root")
+                .expect("unscoped-row Store root is installed")
+                .store_root_hash,
+        )
+        .expect("derive unscoped-row routing key");
+
+        let error = verify_circle_bootstrap_image(
+            &image,
+            &reference,
+            circle_id,
+            source.synced_tables(),
+            Some(&routing_key),
+        )
+        .expect_err("Circle bootstrap must reject an unscoped synced row");
+        assert!(
+            error
+                .to_string()
+                .contains("outside its exact audience closure"),
+            "{error}"
+        );
+    }
+
     #[derive(Clone, Copy)]
     enum ScopedSnapshotImage {
         Valid,
@@ -1651,6 +2031,25 @@ mod tests {
             })
             .await
             .expect("create Circle snapshot with Store parent");
+        let reference = circle_bootstrap_reference(&source, &image);
+        let routing_key = crate::sync::circle::derive_row_routing_key(
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            StoreDatabase::new(&source)
+                .local_store_root_ref()
+                .await
+                .expect("read Circle parent Store root")
+                .expect("Circle parent Store root is installed")
+                .store_root_hash,
+        )
+        .expect("derive Circle parent routing key");
+        verify_circle_bootstrap_image(
+            &image,
+            &reference,
+            circle_id,
+            source.synced_tables(),
+            Some(&routing_key),
+        )
+        .expect("verify Circle bootstrap with its required Store parent");
         let inspected_path = image_dir.path().join("circle-parent.db");
         std::fs::write(&inspected_path, image).expect("write inspected Circle parent snapshot");
         let inspected =

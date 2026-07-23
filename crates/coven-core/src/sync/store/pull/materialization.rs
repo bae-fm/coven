@@ -352,6 +352,7 @@ pub(super) async fn apply_candidate(
             &candidate.commit,
             &candidate.author,
             identity.filter(|_| local_store_membership.allows_circle_access()),
+            routing_key,
             &verified_prefix,
         )
         .await
@@ -368,6 +369,7 @@ pub(super) async fn apply_candidate(
     let circle_packages = match load_applicable_circle_packages(
         database,
         storage,
+        root,
         &candidate.commit_ref,
         &candidate.commit,
         verified_circle_activations.circles(),
@@ -834,6 +836,9 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     routing_key: Option<&super::circle::RowRoutingKey>,
     local_store_membership: LocalStoreMembership,
     timestamp_policy: IncomingTimestampPolicy,
+    baseline_circle_cuts: Option<
+        &BTreeMap<super::circle::CircleId, crate::sync::store_commit::CommitFrontier>,
+    >,
     materialization: PreparedMergeMaterialization,
 ) -> Result<AppliedMergeMaterialization, DbError> {
     let PreparedMergeMaterialization {
@@ -859,6 +864,11 @@ pub(crate) fn apply_prepared_merge_materialization_on(
                 .local_access
                 .as_ref()
                 .filter(|access| access.active.is_none())
+                .filter(|_| {
+                    baseline_circle_cuts
+                        .and_then(|cuts| cuts.get(&activation.circle_id))
+                        .is_none_or(|cut| !cut.covers_commit(&commit_ref))
+                })
                 .map(|_| activation.circle_id)
         })
         .collect::<BTreeSet<_>>();
@@ -870,6 +880,9 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         &commit,
         &registrations,
     )?;
+    for bootstrap in circle_activations.bootstraps() {
+        super::replay::install_circle_bootstrap_remote_objects_on(conn, &commit_ref, bootstrap)?;
+    }
     let store_transaction = crate::sync::store::database::StoreDatabaseTransaction::new(conn);
     store_transaction.record_verified_circle_activations(
         &commit,
@@ -1391,6 +1404,7 @@ async fn commit_candidate(
                         )
                     })
             });
+    let installs_circle_bootstrap = !materialization.circle_activations.bootstraps().is_empty();
     #[cfg(any(test, feature = "test-utils"))]
     let materialization_failure = db.merge_materialization_failure_injection();
     let applied = db
@@ -1416,6 +1430,7 @@ async fn commit_candidate(
                 routing_key.as_ref(),
                 local_store_membership,
                 IncomingTimestampPolicy::Received { receiver_wall_ms },
+                None,
                 materialization,
             )?;
             if matches!(applied.outcome, ApplyOutcome::Applied(_)) {
@@ -1449,6 +1464,7 @@ async fn commit_candidate(
                 }
                 if requires_canonical_replay
                     || activates_circle_epoch_cutoff
+                    || installs_circle_bootstrap
                     || !retracted.is_empty()
                 {
                     let replay = replay_retained_merge_projection_on(

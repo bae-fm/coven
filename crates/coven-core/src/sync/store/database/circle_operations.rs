@@ -286,6 +286,92 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn circle_historical_package_keyring(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: crate::sync::circle::CircleControlCoord,
+        expected_key_fingerprint: crate::KeyFingerprint,
+    ) -> Result<Option<String>, DbError> {
+        self.database
+            .call(move |conn| {
+                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                    return Ok(None);
+                };
+                let Some(current) = state
+                    .authoring_state()
+                    .or_else(|| state.closing_authoring_state())
+                else {
+                    return Ok(None);
+                };
+                let Some(historical) =
+                    Self::verified_circle_activation_on(conn, circle_id, &expected_control)?
+                else {
+                    return Ok(None);
+                };
+                if !Self::verified_circle_control_covers_on(
+                    conn,
+                    circle_id,
+                    &current.control,
+                    &expected_control,
+                )? || current.control.value.epoch_id() != historical.control.value.epoch_id()
+                    || current.control.value.key_fingerprint() != expected_key_fingerprint
+                    || historical.control.value.key_fingerprint() != expected_key_fingerprint
+                {
+                    return Ok(None);
+                }
+                let crate::sync::circle::CircleAccessDisposition::Active { keyring, .. } =
+                    &current.access.disposition
+                else {
+                    return Ok(None);
+                };
+                let parsed = crate::encryption::MasterKeyring::from_serialized(keyring).map_err(
+                    |error| {
+                        DbError::Message(format!(
+                            "parse Circle {circle_id} historical package keyring: {error}"
+                        ))
+                    },
+                )?;
+                let encryption = EncryptionService::from(parsed);
+                if encryption
+                    .service_for_fingerprint(expected_key_fingerprint.as_bytes())
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                Ok(Some(keyring.clone()))
+            })
+            .await
+    }
+
+    pub(crate) async fn verified_circle_activation_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        control: crate::sync::circle::CircleControlCoord,
+    ) -> Result<
+        Option<(
+            crate::sync::store::circle_controls::VerifiedCircleReference,
+            StoreBatchCommitRef,
+        )>,
+        DbError,
+    > {
+        self.database
+            .call(move |conn| {
+                let Some(commit) =
+                    Self::circle_activation_commit_ref_on(conn, circle_id, &control)?
+                else {
+                    return Ok(None);
+                };
+                let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "Circle {circle_id} activation context lost control {control:?}"
+                        ))
+                    })?;
+                Ok(Some((activation, commit)))
+            })
+            .await
+    }
+
     pub(crate) async fn circle_blob_opening_key(
         &self,
         circle_id: crate::sync::circle::CircleId,
@@ -471,6 +557,59 @@ impl StoreDatabase {
             )));
         }
         Ok(Some(activation))
+    }
+
+    pub(crate) fn verified_circle_control_covers_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        current: &crate::sync::circle::PreparedCircleControl,
+        prior: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<bool, DbError> {
+        if current.value.circle_id != circle_id {
+            return Err(DbError::Message(
+                "Circle control lineage starts outside its Circle".to_string(),
+            ));
+        }
+        if current.coord == *prior {
+            return Ok(true);
+        }
+        let mut pending = current
+            .value
+            .access_epoch()
+            .covered_control_heads
+            .iter()
+            .map(|head| (current.clone(), head.coord.clone()))
+            .collect::<Vec<_>>();
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some((successor, coordinate)) = pending.pop() {
+            if !visited.insert(coordinate.clone()) {
+                continue;
+            }
+            let predecessor = Self::verified_circle_activation_on(conn, circle_id, &coordinate)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} control lineage omits retained control {coordinate:?}"
+                    ))
+                })?;
+            if !successor.value.causally_covers(&predecessor.control.value) {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} control lineage contains a non-causal edge"
+                )));
+            }
+            if predecessor.control.coord == *prior {
+                return Ok(true);
+            }
+            pending.extend(
+                predecessor
+                    .control
+                    .value
+                    .access_epoch()
+                    .covered_control_heads
+                    .iter()
+                    .map(|head| (predecessor.control.clone(), head.coord.clone())),
+            );
+        }
+        Ok(false)
     }
 
     fn circle_current_state_on(

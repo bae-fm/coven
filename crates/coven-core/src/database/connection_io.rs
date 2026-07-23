@@ -74,6 +74,25 @@ pub(crate) fn capture_changeset(
         .map_err(DbError::from)
 }
 
+pub(crate) fn open_database_image(image: &[u8]) -> Result<Connection, DbError> {
+    const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    if image.len() < 20 || &image[..SQLITE_DATABASE_HEADER.len()] != SQLITE_DATABASE_HEADER {
+        return Err(DbError::Message(
+            "database image is not a SQLite database".to_string(),
+        ));
+    }
+    let mut image = image.to_vec();
+    // sqlite3_deserialize cannot use an image whose header requests WAL. A
+    // private in-memory copy has no WAL file, so it uses rollback journaling.
+    image[18] = 1;
+    image[19] = 1;
+    let mut connection = Connection::open_in_memory().map_err(DbError::from)?;
+    connection
+        .deserialize_read_exact(rusqlite::MAIN_DB, image.as_slice(), image.len(), false)
+        .map_err(DbError::from)?;
+    Ok(connection)
+}
+
 pub(super) fn open_connection(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
     // WAL so a read-only connection in another process can read committed rows while
