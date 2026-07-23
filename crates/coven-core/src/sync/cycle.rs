@@ -8,10 +8,9 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
-use std::path::PathBuf;
 use std::str::FromStr;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
@@ -27,6 +26,7 @@ use super::cloud_storage::{
 use super::hlc::Hlc;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
+#[cfg(test)]
 use super::storage::SyncStorage;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedStore, Store};
@@ -341,44 +341,6 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
     }
 }
 
-struct SnapshotCut {
-    snapshot: super::store::CreatedSnapshot,
-    coverage: super::store_commit::CommitFrontier,
-}
-
-async fn capture_snapshot_cut(
-    db: &Database,
-    temp_dir: PathBuf,
-    tables: Vec<super::session::SyncedTable>,
-) -> Result<SnapshotCut, DbError> {
-    db.call(move |conn| {
-        let pending: i64 = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM store_writes
-                    WHERE status != '\"local_only\"'
-                      AND json_extract(status, '$.published') IS NULL
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if pending != 0 {
-            return Err(DbError::Message(
-                "snapshot cut refused while unpublished Store writes exist".to_string(),
-            ));
-        }
-        let snapshot = super::store::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
-            .map_err(|e| DbError::Message(e.to_string()))?;
-        let coverage = super::store_commit::CommitFrontier::from_refs(
-            crate::sync::store::database::StoreDatabase::materialized_frontier_on(conn, None)?,
-        )
-        .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
-        Ok(SnapshotCut { snapshot, coverage })
-    })
-    .await
-}
-
 /// Run a single sync cycle: drain pending local changes + gate + push, pull,
 /// bookkeeping, snapshot.
 ///
@@ -530,10 +492,7 @@ async fn prepare_cycle_before_pull(
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
     let database = authorization.database();
     let db = database.sqlite();
-    let storage = authorization.storage();
-    let store_root = authorization.store_root();
-    let store_root_hash = store_root.store_root_hash;
-    let protocol_store_id = store_root.store_root_id.to_string();
+    let protocol_store_id = authorization.store_root().store_root_id.to_string();
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
     // judges, or decrypts. Membership and the rotatable store key are
@@ -544,21 +503,10 @@ async fn prepare_cycle_before_pull(
     // aborts the cycle and retries next time — a refresh that can't complete must
     // not also corrupt state. Adoption itself failing is not this kind of failure —
     // see `rotation_pending` below.
-    let recipient = crate::keys::public_key_hex(user_keypair);
-    let wrapped_keys = authorization.wrapped_keys(&recipient)?;
-    refresh_authorization_state(
-        storage,
-        store_root_hash,
-        cipher,
-        pending_rotation,
-        database,
-        user_keypair,
-        custody,
-        &protocol_store_id,
-        &wrapped_keys,
-    )
-    .await
-    .map_err(|error| SyncCycleFailure::operation("refresh authorization state", error))?;
+    authorization
+        .refresh_authorization_state(cipher, pending_rotation, user_keypair, custody)
+        .await
+        .map_err(|error| SyncCycleFailure::operation("refresh authorization state", error))?;
 
     // Whether this device has adopted everything the store has committed. Read
     // once, right after the refresh that is the one place this cycle could adopt
@@ -829,7 +777,9 @@ async fn complete_cycle_after_pull(
         // stores syncing concurrently (or parallel tests) would otherwise race
         // on one `/tmp/snapshot.db`. A store's own cycles run serially.
         let temp_dir = store_dir.as_ref().to_path_buf();
-        let snapshot_result = capture_snapshot_cut(db, temp_dir, tables.to_vec()).await;
+        let snapshot_result = authorization
+            .capture_snapshot_cut(temp_dir, tables.to_vec())
+            .await;
 
         match snapshot_result {
             Ok(cut) => {
@@ -877,147 +827,6 @@ async fn reclaim_cycle_packages(
         ) => info!(%error, "Store package reclamation is awaiting coverage"),
         Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
     }
-    Ok(())
-}
-
-/// Refresh this device's authorization/decryption state at the top of a cycle:
-/// the policy-shaped membership state and the rotatable store key. Membership
-/// and key state are per-cycle preconditions, not
-/// init-time bootstraps — without this a running device acts on a stale member
-/// set and keeps a dead store key after a rotation it did not perform,
-/// recovering only on restart.
-///
-/// A plaintext (browsable) home still loads membership for authorization, but it
-/// has no wrapped store key to rotate. The key refresh is therefore a no-op.
-///
-/// A discovered rotation is durably recorded before adoption. Without custody,
-/// the cycle returns the gate as pending and seals nothing. If custody is present
-/// but persistence fails, the cycle fails with that error and leaves the durable
-/// gate armed. Membership conflicts and exact-object read failures also abort.
-#[derive(Debug, thiserror::Error)]
-enum AuthorizationRefreshError {
-    #[error("read this device's wrapped key: {0}")]
-    WrappedKey(#[source] super::store::InviteError),
-    #[error("refresh state is invalid: {0}")]
-    InvalidState(String),
-    #[error("rotation gate database state: {0}")]
-    Database(String),
-    #[error("adopt committed store-key rotation: {0}")]
-    KeyAdoption(#[source] crate::keys::KeyError),
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn refresh_authorization_state(
-    storage: &dyn SyncStorage,
-    store_root_hash: super::store_commit::ObjectHash,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    database: &crate::sync::store::StoreDatabase,
-    user_keypair: &UserKeypair,
-    custody: Option<&dyn MasterKeyCustody>,
-    store_id: &str,
-    wrapped_keys: &[super::wrapped_store_key::WrappedStoreKeyRef],
-) -> Result<(), AuthorizationRefreshError> {
-    // A plaintext home has no encrypted store key to rotate. Its policy-shaped
-    // membership authority remains load-bearing elsewhere in the cycle.
-    if cipher.snapshot().is_plaintext() {
-        debug!("refresh: plaintext home, nothing to refresh");
-        return Ok(());
-    }
-
-    // Adopt every exact wrapped-key ref selected by current membership authority.
-    // Each ref binds its semantic path and bytes; the value's
-    // signature binds the Store, recipient, generation, author, and sealed keyring.
-    // A new key is persisted and installed through `apply_key_rotation`, so this
-    // same cycle's push, pull, and blob operations use it.
-    let live_keyring = match cipher.snapshot() {
-        super::cloud_storage::CloudCipher::Encrypted(encryption) => encryption,
-        super::cloud_storage::CloudCipher::Plaintext => {
-            return Err(AuthorizationRefreshError::InvalidState(
-                "plaintext home cannot enter encrypted key refresh".to_string(),
-            ))
-        }
-    };
-    if wrapped_keys.is_empty() {
-        debug!("refresh: no activated wrapped key for this device; keeping the live key");
-        return Ok(());
-    }
-    match super::store::unwrap_store_keyring_for_refs(
-        storage,
-        store_root_hash,
-        user_keypair,
-        store_id,
-        wrapped_keys,
-    )
-    .await
-    {
-        Ok(new_encryption) => {
-            // Key identity is the key itself, not its generation number: adopt if
-            // the authority resolved any key the live keyring does not already hold —
-            // including a fork at the SAME generation number two owners minted at
-            // once, which a generation comparison would wrongly ignore. Merging
-            // (not comparing generations) is what makes a concurrent-rotation fork
-            // converge instead of partition.
-            let merged = live_keyring.merged_with(&new_encryption);
-            if merged.key_count() == live_keyring.key_count() {
-                if pending_rotation.gate().is_some() {
-                    let gate = database
-                        .complete_peer_rotation_adoption(live_keyring.current_generation())
-                        .await
-                        .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
-                    pending_rotation
-                        .install_durable_gate(gate)
-                        .map_err(AuthorizationRefreshError::InvalidState)?;
-                }
-                debug!("refresh: wrapped store key is already held by the live keyring");
-            } else {
-                let gate = database
-                    .record_peer_rotation(merged.current_generation())
-                    .await
-                    .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
-                pending_rotation
-                    .install_durable_gate(Some(gate))
-                    .map_err(AuthorizationRefreshError::InvalidState)?;
-                match custody {
-                    None => {
-                        info!(
-                            committed_generation = merged.current_generation(),
-                            "refresh: found a rotated store key but this cycle has no \
-                             master-key custody to adopt it; sealing is paused until a \
-                             cycle with custody adopts it"
-                        );
-                    }
-                    Some(custody) => {
-                        let fingerprint =
-                            super::store::apply_key_rotation(new_encryption, custody, cipher)
-                                .map_err(AuthorizationRefreshError::KeyAdoption)?;
-                        let adopted_generation = match cipher.snapshot() {
-                            super::cloud_storage::CloudCipher::Encrypted(encryption) => {
-                                encryption.current_generation()
-                            }
-                            super::cloud_storage::CloudCipher::Plaintext => {
-                                return Err(AuthorizationRefreshError::InvalidState(
-                                    "encrypted key refresh produced a plaintext cipher".to_string(),
-                                ));
-                            }
-                        };
-                        let gate = database
-                            .complete_peer_rotation_adoption(adopted_generation)
-                            .await
-                            .map_err(|error| {
-                                AuthorizationRefreshError::Database(error.to_string())
-                            })?;
-                        pending_rotation
-                            .install_durable_gate(gate)
-                            .map_err(AuthorizationRefreshError::InvalidState)?;
-                        info!(%fingerprint, "Adopted rotated store key");
-                    }
-                }
-            }
-        }
-        Err(error) => return Err(AuthorizationRefreshError::WrappedKey(error)),
-    }
-
     Ok(())
 }
 

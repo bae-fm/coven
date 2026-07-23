@@ -524,15 +524,6 @@ impl AuthorizedStore<'_> {
         .await
     }
 
-    pub(crate) fn wrapped_keys(
-        &self,
-        recipient: &str,
-    ) -> Result<Vec<crate::sync::wrapped_store_key::WrappedStoreKeyRef>, SyncCycleFailure> {
-        self.membership
-            .wrapped_key_authority_for(recipient)
-            .map_err(|error| error.to_string().into())
-    }
-
     pub(crate) async fn after_pull(&self) -> Result<&Self, SyncCycleFailure> {
         Ok(self)
     }

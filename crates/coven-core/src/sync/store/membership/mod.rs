@@ -124,6 +124,7 @@ mod key_rotation;
 mod listing;
 mod merge;
 mod mutation;
+mod refresh;
 
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;

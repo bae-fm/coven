@@ -93,7 +93,9 @@ pub use device_join::{
     ProvisionalDeviceBootstrap, SlotDisposition,
 };
 pub use error::StoreError;
-pub(crate) use membership::{apply_key_rotation, unwrap_store_keyring_for_refs};
+pub(crate) use membership::apply_key_rotation;
+#[cfg(test)]
+pub(crate) use membership::unwrap_store_keyring_for_refs;
 #[cfg(test)]
 pub(crate) use membership::{
     complete_revoke_rotation_adoption, load_exact_membership_head, revoke_member_durable,
@@ -140,13 +142,13 @@ pub use registration::{recover_owner_device, StoreRegistrationError};
 pub(crate) use snapshot::drain_outbound_store_snapshot;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use snapshot::push_store_snapshot;
+pub(crate) use snapshot::should_create_snapshot;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use snapshot::CreatedSnapshot;
 #[doc(hidden)]
 pub use snapshot::{
     bootstrap_from_snapshot, create_snapshot, load_store_snapshot_ref, reconcile_snapshot_blobs,
     BootstrapResult, SnapshotBlobReconcile, SnapshotError,
-};
-pub(crate) use snapshot::{
-    create_snapshot_with_host_blobs, should_create_snapshot, CreatedSnapshot,
 };
 
 #[cfg(feature = "test-utils")]

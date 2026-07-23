@@ -20,6 +20,51 @@ use crate::sync::store_commit::{
     StoreProtocolError, StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
 };
 
+pub(crate) struct SnapshotCut {
+    pub(crate) snapshot: CreatedSnapshot,
+    pub(crate) coverage: CommitFrontier,
+}
+
+impl super::AuthorizedStore<'_> {
+    pub(crate) async fn capture_snapshot_cut(
+        &self,
+        temp_dir: std::path::PathBuf,
+        tables: Vec<crate::sync::session::SyncedTable>,
+    ) -> Result<SnapshotCut, crate::database::DbError> {
+        self.db()
+            .call(move |connection| {
+                let pending: i64 = connection
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM store_writes
+                            WHERE status != '\"local_only\"'
+                              AND json_extract(status, '$.published') IS NULL
+                        )",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                if pending != 0 {
+                    return Err(crate::database::DbError::Message(
+                        "snapshot cut refused while unpublished Store writes exist".to_string(),
+                    ));
+                }
+                let snapshot = create_snapshot_with_host_blobs(connection, &temp_dir, &tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+                let coverage = CommitFrontier::from_refs(
+                    crate::sync::store::database::StoreDatabase::materialized_frontier_on(
+                        connection, None,
+                    )?,
+                )
+                .map_err(|error| {
+                    crate::database::DbError::Message(format!("snapshot coverage: {error}"))
+                })?;
+                Ok(SnapshotCut { snapshot, coverage })
+            })
+            .await
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_store_snapshot(
     storage: &dyn SyncStorage,

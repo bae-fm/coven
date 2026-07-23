@@ -98,6 +98,10 @@ This ownership work completes the Store foundation required by
   floor value. Blob tombstone collection requires an authenticated membership
   chain and no longer calls Store membership implementation code or permits an
   authorization-free branch.
+- Complete: per-cycle membership/key refresh is owned by authorized Store
+  membership, and atomic snapshot-cut capture is owned by the authorized Store
+  snapshot subsystem. Cycle invokes both operations without assembling their
+  authority or reaching into Store database state.
 - Discovered: cycle and application command boundaries still construct
   `StoreDatabase` from raw `Database`, and some Store modules retain raw
   `StoreDatabase::sqlite()` access for closed SQL, schema models, test fault
@@ -317,7 +321,8 @@ commits wholly or rolls back.
    Store operations, remove raw Store workflow methods from `Database`, make
    the remaining Store implementation modules private, move manual membership
    conflict resolution behind Store ownership, and reduce widened helper
-   visibility to the exact remaining callers.
+   visibility to the exact remaining callers. Per-cycle membership/key refresh
+   and atomic snapshot-cut capture now live under their Store owners.
 1. Run the boundary searches, sabotage tests, focused failure-injection tests,
    strict lint, repository hook, and manual rules review; then update the
    dependent plans to the sealed one-protocol shape.
