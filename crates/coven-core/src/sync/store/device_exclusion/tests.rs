@@ -233,8 +233,13 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     let synced_tables = owner_db.synced_tables().to_vec();
     let image = owner_db
         .call(move |connection| {
-            crate::sync::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            crate::sync::store::snapshot::create_snapshot(
+                connection,
+                &snapshot_dir,
+                &synced_tables,
+                None,
+            )
+            .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await
         .expect("create author exclusion snapshot");
@@ -430,8 +435,13 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     let synced_tables = owner_db.synced_tables().to_vec();
     let image = owner_db
         .call(move |connection| {
-            crate::sync::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            crate::sync::store::snapshot::create_snapshot(
+                connection,
+                &snapshot_dir,
+                &synced_tables,
+                None,
+            )
+            .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await
         .expect("create pre-exclusion snapshot");
@@ -558,6 +568,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             crate::blob::TransferLimits::one_at_a_time(),
             "post-snapshot-joining-device".to_string(),
             &crate::sync::test_helpers::test_migrations(),
+            None,
         )
         .await
         .expect("open pre-exclusion snapshot");
@@ -2600,6 +2611,7 @@ async fn open_published_exclusion_snapshot(
             crate::blob::TransferLimits::one_at_a_time(),
             device_id,
             &crate::sync::test_helpers::test_migrations(),
+            None,
         )
         .await
         .expect("open author exclusion snapshot");

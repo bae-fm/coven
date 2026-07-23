@@ -364,6 +364,215 @@ unsafe fn validate_inbound_private_routes_raw(
     Ok(package_routes)
 }
 
+pub(crate) fn validate_store_snapshot_routing_state(
+    conn: &Connection,
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<(), GateError> {
+    if !gates.has_scoped_graph() {
+        return Ok(());
+    }
+
+    let mut scoped_tables = gates
+        .tables
+        .keys()
+        .filter(|table| gates.table_is_scoped(table))
+        .cloned()
+        .collect::<Vec<_>>();
+    scoped_tables.sort();
+    let mut materialized_rows = HashSet::new();
+    let mut materialized_routing_ids = HashSet::new();
+    let mut audience_mirrors = HashMap::new();
+    let mirror_rows = query_mapped_rows(
+        conn,
+        "SELECT routing_id, circle_id, _updated_at
+         FROM _coven_audience
+         ORDER BY routing_id",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    for (routing_id, circle_id, stamp) in mirror_rows {
+        routing_id
+            .parse::<crate::sync::circle::RowRoutingId>()
+            .map_err(|error| {
+                GateError::InvalidMaterializedRouting(format!(
+                    "Store audience mirror has invalid routing id {routing_id:?}: {error}"
+                ))
+            })?;
+        let audience = Audience::from_column(circle_id.as_deref()).map_err(|error| {
+            GateError::InvalidMaterializedRouting(format!(
+                "Store audience mirror has invalid audience for {routing_id}: {error}"
+            ))
+        })?;
+        if audience == Audience::Local {
+            return Err(GateError::InvalidMaterializedRouting(format!(
+                "Store audience mirror has invalid audience for {routing_id}: Local"
+            )));
+        }
+        audience_mirrors.insert(routing_id, (audience, stamp));
+    }
+
+    for table in scoped_tables {
+        let identity = gates.row_identity(&table).ok_or_else(|| {
+            GateError::InvalidMaterializedRouting(format!(
+                "scoped table {table} has no declared row identity"
+            ))
+        })?;
+        let sql = format!(
+            "SELECT {id}, {stamp} FROM {table} ORDER BY {id}",
+            id = quote_ident("id"),
+            stamp = quote_ident("_updated_at"),
+            table = quote_ident(&table),
+        );
+        let rows = query_mapped_rows(conn, &sql, [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for (row_id, row_stamp) in rows {
+            crate::sync::session::validate_row_identity(&table, identity, &row_id).map_err(
+                |error| {
+                    GateError::InvalidMaterializedRouting(format!(
+                        "row identity {table}.{row_id} is invalid: {error}"
+                    ))
+                },
+            )?;
+            let (routing_id, route_stamp) = query_row_optional(
+                conn,
+                "SELECT routing_id, _updated_at
+                 FROM _coven_row_routes
+                 WHERE table_name = ?1 AND row_id = ?2",
+                (&table, &row_id),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .ok_or_else(|| {
+                GateError::InvalidMaterializedRouting(format!(
+                    "scoped row {table}.{row_id} has no private route"
+                ))
+            })?;
+            let expected_routing_id = row_routing_id(routing_key, &table, &row_id).to_string();
+            if routing_id != expected_routing_id {
+                return Err(GateError::InvalidMaterializedRouting(format!(
+                    "private route id does not authenticate {table}.{row_id}"
+                )));
+            }
+            if route_stamp != row_stamp {
+                return Err(GateError::InvalidMaterializedRouting(format!(
+                    "private route for {table}.{row_id} has a different _updated_at than its row"
+                )));
+            }
+
+            let mirror = audience_mirrors.get(&routing_id);
+            let audience = live_row_audience(conn, gates, &table, &row_id)?;
+            match audience {
+                Audience::Local => {
+                    return Err(GateError::InvalidMaterializedRouting(format!(
+                        "Store snapshot contains Local row {table}.{row_id}"
+                    )));
+                }
+                expected => {
+                    if matches!(&expected, Audience::Circle(_)) {
+                        return Err(GateError::InvalidMaterializedRouting(format!(
+                            "Store snapshot contains Circle row {table}.{row_id}"
+                        )));
+                    }
+                    let (mirrored, mirror_stamp) = mirror.ok_or_else(|| {
+                        GateError::InvalidMaterializedRouting(format!(
+                            "shared row {table}.{row_id} has no Store audience mirror"
+                        ))
+                    })?;
+                    if *mirrored != expected {
+                        return Err(GateError::InvalidMaterializedRouting(format!(
+                            "Store audience mirror for {table}.{row_id} differs from its row"
+                        )));
+                    }
+                    if mirror_stamp != &row_stamp {
+                        return Err(GateError::InvalidMaterializedRouting(format!(
+                            "Store audience mirror for {table}.{row_id} has a different _updated_at than its row"
+                        )));
+                    }
+                }
+            }
+            materialized_routing_ids.insert(routing_id);
+            materialized_rows.insert((table.clone(), row_id));
+        }
+    }
+
+    let private_routes = query_mapped_rows(
+        conn,
+        "SELECT table_name, row_id
+         FROM _coven_row_routes
+         ORDER BY table_name, row_id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    for (table, row_id) in private_routes {
+        if !materialized_rows.contains(&(table.clone(), row_id.clone())) {
+            return Err(GateError::InvalidMaterializedRouting(format!(
+                "private route {table}.{row_id} has no materialized scoped row"
+            )));
+        }
+    }
+    for (routing_id, (audience, _)) in audience_mirrors {
+        if audience == Audience::Store && !materialized_routing_ids.contains(&routing_id) {
+            return Err(GateError::InvalidMaterializedRouting(format!(
+                "Store audience mirror has no materialized row for {routing_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prune_private_routes_without_rows(
+    conn: &Connection,
+    gates: &Gates,
+) -> Result<(), GateError> {
+    let routes = query_mapped_rows(
+        conn,
+        "SELECT routing_id, table_name, row_id
+         FROM _coven_row_routes
+         ORDER BY table_name, row_id",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    for (routing_id, table, row_id) in routes {
+        if !gates.table_is_scoped(&table) {
+            return Err(GateError::InvalidMaterializedRouting(format!(
+                "private route names unscoped table {table}"
+            )));
+        }
+        let sql = format!(
+            "SELECT 1 FROM {} WHERE {} = ?1",
+            quote_ident(&table),
+            quote_ident("id")
+        );
+        if query_row_optional(conn, &sql, [&row_id], |_| Ok(()))?.is_some() {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM _coven_row_routes WHERE routing_id = ?1",
+            [&routing_id],
+        )
+        .map_err(|error| {
+            GateError::Sql(
+                format!("scope private route {table}.{row_id} to snapshot rows"),
+                error,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn prune_ineligible_scoped_rows(
     conn: &Connection,
     gates: &Gates,

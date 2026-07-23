@@ -2110,6 +2110,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             crate::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
             &test_migrations(),
+            None,
         )
         .await
         .expect("install snapshot-only blob bootstrap");

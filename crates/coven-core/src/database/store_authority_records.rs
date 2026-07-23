@@ -200,10 +200,7 @@ pub(super) fn validate_replay_authority_on(
             (&authority.store_root, &authority.founder_registration)
         }
     };
-    if &root_ref != authority_root
-        || root.descriptor.schema_version != baseline.schema_version
-        || root.descriptor.sync_routing_hash != baseline.routing_hash
-    {
+    if &root_ref != authority_root || root.descriptor.sync_routing_hash != baseline.routing_hash {
         return Err(DbError::Message(
             "retained replay authority differs from its Store root".to_string(),
         ));

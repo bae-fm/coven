@@ -30,7 +30,9 @@ impl super::AuthorizedStore<'_> {
         &self,
         temp_dir: std::path::PathBuf,
         tables: Vec<crate::sync::session::SyncedTable>,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<SnapshotCut, crate::database::DbError> {
+        let routing_encryption = routing_encryption.cloned();
         self.db()
             .call(move |connection| {
                 let pending: i64 = connection
@@ -49,8 +51,13 @@ impl super::AuthorizedStore<'_> {
                         "snapshot cut refused while unpublished Store writes exist".to_string(),
                     ));
                 }
-                let snapshot = create_snapshot_with_host_blobs(connection, &temp_dir, &tables)
-                    .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+                let snapshot = create_snapshot_with_host_blobs(
+                    connection,
+                    &temp_dir,
+                    &tables,
+                    routing_encryption.as_ref(),
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
                 let coverage = CommitFrontier::from_refs(
                     crate::sync::store::database::StoreDatabase::materialized_frontier_on(
                         connection, None,

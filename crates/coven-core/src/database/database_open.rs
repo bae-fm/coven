@@ -244,6 +244,16 @@ impl DatabaseCore {
                 let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
+                    if resolved.has_scoped_graph() {
+                        let routing_key = install.routing_key.as_ref().ok_or_else(|| {
+                            DbError::Message(
+                                "scoped snapshot bootstrap requires Store routing encryption"
+                                    .to_string(),
+                            )
+                        })?;
+                        gate::validate_store_snapshot_routing_state(&tx, &gates, routing_key)
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                    }
                     install.install_on(&tx, schema_version, resolved.hash())?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))

@@ -817,13 +817,14 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
-/// Create the audience mirror and private route map. The
-/// initializer calls this only when the routing contract has a scoped graph.
+/// Create the audience mirror and private route map. A snapshot already carries
+/// these schemas, so creation is idempotent; the caller validates their exact
+/// shape before committing initialization.
 pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
             conn.execute_batch(concat!(
-                "CREATE TABLE ",
+                "CREATE TABLE IF NOT EXISTS ",
                 stringify!($name),
                 " (",
                 $columns,

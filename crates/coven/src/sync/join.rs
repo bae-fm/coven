@@ -679,6 +679,7 @@ impl DeviceJoinClient {
             &db_path,
         )
         .await?;
+        let routing_encryption = EncryptionService::from(join.keyring.clone());
         let device_id = bootstrap
             .bootstrap
             .request
@@ -694,6 +695,7 @@ impl DeviceJoinClient {
                 crate::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 &self.migrations,
+                Some(&routing_encryption),
             )
             .await?;
         let published_at = self.clock.now().to_rfc3339();
@@ -1070,6 +1072,7 @@ pub(crate) async fn open_db_and_pull(
             crate::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             migrations,
+            routing_encryption,
         )
         .await?;
 

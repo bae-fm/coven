@@ -429,6 +429,7 @@ async fn run_single_sync_cycle_with_authorization(
         store_dir,
         &authorization,
         post_pull,
+        routing_encryption,
         prepared,
         store_pull,
     ))
@@ -652,6 +653,7 @@ async fn complete_cycle_after_pull(
     store_dir: &StoreDir,
     authorization: &AuthorizedStore<'_>,
     post_pull: &AuthorizedStore<'_>,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
     prepared: PreparedCycle,
     store_pull: super::store::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
@@ -780,7 +782,7 @@ async fn complete_cycle_after_pull(
         // on one `/tmp/snapshot.db`. A store's own cycles run serially.
         let temp_dir = store_dir.as_ref().to_path_buf();
         let snapshot_result = authorization
-            .capture_snapshot_cut(temp_dir, tables.to_vec())
+            .capture_snapshot_cut(temp_dir, tables.to_vec(), routing_encryption)
             .await;
 
         match snapshot_result {

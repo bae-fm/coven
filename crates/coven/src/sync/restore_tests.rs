@@ -855,7 +855,8 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     let tables_c = tables.clone();
     let snapshot = db
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c, None)
+                .map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("create owner snapshot");
@@ -1133,7 +1134,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let snapshot_tables = tables.clone();
     let snapshot = owner_db
         .call(move |connection| {
-            create_snapshot(connection, &snapshot_dir, &snapshot_tables)
+            create_snapshot(connection, &snapshot_dir, &snapshot_tables, None)
                 .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
@@ -1285,7 +1286,8 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
     let tables_c = tables.clone();
     let snapshot = db_owner
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c, None)
+                .map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1459,7 +1461,8 @@ async fn restore_pins_the_chain_founder_as_owner() {
     let tables_c = tables.clone();
     let snapshot = db_owner
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c, None)
+                .map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1611,7 +1614,8 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let tables_c = tables.clone();
     let snapshot = db_owner
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c, None)
+                .map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");

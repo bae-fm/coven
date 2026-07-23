@@ -649,7 +649,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     let synced_tables = db.synced_tables().to_vec();
     let image = db
         .call(move |connection| {
-            super::store::create_snapshot(connection, &snapshot_dir, &synced_tables)
+            super::store::create_snapshot(connection, &snapshot_dir, &synced_tables, None)
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await

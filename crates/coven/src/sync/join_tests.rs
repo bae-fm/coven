@@ -71,7 +71,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let snapshot_tables = tables.clone();
     let snapshot = owner_db
         .call(move |connection| {
-            create_snapshot(connection, &snapshot_path, &snapshot_tables)
+            create_snapshot(connection, &snapshot_path, &snapshot_tables, None)
                 .map_err(|error| DbError::Message(error.to_string()))
         })
         .await

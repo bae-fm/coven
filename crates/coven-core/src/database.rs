@@ -438,6 +438,7 @@ pub(crate) struct VerifiedSnapshotBootstrapInstall {
     store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
     founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
     stability: RetainedReplaySnapshotAuthority,
+    routing_key: Option<crate::sync::circle::RowRoutingKey>,
 }
 
 impl VerifiedSnapshotBootstrapInstall {
@@ -446,6 +447,7 @@ impl VerifiedSnapshotBootstrapInstall {
         store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
         stability: crate::sync::store::VerifiedStoreSnapshotStability,
+        routing_encryption: Option<&EncryptionService>,
     ) -> Result<Self, DbError> {
         if store_root.value.to_bytes() != store_root.bytes
             || store_root.value.object_hash() != store_root.semantic_hash
@@ -478,11 +480,20 @@ impl VerifiedSnapshotBootstrapInstall {
                 "bootstrap snapshot differs from its verified stability authority".to_string(),
             ));
         }
+        let routing_key = routing_encryption
+            .map(|encryption| {
+                crate::sync::circle::derive_row_routing_key(encryption, root.store_root_hash)
+                    .map_err(|error| {
+                        DbError::Message(format!("derive bootstrap row-routing key: {error}"))
+                    })
+            })
+            .transpose()?;
         Ok(Self {
             snapshot,
             store_root,
             founder,
             stability,
+            routing_key,
         })
     }
 

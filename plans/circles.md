@@ -64,11 +64,18 @@ rebuild the deleted choice.
   source package.
 - Host commit and remote materialization validate every scoped row's final
   synchronized foreign keys, including unchanged descendants.
+- Store snapshots contain only Store rows and their authenticated private
+  routes, retain the opaque Store audience mirror and activated Circle control
+  indexes, and exclude Local and Circle rows.
+- Store snapshot creation validates the projected image before publication.
+  Bootstrap and restore run application migrations, validate the resulting
+  routing graph, install retained replay authority, and commit as one database
+  transaction.
 
 ### Required before Circles are complete
 
-- use the same authenticated routing boundary for snapshot, restore, and
-  bootstrap images;
+- use the authenticated routing boundary for Circle snapshot, bootstrap, and
+  restore images;
 - finish adversarial arrival-order coverage for routing moves, deletes, and
   concurrent edits;
 - complete Circle membership, access, epoch close, rotation, conflict
@@ -84,8 +91,9 @@ rebuild the deleted choice.
 1. **Complete.** Seal the single Store owner boundary.
 1. **In progress.** Schema contracts, row identity, host and pull routing
    authentication, destination-only moves, and final-component validation are
-   implemented. Snapshot, restore, bootstrap, and adversarial arrival-order
-   coverage must use and verify the same boundary.
+   implemented. Store snapshot creation, bootstrap, and restore installation
+   use the same authenticated routing boundary. Circle images and adversarial
+   arrival-order coverage must use and verify it.
 1. Finish Circle authority, roster, metadata, access, epoch, and lifecycle
    operations.
 1. Finish Circle packages, pull, bootstrap, acknowledgement, snapshots,

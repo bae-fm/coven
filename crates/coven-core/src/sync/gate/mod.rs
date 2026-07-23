@@ -72,8 +72,9 @@ mod outbound;
 pub(crate) use audience::{
     active_circle_control, capture_routing_changes, filter_inbound_circle_changeset,
     is_routing_table, live_row_audience, normalize_inbound_private_routes, partition_outbound,
-    prune_ineligible_scoped_rows, validate_scoped_foreign_key_audiences, AudiencePartition,
-    CirclePartitionControl, RoutingChanges,
+    prune_ineligible_scoped_rows, prune_private_routes_without_rows,
+    validate_scoped_foreign_key_audiences, validate_store_snapshot_routing_state,
+    AudiencePartition, CirclePartitionControl, RoutingChanges,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;
@@ -171,6 +172,7 @@ pub enum GateError {
         reason: String,
     },
     InvalidInboundAudiencePackage(String),
+    InvalidMaterializedRouting(String),
     MissingChangesetPrimaryKey(String),
     MissingAudienceRow {
         table: String,
@@ -249,6 +251,9 @@ impl std::fmt::Display for GateError {
             } => write!(f, "scoped table {table} has invalid audience {value:?}: {reason}"),
             GateError::InvalidInboundAudiencePackage(reason) => {
                 write!(f, "invalid inbound audience package: {reason}")
+            }
+            GateError::InvalidMaterializedRouting(reason) => {
+                write!(f, "invalid materialized routing state: {reason}")
             }
             GateError::MissingChangesetPrimaryKey(table) => {
                 write!(f, "scoped changeset row in {table} has no primary key")
