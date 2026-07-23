@@ -2,9 +2,14 @@ mod acknowledgements;
 pub(crate) mod candidate_lifecycle;
 pub(crate) mod candidate_records;
 mod circle_controls;
+mod circle_operations;
+mod device_continuation;
 mod device_exclusion;
+mod host_write_capture;
 mod materialization;
 pub(crate) mod materialization_models;
+mod materialized_commit_index;
+mod membership_mutations;
 mod owner_promotion;
 mod pending_publication;
 mod preparation;
@@ -12,6 +17,8 @@ mod prepared_remote_objects;
 mod publication;
 pub(crate) mod publication_state;
 mod reclaim;
+mod retained_merge_replay;
+mod store_device_state;
 mod write_lifecycle;
 
 use crate::database::{
@@ -28,9 +35,9 @@ use crate::sync::storage::PreparedExactObject;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 
-#[derive(Clone, Copy)]
-pub(crate) struct StoreDatabase<'a> {
-    database: &'a Database,
+#[derive(Clone)]
+pub struct StoreDatabase {
+    database: Database,
 }
 
 pub(in crate::sync::store) struct StoreDatabaseTransaction<'transaction, 'connection> {
@@ -45,9 +52,28 @@ impl<'transaction, 'connection> StoreDatabaseTransaction<'transaction, 'connecti
     }
 }
 
-impl<'a> StoreDatabase<'a> {
-    pub(crate) fn new(database: &'a Database) -> Self {
+impl StoreDatabase {
+    #[doc(hidden)]
+    pub fn from_database(database: Database) -> Self {
         Self { database }
+    }
+
+    pub(crate) fn new(database: &Database) -> Self {
+        Self::from_database(database.clone())
+    }
+
+    #[doc(hidden)]
+    pub fn sqlite(&self) -> &Database {
+        &self.database
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn required_store_root_hash(
+        &self,
+    ) -> Result<crate::sync::store_commit::ObjectHash, DbError> {
+        self.database
+            .call(|connection| Ok(required_store_root_authority_on(connection)?.store_root_hash))
+            .await
     }
 }
 

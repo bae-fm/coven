@@ -279,7 +279,7 @@ pub fn prepare_device_registration_request<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrap_pending_device<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     pending: &'a DeviceJoinJournalDatabase,
     storage: &'a dyn SyncStorage,
     peer_exact: Option<&'a dyn ExactSlotStorage>,
@@ -329,7 +329,7 @@ pub fn bootstrap_pending_device<'a>(
         ))
         .await?;
         let proof = Box::pin(crate::sync::store::bootstrap_pending_device(
-            db,
+            database,
             storage,
             identity_signer,
             bootstrap
@@ -661,7 +661,7 @@ pub async fn close_joining_device(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn revoke_joining_device_writes(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
@@ -669,6 +669,7 @@ pub async fn revoke_joining_device_writes(
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
+    let db = database.sqlite();
     let attempt_id = cancellation.outcome.attempt().attempt_id;
     if let Some(current) = load_store_journal(db, attempt_id, DeviceJoinRole::Joiner).await? {
         return match &*current.progress {
@@ -679,7 +680,7 @@ pub async fn revoke_joining_device_writes(
         };
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
-        db,
+        database,
         storage,
         authorization,
         identity_signer,
@@ -862,7 +863,7 @@ pub fn complete_joiner_device_join_cleanup(
 }
 
 pub fn complete_device_join<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     pending: &'a DeviceJoinJournalDatabase,
     storage: &'a dyn SyncStorage,
     activation: DeviceJoinActivation,
@@ -870,6 +871,7 @@ pub fn complete_device_join<'a>(
     Box<dyn std::future::Future<Output = Result<JoinedStore, DeviceJoinError>> + Send + 'a>,
 > {
     Box::pin(async move {
+        let db = database.sqlite();
         let attempt_id = activation.outcome.attempt().attempt_id;
         if let Some(record) = load_store_journal(db, attempt_id, DeviceJoinRole::Joiner).await? {
             let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing)) =
@@ -877,14 +879,19 @@ pub fn complete_device_join<'a>(
             else {
                 return Err(DeviceJoinError::JournalConflict);
             };
-            let joined =
-                Box::pin(materialize_device_join_activation(db, storage, activation)).await?;
+            let joined = Box::pin(materialize_device_join_activation(
+                database, storage, activation,
+            ))
+            .await?;
             return (existing == &joined)
                 .then_some(joined)
                 .ok_or(DeviceJoinError::JournalConflict);
         }
         let current_readiness = observe_device_join_activation(pending, &activation)?;
-        let joined = Box::pin(materialize_device_join_activation(db, storage, activation)).await?;
+        let joined = Box::pin(materialize_device_join_activation(
+            database, storage, activation,
+        ))
+        .await?;
         if current_readiness.proof.registration != joined.registration {
             return Err(DeviceJoinError::JournalConflict);
         }

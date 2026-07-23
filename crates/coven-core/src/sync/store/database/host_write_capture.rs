@@ -1,10 +1,20 @@
-use crate::database::connection_io::attach_session;
-use crate::database::connection_io::capture_changeset;
-use crate::database::local_store_identity::local_merge_stream_id_on;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use rusqlite::{Connection, OptionalExtension};
+use tracing::warn;
+
+use crate::blob::decl::BlobDecls;
+use crate::database::{
+    attach_session, authorize_host_sql, capture_changeset, local_merge_stream_id_on, *,
+};
+use crate::encryption::EncryptionService;
+use crate::sync::gate::{self, Gates};
+use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
 
 use super::*;
 
-impl Database {
+impl StoreDatabase {
     fn start_host_change_journal_on<'c>(
         conn: &'c Connection,
         synced_tables: &[SyncedTable],
@@ -182,7 +192,7 @@ impl Database {
     ) -> Result<Vec<gate::AudiencePartition>, DbError> {
         match routing {
             StoreWriteRouting::MergeScoped(encryption) => {
-                let store_root_hash = Self::required_store_root_hash_on(tx)?;
+                let store_root_hash = required_store_root_authority_on(tx)?.store_root_hash;
                 let key = crate::sync::circle::derive_row_routing_key(encryption, store_root_hash)
                     .map_err(|error| {
                         DbError::Message(format!("derive row routing key: {error}"))
@@ -439,8 +449,9 @@ impl Database {
     }
 
     pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.call(move |conn| {
-            let stored = conn
+        self.database
+            .call(move |conn| {
+                let stored = conn
                 .query_row(
                 "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
                  WHERE status = '\"pending\"'
@@ -467,23 +478,25 @@ impl Database {
             )
                 .optional()
                 .map_err(DbError::from)?;
-            let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored else {
-                return Ok(None);
-            };
-            let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
-            Ok(Some(PreparedStoreWrite {
-                write_id: WriteId::from_generated(write_id),
-                changeset,
-                partitions,
-                inverse_changeset,
-                base: serde_json::from_str(&base)
-                    .map_err(|error| DbError::Message(format!("pending write base: {error}")))?,
-                blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
-                    DbError::Message(format!("pending write blob facts: {error}"))
-                })?,
-            }))
-        })
-        .await
+                let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored
+                else {
+                    return Ok(None);
+                };
+                let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
+                Ok(Some(PreparedStoreWrite {
+                    write_id: WriteId::from_generated(write_id),
+                    changeset,
+                    partitions,
+                    inverse_changeset,
+                    base: serde_json::from_str(&base).map_err(|error| {
+                        DbError::Message(format!("pending write base: {error}"))
+                    })?,
+                    blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
+                        DbError::Message(format!("pending write blob facts: {error}"))
+                    })?,
+                }))
+            })
+            .await
     }
 
     pub(crate) fn store_write_partitions_on(
@@ -593,5 +606,47 @@ impl Database {
             circles,
             local,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_sql_authorizer_is_removed_after_success_error_and_panic() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "ATTACH ':memory:' AS coven_gate_empty; \
+             CREATE TABLE coven_gate_empty.baseline (id TEXT PRIMARY KEY) STRICT; \
+             INSERT INTO coven_gate_empty.baseline VALUES ('guarded');",
+        )
+        .expect("attach guarded schema");
+        let assert_guard_removed = || {
+            let id: String = conn
+                .query_row("SELECT id FROM coven_gate_empty.baseline", [], |row| {
+                    row.get(0)
+                })
+                .expect("internal SQL can address the baseline after host SQL");
+            assert_eq!(id, "guarded");
+        };
+
+        StoreDatabase::run_host_sql_on(&conn, || Ok::<_, DbError>(()))
+            .expect("successful host SQL");
+        assert_guard_removed();
+
+        let error =
+            StoreDatabase::run_host_sql_on(&conn, || Err::<(), _>(DbError::Message("host".into())));
+        assert!(error.is_err());
+        assert_guard_removed();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            StoreDatabase::run_host_sql_on(&conn, || -> Result<(), DbError> {
+                panic!("host panic")
+            })
+            .expect("panicking host SQL closure never returns");
+        }));
+        assert!(panic.is_err());
+        assert_guard_removed();
     }
 }

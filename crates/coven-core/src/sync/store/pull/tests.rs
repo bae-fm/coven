@@ -20,7 +20,8 @@ async fn one_retained_checkpoint() -> (
     )
     .await
     .expect("create retained-checkpoint Store");
-    let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+    let database = StoreDatabase::new(&db);
+    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load checkpoint membership")
         .chain
@@ -39,7 +40,7 @@ async fn one_retained_checkpoint() -> (
         .expect("checkpoint device id exists");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(crate::sync::store::preparation::prepare_store_write(
-        &db,
+        &database,
         &store.storage,
         &device_id,
         "2026-07-21T00:00:00Z",
@@ -50,17 +51,17 @@ async fn one_retained_checkpoint() -> (
     .await
     .expect("prepare checkpoint commit"));
     assert_eq!(
-        crate::sync::store::publication::drain_store_writes(&db, &store.storage)
+        crate::sync::store::publication::drain_store_writes(&database, &store.storage)
             .await
             .expect("publish checkpoint commit"),
         1,
     );
-    let reference = crate::sync::store::database::StoreDatabase::new(&db)
+    let reference = database
         .latest_local_store_position()
         .await
         .expect("load checkpoint position")
         .expect("checkpoint position exists");
-    let mut retained = db
+    let mut retained = database
         .retained_merge_history_frontier(vec![reference])
         .await
         .expect("open retained checkpoint");
@@ -111,7 +112,8 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
     let (db, store, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
-        db.materialized_frontier()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
     )
@@ -129,7 +131,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .await
         .expect("load acknowledgement commit")
         .expect("acknowledgement commit exists");
-    let mut retained = db
+    let mut retained = crate::sync::store::database::StoreDatabase::new(&db)
         .retained_merge_history_frontier(vec![acknowledgement_commit])
         .await
         .expect("open acknowledgement checkpoint");
@@ -225,6 +227,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("create Merge Store");
+    let founder_database = StoreDatabase::new(&founder_db);
     let candidate = crate::sync::test_helpers::user_keypair_from_seed([43; 32]);
     let encryption = crate::encryption::EncryptionService::from_key([73; 32]);
     crate::sync::store::membership::invite_member(
@@ -238,7 +241,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &encryption,
         "causal-membership-proof",
         "Causal Membership Proof",
-        &founder_db,
+        &founder_database,
     )
     .await
     .expect("invite exact Store member");
@@ -264,7 +267,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     .await
     .expect("promote candidate Owner");
     let candidate_membership =
-        crate::sync::pull::load_cycle_membership(&store.storage, &candidate_db)
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &candidate_db)
             .await
             .expect("load candidate Owner membership");
     let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -290,7 +293,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let later_owner = &founder;
 
     let mut earlier_membership =
-        crate::sync::pull::load_cycle_membership(&store.storage, earlier_db)
+        crate::sync::store::pull::load_cycle_membership(&store.storage, earlier_db)
             .await
             .expect("load earlier Owner membership")
             .chain
@@ -306,7 +309,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         "0000000003000-0000-causal-proof",
         &encryption,
         &crate::sync::cloud_storage::PendingRotation::none(),
-        earlier_db,
+        &StoreDatabase::new(earlier_db),
     )
     .await
     .expect("publish traversal-earlier Owner removal control");
@@ -336,9 +339,10 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
-    let later_membership = crate::sync::pull::load_cycle_membership(&store.storage, later_db)
-        .await
-        .expect("load membership containing the concurrent control");
+    let later_membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, later_db)
+            .await
+            .expect("load membership containing the concurrent control");
     let caller_membership = later_membership
         .chain
         .as_ref()
@@ -363,7 +367,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("later Owner device is activated");
     let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(crate::sync::store::preparation::prepare_store_write(
-        later_db,
+        &StoreDatabase::new(later_db),
         &store.storage,
         &later_device_id,
         "2026-07-21T00:02:00Z",
@@ -376,9 +380,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("prepare later concurrent write"));
-    crate::sync::store::publication::drain_store_writes(later_db, &store.storage)
-        .await
-        .expect("publish later concurrent write");
+    crate::sync::store::publication::drain_store_writes(
+        &StoreDatabase::new(later_db),
+        &store.storage,
+    )
+    .await
+    .expect("publish later concurrent write");
     let later_commit = crate::sync::store::database::StoreDatabase::new(later_db)
         .latest_local_store_position()
         .await
@@ -460,14 +467,16 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
     let device_cut = coverage.commits().clone();
-    let (_, device_state) = source
+    let source_database = StoreDatabase::new(&source);
+    let (_, device_state) = source_database
         .store_device_state_for_history_cut(&StoreHistoryCut(device_cut))
         .await
         .expect("load exact device state");
     let target = crate::sync::test_helpers::open_test_db();
+    let target_database = StoreDatabase::new(&target);
 
     let readiness = readiness(
-        &target,
+        &target_database,
         &store.storage,
         &store.root,
         &coverage,

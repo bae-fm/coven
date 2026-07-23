@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_partition_package(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     candidate_family: CandidateFamilyId,
@@ -34,7 +34,7 @@ pub(crate) async fn prepare_partition_package(
                     "Circle partition {circle_id} has no exact control"
                 ))
             })?;
-            let (encryption, _) = db
+            let (encryption, _) = database
                 .circle_publication_context(circle_id, control.coordinate().clone())
                 .await?;
             (
@@ -52,7 +52,7 @@ pub(crate) async fn prepare_partition_package(
     let mut blob_bindings = Vec::with_capacity(blob_facts.len());
     for fact in blob_facts {
         let (binding, blob) = prepare_partition_blob(
-            db,
+            database,
             storage,
             fact,
             remote_audience.clone(),
@@ -104,7 +104,7 @@ pub(crate) async fn prepare_partition_package(
                     "Circle partition {circle_id} has no exact control"
                 ))
             })?;
-            let (encryption, key_fingerprint) = db
+            let (encryption, key_fingerprint) = database
                 .circle_publication_context(circle_id, control.coordinate().clone())
                 .await?;
             let package = super::audience_package::AudiencePackage::circle(
@@ -198,7 +198,7 @@ fn partition_blob_facts<'a>(
 }
 
 pub(crate) async fn prepare_partition_blob(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     fact: &StoreWriteBlobFact,
     audience: crate::blob::locator::RemoteAudience,
@@ -263,8 +263,14 @@ pub(crate) async fn prepare_partition_blob(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 temporary_plaintext = true;
-                materialize_previous_blob(db, storage, fact, store_dir, locator.locator_hash())
-                    .await?
+                materialize_previous_blob(
+                    database,
+                    storage,
+                    fact,
+                    store_dir,
+                    locator.locator_hash(),
+                )
+                .await?
             }
             Err(error) => {
                 return Err(StoreError::InvalidOutbound(format!(
@@ -275,7 +281,8 @@ pub(crate) async fn prepare_partition_blob(
         }
     } else {
         temporary_plaintext = true;
-        materialize_previous_blob(db, storage, fact, store_dir, locator.locator_hash()).await?
+        materialize_previous_blob(database, storage, fact, store_dir, locator.locator_hash())
+            .await?
     };
     if let Err(error) = storage
         .seal_blob_to_spool(&locator, authority, protection, &source_path, &spool_path)
@@ -449,7 +456,7 @@ pub(crate) fn prepare_partition_blob_locator(
 }
 
 async fn materialize_previous_blob(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     fact: &StoreWriteBlobFact,
     store_dir: &StoreDir,
@@ -463,8 +470,8 @@ async fn materialize_previous_blob(
             id: fact.blob.id.clone(),
         })?;
     let authority = crate::blob::RowBlobAuthority::Remote(previous.authority.clone());
-    let protection = crate::blob::cache::opening_protection_for_authority(
-        db,
+    let protection = crate::sync::store::blob::opening_protection(
+        database,
         storage,
         &authority,
         &previous.stored,

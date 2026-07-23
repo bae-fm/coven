@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::Database;
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::membership::StoreMembershipRoleGrant;
 use crate::sync::store::database::StoreDatabase;
@@ -901,7 +900,7 @@ impl OwnerPromotionJournalPredecessor {
 }
 
 pub(super) async fn advance_owner_promotion_journal(
-    db: &Database,
+    database: &StoreDatabase,
     previous: OwnerPromotionJournalPredecessor,
     next: OwnerPromotionJournal,
 ) -> Result<(OwnerPromotionJournalPredecessor, OwnerPromotionJournalState), OwnerPromotionError> {
@@ -919,7 +918,7 @@ pub(super) async fn advance_owner_promotion_journal(
     };
     let transition = previous.transition_to(&next, remote_objects)?;
     let (successor, state) = next.into_predecessor()?;
-    StoreDatabase::new(db)
+    database
         .advance_owner_promotion_journal(transition)
         .await
         .map_err(|error| {

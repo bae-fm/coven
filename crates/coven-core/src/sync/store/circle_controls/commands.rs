@@ -2,7 +2,6 @@ use super::{
     prepare_circle_operation, prepare_circle_operation_request, publish_circle_operation,
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
-use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{CircleId, CircleOperationState};
 use crate::sync::storage::SyncStorage;
@@ -10,16 +9,16 @@ use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::CircleControlRef;
 
 pub(crate) async fn create_circle(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     metadata_stamp: &str,
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleId, CircleOperationError> {
-    crate::sync::store::ensure_active_registration(db, storage).await?;
+    crate::sync::store::ensure_active_registration(database, storage).await?;
     let journal = Box::pin(prepare_circle_operation(
-        db,
+        database,
         storage,
         device_id,
         metadata_stamp,
@@ -29,15 +28,19 @@ pub(crate) async fn create_circle(
     .await?;
     let circle_id = journal.circle_id();
     let operation_id = journal.operation_id.clone();
-    StoreDatabase::new(db)
-        .insert_circle_operation(journal)
-        .await?;
-    Box::pin(publish_circle_operation(db, storage, &operation_id, signer)).await?;
+    database.insert_circle_operation(journal).await?;
+    Box::pin(publish_circle_operation(
+        database,
+        storage,
+        &operation_id,
+        signer,
+    ))
+    .await?;
     Ok(circle_id)
 }
 
 pub(crate) async fn rename_circle(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     metadata_stamp: &str,
@@ -45,9 +48,10 @@ pub(crate) async fn rename_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::ensure_active_registration(db, storage).await?;
+    let db = database.sqlite();
+    crate::sync::store::ensure_active_registration(database, storage).await?;
     let identity_pubkey = keys::public_key_hex(signer);
-    let (current, activation_commit_ref) = db
+    let (current, activation_commit_ref) = database
         .circle_authoring_context(circle_id, &identity_pubkey)
         .await?;
     let root = db
@@ -74,7 +78,7 @@ pub(crate) async fn rename_circle(
             ))
         })?;
     let journal = Box::pin(prepare_circle_operation_request(
-        db,
+        database,
         storage,
         device_id,
         metadata_stamp,
@@ -93,10 +97,14 @@ pub(crate) async fn rename_circle(
         ));
     }
     let operation_id = journal.operation_id.clone();
-    StoreDatabase::new(db)
-        .insert_circle_operation(journal)
-        .await?;
-    Box::pin(publish_circle_operation(db, storage, &operation_id, signer)).await
+    database.insert_circle_operation(journal).await?;
+    Box::pin(publish_circle_operation(
+        database,
+        storage,
+        &operation_id,
+        signer,
+    ))
+    .await
 }
 
 pub(super) struct CircleRenameRequest {
@@ -139,14 +147,11 @@ impl CircleOperationRequest {
 }
 
 pub(crate) async fn resume_circle_operations(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    while let Some(journal) = StoreDatabase::new(db)
-        .oldest_pending_circle_operation()
-        .await?
-    {
+    while let Some(journal) = database.oldest_pending_circle_operation().await? {
         if !matches!(journal.state(), CircleOperationState::Pending) {
             return Err(CircleOperationError::Journal(format!(
                 "pending circle operation {} contains a blocked payload",
@@ -154,7 +159,7 @@ pub(crate) async fn resume_circle_operations(
             )));
         }
         match Box::pin(publish_circle_operation(
-            db,
+            database,
             storage,
             &journal.operation_id,
             identity,

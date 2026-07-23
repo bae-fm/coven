@@ -14,29 +14,31 @@ use super::operations::{
 };
 
 pub(crate) async fn drain_store_writes(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreError> {
+    let db = database.sqlite();
     let mut published = 0_u64;
-    while let Some(batch) = StoreDatabase::new(db).oldest_prepared_store_write().await? {
+    while let Some(batch) = database.oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();
-        crate::sync::store::database::StoreDatabase::new(db)
+        database
             .set_write_status(&write_id, crate::WriteStatus::Publishing)
             .await?;
         let attempt = async {
             Box::pin(reject_excluded_merge_candidate(
-                db,
+                database,
                 &batch.head.value.commit,
                 &batch.commit.value.author_registration,
             ))
             .await?;
-            let store_root_hash = required_store_root(db).await?.store_root_hash;
+            let store_root_hash = required_store_root(database).await?.store_root_hash;
             let commit = &batch.commit.value;
             if !matches!(
                 commit.body,
                 crate::sync::store_commit::StoreCommitBody::AbandonCandidates { .. }
             ) {
-                publish_prepared_remote_objects(db, storage, &write_id, store_root_hash).await?;
+                publish_prepared_remote_objects(database, storage, &write_id, store_root_hash)
+                    .await?;
             }
             let head = &batch.head.value;
             let stream_id = head.commit.coord.stream_id.to_string();
@@ -63,7 +65,7 @@ pub(crate) async fn drain_store_writes(
                     "prepared commit exact readback differs from its signed bytes".to_string(),
                 ));
             }
-            crate::sync::store::database::StoreDatabase::new(db)
+            database
                 .mark_candidate_commit_uploaded(head.commit.clone())
                 .await?;
             #[cfg(any(test, feature = "test-utils"))]
@@ -74,7 +76,7 @@ pub(crate) async fn drain_store_writes(
             )
             .await;
             Box::pin(reject_excluded_merge_candidate(
-                db,
+                database,
                 &head.commit,
                 &commit.author_registration,
             ))
@@ -88,7 +90,7 @@ pub(crate) async fn drain_store_writes(
                     return Err(StoreObjectError::from(error).into());
                 }
                 let observation = read_occupied_merge_head(
-                    db,
+                    database,
                     storage,
                     store_root_hash,
                     head,
@@ -98,7 +100,7 @@ pub(crate) async fn drain_store_writes(
                 )
                 .await?;
                 if observation.winner().commit == head.commit {
-                    let registration = db
+                    let registration = database
                         .activated_store_device_registration(head.author_registration.clone())
                         .await?;
                     let nonactivations = verify_merge_candidate_nonactivations(
@@ -110,7 +112,7 @@ pub(crate) async fn drain_store_writes(
                         &registration,
                     )?;
                     let (winner, winner_prepared) = observation.into_head();
-                    crate::sync::store::database::StoreDatabase::new(db)
+                    database
                         .adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
                         .await?;
                     #[cfg(any(test, feature = "test-utils"))]
@@ -120,7 +122,7 @@ pub(crate) async fn drain_store_writes(
                         },
                     )
                     .await;
-                    match StoreDatabase::new(db)
+                    match database
                         .complete_prepared_store_write(head.commit.clone(), nonactivations)
                         .await?
                     {
@@ -131,7 +133,7 @@ pub(crate) async fn drain_store_writes(
                     }
                     return Ok::<bool, StoreError>(true);
                 }
-                let registration = db
+                let registration = database
                     .activated_store_device_registration(head.author_registration.clone())
                     .await?;
                 let nonactivations = verify_merge_candidate_nonactivations(
@@ -149,13 +151,13 @@ pub(crate) async fn drain_store_writes(
                     ),
                     &registration,
                 )?;
-                StoreDatabase::new(db)
+                database
                     .mark_merge_candidate_conflict(write_id.clone(), nonactivations)
                     .await?;
                 return Ok::<bool, StoreError>(false);
             }
             let observation = read_occupied_merge_head(
-                db,
+                database,
                 storage,
                 store_root_hash,
                 head,
@@ -171,7 +173,7 @@ pub(crate) async fn drain_store_writes(
                     "prepared head exact readback differs from its signed bytes".to_string(),
                 ));
             }
-            let registration = db
+            let registration = database
                 .activated_store_device_registration(head.author_registration.clone())
                 .await?;
             let nonactivations = verify_merge_candidate_nonactivations(
@@ -182,7 +184,7 @@ pub(crate) async fn drain_store_writes(
                     .map(|manifest| manifest.candidate.clone()),
                 &registration,
             )?;
-            crate::sync::store::database::StoreDatabase::new(db)
+            database
                 .mark_store_head_uploaded(StoreDeviceHeadRef {
                     head_hash: head.head_hash(),
                     object: batch.head.object.clone(),
@@ -193,7 +195,7 @@ pub(crate) async fn drain_store_writes(
                 write_id: write_id.clone(),
             })
             .await;
-            match StoreDatabase::new(db)
+            match database
                 .complete_prepared_store_write(head.commit.clone(), nonactivations)
                 .await?
             {
@@ -210,9 +212,7 @@ pub(crate) async fn drain_store_writes(
             Ok(true) => {}
             Err(error) => {
                 if let Some(block) = blocked_status(&error) {
-                    crate::sync::store::database::StoreDatabase::new(db)
-                        .block_write_if_unresolved(&write_id, block)
-                        .await?;
+                    database.block_write_if_unresolved(&write_id, block).await?;
                 }
                 return Err(error);
             }

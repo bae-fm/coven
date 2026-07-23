@@ -26,6 +26,7 @@ use crate::sync::provider::{
 use crate::sync::storage::{
     ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding, SyncStorage,
 };
+use crate::sync::store::StoreDatabase;
 use crate::sync::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,

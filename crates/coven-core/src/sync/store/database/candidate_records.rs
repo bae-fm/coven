@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::publication_state::PreparedStoreWriteState;
-
+use super::store_device_state::store_device_state_for_history_cut_on;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedMergeCandidate {
@@ -146,12 +146,12 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
             "candidate stream differs from its exact author registration".to_string(),
         ));
     }
-    let frontier = Database::materialized_frontier_on(conn, None)?
-        .into_values()
-        .map(|reference| (reference.coord.stream_id, reference))
-        .collect::<BTreeMap<_, _>>();
-    let (_, state) =
-        crate::database::store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
+    let frontier =
+        crate::sync::store::database::StoreDatabase::materialized_frontier_on(conn, None)?
+            .into_values()
+            .map(|reference| (reference.coord.stream_id, reference))
+            .collect::<BTreeMap<_, _>>();
+    let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
     let Some(record) = state.devices.get(&author.device_id) else {
         return Err(DbError::Message(
             "candidate author is absent from the current device state".to_string(),
@@ -236,7 +236,10 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
         activation_head,
     );
     let retained =
-        Database::load_retained_merge_materialization_by_ref_on(conn, locator.activation_commit())?;
+        crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            conn,
+            locator.activation_commit(),
+        )?;
     let accepted_cut = StoreHistoryCut(locator.accepted_cut().clone());
     if retained.activation_head_object() != &locator.activation_head().object
         || retained.activation_head().head_hash() != locator.activation_head().head_hash
@@ -346,7 +349,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
                 stream_id,
                 sequence,
             } = &activation_commit.coord;
-            if Database::materialized_commit_ref_on(
+            if crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(
                 conn,
                 &stream_id.to_string(),
                 *sequence,

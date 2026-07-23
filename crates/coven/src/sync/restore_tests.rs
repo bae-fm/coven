@@ -39,8 +39,8 @@ use crate::sync::restore_code::{
     RestoreCode, RestoreCodeError,
 };
 use crate::sync::session::BlobDecl;
-use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::test_helpers::{
     host_exec, open_test_db, open_test_db_with_blob, pubkey_hex, publish_store_ack_fixture,
     temp_store_dir, test_migrations, test_synced_tables, test_synced_tables_with_blob,
@@ -1315,7 +1315,7 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
     // CloudKit home onto the same records.
     let app = Arc::new(tempfile::tempdir().expect("restore app dir"));
     let joiner_keypair = owner_keypair.clone();
-    let continuation = db_owner
+    let continuation = crate::sync::store::StoreDatabase::from_database(db_owner.clone())
         .export_activated_device_continuation(&joiner_keypair)
         .await
         .expect("export exact activated continuation");
@@ -1563,15 +1563,16 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         &encryption,
         "test-lib",
         "Test Store",
-        &db_owner,
+        &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     )
     .await
     .expect("add member");
-    let pre_removal_chain = crate::sync::pull::load_cycle_membership(&storage.storage, &db_owner)
-        .await
-        .expect("load pre-removal membership")
-        .chain
-        .expect("pre-removal membership chain");
+    let pre_removal_chain =
+        crate::sync::store::pull::load_cycle_membership(&storage.storage, &db_owner)
+            .await
+            .expect("load pre-removal membership")
+            .chain
+            .expect("pre-removal membership chain");
     let pre_removal_heads = pre_removal_chain.head_refs().to_vec();
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
@@ -1586,11 +1587,11 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         &custody,
         &live_cipher,
         &PendingRotation::none(),
-        &db_owner,
+        &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     )
     .await
     .expect("remove member");
-    let chain = crate::sync::pull::load_cycle_membership(&storage.storage, &db_owner)
+    let chain = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db_owner)
         .await
         .expect("load post-removal membership")
         .chain
@@ -1716,7 +1717,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     ))
     .await
     .expect("publish owner row and blob");
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         components.storage().as_ref(),
         &db_owner,
     ))
@@ -1754,7 +1755,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
-    let continuation = db_owner
+    let continuation = crate::sync::store::StoreDatabase::from_database(db_owner.clone())
         .export_activated_device_continuation(&joiner_keypair)
         .await
         .expect("export exact activated continuation");

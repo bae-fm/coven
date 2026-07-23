@@ -4,7 +4,6 @@ use super::{
     read_exact_circle_object, resolve_circle_stream_authority, verify_circle_head_chain,
     CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::sync::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleRosterHeadRef,
@@ -13,13 +12,14 @@ use crate::sync::circle::{
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreRootRef, StreamActivationId,
 };
 
 pub(super) async fn load_circle_roster_state(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -53,7 +53,7 @@ pub(super) async fn load_circle_roster_state(
         ));
     }
     let loaded_heads = load_exact_circle_roster_heads(
-        db,
+        database,
         verified_prefix,
         storage,
         root,
@@ -103,7 +103,7 @@ pub(super) async fn load_circle_roster_state(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
     } else {
         replay_circle_roster_resolutions(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -241,7 +241,7 @@ async fn load_circle_roster_resolutions(
 }
 
 async fn load_exact_circle_roster_heads(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -277,7 +277,7 @@ async fn load_exact_circle_roster_heads(
             })?;
         let declared_ref = CircleRosterHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -348,7 +348,7 @@ async fn load_exact_circle_roster_heads(
 }
 
 async fn replay_circle_roster_resolutions(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -407,7 +407,7 @@ async fn replay_circle_roster_resolutions(
             ));
         }
         let heads = load_exact_circle_roster_heads(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -649,7 +649,7 @@ async fn replay_circle_roster_resolutions(
 }
 
 pub(super) async fn load_circle_authority_roster(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -671,7 +671,7 @@ pub(super) async fn load_circle_authority_roster(
         }
     };
     load_circle_roster_state(
-        db,
+        database,
         verified_prefix,
         storage,
         root,

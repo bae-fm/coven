@@ -1,18 +1,18 @@
 use super::*;
 
 pub(crate) async fn publish_prepared_store_operation(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     prepared: Box<PreparedStoreOperationCommit>,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
     Box::pin(publish_prepared_store_operation_with_membership_completion(
-        db, storage, prepared, None, None,
+        database, storage, prepared, None, None,
     ))
     .await
 }
 
 pub(crate) fn publish_prepared_store_membership_operation<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     prepared: Box<PreparedStoreOperationCommit>,
     membership_objects: crate::database::VerifiedMergeMembershipObjects,
@@ -20,7 +20,7 @@ pub(crate) fn publish_prepared_store_membership_operation<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
 {
     Box::pin(publish_prepared_store_operation_with_membership_completion(
-        db,
+        database,
         storage,
         prepared,
         Some(membership_objects),
@@ -29,14 +29,14 @@ pub(crate) fn publish_prepared_store_membership_operation<'a>(
 }
 
 async fn publish_prepared_store_operation_with_membership_completion(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     prepared: Box<PreparedStoreOperationCommit>,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
     publish_prepared(
-        db,
+        database,
         storage,
         prepared,
         membership_objects,
@@ -111,7 +111,7 @@ impl StoreMembershipJournalCompletion {
                 intent_hash,
                 progress_bytes,
                 remote_objects,
-            } => Database::record_activated_membership_candidate_mutation_on(
+            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
                 tx,
                 intent_hash,
                 candidate,
@@ -127,7 +127,7 @@ impl StoreMembershipJournalCompletion {
                 progress_bytes,
                 generation,
                 remote_objects,
-            } => Database::record_activated_membership_candidate_mutation_on(
+            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
                 tx,
                 intent_hash,
                 candidate,
@@ -226,13 +226,13 @@ pub(crate) fn retained_store_operation_objects(
 }
 
 pub(crate) async fn activate_store_operation_commit(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreError> {
-    let prepared = prepare_candidate(db, storage, plan, batch).await?;
-    match publish_prepared_store_operation(db, storage, Box::new(prepared)).await? {
+    let prepared = prepare_candidate(database, storage, plan, batch).await?;
+    match publish_prepared_store_operation(database, storage, Box::new(prepared)).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {
             Err(StoreError::InvalidOutbound(format!(

@@ -1,23 +1,38 @@
-use crate::database::store_device_state::load_store_device_exclusion_freezes_on;
-use crate::database::store_device_state::load_store_device_snapshot_on;
-use crate::database::store_device_state::replace_store_device_exclusion_freezes_on;
-use crate::database::store_device_state::store_device_state_for_history_cut_on;
+use crate::blob::locator::{RemoteAudience, StoredBlobRef};
+use crate::database::*;
+use crate::sync::audience_package::AudiencePackage;
+use crate::sync::membership::{AuthorHead, MembershipEntry};
+use crate::sync::remote_object::{
+    remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
+};
+use crate::sync::storage::PreparedExactObject;
+use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
+use crate::sync::store::retained_replay::{RetainedReplayAuthority, RetainedReplayBaseline};
+use crate::sync::store_commit::{
+    CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
+    StoreDeviceRegistrationRef, StoreHistoryCut,
+};
+use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+use rusqlite::{Connection, OptionalExtension};
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::database::blob_records::load_activated_registration_on;
-use crate::database::local_store_identity::local_activated_registration_ref_on;
-use crate::database::remote_object_records::candidate_graph_exact_objects;
-use crate::database::remote_object_records::finish_remote_candidate_nonactivation_on;
-use crate::database::remote_object_records::index_retained_replay_owner_on;
-use crate::database::remote_object_records::load_remote_object_on;
-use crate::database::remote_object_records::update_remote_object_on;
-
+use super::candidate_records::PreparedMergeCandidate;
+use super::materialization_models::{
+    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedCommitActivationInput,
+    RetainedMergeMaterializationInput,
+};
+use super::store_device_state::{
+    load_store_device_exclusion_freezes_on, load_store_device_snapshot_on,
+    replace_store_device_exclusion_freezes_on, store_device_state_for_history_cut_on,
+};
 use super::*;
 use crate::sync::store::database::candidate_records::{
     author_exclusion_activation_for_candidate_on, load_author_exclusion_activation_locator_on,
     parse_prepared_merge_candidate_parts_on, validate_terminal_nonactivation_authority_on,
 };
 
-impl Database {
+impl StoreDatabase {
     fn canonical_retained_merge_packages(
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -62,7 +77,7 @@ impl Database {
         Ok(ordered)
     }
 
-    pub(super) fn retained_audience_package(
+    pub(crate) fn retained_audience_package(
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         package: AudiencePackage,
@@ -299,7 +314,7 @@ impl Database {
             sequence,
         } = &commit.coord;
         let stream_id = stream_id.to_string();
-        let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let commit_ref = serde_json::to_string(commit).map_err(|error| {
             DbError::Message(format!("serialize retained replay commit ref: {error}"))
         })?;
@@ -393,7 +408,7 @@ impl Database {
                 sequence,
             } = &reference.coord;
             let stream_id = stream_id.to_string();
-            let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
             let (stored_ref, input_hash, canonical_input): (String, String, Vec<u8>) = conn
                 .query_row(
                     "SELECT commit_ref, input_hash, canonical_input
@@ -426,7 +441,7 @@ impl Database {
                 sequence,
             } = &reference.coord;
             let stream_id = stream_id.to_string();
-            let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
             let encoded_ref = serde_json::to_string(&reference).map_err(|error| {
                 DbError::Message(format!(
                     "serialize snapshot author exclusion activation: {error}"
@@ -849,7 +864,7 @@ impl Database {
             sequence,
         } = &materialization.commit_ref().coord;
         let stream_id = stream_id.to_string();
-        let sequence = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let commit_ref_json =
             serde_json::to_string(materialization.commit_ref()).map_err(|error| {
                 DbError::Message(format!("serialize retained Merge commit ref: {error}"))
@@ -911,7 +926,7 @@ impl Database {
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let sequence_sql = Self::sequence_to_sqlite(stream_id, sequence)?;
+        let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
         let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
             .query_row(
                 "SELECT commit_ref, input_hash, canonical_input
@@ -976,7 +991,7 @@ impl Database {
             sequence,
         } = &reference.coord;
         let stream_id = stream_id.to_string();
-        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let (stored_ref, input_hash): (String, String) = conn
             .query_row(
                 "SELECT commit_ref, input_hash FROM retained_merge_materializations
@@ -1009,7 +1024,7 @@ impl Database {
             sequence,
         } = &reference.coord;
         let stream = stream_id.to_string();
-        let sequence_sql = Self::sequence_to_sqlite(&stream, *sequence)?;
+        let sequence_sql = Database::sequence_to_sqlite(&stream, *sequence)?;
         let snapshot_reference: Option<String> = conn
             .query_row(
                 "SELECT commit_ref FROM snapshot_coverage WHERE device_id = ?1 AND seq = ?2",
@@ -1143,7 +1158,7 @@ impl Database {
         drop(statement);
         rows.into_iter()
             .map(|(stream_id, sequence, encoded_ref, input_hash)| {
-                let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
+                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
                 let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
                 Self::load_retained_merge_materialization_on(
                     conn,
@@ -1232,8 +1247,11 @@ impl Database {
                     "retained replay write {encoded_write_id} status: {error}"
                 ))
             })?;
-            let partitions =
-                Self::store_write_partitions_on(conn, &encoded_write_id, &stored_store_changeset)?;
+            let partitions = StoreDatabase::store_write_partitions_on(
+                conn,
+                &encoded_write_id,
+                &stored_store_changeset,
+            )?;
             let active = active_accepted_writes.contains(&write_id);
             let retracted = retracted_writes.contains(&write_id);
             let partitions = match status {
@@ -1321,7 +1339,7 @@ impl Database {
             sequence,
         } = &candidate.coord;
         let stream_id = stream_id.to_string();
-        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let encoded_ref = serde_json::to_string(candidate).map_err(|error| {
             DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
         })?;
@@ -1351,14 +1369,12 @@ impl Database {
                 "Merge retraction cleanup is not canonical".to_string(),
             ));
         }
-        let commit = DurablePreparedProtocolObject {
-            semantic_bytes: input.commit.stored_bytes().to_vec(),
-            prepared: input.commit,
-        };
-        let head = DurablePreparedProtocolObject {
-            semantic_bytes: input.activation_head.stored_bytes().to_vec(),
-            prepared: input.activation_head,
-        };
+        let commit =
+            DurablePreparedProtocolObject::new(input.commit.stored_bytes().to_vec(), input.commit);
+        let head = DurablePreparedProtocolObject::new(
+            input.activation_head.stored_bytes().to_vec(),
+            input.activation_head,
+        );
         let prepared = parse_prepared_merge_candidate_parts_on(conn, &commit, &head)?;
         if &prepared.reference != candidate {
             return Err(DbError::Message(
@@ -1393,7 +1409,7 @@ impl Database {
         })?;
         let cleanup_hash = ObjectHash::digest(&canonical_cleanup);
         let stream_id = stream_id.to_string();
-        let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+        let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let encoded_ref = serde_json::to_string(&retained.commit_ref()).map_err(|error| {
             DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
         })?;
@@ -1544,7 +1560,7 @@ impl Database {
                 sequence,
             } = &candidate.coord;
             let stream_id = stream_id.to_string();
-            let sequence_sql = Self::sequence_to_sqlite(&stream_id, *sequence)?;
+            let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
             let encoded_ref = serde_json::to_string(&candidate).map_err(|error| {
                 DbError::Message(format!("serialize retracted Merge commit: {error}"))
             })?;
@@ -1737,10 +1753,65 @@ impl Database {
                     [retained.commit().write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-                Self::set_write_status_on(conn, &retained.commit().write_id, &status)?;
+                Database::set_write_status_on(conn, &retained.commit().write_id, &status)?;
                 notifications.push((retained.commit().write_id.clone(), status));
             }
         }
         Ok(notifications)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_object(path: &str) -> crate::sync::storage::ExactObjectRef {
+        crate::sync::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(path.to_string())
+                .expect("valid test object slot"),
+            0,
+            ObjectHash::digest(path.as_bytes()),
+        )
+    }
+
+    #[test]
+    fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
+        let stream = crate::sync::causal_grants::AuthorStreamId::from_bytes([19; 32]);
+        let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
+            coord: StoreCommitCoord {
+                stream_id: stream,
+                sequence,
+            },
+            commit_hash: ObjectHash::digest(format!("{label} commit").as_bytes()),
+            object: test_object(&format!("store-v1/test/{label}/commit.json")),
+        };
+        let root = commit(1, "retraction-root");
+        let child = commit(2, "retraction-child");
+        let grandchild = commit(3, "retraction-grandchild");
+        let independent = commit(4, "retraction-independent");
+        let graph = BTreeMap::from([
+            (root.clone(), BTreeSet::new()),
+            (child.clone(), BTreeSet::from([root.clone()])),
+            (grandchild.clone(), BTreeSet::from([child.clone()])),
+            (independent.clone(), BTreeSet::new()),
+        ]);
+
+        let required = StoreDatabase::complete_merge_retraction_closure(
+            &graph,
+            BTreeSet::from([root.clone()]),
+        );
+
+        assert_eq!(
+            required,
+            BTreeSet::from([root.clone(), child.clone(), grandchild]),
+        );
+        assert_ne!(required, BTreeSet::from([root.clone(), child.clone()]));
+        assert!(!required.contains(&independent));
+        assert!(StoreDatabase::require_exact_merge_retraction_closure(
+            &graph,
+            BTreeSet::from([root.clone()]),
+            &BTreeSet::from([root, child]),
+        )
+        .is_err());
     }
 }

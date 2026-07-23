@@ -69,7 +69,7 @@ async fn retained_merge_device_state(
 }
 
 pub(crate) async fn retained_merge_device_state_for_order(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
@@ -78,7 +78,7 @@ pub(crate) async fn retained_merge_device_state_for_order(
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
         .0;
-    let checkpoints = db
+    let checkpoints = database
         .retained_merge_history_frontier(frontier.values().cloned().collect())
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -96,7 +96,7 @@ pub(crate) async fn retained_merge_device_state_for_order(
 }
 
 pub(crate) async fn load_merge_conflict_resolution_authorization(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
@@ -108,7 +108,7 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
         .0;
-    let checkpoints = db
+    let checkpoints = database
         .retained_merge_history_frontier(frontier.values().cloned().collect())
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -159,7 +159,7 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
 }
 
 pub(crate) async fn load_retained_merge_outbound_authorization(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
@@ -170,7 +170,7 @@ pub(crate) async fn load_retained_merge_outbound_authorization(
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
         .0;
-    let checkpoints = db
+    let checkpoints = database
         .retained_merge_history_frontier(frontier.values().cloned().collect())
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;

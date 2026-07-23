@@ -7,7 +7,7 @@ use crate::sync::remote_object::RemoteObjectRecord;
 
 use super::StoreDatabase;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(in crate::sync::store) async fn load_owner_promotion_journal(
         &self,
         promotion_id: crate::sync::store_commit::OwnerPromotionId,

@@ -303,19 +303,17 @@ impl StoreOperationCommitPlan {
 }
 
 pub(crate) async fn prepare_merge_conflict_resolution_commit(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     keypair: &UserKeypair,
     candidate_membership_heads: &[super::membership::MembershipHeadRef],
 ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
-        load_local_store_authority(db, device_id, keypair).await?;
-    let previous = crate::sync::store::database::StoreDatabase::new(db)
-        .latest_local_store_position()
-        .await?;
+        load_local_store_authority(database, device_id, keypair).await?;
+    let previous = database.latest_local_store_position().await?;
     let dependencies =
-        super::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
+        super::store_commit::CommitFrontier::from_refs(database.materialized_frontier().await?)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
@@ -332,7 +330,7 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         dependencies: dependencies.0,
     };
     let authorization = crate::sync::store::pull::load_merge_conflict_resolution_authorization(
-        db,
+        database,
         storage,
         &root,
         &order,

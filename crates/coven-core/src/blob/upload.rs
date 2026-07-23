@@ -193,15 +193,16 @@ impl std::error::Error for UploadFailures {
 /// exact-deletes each created object and its spool before removing the journal;
 /// restarting during cleanup resets that exact journal to Pending.
 pub async fn drain_uploads(
-    db: &Database,
+    database: &crate::sync::store::StoreDatabase,
     storage: &dyn crate::sync::storage::SyncStorage,
+    authority: crate::sync::storage::BlobWriteAuthority<'_>,
     store_dir: &StoreDir,
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
     routing_encryption: Option<&EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
-    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption)?;
+    let db = database.sqlite();
     let uploads = db.get_pending_cloud_uploads().await?;
 
     let now = clock.now();
@@ -215,10 +216,6 @@ pub async fn drain_uploads(
             failures: UploadFailures::default(),
         });
     }
-    let (registration_ref, registration) = db.local_blob_write_authority().await?;
-    let authority = crate::sync::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-        .map_err(|error| DbError::Message(error.to_string()))?;
-
     // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
     // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
     // one, await it fully, then the next — same order-observable effects and error
@@ -251,7 +248,7 @@ pub async fn drain_uploads(
                 break;
             };
             inflight.push(upload_entry(
-                db,
+                database,
                 storage,
                 authority,
                 store_dir,
@@ -340,7 +337,7 @@ fn next_ready_entry(
 
 #[allow(clippy::too_many_arguments)]
 async fn upload_entry(
-    db: &Database,
+    database: &crate::sync::store::StoreDatabase,
     storage: &dyn crate::sync::storage::SyncStorage,
     authority: crate::sync::storage::BlobWriteAuthority<'_>,
     store_dir: &StoreDir,
@@ -350,6 +347,7 @@ async fn upload_entry(
     observer: Option<&dyn BlobTransitionObserver>,
     mut entry: OutboxEntry,
 ) -> EntryOutcome {
+    let db = database.sqlite();
     let OutboxOperation::Upload {
         root_table,
         root_id,
@@ -593,8 +591,13 @@ async fn upload_entry(
     }
 
     let stamp = hlc.now().to_string();
-    match crate::blob::transition::finalize_created_upload(db, &entry, stamp, routing_encryption)
-        .await
+    match crate::blob::transition::finalize_created_upload(
+        database,
+        &entry,
+        stamp,
+        routing_encryption,
+    )
+    .await
     {
         Ok(crate::blob::transition::PostUpload::Waiting) => EntryOutcome::Uploaded {
             made_remote: false,

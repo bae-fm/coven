@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
 use crate::database::Database;
 use crate::keys::UserKeypair;
 
@@ -42,7 +43,7 @@ impl super::AuthorizedStore<'_> {
     pub(crate) async fn ensure_active_registration(
         &self,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
-        ensure_active_registration(self.db(), self.storage())
+        ensure_active_registration(self.database(), self.storage())
             .await
             .map_err(|error| {
                 crate::sync::cycle::SyncCycleFailure::operation(
@@ -54,17 +55,18 @@ impl super::AuthorizedStore<'_> {
 }
 
 pub(crate) async fn ensure_active_registration(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<(), StoreRegistrationError> {
-    drain_registration_outbox(db, storage).await?;
-    match db
+    let db = database.sqlite();
+    drain_registration_outbox(database, storage).await?;
+    match database
         .latest_local_store_device_registration()
         .await
         .map_err(database_error)?
     {
         Some(registration) if registration.is_activated() => {
-            require_activated_registration(db, storage, &registration).await?;
+            require_activated_registration(database, storage, &registration).await?;
             return Ok(());
         }
         Some(_) => return Err(StoreRegistrationError::ActivationRequired),
@@ -79,11 +81,12 @@ pub(crate) async fn ensure_active_registration(
 }
 
 pub(crate) async fn install_existing_founder_device(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &crate::sync::store_commit::StoreRootRef,
     signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
+    let db = database.sqlite();
     let founder = crate::sync::store_objects::load_founder_registration(storage, root).await?;
     if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
         return Err(StoreRegistrationError::Invalid(
@@ -522,7 +525,7 @@ async fn prepare_or_load_owner_recovery_node(
 
 #[allow(clippy::too_many_arguments)]
 async fn install_activated_owner_recovery(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &crate::sync::store_commit::StoreRootRef,
     origin: &StoreDeviceRegistrationOrigin,
@@ -534,7 +537,8 @@ async fn install_activated_owner_recovery(
     sequence: u64,
     predecessor: &Option<OwnerRecoveryNodeRef>,
 ) -> Result<Option<StoreDeviceRegistrationRef>, StoreRegistrationError> {
-    let Some((registration_ref, registration, activation)) = db
+    let db = database.sqlite();
+    let Some((registration_ref, registration, activation)) = database
         .activated_store_device_registration_for_device(device_id)
         .await
         .map_err(database_error)?
@@ -666,12 +670,13 @@ async fn install_activated_owner_recovery(
 }
 
 pub async fn recover_owner_device(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     authority: &crate::sync::restore_code::OwnerRecoveryAuthority,
     membership: &MembershipChain,
 ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
+    let db = database.sqlite();
     let root = db
         .local_store_root_ref()
         .await
@@ -748,7 +753,7 @@ pub async fn recover_owner_device(
     };
     let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root, &origin);
     if let Some(registration) = install_activated_owner_recovery(
-        db,
+        database,
         storage,
         &root,
         &origin,
@@ -768,7 +773,7 @@ pub async fn recover_owner_device(
         crate::sync::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
     };
     let commit_context = context(ProtocolObjectDomain::StoreCommit);
-    let staged = db
+    let staged = database
         .latest_local_store_device_registration()
         .await
         .map_err(database_error)?
@@ -909,7 +914,7 @@ pub async fn recover_owner_device(
                 &registration_prefix,
             )
             .await?;
-        let dependencies = db
+        let dependencies = database
             .materialized_frontier()
             .await
             .map_err(database_error)?
@@ -929,7 +934,7 @@ pub async fn recover_owner_device(
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let bootstrap_cut = StoreHistoryCut(dependencies);
-        let (device_state, _) = db
+        let (device_state, _) = database
             .store_device_state_for_history_cut(&bootstrap_cut)
             .await
             .map_err(database_error)?;
@@ -1071,7 +1076,7 @@ pub async fn recover_owner_device(
         predecessor: None,
         dependencies,
     };
-    let (device_state, predecessor_state) = db
+    let (device_state, predecessor_state) = database
         .store_device_state_for_order(&order)
         .await
         .map_err(database_error)?;
@@ -1143,7 +1148,7 @@ pub async fn recover_owner_device(
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let history = crate::sync::store::pull::prepare_merge_history_successor(
-        db,
+        database,
         &root,
         &commit,
         &commit_ref,
@@ -1209,7 +1214,7 @@ pub async fn recover_owner_device(
         .create_protocol_object(&head_prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    StoreDatabase::new(db)
+    database
         .complete_owner_recovery(
             commit,
             commit_ref,
@@ -1225,7 +1230,7 @@ pub async fn recover_owner_device(
 }
 
 pub(crate) async fn bootstrap_pending_device(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
@@ -1235,6 +1240,7 @@ pub(crate) async fn bootstrap_pending_device(
     owner: &StoreDeviceRegistration,
     published_at: &str,
 ) -> Result<DeviceReadinessProof, StoreRegistrationError> {
+    let db = database.sqlite();
     if verified_attempt.semantic_hash != attempt_ref.attempt_hash
         || verified_attempt.object != attempt_ref.object
     {
@@ -1244,16 +1250,15 @@ pub(crate) async fn bootstrap_pending_device(
     }
     let attempt = verified_attempt.value;
     let activation_stream = attempt_activation.coord.stream_id.to_string();
-    Box::pin(
-        StoreDatabase::new(db)
-            .install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan),
+    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
+        .await
+        .map_err(database_error)?;
+    if Box::pin(
+        database.exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()),
     )
     .await
-    .map_err(database_error)?;
-    if Box::pin(db.exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()))
-        .await
-        .map_err(database_error)?
-        .as_ref()
+    .map_err(database_error)?
+    .as_ref()
         != Some(&attempt_activation)
     {
         return Err(StoreRegistrationError::ActivationRequired);
@@ -1302,7 +1307,7 @@ pub(crate) async fn bootstrap_pending_device(
             "joiner identity differs from the signed device registration request".to_string(),
         ));
     }
-    let existing = Box::pin(db.latest_local_store_device_registration())
+    let existing = Box::pin(database.latest_local_store_device_registration())
         .await
         .map_err(database_error)?;
     if let Some(existing) = existing.as_ref() {
@@ -1347,7 +1352,7 @@ pub(crate) async fn bootstrap_pending_device(
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let (device_state, _) =
-            Box::pin(db.store_device_state_for_history_cut(&attempt.bootstrap_cut))
+            Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
                 .await
                 .map_err(database_error)?;
         let initial_ack = StoreAck::signed(
@@ -1404,8 +1409,8 @@ pub(crate) async fn bootstrap_pending_device(
         .await
         .map_err(database_error)?;
     }
-    Box::pin(drain_registration_outbox(db, storage)).await?;
-    let durable = Box::pin(db.latest_local_store_device_registration())
+    Box::pin(drain_registration_outbox(database, storage)).await?;
+    let durable = Box::pin(database.latest_local_store_device_registration())
         .await
         .map_err(database_error)?
         .ok_or(StoreRegistrationError::ActivationRequired)?;
@@ -1441,9 +1446,10 @@ pub(crate) async fn bootstrap_pending_device(
 }
 
 async fn drain_registration_outbox(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreRegistrationError> {
+    let db = database.sqlite();
     let store_root = db
         .local_store_root_ref()
         .await
@@ -1526,10 +1532,11 @@ async fn drain_registration_outbox(
 }
 
 async fn require_activated_registration(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     durable: &crate::database::DurableDeviceRegistration,
 ) -> Result<(), StoreRegistrationError> {
+    let db = database.sqlite();
     let root_ref = db
         .local_store_root_ref()
         .await
@@ -1554,7 +1561,7 @@ async fn require_activated_registration(
     else {
         return Err(StoreRegistrationError::ActivationRequired);
     };
-    let activated = db
+    let activated = database
         .activated_store_device_registration_with_authority(exact_ref)
         .await
         .map_err(database_error)?;
@@ -1622,17 +1629,23 @@ mod tests {
         StoreBatchCommitRef,
     ) {
         let (store, db) = initialized().await;
-        let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load exact membership")
             .chain
             .expect("resolved founder membership");
         let authority = founder_recovery_authority(&store);
-        let registration =
-            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
-                .await
-                .expect("recover Owner device");
-        for reference in db
+        let database = StoreDatabase::new(&db);
+        let registration = recover_owner_device(
+            &database,
+            &store.storage,
+            &store.signer,
+            &authority,
+            &membership,
+        )
+        .await
+        .expect("recover Owner device");
+        for reference in database
             .materialized_frontier()
             .await
             .expect("load materialized Store frontier")
@@ -1740,10 +1753,11 @@ mod tests {
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
+        let database = StoreDatabase::new(&db);
         let store = TestStore::for_store("registration-missing-root-storage").await;
 
         assert!(matches!(
-            drain_registration_outbox(&db, &store.storage).await,
+            drain_registration_outbox(&database, &store.storage).await,
             Err(StoreRegistrationError::ExactRootAuthorityMissing)
         ));
     }
@@ -1751,10 +1765,14 @@ mod tests {
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
         let (store, db) = initialized().await;
-        ensure_active_registration(&db, &store.storage)
+        let database = StoreDatabase::new(&db);
+        ensure_active_registration(&database, &store.storage)
             .await
             .expect("founder registration remains active");
-        let activated = db.activated_store_device_registrations().await.unwrap();
+        let activated = database
+            .activated_store_device_registrations()
+            .await
+            .unwrap();
         assert_eq!(activated.len(), 1);
         assert_eq!(activated[0].store_root, store.root);
     }
@@ -1762,25 +1780,31 @@ mod tests {
     #[tokio::test]
     async fn owner_recovery_publishes_and_activates_replacement_device() {
         let (store, db) = initialized().await;
-        let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
             .await
             .expect("load exact membership")
             .chain
             .expect("resolved founder membership");
         let authority = founder_recovery_authority(&store);
-        let registration =
-            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
-                .await
-                .expect("recover Owner device");
+        let database = StoreDatabase::new(&db);
+        let registration = recover_owner_device(
+            &database,
+            &store.storage,
+            &store.signer,
+            &authority,
+            &membership,
+        )
+        .await
+        .expect("recover Owner device");
 
-        let durable = db
+        let durable = database
             .latest_local_store_device_registration()
             .await
             .expect("load replacement registration")
             .expect("replacement registration exists");
         assert_eq!(durable.device_id, registration.device_id);
         assert!(durable.is_activated());
-        ensure_active_registration(&db, &store.storage)
+        ensure_active_registration(&database, &store.storage)
             .await
             .expect("replacement registration is usable");
     }
@@ -1803,7 +1827,7 @@ mod tests {
         .await
         .expect("corrupt activated recovery registration fixture");
 
-        let frontier = db
+        let frontier = crate::sync::store::database::StoreDatabase::new(&db)
             .materialized_frontier()
             .await
             .expect("retained recovery author does not depend on mutable registration rows");
@@ -1821,7 +1845,8 @@ mod tests {
         )
         .await;
 
-        db.materialized_frontier()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .materialized_frontier()
             .await
             .expect_err("tampered retained recovery registration bytes must fail");
     }
@@ -1836,7 +1861,8 @@ mod tests {
         )
         .await;
 
-        db.materialized_frontier()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .materialized_frontier()
             .await
             .expect_err("tampered retained recovery registration authority must fail");
     }
@@ -1849,21 +1875,28 @@ mod tests {
             let store = TestStore::create(&db, &format!("recovery-prefix-{failed_call}"), signer)
                 .await
                 .expect("create recovery prefix Store");
-            let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+            let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
                 .await
                 .expect("load exact membership")
                 .chain
                 .expect("resolved founder membership");
             let authority = founder_recovery_authority(&store);
+            let database = StoreDatabase::new(&db);
             store.home.fail_exact_create_before_call(failed_call);
             assert!(
-                recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership,)
-                    .await
-                    .is_err(),
+                recover_owner_device(
+                    &database,
+                    &store.storage,
+                    &store.signer,
+                    &authority,
+                    &membership,
+                )
+                .await
+                .is_err(),
                 "failure before exact create {failed_call} interrupts recovery",
             );
 
-            let interrupted = db
+            let interrupted = database
                 .latest_local_store_device_registration()
                 .await
                 .expect("read interrupted recovery journal")
@@ -1904,15 +1937,21 @@ mod tests {
                 None
             };
 
-            recover_owner_device(&db, &store.storage, &store.signer, &authority, &membership)
-                .await
-                .expect("retry completes absent recovery suffix");
+            recover_owner_device(
+                &database,
+                &store.storage,
+                &store.signer,
+                &authority,
+                &membership,
+            )
+            .await
+            .expect("retry completes absent recovery suffix");
             assert_eq!(
                 store.home.exact_create_count(),
                 6,
                 "retry after boundary {failed_call} creates only the absent suffix",
             );
-            let completed = db
+            let completed = database
                 .latest_local_store_device_registration()
                 .await
                 .expect("read completed recovery journal")

@@ -2950,7 +2950,7 @@ mod tests {
         )
         .expect("construct pending-rotation storage");
         let components = crate::sync::cycle::init_sync_over_storage(
-            &db,
+            &crate::sync::store::StoreDatabase::new(&db),
             storage,
             crate::sync::cycle::StoreInitialization::CreateStore,
             None,
@@ -2978,7 +2978,7 @@ mod tests {
         )
         .expect("reconstruct pending-rotation storage");
         let result = crate::sync::cycle::init_sync_over_storage(
-            &reopened,
+            &crate::sync::store::StoreDatabase::new(&reopened),
             storage,
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: root,

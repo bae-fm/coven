@@ -21,7 +21,7 @@ pub async fn load_current_device_join_authorization(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<MembershipChain, DeviceJoinError> {
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
         .await
         .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
     membership.chain.ok_or(DeviceJoinError::MembershipConflict)

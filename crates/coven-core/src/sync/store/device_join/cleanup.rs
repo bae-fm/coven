@@ -19,7 +19,7 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
 }
 
 pub fn prepare_device_join_cleanup<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     executor_exact: &'a dyn ExactSlotStorage,
     authorization: &'a MembershipChain,
@@ -31,7 +31,7 @@ pub fn prepare_device_join_cleanup<'a>(
     Box<dyn std::future::Future<Output = Result<DeviceJoinCleanupReceipt, DeviceJoinError>> + 'a>,
 > {
     Box::pin(prepare_device_join_cleanup_inner(
-        db,
+        database,
         storage,
         executor_exact,
         authorization,
@@ -44,7 +44,7 @@ pub fn prepare_device_join_cleanup<'a>(
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_device_join_cleanup_inner(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     executor_exact: &dyn ExactSlotStorage,
     authorization: &MembershipChain,
@@ -53,6 +53,7 @@ async fn prepare_device_join_cleanup_inner(
     administrator_terminal: Box<ProviderAdminJoinTerminal>,
     joiner_terminal: Box<JoinerJoinTerminal>,
 ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
+    let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
     let current = load_store_journal(db, attempt_ref.attempt_id, DeviceJoinRole::Owner)
@@ -89,7 +90,7 @@ async fn prepare_device_join_cleanup_inner(
         .read_protocol_object(&attempt_context, &attempt_ref.object, &attempt_prefix)
         .await?;
     let unverified_attempt: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)?;
-    let owner = db
+    let owner = database
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
@@ -121,7 +122,7 @@ async fn prepare_device_join_cleanup_inner(
         joiner_terminal.as_ref(),
     )?;
     verify_cleanup_terminals(
-        db,
+        database,
         administrator_terminal.as_ref(),
         joiner_terminal.as_ref(),
     )
@@ -133,7 +134,7 @@ async fn prepare_device_join_cleanup_inner(
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
     let (local_root, executor_ref, executor, executor_signer) =
         crate::sync::store::operations::load_local_store_authority(
-            db,
+            database,
             &local_device_id,
             identity_signer,
         )
@@ -166,7 +167,7 @@ async fn prepare_device_join_cleanup_inner(
     let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(_)) => {
             let plan = crate::sync::store::operations::prepare_plan(
-                db,
+                database,
                 storage,
                 authorization,
                 &local_device_id,
@@ -279,7 +280,7 @@ async fn prepare_device_join_cleanup_inner(
 }
 
 pub(super) async fn sign_device_join_producer_write_revocation(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
@@ -288,6 +289,7 @@ pub(super) async fn sign_device_join_producer_write_revocation(
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
+    let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
     let root = db
@@ -305,7 +307,7 @@ pub(super) async fn sign_device_join_producer_write_revocation(
         .read_protocol_object(&attempt_context, &attempt_ref.object, &attempt_prefix)
         .await?;
     let unverified_attempt: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)?;
-    let owner = db
+    let owner = database
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
@@ -332,7 +334,7 @@ pub(super) async fn sign_device_join_producer_write_revocation(
         return Err(DeviceJoinError::AttemptMismatch);
     }
     let executor_admin = resolved_provider_admin(authorization, &executor_grant)?;
-    let executor = db
+    let executor = database
         .activated_store_device_registration(executor_admin.administrator.clone())
         .await
         .map_err(database_error)?;
@@ -415,13 +417,14 @@ pub(super) async fn sign_device_join_producer_write_revocation(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_device_join_cleanup(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     attempt_id: DeviceJoinAttemptId,
     receipt: DeviceJoinCleanupReceipt,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+    let db = database.sqlite();
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::Owner)
         .await?
         .ok_or(DeviceJoinError::JournalConflict)?;
@@ -447,7 +450,7 @@ pub async fn activate_device_join_cleanup(
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
     let plan = crate::sync::store::operations::prepare_plan(
-        db,
+        database,
         storage,
         authorization,
         &local_device_id,
@@ -470,7 +473,7 @@ pub async fn activate_device_join_cleanup(
         .read_protocol_object(&context, &receipt.receipt.object, &prefix)
         .await?;
     let receipt_object: DeviceJoinCleanupReceiptObject = serde_json::from_slice(&bytes)?;
-    let executor = db
+    let executor = database
         .activated_store_device_registration(receipt_object.executor.clone())
         .await
         .map_err(database_error)?;
@@ -481,7 +484,7 @@ pub async fn activate_device_join_cleanup(
         return Err(DeviceJoinError::CleanupMismatch);
     }
     let activation_ref = crate::sync::store::operations::activate_store_operation_commit(
-        db,
+        database,
         storage,
         plan,
         crate::sync::store::operations::StoreOperationBatch::CleanupReceipt(
@@ -598,21 +601,21 @@ pub(super) fn validate_terminals(
 }
 
 async fn verify_cleanup_terminals(
-    db: &Database,
+    database: &StoreDatabase,
     administrator: &ProviderAdminJoinTerminal,
     joiner: &JoinerJoinTerminal,
 ) -> Result<(), DeviceJoinError> {
     match administrator {
         ProviderAdminJoinTerminal::Completed(_) => {}
         ProviderAdminJoinTerminal::Cancelled(closure) => {
-            let registration = db
+            let registration = database
                 .activated_store_device_registration(closure.administrator_registration.clone())
                 .await
                 .map_err(database_error)?;
             closure.verify(&registration)?;
         }
         ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
-            let registration = db
+            let registration = database
                 .activated_store_device_registration(revocation.executor.clone())
                 .await
                 .map_err(database_error)?;
@@ -623,7 +626,7 @@ async fn verify_cleanup_terminals(
         JoinerJoinTerminal::Ready(_) => {}
         JoinerJoinTerminal::Cancelled(closure) => closure.verify()?,
         JoinerJoinTerminal::WriteRevoked(revocation) => {
-            let registration = db
+            let registration = database
                 .activated_store_device_registration(revocation.executor.clone())
                 .await
                 .map_err(database_error)?;

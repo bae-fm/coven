@@ -1,5 +1,4 @@
 use super::super::*;
-
 use super::fixtures::*;
 
 async fn assert_store_creation_installs_generation_zero_replay_baseline() {
@@ -99,43 +98,4 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
         .expect("one terminal excludes the candidate");
 
     assert_eq!(selected, low_locator);
-}
-
-#[test]
-fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
-    let stream = crate::sync::causal_grants::AuthorStreamId::from_bytes([19; 32]);
-    let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
-        coord: StoreCommitCoord {
-            stream_id: stream,
-            sequence,
-        },
-        commit_hash: ObjectHash::digest(format!("{label} commit").as_bytes()),
-        object: reclaim_test_object(&format!("store-v1/test/{label}/commit.json")),
-    };
-    let root = commit(1, "retraction-root");
-    let child = commit(2, "retraction-child");
-    let grandchild = commit(3, "retraction-grandchild");
-    let independent = commit(4, "retraction-independent");
-    let graph = BTreeMap::from([
-        (root.clone(), BTreeSet::new()),
-        (child.clone(), BTreeSet::from([root.clone()])),
-        (grandchild.clone(), BTreeSet::from([child.clone()])),
-        (independent.clone(), BTreeSet::new()),
-    ]);
-
-    let required =
-        Database::complete_merge_retraction_closure(&graph, BTreeSet::from([root.clone()]));
-
-    assert_eq!(
-        required,
-        BTreeSet::from([root.clone(), child.clone(), grandchild]),
-    );
-    assert_ne!(required, BTreeSet::from([root.clone(), child.clone()]));
-    assert!(!required.contains(&independent));
-    assert!(Database::require_exact_merge_retraction_closure(
-        &graph,
-        BTreeSet::from([root.clone()]),
-        &BTreeSet::from([root, child]),
-    )
-    .is_err());
 }

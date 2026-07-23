@@ -34,7 +34,7 @@ async fn initialize(db: &Database, storage: &CloudSyncStorage, signer: &UserKeyp
     crate::sync::store_protocol_root::create_store(db, storage, "ack-exact-store", signer)
         .await
         .expect("create acknowledgement test Store");
-    crate::sync::store::ensure_active_registration(db, storage)
+    crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), storage)
         .await
         .expect("activate acknowledgement test registration");
 }
@@ -50,7 +50,8 @@ async fn stage_at(
     last_sync: &str,
 ) -> StoreAck {
     let frontier = CommitFrontier::from_refs(
-        db.materialized_frontier()
+        crate::sync::store::database::StoreDatabase::new(db)
+            .materialized_frontier()
             .await
             .expect("read acknowledgement frontier"),
     )
@@ -82,7 +83,8 @@ async fn persist_candidate(
     signer: &UserKeypair,
     outbound: &crate::database::OutboundStoreAck,
 ) -> crate::sync::store::operations::PreparedStoreOperationCommit {
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+    let database = StoreDatabase::new(db);
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
         .await
         .expect("load acknowledgement test membership");
     let device_id = db
@@ -91,7 +93,7 @@ async fn persist_candidate(
         .unwrap()
         .expect("local Store device id");
     let plan = crate::sync::store::operations::prepare_plan(
-        db,
+        &database,
         storage,
         membership
             .chain
@@ -106,7 +108,7 @@ async fn persist_candidate(
         .validate_acknowledgement(&outbound.ack.value)
         .expect("acknowledgement matches activation predecessor");
     let candidate = crate::sync::store::operations::prepare_candidate(
-        db,
+        &database,
         storage,
         plan,
         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
@@ -140,6 +142,7 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
     let db = open(path, "ack-loser-device");
+    let database = StoreDatabase::new(&db);
     Box::pin(initialize(&db, &storage, &signer)).await;
     Box::pin(stage(&db, &storage, &signer)).await;
     let outbound = db
@@ -148,16 +151,18 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
         .unwrap()
         .expect("staged acknowledgement exists");
     let losing = Box::pin(persist_candidate(&db, &storage, &signer, &outbound)).await;
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(&storage, &db))
-        .await
-        .expect("load acknowledgement test membership");
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
+        &storage, &db,
+    ))
+    .await
+    .expect("load acknowledgement test membership");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
         .unwrap()
         .expect("local Store device id");
     let competing_plan = Box::pin(crate::sync::store::operations::prepare_plan(
-        &db,
+        &database,
         &storage,
         membership
             .chain
@@ -182,7 +187,7 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
         ),
     };
     let competing = Box::pin(crate::sync::store::operations::prepare_candidate(
-        &db,
+        &database,
         &storage,
         competing_plan,
         crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
@@ -480,7 +485,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .await
         .expect("record acknowledgement upload");
     crate::sync::store::operations::publish_prepared(
-        &db,
+        &StoreDatabase::new(&db),
         &storage,
         Box::new(candidate),
         None,
@@ -810,7 +815,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let expected_prepared = candidate.prepared_head.clone();
     let (root, registration_ref, _, device_signer) =
         crate::sync::store::operations::load_local_store_authority(
-            &db,
+            &StoreDatabase::new(&db),
             &outbound.reference.registration.device_id.to_string(),
             &signer,
         )

@@ -52,6 +52,7 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::{StorageError, SyncStorage};
+use crate::sync::store::StoreDatabase;
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::sync_manager::MemberInfo;
 use crate::sync::sync_manager::{ConfigProvider, SyncError, SyncManager};
@@ -137,7 +138,7 @@ pub(crate) fn routing_encryption_from_custody(
 /// ```
 #[derive(Clone)]
 pub struct CovenHandle {
-    db: Database,
+    database: StoreDatabase,
 
     /// A read-only companion connection on the same WAL database, opened at
     /// [`open`](crate::CovenBuilder::open) after the writer's migrations completed.
@@ -229,7 +230,7 @@ impl CovenHandle {
         open_guard: Arc<StoreOpenGuard>,
     ) -> Self {
         Self {
-            db,
+            database: StoreDatabase::from_database(db),
             read_db,
             stamper,
             store_dir,
@@ -259,7 +260,7 @@ impl CovenHandle {
     /// [`CovenHandle::sql`] and [`CovenHandle::write`]; coven internals use this
     /// to reach row-level helpers.
     pub(crate) fn db(&self) -> &Database {
-        &self.db
+        self.database.sqlite()
     }
 
     /// The read-only companion [`Database`] backing [`sql_read`](Self::sql_read).
@@ -307,7 +308,7 @@ impl CovenHandle {
 
     /// Writes that have shared rows and have not reached a published position.
     pub async fn pending_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
-        self.db
+        self.db()
             .pending_writes()
             .await
             .map_err(crate::CovenError::from)
@@ -316,7 +317,7 @@ impl CovenHandle {
     /// Writes stopped by a semantic publication fault and awaiting an explicit
     /// retry or discard decision.
     pub async fn blocked_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
-        self.db
+        self.db()
             .blocked_writes()
             .await
             .map_err(crate::CovenError::from)
@@ -328,7 +329,7 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let retried = coven_core::sync::store::retry_blocked_write(&self.db, write_id)
+        let retried = coven_core::sync::store::retry_blocked_write(self.db(), write_id)
             .await
             .map_err(crate::CovenError::from)?;
         self.sync_now();
@@ -341,7 +342,7 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let outcome = coven_core::sync::store::discard_blocked_write(&self.db, write_id)
+        let outcome = coven_core::sync::store::discard_blocked_write(self.db(), write_id)
             .await
             .map_err(crate::CovenError::from)?;
         if let coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) = outcome {
@@ -371,7 +372,7 @@ impl CovenHandle {
             }
         }
 
-        match coven_core::sync::store::discard_blocked_write(&self.db, write_id)
+        match coven_core::sync::store::discard_blocked_write(self.db(), write_id)
             .await
             .map_err(crate::CovenError::from)?
         {
@@ -389,7 +390,7 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<coven_core::WriteStatus, crate::CovenError> {
-        self.db
+        self.db()
             .write_status(write_id)
             .await
             .map_err(crate::CovenError::from)
@@ -401,7 +402,7 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<tokio::sync::watch::Receiver<coven_core::WriteStatus>, crate::CovenError> {
-        self.db
+        self.db()
             .subscribe_write_status(write_id)
             .await
             .map_err(crate::CovenError::from)
@@ -468,7 +469,7 @@ impl CovenHandle {
             self.key_service.clone(),
             self.key_custody.clone(),
             self.identity_custody.clone(),
-            self.db.clone(),
+            self.db().clone(),
             self.clock.clone(),
             cloudkit_ops,
             self.observer.clone(),
@@ -805,7 +806,7 @@ impl CovenHandle {
     /// Capture the exact current blob-bearing row version. Blob operations use
     /// this row-bound value so a later row replacement cannot redirect a read.
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
-        self.db.row_blob_ref(table, row_id).await
+        self.db().row_blob_ref(table, row_id).await
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served
@@ -816,7 +817,13 @@ impl CovenHandle {
     /// holds the database, directory, and storage.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
+        crate::sync::store::blob::read_blob(
+            &self.database,
+            &self.store_dir,
+            storage.as_deref(),
+            blob,
+        )
+        .await
     }
 
     /// Ensure the exact current row blob plaintext is durable on this device.
@@ -824,8 +831,8 @@ impl CovenHandle {
     /// pending-remote blobs exact-verify their authoritative local source.
     pub async fn materialize_row_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::materialize_row_blob(
-            &self.db,
+        crate::sync::store::blob::materialize_row_blob(
+            &self.database,
             &self.store_dir,
             storage.as_deref(),
             blob,
@@ -844,8 +851,8 @@ impl CovenHandle {
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::open_blob_stream(
-            &self.db,
+        crate::sync::store::blob::open_blob_stream(
+            &self.database,
             &self.store_dir,
             storage.as_deref(),
             blob,
@@ -860,13 +867,14 @@ impl CovenHandle {
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::pin(&self.db, &self.store_dir, storage.as_deref(), blobs).await
+        crate::sync::store::blob::pin(&self.database, &self.store_dir, storage.as_deref(), blobs)
+            .await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        crate::blob::cache::unpin(&self.db, &self.store_dir, blobs).await
+        crate::blob::cache::unpin(self.db(), &self.store_dir, blobs).await
     }
 
     /// The cloud object key a blob's bytes live at, derived under the connected
@@ -912,7 +920,7 @@ impl CovenHandle {
     /// surfaced, never read as "not pinned".
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
+            if !crate::blob::cache::is_pinned(self.db(), &self.store_dir, blob).await? {
                 return Ok(false);
             }
         }
@@ -925,7 +933,7 @@ impl CovenHandle {
     /// It does not delete the cloud blob or its carrying row; a later read can
     /// fetch the bytes again.
     pub async fn evict_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_cached_blob(&self.db, &self.store_dir, blob).await
+        crate::blob::cache::drop_cached_blob(self.db(), &self.store_dir, blob).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
@@ -978,7 +986,7 @@ impl CovenHandle {
     ) -> Result<(), MakeLocalError> {
         let manager = self.sync_manager().ok_or(MakeLocalError::SyncNotReady)?;
         let routing_encryption = self
-            .db
+            .db()
             .gates()
             .has_scoped_graph()
             .then(|| self.routing_encryption())
@@ -1008,7 +1016,7 @@ impl CovenHandle {
     }
 
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
-        self.db.get_cache_budget(namespace).await
+        self.db().get_cache_budget(namespace).await
     }
 
     pub async fn set_cache_budget(
@@ -1016,7 +1024,7 @@ impl CovenHandle {
         namespace: &str,
         max_bytes: u64,
     ) -> Result<(), crate::DbError> {
-        self.db.set_cache_budget(namespace, max_bytes).await
+        self.db().set_cache_budget(namespace, max_bytes).await
     }
 
     pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
@@ -1051,7 +1059,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(crate::sync::store::device_join::begin_device_join(
-            &self.db,
+            &self.database,
             storage.as_ref(),
             &authorization,
             &signer,
@@ -1069,7 +1077,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(crate::sync::store::device_join::abandon_device_join(
-            &self.db,
+            &self.database,
             storage.as_ref(),
             &authorization,
             &signer,
@@ -1089,7 +1097,7 @@ impl CovenHandle {
         let exact = self.device_join_exact_storage()?;
         Ok(
             crate::sync::store::device_join::authorize_device_provider_access(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 Some(exact.as_ref()),
                 access_administrator,
@@ -1110,7 +1118,7 @@ impl CovenHandle {
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
             crate::sync::store::device_join::accept_device_registration_request(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 &authorization,
                 &signer,
@@ -1128,7 +1136,7 @@ impl CovenHandle {
         let exact = self.device_join_exact_storage()?;
         Ok(
             crate::sync::store::device_join::publish_device_provider_challenge(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 Some(exact.as_ref()),
                 bootstrap,
@@ -1145,7 +1153,7 @@ impl CovenHandle {
         let exact = self.device_join_exact_storage()?;
         Ok(
             crate::sync::store::device_join::complete_device_provider_admission(
-                &self.db,
+                &self.database,
                 Some(exact.as_ref()),
                 &signer,
                 readiness,
@@ -1162,7 +1170,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(crate::sync::store::device_join::finalize_device_join(
-            &self.db,
+            &self.database,
             storage.as_ref(),
             &authorization,
             &signer,
@@ -1179,7 +1187,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(crate::sync::store::device_join::cancel_device_join(
-            &self.db,
+            &self.database,
             storage.as_ref(),
             &authorization,
             &signer,
@@ -1197,7 +1205,7 @@ impl CovenHandle {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(
             crate::sync::store::device_join::close_device_provider_admission(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 Some(exact.as_ref()),
                 &signer,
@@ -1218,7 +1226,7 @@ impl CovenHandle {
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
             crate::sync::store::device_join::revoke_device_provider_admission_writes(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 &authorization,
                 &signer,
@@ -1241,7 +1249,7 @@ impl CovenHandle {
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
             crate::sync::store::device_join::revoke_joining_device_writes(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 &authorization,
                 &signer,
@@ -1265,7 +1273,7 @@ impl CovenHandle {
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
             crate::sync::store::device_join::prepare_device_join_cleanup(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 exact.as_ref(),
                 &authorization,
@@ -1288,7 +1296,7 @@ impl CovenHandle {
         let authorization = self.device_join_authorization(&storage).await?;
         Ok(
             crate::sync::store::device_join::activate_device_join_cleanup(
-                &self.db,
+                &self.database,
                 storage.as_ref(),
                 &authorization,
                 &signer,
@@ -1305,7 +1313,9 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         let attempt_id = activation.receipt.attempt_id;
         crate::sync::store::device_join::complete_owner_device_join_cleanup(
-            &self.db, attempt_id, activation,
+            &self.database,
+            attempt_id,
+            activation,
         )
         .await?;
         Ok(())
@@ -1318,14 +1328,16 @@ impl CovenHandle {
     ) -> Result<Option<crate::DeviceJoinStatus>, SyncError> {
         Ok(
             crate::sync::store::device_join::load_store_device_join_status(
-                &self.db, attempt_id, role,
+                self.db(),
+                attempt_id,
+                role,
             )
             .await?,
         )
     }
 
     pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
-        Ok(crate::sync::store::device_join::load_store_device_join_actions(&self.db).await?)
+        Ok(crate::sync::store::device_join::load_store_device_join_actions(self.db()).await?)
     }
 
     fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
@@ -1351,7 +1363,8 @@ impl CovenHandle {
     ) -> Result<crate::sync::membership::MembershipChain, SyncError> {
         Ok(
             crate::sync::store::device_join::load_current_device_join_authorization(
-                &self.db, storage,
+                self.db(),
+                storage,
             )
             .await?,
         )
@@ -1395,7 +1408,7 @@ impl CovenHandle {
     /// Return circles with a locally verified active access record.
     pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        self.db
+        self.database
             .get_circles(&crate::keys::public_key_hex(&identity))
             .await
             .map_err(SyncError::from)
@@ -1414,7 +1427,7 @@ impl CovenHandle {
     pub async fn get_circle_operations(
         &self,
     ) -> Result<Vec<crate::CircleOperationInfo>, SyncError> {
-        self.db
+        self.database
             .get_circle_operations()
             .await
             .map_err(SyncError::from)
@@ -2820,7 +2833,7 @@ mod tests {
             );
             let identity = crate::keys::require_identity(handle.identity_custody.as_ref())
                 .expect("read test identity");
-            assert!(db
+            assert!(StoreDatabase::from_database(db.clone())
                 .get_circle_members(
                     circle_id,
                     &crate::keys::public_key_hex(&identity),

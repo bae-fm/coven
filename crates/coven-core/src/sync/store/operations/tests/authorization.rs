@@ -21,7 +21,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         &encryption,
         store.storage.store_id(),
         "Operation predecessor membership",
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("invite operation author");
@@ -63,7 +63,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         &custody,
         &cipher,
         &PendingRotation::none(),
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("remove operation author after its predecessor cut");
@@ -128,7 +128,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         &encryption,
         store.storage.store_id(),
         "Direct removal predecessor membership",
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("invite operation author");
@@ -164,7 +164,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         &custody,
         &cipher,
         &PendingRotation::none(),
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("remove operation author directly");
@@ -221,7 +221,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let result = crate::sync::store::pull::load_retained_merge_outbound_authorization(
-        &writer_db,
+        &StoreDatabase::new(&writer_db),
         &store.storage,
         &root,
         &order,
@@ -302,7 +302,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         &encryption,
         store.storage.store_id(),
         "New Direct membership",
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("publish new Direct membership");
@@ -327,7 +327,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let authorization = crate::sync::store::pull::load_retained_merge_outbound_authorization(
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
         &store.storage,
         &root,
         &order,

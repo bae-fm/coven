@@ -217,7 +217,7 @@ pub(crate) async fn verify_author_exclusion_nonactivation_with_verified_operatio
 }
 
 pub(crate) async fn verify_author_exclusion_nonactivation(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     locator: &crate::database::AuthorExclusionActivationLocator,
@@ -227,9 +227,10 @@ pub(crate) async fn verify_author_exclusion_nonactivation(
     candidate_head_object: &ExactObjectRef,
 ) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
     let retained =
-        Box::pin(db.retained_merge_materialization(locator.activation_commit().clone())).await?;
+        Box::pin(database.retained_merge_materialization(locator.activation_commit().clone()))
+            .await?;
     let (_, predecessor_state) =
-        Box::pin(db.store_device_state_for_order(&retained.commit().order)).await?;
+        Box::pin(database.store_device_state_for_order(&retained.commit().order)).await?;
     Box::pin(
         verify_author_exclusion_nonactivation_with_verified_operation(
             storage,

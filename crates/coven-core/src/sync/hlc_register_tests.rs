@@ -248,7 +248,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let write_id = target.new_write_id();
     let host_stamp = target
         .call(move |conn| {
-            crate::database::Database::run_internal_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
                 None,
@@ -277,7 +277,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     );
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'remote-boundary'").await);
     assert_eq!(
-        target
+        crate::sync::store::StoreDatabase::new(&target)
             .materialized_frontier()
             .await
             .expect("read materialized frontier")
@@ -340,7 +340,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         &encryption,
         "test-store",
         "Test Store",
-        &owner_db,
+        &crate::sync::store::StoreDatabase::new(&owner_db),
     )
     .await
     .expect("invite exact member identity");
@@ -372,13 +372,13 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
     )
     .await;
-    let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &member_db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&storage.storage, &member_db)
         .await
         .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
     assert!(
         crate::sync::store::preparation::prepare_store_write(
-            &member_db,
+            &crate::sync::store::StoreDatabase::new(&member_db),
             &storage.storage,
             &member_device_id,
             "0000000003000-0000-member",
@@ -393,9 +393,12 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    crate::sync::store::publication::drain_store_writes(&member_db, &storage.storage)
-        .await
-        .expect("publish member commit while grant is active");
+    crate::sync::store::publication::drain_store_writes(
+        &crate::sync::store::StoreDatabase::new(&member_db),
+        &storage.storage,
+    )
+    .await
+    .expect("publish member commit while grant is active");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
@@ -411,7 +414,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         &custody,
         cipher.as_ref(),
         pending_rotation.as_ref(),
-        &owner_db,
+        &crate::sync::store::StoreDatabase::new(&owner_db),
     )
     .await
     .expect("remove exact member identity");

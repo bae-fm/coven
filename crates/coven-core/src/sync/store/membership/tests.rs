@@ -3,6 +3,7 @@ use crate::storage::cloud::ObjectSlot;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::membership::AuthorStreamId;
 use crate::sync::storage::ExactObjectRef;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::test_helpers::{
     install_active_device_fixture, open_test_db, promote_active_member_fixture, pubkey_hex,
     TestCustody, TestStore,
@@ -12,6 +13,7 @@ use std::sync::RwLock;
 struct MergeFixture {
     store: TestStore,
     db: Database,
+    database: StoreDatabase,
     owner: UserKeypair,
     owner_pubkey: String,
 }
@@ -23,9 +25,11 @@ async fn merge_fixture(store_id: &str) -> MergeFixture {
     let store = TestStore::create(&db, store_id, owner.clone())
         .await
         .expect("create exact Store");
+    let database = StoreDatabase::new(&db);
     MergeFixture {
         store,
         db,
+        database,
         owner,
         owner_pubkey,
     }
@@ -58,7 +62,7 @@ async fn invite_fixture_member(
         &EncryptionService::from_key([42; 32]),
         fixture.store.storage.store_id(),
         "Test Store",
-        &fixture.db,
+        &fixture.database,
     )
     .await
     .expect("invite exact member")
@@ -79,7 +83,7 @@ async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
         &custody,
         &cipher,
         &PendingRotation::none(),
-        &fixture.db,
+        &fixture.database,
     )
     .await
     .expect("remove exact member");
@@ -442,8 +446,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &founder_ref)
             .await
             .expect("load founder membership head");
-    let registration = fixture
-        .db
+    let registration = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(founder_head.body.author_registration.clone())
         .await
         .expect("load founder device registration");
@@ -530,7 +533,7 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
         &EncryptionService::from_key([42; 32]),
         fixture.store.storage.store_id(),
         "Test Store",
-        &fixture.db,
+        &fixture.database,
     )
     .await;
 
@@ -554,7 +557,7 @@ async fn inviting_without_an_exact_root_is_refused_with_a_typed_variant() {
         &EncryptionService::from_key([42; 32]),
         store.storage.store_id(),
         "Test Store",
-        &db,
+        &StoreDatabase::new(&db),
     )
     .await;
 
@@ -679,16 +682,17 @@ async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let grant = MembershipGrantId(crate::sync::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
-    let first = db
+    let database = StoreDatabase::new(&db);
+    let first = database
         .select_membership_author_stream(&author, &grant, Default::default())
         .await
         .unwrap();
-    let reused = db
+    let reused = database
         .select_membership_author_stream(&author, &grant, std::collections::BTreeSet::from([first]))
         .await
         .unwrap();
     assert_eq!(reused, first);
-    let replacement = db
+    let replacement = database
         .select_membership_author_stream(&author, &grant, Default::default())
         .await
         .unwrap();

@@ -147,7 +147,7 @@ pub(super) fn indexed_retained_replay_owners_on(
     Ok(owners)
 }
 
-pub(super) fn index_retained_replay_owner_on(
+pub(crate) fn index_retained_replay_owner_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     owner: &RetainedReplayOwner,

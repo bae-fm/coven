@@ -1,8 +1,18 @@
 //! Durable exact Store snapshot publication.
 
+mod image;
+
+pub use image::{
+    bootstrap_from_snapshot, create_snapshot, reconcile_snapshot_blobs, should_create_snapshot,
+    BootstrapResult, SnapshotBlobReconcile, SnapshotError,
+};
+pub(crate) use image::{
+    create_snapshot_with_host_blobs, install_snapshot_blob_graph, CreatedSnapshot,
+    SnapshotBlobAudience,
+};
+
 use crate::keys::UserKeypair;
 use crate::sync::membership::MembershipChain;
-use crate::sync::snapshot::{CreatedSnapshot, SnapshotError};
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
@@ -20,8 +30,9 @@ pub(crate) async fn push_store_snapshot(
     keypair: &UserKeypair,
     created_at: String,
     membership: &MembershipChain,
-    db: &crate::database::Database,
+    database: &crate::sync::store::StoreDatabase,
 ) -> Result<SnapshotMeta, SnapshotError> {
+    let db = database.sqlite();
     let _publication = db.lock_snapshot_publication().await;
     drain_snapshot_spool_cleanup(db).await?;
     if let Some(pending) = db
@@ -29,7 +40,7 @@ pub(crate) async fn push_store_snapshot(
         .await
         .map_err(publication_error)?
     {
-        return publish_durable_snapshot(storage, db, pending).await;
+        return publish_durable_snapshot(storage, database, pending).await;
     }
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -39,7 +50,7 @@ pub(crate) async fn push_store_snapshot(
             SnapshotError::PublicationState("local Store device registration is absent".to_string())
         })?;
     let (root, registration_ref, registration, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(db, &device_id, keypair)
+        crate::sync::store::operations::load_local_store_authority(database, &device_id, keypair)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     if root.store_root_hash != store_root_hash {
@@ -52,7 +63,7 @@ pub(crate) async fn push_store_snapshot(
         return Err(SnapshotError::UnauthorizedAuthor(author));
     }
     let history_cut = StoreHistoryCut(coverage.0.clone());
-    let (devices, resolved_devices) = db
+    let (devices, resolved_devices) = database
         .store_device_state_for_history_cut(&history_cut)
         .await
         .map_err(publication_error)?;
@@ -73,7 +84,7 @@ pub(crate) async fn push_store_snapshot(
         devices,
     };
     let history_summary = super::pull::prepare_merge_snapshot_history_summary(
-        db,
+        database,
         &root,
         &coverage,
         membership,
@@ -112,7 +123,7 @@ pub(crate) async fn push_store_snapshot(
         generation,
     };
     let (image_bytes, snapshot_blobs) = prepare_snapshot_blobs(
-        db,
+        database,
         storage,
         snapshot,
         snapshot_owner,
@@ -210,12 +221,12 @@ pub(crate) async fn push_store_snapshot(
         .ok_or_else(|| {
             SnapshotError::PublicationState("staged snapshot publication row is absent".to_string())
         })?;
-    publish_durable_snapshot(storage, db, pending).await
+    publish_durable_snapshot(storage, database, pending).await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_snapshot_blobs(
-    db: &crate::database::Database,
+    database: &crate::sync::store::StoreDatabase,
     storage: &dyn SyncStorage,
     snapshot: CreatedSnapshot,
     owner: crate::sync::remote_object::SnapshotObjectOwner,
@@ -235,14 +246,14 @@ async fn prepare_snapshot_blobs(
     let preparation = async {
     for captured in blobs {
         let (audience, protection, package_authority) = match captured.audience {
-            crate::sync::snapshot::SnapshotBlobAudience::Store => (
+            SnapshotBlobAudience::Store => (
                 crate::blob::locator::RemoteAudience::Store,
                 storage.store_blob_protection().map_err(SnapshotError::Bucket)?,
                 crate::sync::audience_package::PackageAudience::Store,
             ),
-            crate::sync::snapshot::SnapshotBlobAudience::Circle { circle_id, control } => {
-                let (encryption, key_fingerprint) = db
-                    .circle_publication_context(circle_id, control.coordinate().clone())
+            SnapshotBlobAudience::Circle { circle_id, control } => {
+                let (encryption, key_fingerprint) =
+                    database.circle_publication_context(circle_id, control.coordinate().clone())
                     .await
                     .map_err(publication_error)?;
                 (
@@ -308,7 +319,7 @@ async fn prepare_snapshot_blobs(
             continue;
         }
         let (binding, blob) = super::package_preparation::prepare_partition_blob(
-            db,
+            database,
             storage,
             &captured.fact,
             audience,
@@ -371,11 +382,7 @@ async fn prepare_snapshot_blobs(
             "prepared snapshot blob graph has no captured Store directory".to_string(),
         )
     })?;
-    let image = match crate::sync::snapshot::install_snapshot_blob_graph(
-        db_image,
-        &prepared,
-        &image_store_dir,
-    ) {
+    let image = match install_snapshot_blob_graph(db_image, &prepared, &image_store_dir) {
         Ok(image) => image,
         Err(error) => {
             cleanup_snapshot_spools(&prepared)
@@ -408,8 +415,9 @@ async fn cleanup_snapshot_spools(
 
 pub(crate) async fn drain_outbound_store_snapshot(
     storage: &dyn SyncStorage,
-    db: &crate::database::Database,
+    database: &crate::sync::store::StoreDatabase,
 ) -> Result<Option<SnapshotMeta>, SnapshotError> {
+    let db = database.sqlite();
     let _publication = db.lock_snapshot_publication().await;
     drain_snapshot_spool_cleanup(db).await?;
     let Some(pending) = db
@@ -419,16 +427,17 @@ pub(crate) async fn drain_outbound_store_snapshot(
     else {
         return Ok(None);
     };
-    publish_durable_snapshot(storage, db, pending)
+    publish_durable_snapshot(storage, database, pending)
         .await
         .map(Some)
 }
 
 async fn publish_durable_snapshot(
     storage: &dyn SyncStorage,
-    db: &crate::database::Database,
+    database: &crate::sync::store::StoreDatabase,
     pending: crate::database::DurableSnapshotPublication,
 ) -> Result<SnapshotMeta, SnapshotError> {
+    let db = database.sqlite();
     let meta = &pending.meta.value;
     let device_id = meta.author_registration.device_id.to_string();
     let image_context = ProtocolObjectContext::store_encrypted(
@@ -439,7 +448,7 @@ async fn publish_durable_snapshot(
     for prepared in &pending.blobs {
         let blob = prepared.bindings[0].blob();
         let uploader = blob.locator().uploader().clone();
-        let registration = db
+        let registration = database
             .activated_store_device_registration(uploader.clone())
             .await
             .map_err(publication_error)?;
@@ -881,6 +890,7 @@ mod tests {
     use crate::database::Database;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::store::database::StoreDatabase;
 
     fn open(path: &Path, device_id: &str) -> Database {
         Database::open(
@@ -919,7 +929,7 @@ mod tests {
         )
         .await
         .expect("create snapshot test Store");
-        crate::sync::store::ensure_active_registration(db, storage)
+        crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), storage)
             .await
             .expect("activate snapshot test registration");
         let root_ref = db
@@ -931,7 +941,7 @@ mod tests {
             creation_id: root.descriptor.creation_id,
         };
         let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root_ref, &origin);
-        let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
             .await
             .expect("load snapshot test membership")
             .chain
@@ -964,7 +974,7 @@ mod tests {
             signer,
             created_at.to_string(),
             membership,
-            db,
+            &StoreDatabase::new(db),
         )
         .await
     }
@@ -997,7 +1007,7 @@ mod tests {
             &signer,
             "2026-07-16T00:00:00Z".to_string(),
             &membership,
-            &db,
+            &StoreDatabase::new(&db),
         )
         .await
         .expect("publish exact snapshot selector fixture");
@@ -1060,7 +1070,7 @@ mod tests {
         drop(db);
 
         let reopened = open(&path, "snapshot-test-device");
-        let published = drain_outbound_store_snapshot(&storage, &reopened)
+        let published = drain_outbound_store_snapshot(&storage, &StoreDatabase::new(&reopened))
             .await
             .expect("resume snapshot publication")
             .expect("snapshot was pending");
@@ -1080,7 +1090,7 @@ mod tests {
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
         let (root_hash, device_id, membership) = initialize(&db, &storage, &signer).await;
-        assert!(db
+        assert!(StoreDatabase::new(&db)
             .export_activated_device_continuation(&signer)
             .await
             .expect("export continuation before any snapshot")
@@ -1103,16 +1113,21 @@ mod tests {
             .expect("load continued Store root")
             .expect("continued Store root exists");
         let (_, registration_ref, registration, _) =
-            crate::sync::store::operations::load_local_store_authority(&db, &device_id, &signer)
-                .await
-                .expect("load continued snapshot authority");
+            crate::sync::store::operations::load_local_store_authority(
+                &StoreDatabase::new(&db),
+                &device_id,
+                &signer,
+            )
+            .await
+            .expect("load continued snapshot authority");
         let published = db
             .latest_local_store_snapshot()
             .await
             .expect("load continued snapshot journal")
             .expect("continued snapshot journal exists");
         assert_eq!(
-            db.export_activated_device_continuation(&signer)
+            StoreDatabase::new(&db)
+                .export_activated_device_continuation(&signer)
                 .await
                 .expect("export continuation after snapshot")
                 .latest_snapshot,
@@ -1241,7 +1256,7 @@ mod tests {
             .get(pending.reference.object.slot().logical_key())
             .is_none());
 
-        let completed = drain_outbound_store_snapshot(&storage, &db)
+        let completed = drain_outbound_store_snapshot(&storage, &StoreDatabase::new(&db))
             .await
             .expect("retry ordered snapshot publication")
             .expect("snapshot remained pending");
@@ -1275,7 +1290,11 @@ mod tests {
         let image_slot = pending.image.object.slot().clone();
         home.insert_exact_object(image_slot.logical_key(), b"competing image".to_vec());
 
-        assert!(drain_outbound_store_snapshot(&storage, &db).await.is_err());
+        assert!(
+            drain_outbound_store_snapshot(&storage, &StoreDatabase::new(&db))
+                .await
+                .is_err()
+        );
         assert_eq!(
             home.get(image_slot.logical_key()),
             Some(b"competing image".to_vec())
@@ -1372,7 +1391,7 @@ mod tests {
         );
         assert_eq!(second.reference.object.slot(), &first.successor.next_slot);
         assert_eq!(second.reference.generation, first.generation + 1);
-        drain_outbound_store_snapshot(&storage, &db)
+        drain_outbound_store_snapshot(&storage, &StoreDatabase::new(&db))
             .await
             .expect("resume second snapshot publication")
             .expect("publish staged second snapshot");

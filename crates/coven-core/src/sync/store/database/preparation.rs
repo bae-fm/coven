@@ -8,8 +8,8 @@ use super::{
 };
 use crate::database::{
     load_activated_registration_on, persist_exact_remote_object_on,
-    required_store_root_authority_on, Database, DbError, DurablePreparedProtocolObject,
-    StoreWriteBase, LOCAL_DEVICE_ID_STATE_KEY,
+    required_store_root_authority_on, DbError, DurablePreparedProtocolObject, StoreWriteBase,
+    LOCAL_DEVICE_ID_STATE_KEY,
 };
 use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
@@ -19,7 +19,7 @@ use crate::sync::store_commit::{
 use crate::write::WriteStatus;
 use rusqlite::OptionalExtension;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn enqueue_store_changeset_for_test(
         &self,
@@ -32,20 +32,21 @@ impl StoreDatabase<'_> {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let local_stream_id = crate::database::local_merge_stream_id_on(&tx)?;
                 let base = StoreWriteBase {
-                    dependencies: Database::materialized_frontier_on(
-                        &tx,
-                        local_stream_id.as_deref(),
-                    )?,
+                    dependencies:
+                        crate::sync::store::database::StoreDatabase::materialized_frontier_on(
+                            &tx,
+                            local_stream_id.as_deref(),
+                        )?,
                 };
-                let inverse_changeset = Database::invert_changeset(&changeset)?;
+                let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
                 let partitions = vec![crate::sync::gate::AudiencePartition {
                     audience: crate::sync::circle::Audience::Store,
                     control: None,
                     changeset,
                 }];
                 let blob_facts =
-                    Database::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
-                Database::insert_store_write_on(
+                    StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
+                StoreDatabase::insert_store_write_on(
                     &tx,
                     &write_id,
                     &partitions,
@@ -161,7 +162,7 @@ impl StoreDatabase<'_> {
                     stage.write_id
                 )));
             }
-            let partitions = Database::store_write_partitions_on(
+            let partitions = StoreDatabase::store_write_partitions_on(
                 &tx,
                 stage.write_id.as_str(),
                 &stored_changeset,
@@ -196,7 +197,7 @@ impl StoreDatabase<'_> {
                 )));
             }
             let durable_predecessor =
-                Database::latest_position_for_device_on(&tx, &stream_id.to_string())?;
+                crate::sync::store::database::StoreDatabase::latest_position_for_device_on(&tx, &stream_id.to_string())?;
             let expected_seq = durable_predecessor
                 .as_ref()
                 .map_or(1, |reference| reference.coord.sequence().saturating_add(1));

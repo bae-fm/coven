@@ -20,17 +20,19 @@ pub trait DeviceProviderAccessAdministrator: Send + Sync {
 }
 
 pub async fn publish_device_provider_challenge(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     bootstrap: ProvisionalDeviceBootstrap,
 ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
+    let db = database.sqlite();
     let offer = &bootstrap.request.approval.request.offer;
-    let owner = Box::pin(db.activated_store_device_registration(offer.owner_registration.clone()))
-        .await
-        .map_err(database_error)?;
+    let owner =
+        Box::pin(database.activated_store_device_registration(offer.owner_registration.clone()))
+            .await
+            .map_err(database_error)?;
     let administrator = Box::pin(
-        db.activated_store_device_registration(offer.provider_admin.administrator.clone()),
+        database.activated_store_device_registration(offer.provider_admin.administrator.clone()),
     )
     .await
     .map_err(database_error)?;
@@ -132,11 +134,12 @@ pub async fn publish_device_provider_challenge(
 }
 
 pub async fn complete_device_provider_admission(
-    db: &Database,
+    database: &StoreDatabase,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     identity_signer: &UserKeypair,
     readiness: DeviceJoinReadiness,
 ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
+    let db = database.sqlite();
     let attempt_id = readiness.proof.attempt.attempt_id;
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::ProviderAdministrator)
         .await?
@@ -160,7 +163,7 @@ pub async fn complete_device_provider_admission(
         return Err(DeviceJoinError::AttemptMismatch);
     }
     let offer = &bootstrap.bootstrap.request.approval.request.offer;
-    let administrator = db
+    let administrator = database
         .activated_store_device_registration(offer.provider_admin.administrator.clone())
         .await
         .map_err(database_error)?;
@@ -233,12 +236,13 @@ pub async fn complete_device_provider_admission(
 }
 
 pub async fn close_device_provider_admission(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
 ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+    let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
     let current = load_store_journal(
@@ -275,7 +279,7 @@ pub async fn close_device_provider_admission(
         .read_protocol_object(&attempt_context, &attempt_ref.object, &attempt_prefix)
         .await?;
     let unverified_attempt: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)?;
-    let owner = db
+    let owner = database
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
@@ -302,7 +306,7 @@ pub async fn close_device_provider_admission(
         return Err(DeviceJoinError::AttemptMismatch);
     }
     let offer = &attempt.provider_approval.request.offer;
-    let administrator = db
+    let administrator = database
         .activated_store_device_registration(offer.provider_admin.administrator.clone())
         .await
         .map_err(database_error)?;
@@ -410,7 +414,7 @@ pub async fn close_device_provider_admission(
 }
 
 pub async fn revoke_device_provider_admission_writes(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
@@ -418,6 +422,7 @@ pub async fn revoke_device_provider_admission_writes(
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+    let db = database.sqlite();
     let attempt_id = cancellation.outcome.attempt().attempt_id;
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::ProviderAdministrator).await?;
     if let Some(current) = &current {
@@ -443,7 +448,7 @@ pub async fn revoke_device_provider_admission_writes(
         }
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
-        db,
+        database,
         storage,
         authorization,
         identity_signer,
@@ -469,7 +474,7 @@ pub async fn revoke_device_provider_admission_writes(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn authorize_device_provider_access(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
@@ -477,8 +482,9 @@ pub async fn authorize_device_provider_access(
     identity_signer: &UserKeypair,
     request: DeviceProviderAccessRequest,
 ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
+    let db = database.sqlite();
     let root_value = load_local_store_root(db, storage).await?;
-    let owner = db
+    let owner = database
         .activated_store_device_registration(request.offer.owner_registration.clone())
         .await
         .map_err(database_error)?;
@@ -488,7 +494,7 @@ pub async fn authorize_device_provider_access(
     if provider_admin != *request.offer.provider_admin {
         return Err(DeviceJoinError::OfferMismatch);
     }
-    let administrator = db
+    let administrator = database
         .activated_store_device_registration(provider_admin.administrator.clone())
         .await
         .map_err(database_error)?;
@@ -600,7 +606,7 @@ pub async fn authorize_device_provider_access(
     let grant_ref =
         StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
     let plan = crate::sync::store::operations::prepare_plan(
-        db,
+        database,
         storage,
         authorization,
         &local_device_id,
@@ -608,7 +614,7 @@ pub async fn authorize_device_provider_access(
     )
     .await?;
     let activation = crate::sync::store::operations::activate_store_operation_commit(
-        db,
+        database,
         storage,
         plan,
         crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant_ref.clone()),

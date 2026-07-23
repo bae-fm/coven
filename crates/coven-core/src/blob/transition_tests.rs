@@ -20,8 +20,9 @@ use std::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use tokio::sync::watch;
 
-use crate::blob::transition::{cancel_make_remote, make_local, make_remote};
-use crate::blob::upload::drain_uploads;
+use crate::blob::transition::{
+    cancel_make_remote, make_local as store_make_local, make_remote as store_make_remote,
+};
 use crate::blob::{cache, local_files, BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use crate::clock::SystemClock;
 use crate::database::Database;
@@ -34,12 +35,77 @@ use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
     host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
     TestStore,
 };
+
+async fn make_remote(
+    db: &Database,
+    store_dir: &StoreDir,
+    hlc: &Hlc,
+    root_table: &str,
+    root_id: &str,
+    pin: bool,
+) -> Result<(), crate::blob::transition::MakeRemoteError> {
+    store_make_remote(
+        &StoreDatabase::new(db),
+        store_dir,
+        hlc,
+        root_table,
+        root_id,
+        pin,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn make_local(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    hlc: &Hlc,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
+    observer: Option<&dyn BlobTransitionObserver>,
+    root_table: &str,
+    root_id: &str,
+    dest: &HashMap<String, PathBuf>,
+    cancel: &watch::Receiver<bool>,
+) -> Result<(), crate::blob::transition::MakeLocalError> {
+    store_make_local(
+        &StoreDatabase::new(db),
+        storage,
+        store_dir,
+        hlc,
+        routing_encryption,
+        observer,
+        root_table,
+        root_id,
+        dest,
+        cancel,
+    )
+    .await
+}
+
+async fn drain_uploads(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    clock: &dyn crate::clock::Clock,
+    hlc: &Hlc,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
+    observer: Option<&dyn BlobTransitionObserver>,
+) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+    let store = crate::sync::store::Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+    store
+        .drain_uploads(store_dir, clock, hlc, routing_encryption, observer)
+        .await
+}
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -140,7 +206,7 @@ async fn invite_and_activate_peer(
         &crate::encryption::EncryptionService::from_key([42; 32]),
         "test-store",
         "Test Store",
-        observer_db,
+        &StoreDatabase::new(observer_db),
     )
     .await
     .expect("invite peer identity");
@@ -427,7 +493,7 @@ async fn seed_remote_release(
         .expect("build exact remote fixture source path");
     register_external_blob(db, "note_photos", photo_id, &source).await;
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store::ensure_active_registration(db, &storage.storage)
+    crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), &storage.storage)
         .await
         .expect("activate exact fixture writer");
     make_remote(db, store_dir, hlc, "notes", note_id, false)
@@ -796,8 +862,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "B receives the release once its blobs are up and the gate flips",
     );
-    let fetched = cache::read_blob(
-        &db_b,
+    let fetched = crate::sync::store::blob::read_blob(
+        &StoreDatabase::new(&db_b),
         &lib_b,
         Some(&storage.storage),
         &photo_ref(&db_b, "photoaaa").await,
@@ -1130,8 +1196,8 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         );
 
         // A still reads the photo from its external file (no cloud copy needed).
-        let read = cache::read_blob(
-            &db_a,
+        let read = crate::sync::store::blob::read_blob(
+            &StoreDatabase::new(&db_a),
             &lib_a,
             Some(&storage.storage),
             &photo_ref(&db_a, "photoaaa").await,
@@ -1593,8 +1659,8 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "B does not fetch the CacheLazy photo on pull",
     );
     assert_eq!(
-        cache::read_blob(
-            &db_b,
+        crate::sync::store::blob::read_blob(
+            &StoreDatabase::new(&db_b),
             &lib_b,
             Some(&storage.storage),
             &cover_ref(&db_b, "coveraaa").await
@@ -1701,8 +1767,8 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         .await
         .expect("store host-provided cover");
 
-    let before = cache::read_blob(
-        &db_a,
+    let before = crate::sync::store::blob::read_blob(
+        &StoreDatabase::new(&db_a),
         &lib_a,
         Some(&storage.storage),
         &cover_ref(&db_a, "coverhost").await,
@@ -1756,8 +1822,8 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
             .exists(),
         "after Remote upload the local store no longer holds the blob"
     );
-    let after = cache::read_blob(
-        &db_a,
+    let after = crate::sync::store::blob::read_blob(
+        &StoreDatabase::new(&db_a),
         &lib_a,
         Some(&storage.storage),
         &cover_ref(&db_a, "coverhost").await,
@@ -2099,8 +2165,8 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .exists(),
         "the peer eagerly caches the host-provided blob"
     );
-    let got = cache::read_blob(
-        &db_b,
+    let got = crate::sync::store::blob::read_blob(
+        &StoreDatabase::new(&db_b),
         &lib_b,
         Some(&storage.storage),
         &db_b
@@ -2506,7 +2572,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("queue both same-locator uploads");
     storage.open_into(&db).await.expect("open exact test Store");
-    let (registration_ref, registration) = db
+    let (registration_ref, registration) = StoreDatabase::new(&db)
         .local_blob_write_authority()
         .await
         .expect("load local blob write authority");

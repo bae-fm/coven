@@ -44,7 +44,7 @@ pub(super) fn scan_max_updated_at(
 
 /// Create a capture session and attach every synced table, so a journaled
 /// transaction records changes to exactly those tables.
-pub(super) fn attach_session<'c>(
+pub(crate) fn attach_session<'c>(
     conn: &'c Connection,
     synced_tables: &[SyncedTable],
 ) -> Result<rusqlite::session::Session<'c>, DbError> {
@@ -64,7 +64,7 @@ pub(super) fn attach_session<'c>(
 /// Drain a journal session's recorded changes into a changeset. The caller drops
 /// the session right after (it lives only for the span of one journaled
 /// transaction), so there is nothing to reset.
-pub(super) fn capture_changeset(
+pub(crate) fn capture_changeset(
     session: &mut rusqlite::session::Session<'_>,
 ) -> Result<Vec<u8>, DbError> {
     let mut buf = Vec::new();

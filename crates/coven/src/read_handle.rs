@@ -32,6 +32,7 @@ use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::StoreDatabase;
 use crate::sync::sync_manager::ConfigProvider;
 
 /// A read-only handle over one coven store, for a same-store secondary reader.
@@ -55,7 +56,7 @@ use crate::sync::sync_manager::ConfigProvider;
 /// home-less full handle does — there is no sync loop to reuse.
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    db: Database,
+    database: StoreDatabase,
     store_dir: StoreDir,
     config_provider: ConfigProvider,
     key_service: StoreKeys,
@@ -78,7 +79,7 @@ impl CovenReadHandle {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Self {
         Self {
-            db,
+            database: StoreDatabase::from_database(db),
             store_dir,
             config_provider,
             key_service,
@@ -109,7 +110,8 @@ impl CovenReadHandle {
         R: Send + 'static,
     {
         let outcome = self
-            .db
+            .database
+            .sqlite()
             .call(move |conn| Ok(f(conn)))
             .await
             .map_err(CovenError::from)?;
@@ -150,7 +152,7 @@ impl CovenReadHandle {
         table: &str,
         row_id: &str,
     ) -> Result<RowBlobRef, crate::database::DbError> {
-        self.db.row_blob_ref(table, row_id).await
+        self.database.sqlite().row_blob_ref(table, row_id).await
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served from
@@ -166,7 +168,13 @@ impl CovenReadHandle {
     /// object and authority, so the read performs no database write or cloud listing.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
+        crate::sync::store::blob::read_blob(
+            &self.database,
+            &self.store_dir,
+            storage.as_deref(),
+            blob,
+        )
+        .await
     }
 
     /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
@@ -181,8 +189,8 @@ impl CovenReadHandle {
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::open_blob_stream(
-            &self.db,
+        crate::sync::store::blob::open_blob_stream(
+            &self.database,
             &self.store_dir,
             storage.as_deref(),
             blob,
@@ -213,7 +221,8 @@ impl CovenReadHandle {
     /// stats the folder, never writes.
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
+            if !crate::blob::cache::is_pinned(self.database.sqlite(), &self.store_dir, blob).await?
+            {
                 return Ok(false);
             }
         }

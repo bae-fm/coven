@@ -2,7 +2,7 @@ use crate::database::local_store_identity::local_store_authority_on;
 
 use super::*;
 
-pub(super) fn load_published_store_snapshot_on(
+pub(crate) fn load_published_store_snapshot_on(
     conn: &Connection,
 ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
     conn.query_row(

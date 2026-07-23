@@ -1,4 +1,4 @@
-use crate::database::{Database, DurableMembershipMutation};
+use crate::database::DurableMembershipMutation;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
 use crate::sync::membership::{
@@ -8,6 +8,7 @@ use crate::sync::membership::{
 };
 use crate::sync::remote_object::{CandidateNonactivation, RemoteObjectRecord};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{ObjectHash, StoreBatchCommitRef};
 use crate::sync::wrapped_store_key::PreparedWrappedStoreKey;
@@ -18,7 +19,7 @@ use super::InviteError;
 /// Streams are persisted per database, so independently restored devices use
 /// different streams; copied state that reuses one exposes an immutable fork.
 pub(super) async fn select_mutation_author_stream(
-    db: &Database,
+    database: &StoreDatabase,
     chain: &MembershipChain,
     signer: &UserKeypair,
 ) -> Result<AuthorStreamId, InviteError> {
@@ -30,7 +31,7 @@ pub(super) async fn select_mutation_author_stream(
     if let Some(anchored) = chain.membership_stream_id(&grant) {
         reusable.insert(anchored);
     }
-    Ok(db
+    Ok(database
         .select_membership_author_stream(&author, &grant, reusable)
         .await?)
 }
@@ -155,7 +156,7 @@ pub(super) enum MembershipMutationProgress {
 }
 
 pub(super) struct MutationPersistence<'a> {
-    pub(super) db: &'a Database,
+    pub(super) database: &'a StoreDatabase,
     pub(super) intent_hash: ObjectHash,
 }
 
@@ -167,14 +168,14 @@ impl MutationPersistence<'_> {
         let bytes = serde_json::to_vec(progress).map_err(|error| {
             InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
         })?;
-        self.db
+        self.database
             .update_membership_mutation_progress(self.intent_hash, bytes)
             .await?;
         Ok(())
     }
 
     pub(super) async fn complete(&self) -> Result<(), InviteError> {
-        self.db
+        self.database
             .complete_membership_mutation(self.intent_hash)
             .await?;
         Ok(())

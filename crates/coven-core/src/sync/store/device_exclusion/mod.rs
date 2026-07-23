@@ -573,7 +573,7 @@ impl Store {
         identity_signer: &UserKeypair,
         target: &crate::sync::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        propose_device_exclusion(self.db(), &**self.storage(), identity_signer, target).await
+        propose_device_exclusion(self.database(), &**self.storage(), identity_signer, target).await
     }
 
     pub(crate) async fn cancel_device_exclusion(
@@ -581,7 +581,13 @@ impl Store {
         identity_signer: &UserKeypair,
         proposal: &StoreDeviceExclusionProposalRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        cancel_device_exclusion(self.db(), &**self.storage(), identity_signer, proposal).await
+        cancel_device_exclusion(
+            self.database(),
+            &**self.storage(),
+            identity_signer,
+            proposal,
+        )
+        .await
     }
 
     pub(crate) async fn finalize_device_exclusion(
@@ -589,42 +595,48 @@ impl Store {
         identity_signer: &UserKeypair,
         proposal: &StoreDeviceExclusionProposalRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        finalize_device_exclusion(self.db(), &**self.storage(), identity_signer, proposal).await
+        finalize_device_exclusion(
+            self.database(),
+            &**self.storage(),
+            identity_signer,
+            proposal,
+        )
+        .await
     }
 
     pub(crate) async fn resume_device_exclusion(
         &self,
         identity_signer: &UserKeypair,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-        resume_device_exclusion(self.db(), &**self.storage(), identity_signer).await
+        resume_device_exclusion(self.database(), &**self.storage(), identity_signer).await
     }
 
     pub(crate) async fn device_exclusion_operations(
         &self,
     ) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
-        get_device_exclusion_operations(self.db()).await
+        get_device_exclusion_operations(self.database()).await
     }
 }
 
 pub(crate) async fn propose_device_exclusion(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     target: &crate::sync::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-    let journal = StoreDatabase::new(db);
-    let _lock = journal.lock_device_exclusion().await;
-    reject_active_operation(db).await?;
-    let durable = Box::pin(prepare_proposal(db, storage, identity_signer, target)).await?;
-    drive_device_exclusion(db, storage, identity_signer, Box::new(durable)).await
+    let _lock = database.lock_device_exclusion().await;
+    reject_active_operation(database).await?;
+    let durable = Box::pin(prepare_proposal(database, storage, identity_signer, target)).await?;
+    drive_device_exclusion(database, storage, identity_signer, Box::new(durable)).await
 }
 
 async fn prepare_proposal(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     target: &crate::sync::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
+    let db = database.sqlite();
     let device_id = local_device_id(db).await?;
     let authorization = Box::new(
         Box::pin(super::device_join::load_current_device_join_authorization(
@@ -635,7 +647,7 @@ async fn prepare_proposal(
     );
     let plan = Box::new(
         Box::pin(super::operations::prepare_plan(
-            db,
+            database,
             storage,
             &authorization,
             &device_id,
@@ -646,10 +658,14 @@ async fn prepare_proposal(
     if plan.registration_ref() == target {
         return Err(StoreDeviceExclusionError::CannotExcludeLocalDevice);
     }
-    let target_registration = db
+    let target_registration = database
         .activated_store_device_registration(target.clone())
         .await?;
-    let state = Box::new(db.resolved_store_device_state(plan.device_state()).await?);
+    let state = Box::new(
+        database
+            .resolved_store_device_state(plan.device_state())
+            .await?,
+    );
     require_active_target(&state, target)?;
     let owner_grant = plan
         .owner_grant()
@@ -705,7 +721,7 @@ async fn prepare_proposal(
         plan.registration(),
     )?;
     let candidate = Box::pin(super::operations::prepare_candidate(
-        db,
+        database,
         storage,
         *plan,
         StoreOperationBatch::DeviceExclusionProposal(retained),
@@ -719,8 +735,7 @@ async fn prepare_proposal(
         },
         candidate,
     )?;
-    let durable =
-        Box::pin(StoreDatabase::new(db).begin_outbound_store_device_exclusion(operation)).await?;
+    let durable = Box::pin(database.begin_outbound_store_device_exclusion(operation)).await?;
     #[cfg(any(test, feature = "test-utils"))]
     db.reach_test_point(crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged)
         .await;
@@ -728,7 +743,7 @@ async fn prepare_proposal(
 }
 
 fn cancel_device_exclusion<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     identity_signer: &'a UserKeypair,
     proposal: &'a StoreDeviceExclusionProposalRef,
@@ -741,7 +756,7 @@ fn cancel_device_exclusion<'a>(
     >,
 > {
     publish_outcome(
-        db,
+        database,
         storage,
         identity_signer,
         proposal,
@@ -750,7 +765,7 @@ fn cancel_device_exclusion<'a>(
 }
 
 pub(crate) fn finalize_device_exclusion<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     identity_signer: &'a UserKeypair,
     proposal: &'a StoreDeviceExclusionProposalRef,
@@ -763,7 +778,7 @@ pub(crate) fn finalize_device_exclusion<'a>(
     >,
 > {
     publish_outcome(
-        db,
+        database,
         storage,
         identity_signer,
         proposal,
@@ -772,24 +787,23 @@ pub(crate) fn finalize_device_exclusion<'a>(
 }
 
 async fn resume_device_exclusion(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-    let journal = StoreDatabase::new(db);
-    let _lock = journal.lock_device_exclusion().await;
-    let Some(operation) = journal.active_outbound_store_device_exclusion().await? else {
+    let _lock = database.lock_device_exclusion().await;
+    let Some(operation) = database.active_outbound_store_device_exclusion().await? else {
         return Ok(None);
     };
-    drive_device_exclusion(db, storage, identity_signer, Box::new(operation))
+    drive_device_exclusion(database, storage, identity_signer, Box::new(operation))
         .await
         .map(Some)
 }
 
 async fn get_device_exclusion_operations(
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
-    StoreDatabase::new(db)
+    database
         .outbound_store_device_exclusion_operations()
         .await?
         .into_iter()
@@ -815,7 +829,7 @@ enum OutcomeIntent {
 }
 
 fn publish_outcome<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     identity_signer: &'a UserKeypair,
     proposal_ref: &'a StoreDeviceExclusionProposalRef,
@@ -829,16 +843,16 @@ fn publish_outcome<'a>(
     >,
 > {
     Box::pin(async move {
-        let journal = StoreDatabase::new(db);
-        let _lock = journal.lock_device_exclusion().await;
-        reject_active_operation(db).await?;
+        let db = database.sqlite();
+        let _lock = database.lock_device_exclusion().await;
+        reject_active_operation(database).await?;
         let authorization = Box::pin(super::device_join::load_current_device_join_authorization(
             db, storage,
         ))
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
         let durable = Box::pin(prepare_outcome(
-            db,
+            database,
             storage,
             identity_signer,
             proposal_ref,
@@ -846,21 +860,22 @@ fn publish_outcome<'a>(
             authorization,
         ))
         .await?;
-        drive_device_exclusion(db, storage, identity_signer, Box::new(durable)).await
+        drive_device_exclusion(database, storage, identity_signer, Box::new(durable)).await
     })
 }
 
 async fn prepare_outcome(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     proposal_ref: &StoreDeviceExclusionProposalRef,
     intent: OutcomeIntent,
     authorization: MembershipChain,
 ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
+    let db = database.sqlite();
     let device_id = local_device_id(db).await?;
     let plan = Box::pin(super::operations::prepare_plan(
-        db,
+        database,
         storage,
         &authorization,
         &device_id,
@@ -877,7 +892,9 @@ async fn prepare_outcome(
         proposal_ref,
     )
     .await?;
-    let state = db.resolved_store_device_state(plan.device_state()).await?;
+    let state = database
+        .resolved_store_device_state(plan.device_state())
+        .await?;
     require_pending_proposal(&state, proposal_ref)?;
     let outcome = match intent {
         OutcomeIntent::Cancel => {
@@ -892,7 +909,7 @@ async fn prepare_outcome(
         }
         OutcomeIntent::Exclude => {
             let proof = build_exclusion_proof(
-                db,
+                database,
                 storage,
                 plan.root(),
                 proposal_ref,
@@ -940,7 +957,7 @@ async fn prepare_outcome(
         plan.registration(),
     )?;
     let candidate = Box::pin(super::operations::prepare_candidate(
-        db,
+        database,
         storage,
         plan,
         StoreOperationBatch::DeviceExclusionOutcome(retained),
@@ -954,8 +971,7 @@ async fn prepare_outcome(
         },
         candidate,
     )?;
-    let durable =
-        Box::pin(StoreDatabase::new(db).begin_outbound_store_device_exclusion(operation)).await?;
+    let durable = Box::pin(database.begin_outbound_store_device_exclusion(operation)).await?;
     #[cfg(any(test, feature = "test-utils"))]
     db.reach_test_point(crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged)
         .await;
@@ -963,7 +979,7 @@ async fn prepare_outcome(
 }
 
 fn drive_device_exclusion<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     identity_signer: &'a UserKeypair,
     mut operation: Box<DurableStoreDeviceExclusionOperation>,
@@ -973,7 +989,7 @@ fn drive_device_exclusion<'a>(
     let future = async move {
         loop {
             if let Some(result) = Box::pin(resume_device_exclusion_candidate(
-                db,
+                database,
                 storage,
                 &mut operation,
             ))
@@ -982,7 +998,7 @@ fn drive_device_exclusion<'a>(
                 return Ok(result);
             }
             if let Some(result) = Box::pin(ensure_device_exclusion_authority_uploaded(
-                db,
+                database,
                 storage,
                 operation.as_ref(),
             ))
@@ -991,7 +1007,7 @@ fn drive_device_exclusion<'a>(
                 return Ok(result);
             }
             let progress = Box::pin(publish_device_exclusion_candidate(
-                db,
+                database,
                 storage,
                 &mut operation,
             ))
@@ -1001,7 +1017,7 @@ fn drive_device_exclusion<'a>(
                 DeviceExclusionPublicationProgress::Continue => {}
                 DeviceExclusionPublicationProgress::ReplacementRequired(proof) => {
                     Box::pin(replace_device_exclusion_candidate(
-                        db,
+                        database,
                         storage,
                         identity_signer,
                         &mut operation,
@@ -1022,7 +1038,7 @@ enum DeviceExclusionPublicationProgress {
 }
 
 async fn publish_device_exclusion_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
 ) -> Result<DeviceExclusionPublicationProgress, StoreDeviceExclusionError> {
@@ -1032,12 +1048,12 @@ async fn publish_device_exclusion_candidate(
         )
     })?;
     let publish =
-        super::operations::publish_prepared_store_operation(db, storage, Box::new(candidate));
+        super::operations::publish_prepared_store_operation(database, storage, Box::new(candidate));
     let publication = Box::new(Box::pin(publish).await?);
     match publication.as_ref() {
         StoreOperationPublicationOutcome::Activated(_) => {
             **operation = Box::pin(
-                StoreDatabase::new(db).complete_outbound_store_device_exclusion_activation(
+                database.complete_outbound_store_device_exclusion_activation(
                     operation.as_ref().clone(),
                 ),
             )
@@ -1045,12 +1061,10 @@ async fn publish_device_exclusion_candidate(
             completion_result(operation.as_ref()).map(DeviceExclusionPublicationProgress::Completed)
         }
         StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
-            **operation = Box::pin(
-                StoreDatabase::new(db).replace_outbound_store_device_exclusion_candidate(
-                    operation.as_ref().clone(),
-                    candidate.as_ref().clone(),
-                ),
-            )
+            **operation = Box::pin(database.replace_outbound_store_device_exclusion_candidate(
+                operation.as_ref().clone(),
+                candidate.as_ref().clone(),
+            ))
             .await?;
             Ok(DeviceExclusionPublicationProgress::Continue)
         }
@@ -1072,7 +1086,7 @@ async fn publish_device_exclusion_candidate(
                 ));
             } else {
                 **operation = Box::pin(
-                    StoreDatabase::new(db).begin_outbound_store_device_exclusion_nonactivation(
+                    database.begin_outbound_store_device_exclusion_nonactivation(
                         operation.as_ref().clone(),
                         nonactivation.as_ref().clone(),
                     ),
@@ -1091,32 +1105,30 @@ async fn publish_device_exclusion_candidate(
 }
 
 async fn replace_device_exclusion_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
     nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
 ) -> Result<(), StoreDeviceExclusionError> {
     let replacement = Box::pin(prepare_replacement_candidate(
-        db,
+        database,
         storage,
         identity_signer,
         operation.object(),
     ))
     .await?;
-    **operation = Box::pin(
-        StoreDatabase::new(db).begin_outbound_store_device_exclusion_replacement(
-            operation.as_ref().clone(),
-            replacement,
-            nonactivation,
-        ),
-    )
+    **operation = Box::pin(database.begin_outbound_store_device_exclusion_replacement(
+        operation.as_ref().clone(),
+        replacement,
+        nonactivation,
+    ))
     .await?;
     Ok(())
 }
 
 async fn ensure_device_exclusion_authority_uploaded(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: &DurableStoreDeviceExclusionOperation,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
@@ -1126,7 +1138,7 @@ async fn ensure_device_exclusion_authority_uploaded(
             crate::sync::storage::StorageError::SlotCollision(_),
         )) => {
             if let Some(completed) = Box::pin(resolve_exclusion_object_collision(
-                db,
+                database,
                 storage,
                 operation.clone(),
             ))
@@ -1137,22 +1149,20 @@ async fn ensure_device_exclusion_authority_uploaded(
         }
         Err(error) => return Err(error.into()),
     }
-    Box::pin(
-        StoreDatabase::new(db).mark_store_device_exclusion_authority_uploaded(operation.clone()),
-    )
-    .await?;
+    Box::pin(database.mark_store_device_exclusion_authority_uploaded(operation.clone())).await?;
     Ok(None)
 }
 
 async fn resume_device_exclusion_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
+    let db = database.sqlite();
     match operation.as_ref() {
         DurableStoreDeviceExclusionOperation::CandidateNonactivating { .. } => {
             for target in Box::pin(
-                StoreDatabase::new(db).nonactivating_store_device_exclusion_cleanup_targets(
+                database.nonactivating_store_device_exclusion_cleanup_targets(
                     operation.as_ref().clone(),
                 ),
             )
@@ -1162,15 +1172,14 @@ async fn resume_device_exclusion_candidate(
                 db.mark_candidate_cleanup_absent(target.object).await?;
             }
             **operation = Box::pin(
-                StoreDatabase::new(db)
-                    .complete_nonactivating_store_device_exclusion(operation.as_ref().clone()),
+                database.complete_nonactivating_store_device_exclusion(operation.as_ref().clone()),
             )
             .await?;
             completion_result(operation.as_ref()).map(Some)
         }
         DurableStoreDeviceExclusionOperation::ReplacingCandidate { .. } => {
             for target in Box::pin(
-                StoreDatabase::new(db).nonactivating_store_device_exclusion_cleanup_targets(
+                database.nonactivating_store_device_exclusion_cleanup_targets(
                     operation.as_ref().clone(),
                 ),
             )
@@ -1180,7 +1189,7 @@ async fn resume_device_exclusion_candidate(
                 db.mark_candidate_cleanup_absent(target.object).await?;
             }
             **operation = Box::pin(
-                StoreDatabase::new(db).complete_store_device_exclusion_replacement_cleanup(
+                database.complete_store_device_exclusion_replacement_cleanup(
                     operation.as_ref().clone(),
                 ),
             )
@@ -1190,13 +1199,13 @@ async fn resume_device_exclusion_candidate(
         DurableStoreDeviceExclusionOperation::CandidatePrepared { candidate, .. } => {
             let reference = candidate.reference.clone();
             let stream = reference.coord.stream_id.to_string();
-            if db
+            if database
                 .exact_materialized_ref(&stream, reference.coord.sequence())
                 .await?
                 == Some(reference)
             {
                 **operation = Box::pin(
-                    StoreDatabase::new(db).complete_outbound_store_device_exclusion_activation(
+                    database.complete_outbound_store_device_exclusion_activation(
                         operation.as_ref().clone(),
                     ),
                 )
@@ -1213,11 +1222,12 @@ async fn resume_device_exclusion_candidate(
 }
 
 async fn prepare_replacement_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
     object: &DurableStoreDeviceExclusionObject,
 ) -> Result<PreparedStoreOperationCommit, StoreDeviceExclusionError> {
+    let db = database.sqlite();
     let DurableStoreDeviceExclusionObject::Outcome {
         reference, value, ..
     } = object
@@ -1230,10 +1240,17 @@ async fn prepare_replacement_candidate(
     let authorization = super::device_join::load_current_device_join_authorization(db, storage)
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-    let plan =
-        super::operations::prepare_plan(db, storage, &authorization, &device_id, identity_signer)
-            .await?;
-    let state = db.resolved_store_device_state(plan.device_state()).await?;
+    let plan = super::operations::prepare_plan(
+        database,
+        storage,
+        &authorization,
+        &device_id,
+        identity_signer,
+    )
+    .await?;
+    let state = database
+        .resolved_store_device_state(plan.device_state())
+        .await?;
     require_pending_proposal(&state, reference.proposal())?;
     let proposal = crate::sync::store_objects::load_device_exclusion_proposal_ref(
         storage,
@@ -1248,7 +1265,7 @@ async fn prepare_replacement_candidate(
         plan.registration(),
     )?;
     Box::pin(super::operations::prepare_candidate(
-        db,
+        database,
         storage,
         plan,
         StoreOperationBatch::DeviceExclusionOutcome(retained),
@@ -1258,10 +1275,11 @@ async fn prepare_replacement_candidate(
 }
 
 async fn resolve_exclusion_object_collision(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: DurableStoreDeviceExclusionOperation,
 ) -> Result<Option<DurableStoreDeviceExclusionOperation>, StoreDeviceExclusionError> {
+    let db = database.sqlite();
     let intended = operation.object();
     let (bytes, prepared) = storage
         .read_prepared_protocol_slot(
@@ -1319,28 +1337,27 @@ async fn resolve_exclusion_object_collision(
             "occupied exclusion outcome changed during exact verification".to_string(),
         ));
     }
-    let completed = Box::pin(
-        StoreDatabase::new(db).complete_outbound_store_device_exclusion_slot_loss(
-            operation,
-            DurableStoreDeviceExclusionObject::Outcome {
-                reference: winner_ref,
-                value: unverified,
-                prepared,
-            },
-        ),
-    )
+    let completed = Box::pin(database.complete_outbound_store_device_exclusion_slot_loss(
+        operation,
+        DurableStoreDeviceExclusionObject::Outcome {
+            reference: winner_ref,
+            value: unverified,
+            prepared,
+        },
+    ))
     .await?;
     Ok(Some(completed))
 }
 
 async fn build_exclusion_proof(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     proposal_ref: &StoreDeviceExclusionProposalRef,
     proposal: &StoreDeviceExclusionProposal,
 ) -> Result<StoreDeviceExclusionProof, StoreDeviceExclusionError> {
-    let frozen = db
+    let db = database.sqlite();
+    let frozen = database
         .resolved_store_device_state(&proposal.frozen_device_state)
         .await?;
     let mut acknowledgements = Vec::new();
@@ -1360,7 +1377,7 @@ async fn build_exclusion_proof(
                     record.registration.device_id, proposal_ref.proposal_id
                 ))
             })?;
-        let registration = db
+        let registration = database
             .activated_store_device_registration(record.registration.clone())
             .await?;
         let acknowledgement = crate::sync::store_objects::load_store_ack_ref(
@@ -1451,11 +1468,10 @@ fn completion_result(
     })
 }
 
-async fn reject_active_operation(db: &Database) -> Result<(), StoreDeviceExclusionError> {
-    if let Some(operation) = StoreDatabase::new(db)
-        .active_outbound_store_device_exclusion()
-        .await?
-    {
+async fn reject_active_operation(
+    database: &StoreDatabase,
+) -> Result<(), StoreDeviceExclusionError> {
+    if let Some(operation) = database.active_outbound_store_device_exclusion().await? {
         return Err(StoreDeviceExclusionError::OperationActive(
             operation.operation_id(),
         ));

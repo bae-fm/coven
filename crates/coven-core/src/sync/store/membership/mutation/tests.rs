@@ -73,6 +73,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     )
     .await
     .expect("create Merge Store");
+    let database = crate::sync::store::StoreDatabase::new(&db);
     let chain = crate::sync::store::membership::load_current_exact_chain(
         &store.storage,
         &store.root,
@@ -81,7 +82,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     )
     .await
     .expect("load exact membership chain");
-    let stream_id = select_mutation_author_stream(&db, &chain, &owner)
+    let stream_id = select_mutation_author_stream(&database, &chain, &owner)
         .await
         .expect("select membership stream");
     let entry = chain
@@ -96,7 +97,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         .expect("sign membership entry");
     let prepared = prepare_membership_transition(
         &store.storage,
-        &db,
+        &database,
         store.root.store_root_hash,
         &chain,
         entry,
@@ -137,7 +138,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
 
     let publication = finish_membership_transition(
         &store.storage,
-        &db,
+        &database,
         store.root.store_root_hash,
         prepared,
         crate::sync::membership::MembershipHeadActivation::Direct,

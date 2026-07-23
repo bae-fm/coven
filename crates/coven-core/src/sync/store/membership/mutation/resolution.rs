@@ -1,10 +1,10 @@
-use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::sync::membership::{
     self, MembershipChain, MembershipChange, MembershipError, MembershipHeadRef,
 };
 use crate::sync::remote_object;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::operations;
 use crate::sync::store_commit;
 use crate::sync::store_commit::membership_head_slot_prefix;
@@ -74,7 +74,7 @@ impl ResolveMutationPlan {
 
 async fn build_resolution_mutation(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     chain: &MembershipChain,
     signer: &UserKeypair,
     device_id: &str,
@@ -83,7 +83,7 @@ async fn build_resolution_mutation(
     created_at: &str,
 ) -> Result<ResolveMutationPlan, InviteError> {
     let base = operations::prepare_merge_conflict_resolution_commit(
-        db,
+        database,
         storage,
         device_id,
         signer,
@@ -204,7 +204,7 @@ async fn build_resolution_mutation(
     )?;
     let transition = prepare_membership_transition(
         storage,
-        db,
+        database,
         base.root().store_root_hash,
         &resolved_chain,
         entry,
@@ -230,7 +230,7 @@ async fn build_resolution_mutation(
     ];
     stream_activations.sort();
     let mut candidate = operations::prepare_candidate(
-        db,
+        database,
         storage,
         operation,
         operations::StoreOperationBatch::MergeMembershipActivation {
@@ -242,7 +242,7 @@ async fn build_resolution_mutation(
     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     let publication = finish_membership_transition(
         storage,
-        db,
+        database,
         resolution.store_root_hash,
         transition.clone(),
         membership::MembershipHeadActivation::StoreCommit {
@@ -279,7 +279,7 @@ async fn finish_nonactivating_resolution(
     let mut retained = vec![plan.reference.object.clone()];
     retained.push(plan.candidate.head_ref().object);
     let cleanup = persistence
-        .db
+        .database
         .membership_candidate_cleanup_targets(
             persistence.intent_hash,
             plan.candidate.reference.clone(),
@@ -291,12 +291,13 @@ async fn finish_nonactivating_resolution(
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         persistence
-            .db
+            .database
+            .sqlite()
             .mark_candidate_cleanup_absent(target.object)
             .await?;
     }
     persistence
-        .db
+        .database
         .complete_nonactivating_membership_candidate_mutation(
             persistence.intent_hash,
             plan.candidate.reference.clone(),
@@ -361,7 +362,8 @@ async fn execute_resolution_mutation(
     )?;
     successor.add_entry(plan.publication.entry.clone())?;
     let root = persistence
-        .db
+        .database
+        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| InviteError::InvalidDurableMutation("Store root is absent".to_string()))?;
@@ -380,7 +382,8 @@ async fn execute_resolution_mutation(
     store_objects::load_membership_resolution_ref(storage, root.store_root_hash, &plan.reference)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    crate::sync::store::database::StoreDatabase::new(persistence.db)
+    persistence
+        .database
         .mark_remote_object_uploaded(exact_owned_remote(&remotes, &plan.reference.object)?)
         .await?;
     publish_prepared_merge_membership_authority(
@@ -390,7 +393,8 @@ async fn execute_resolution_mutation(
         &[],
     )
     .await?;
-    crate::sync::store::database::StoreDatabase::new(persistence.db)
+    persistence
+        .database
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.transition.entry_ref.object,
@@ -399,7 +403,8 @@ async fn execute_resolution_mutation(
     operations::upload_commit(storage, &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    crate::sync::store::database::StoreDatabase::new(persistence.db)
+    persistence
+        .database
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.candidate.reference.object,
@@ -409,7 +414,7 @@ async fn execute_resolution_mutation(
         let previous = plan.candidate.as_ref().clone();
         let current_remotes = plan.remote_objects()?;
         let outcome = publish_prepared_merge_membership_activation(
-            persistence.db,
+            persistence.database,
             storage,
             &root,
             &author,
@@ -446,7 +451,7 @@ async fn execute_resolution_mutation(
                 let bytes =
                     encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
                 persistence.intent_hash = persistence
-                    .db
+                    .database
                     .adopt_merge_membership_candidate_head(
                         persistence.intent_hash,
                         bytes,
@@ -464,7 +469,7 @@ async fn execute_resolution_mutation(
                     nonactivation: nonactivation.clone().into_durable(),
                 };
                 let cleanup = persistence
-                    .db
+                    .database
                     .begin_membership_candidate_nonactivation(
                         persistence.intent_hash,
                         plan.candidate.reference.clone(),
@@ -486,7 +491,8 @@ async fn execute_resolution_mutation(
                         .await
                         .map_err(|error| InviteError::Crypto(error.to_string()))?;
                     persistence
-                        .db
+                        .database
+                        .sqlite()
                         .mark_candidate_cleanup_absent(target.object)
                         .await?;
                 }
@@ -514,10 +520,10 @@ pub async fn resolve_membership_conflict(
     conflict_hash: store_commit::ObjectHash,
     resolver_branch_heads: Vec<MembershipHeadRef>,
     created_at: &str,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
-    let _mutation = db.lock_membership_mutation().await;
-    let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
+    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;
             let (pending, progress) = decode_membership_mutation(row)?;
@@ -539,7 +545,7 @@ pub async fn resolve_membership_conflict(
         None => {
             let plan = build_resolution_mutation(
                 storage,
-                db,
+                database,
                 chain,
                 signer,
                 device_id,
@@ -550,7 +556,7 @@ pub async fn resolve_membership_conflict(
             .await?;
             let bytes = encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
             let progress = MembershipMutationProgress::Pending;
-            let intent_hash = db
+            let intent_hash = database
                 .stage_membership_candidate_mutation(
                     bytes,
                     encode_membership_progress(&progress)?,
@@ -566,7 +572,10 @@ pub async fn resolve_membership_conflict(
         chain,
         plan,
         progress,
-        MutationPersistence { db, intent_hash },
+        MutationPersistence {
+            database,
+            intent_hash,
+        },
     )
     .await
 }

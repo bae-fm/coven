@@ -10,14 +10,14 @@ use crate::sync::store_objects::StoreObjectError;
 use crate::sync::{audience_package, circle, gate, remote_object, storage};
 
 use crate::database::{
-    Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
-    StoreWriteBlobFact, StoreWriteBlobFacts,
+    PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
+    StoreWriteBlobFacts,
 };
 use crate::store_dir::StoreDir;
 
 mod audience_preparation;
 
-use super::StoreError;
+use super::{StoreDatabase, StoreError};
 pub(crate) use audience_preparation::*;
 
 pub(crate) struct PreparedPartitionPackage {

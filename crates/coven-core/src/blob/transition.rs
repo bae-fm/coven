@@ -40,12 +40,13 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{cache, Provenance, RowBlobRef};
+use crate::blob::{Provenance, RowBlobRef};
 use crate::database::{Database, DbError, MakeRemoteIntentState};
 use crate::db::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use crate::store_dir::StoreDir;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::SyncedTable;
+use crate::sync::store::StoreDatabase;
 
 use crate::blob::BlobTransitionObserver;
 use crate::sync::storage::SyncStorage;
@@ -153,13 +154,14 @@ fn gated_root_gate_col(
 /// half-queued make_remote. `pin` becomes each upload's `retain_pinned`, so the
 /// blob is kept in coven's cache as a pinned (offline) copy.
 pub async fn make_remote(
-    db: &Database,
+    database: &StoreDatabase,
     store_dir: &StoreDir,
     hlc: &Hlc,
     root_table: &str,
     root_id: &str,
     pin: bool,
 ) -> Result<(), MakeRemoteError> {
+    let db = database.sqlite();
     let tables = db.synced_tables().to_vec();
     let gate_col = gated_root_gate_col(&tables, root_table)?;
     let (locality_table, locality_column, locality_id) = (
@@ -355,11 +357,12 @@ pub(crate) enum PostUpload {
 /// Created handoffs remain until that Store write activates, so a crash cannot make
 /// the upload drain mistake a published object for an orphan.
 pub(crate) async fn finalize_created_upload(
-    db: &Database,
+    database: &StoreDatabase,
     entry: &OutboxEntry,
     stamp: String,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 ) -> Result<PostUpload, DbError> {
+    let db = database.sqlite();
     let OutboxOperation::Upload {
         root_table,
         root_id,
@@ -464,7 +467,7 @@ pub(crate) async fn finalize_created_upload(
             ))
         })?;
         let publication_write_id = write_id.clone();
-        Database::run_internal_store_write_transaction_on(
+        StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &tables,
             routing_encryption.as_ref(),
@@ -536,7 +539,7 @@ struct Materialized {
 /// stays Remote and a retry re-materializes cleanly.
 #[allow(clippy::too_many_arguments)]
 pub async fn make_local(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     hlc: &Hlc,
@@ -547,8 +550,9 @@ pub async fn make_local(
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), MakeLocalError> {
+    let db = database.sqlite();
     let tables = db.synced_tables().to_vec();
-    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())?;
+    StoreDatabase::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())?;
     if is_remote_root(&tables, root_table) {
         return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
     }
@@ -624,7 +628,7 @@ pub async fn make_local(
     // loud); the loop's result drives the cleanup-or-commit decision.
     let mut written: Vec<PathBuf> = Vec::new();
     let materialized = match materialize_blobs(
-        db,
+        database,
         storage,
         store_dir,
         observer,
@@ -653,7 +657,7 @@ pub async fn make_local(
     let write_id = db.new_write_id();
     let gates = db.gates();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
+        StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &tables,
             routing_encryption.as_ref(),
@@ -785,7 +789,7 @@ fn same_row_blob_version(left: &RowBlobRef, right: &RowBlobRef) -> bool {
 /// Separated from the commit so every error path runs that one rollback.
 #[allow(clippy::too_many_arguments)]
 async fn materialize_blobs(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     observer: Option<&dyn BlobTransitionObserver>,
@@ -829,8 +833,8 @@ async fn materialize_blobs(
                         path: dest_path.display().to_string(),
                         detail,
                     })?;
-                let staged = cache::stage_remote_blob_plaintext(
-                    db,
+                let staged = crate::sync::store::blob::stage_remote_blob_plaintext(
+                    database,
                     store_dir,
                     Some(storage),
                     reference,
@@ -868,8 +872,8 @@ async fn materialize_blobs(
                         path: format!("local/{}/{}", blob.namespace, blob.id),
                         detail: e.to_string(),
                     })?;
-                let staged = cache::stage_remote_blob_plaintext(
-                    db,
+                let staged = crate::sync::store::blob::stage_remote_blob_plaintext(
+                    database,
                     store_dir,
                     Some(storage),
                     reference,

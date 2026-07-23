@@ -50,6 +50,88 @@ async fn create_test_store_in_its_own_task(
         .expect("create exact Circle test Store")
 }
 
+async fn prepare_circle_operation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    metadata_stamp: &str,
+    name: &str,
+    signer: &UserKeypair,
+) -> Result<CircleOperationJournal, CircleOperationError> {
+    super::prepare_circle_operation(
+        &StoreDatabase::new(db),
+        storage,
+        device_id,
+        metadata_stamp,
+        name,
+        signer,
+    )
+    .await
+}
+
+async fn publish_circle_operation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    operation_id: &CircleOperationId,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    super::publish_circle_operation(&StoreDatabase::new(db), storage, operation_id, signer).await
+}
+
+async fn resume_circle_operations(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    super::resume_circle_operations(&StoreDatabase::new(db), storage, signer).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rename_circle(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    metadata_stamp: &str,
+    circle_id: CircleId,
+    name: &str,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    super::rename_circle(
+        &StoreDatabase::new(db),
+        storage,
+        device_id,
+        metadata_stamp,
+        circle_id,
+        name,
+        signer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_circle_activations(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    author: &crate::sync::store_commit::StoreDeviceRegistration,
+    identity: &UserKeypair,
+    founder_pubkey: &str,
+) -> Result<VerifiedCircleActivations, CircleOperationError> {
+    super::load_circle_activations(
+        &StoreDatabase::new(db),
+        storage,
+        root,
+        commit_ref,
+        commit,
+        author,
+        identity,
+        founder_pubkey,
+    )
+    .await
+}
+
 async fn assert_exact_object_absent(home: &InMemoryCloudHome, reference: &ExactObjectRef) {
     let storage = Arc::new(home.clone())
         .exact_slot_storage()
@@ -121,7 +203,7 @@ async fn resign_merge_journal_with_reference(
     mutate_commit: impl FnOnce(&mut StoreBatchCommit),
 ) {
     let old_commit = journal.commit().expect("parse prepared Circle commit");
-    let author = db
+    let author = crate::sync::store::database::StoreDatabase::new(db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load Circle commit author");

@@ -16,7 +16,7 @@ use crate::sync::remote_object::remote_object_id;
 use crate::sync::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
 use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(crate) async fn complete_prepared_store_write(
         &self,
         accepted: StoreBatchCommitRef,

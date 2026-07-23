@@ -566,15 +566,17 @@ impl CovenHandle {
         let outcome = self
             .db()
             .call(move |conn| {
-                Ok(Database::run_store_write_transaction_on(
-                    conn,
-                    &tables,
-                    &gates,
-                    &blob_decls,
-                    routing_encryption.as_ref(),
-                    write_id,
-                    |tx| f(SqlContext::new(tx, stamper)),
-                ))
+                Ok(
+                    crate::sync::store::StoreDatabase::run_store_write_transaction_on(
+                        conn,
+                        &tables,
+                        &gates,
+                        &blob_decls,
+                        routing_encryption.as_ref(),
+                        write_id,
+                        |tx| f(SqlContext::new(tx, stamper)),
+                    ),
+                )
             })
             .await
             .map_err(CovenError::from)?;
@@ -861,7 +863,7 @@ fn run_write_batch_on_connection<R>(
     sql: WriteSql<R>,
 ) -> CovenResult<WriteReceipt<R>> {
     let mut moved = Vec::new();
-    let result = Database::run_store_write_transaction_on(
+    let result = crate::sync::store::StoreDatabase::run_store_write_transaction_on(
         conn,
         &tables,
         &gates,

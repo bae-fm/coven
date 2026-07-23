@@ -15,7 +15,7 @@ use super::candidate_records::parse_prepared_merge_candidate_on;
 use super::publication_state::PreparedStoreWriteState;
 use super::*;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(crate) fn persist_prepared_audience_objects_on(
         conn: &Connection,
         write_id: &WriteId,

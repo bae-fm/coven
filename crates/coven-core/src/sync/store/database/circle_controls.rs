@@ -14,7 +14,7 @@ use crate::sync::store_commit::{
     commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreDeviceOperations,
 };
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(in crate::sync::store) async fn insert_circle_operation(
         &self,
         journal: CircleOperationJournal,

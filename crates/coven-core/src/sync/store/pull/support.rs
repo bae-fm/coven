@@ -1,16 +1,16 @@
 /// Membership and blob helpers shared by Store pull and bootstrap.
 use tracing::{debug, warn};
 
-use super::conflict::TableSchema;
-use super::hlc::Timestamp;
-use super::membership::MembershipChain;
-use super::storage::SyncStorage;
 use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::LocalBlobCleanupIntent;
 use crate::blob::CacheFill;
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::store_dir::StoreDir;
+use crate::sync::conflict::TableSchema;
+use crate::sync::hlc::Timestamp;
+use crate::sync::membership::MembershipChain;
+use crate::sync::storage::SyncStorage;
 
 /// The membership state one sync cycle judges every authorization against, loaded
 /// and anchored once at the top of the cycle and threaded to the pull, the
@@ -21,7 +21,7 @@ use crate::store_dir::StoreDir;
 /// can't disagree mid-cycle. Because [`load_anchored_chain`] writes the reader's
 /// per-author-stream head watermark, loading once also writes each watermark once.
 ///
-/// [`load_anchored_chain`]: super::store::membership::load_anchored_chain
+/// [`load_anchored_chain`]: crate::sync::store::membership::load_anchored_chain
 pub struct CycleMembership {
     /// The owner-anchored, committed chain. `None` is representable for
     /// pre-initialization bootstrap callers; initialized cycles always carry one.
@@ -30,11 +30,6 @@ pub struct CycleMembership {
     /// An owner-pinned store that fails to produce a valid chain aborts the load,
     /// so `Some(owner)` here always travels with `Some(chain)`.
     pub pinned_owner: Option<String>,
-    /// The raw membership listing this cycle read (one `list_membership_entries`).
-    /// The key refresh reads the visible activation coordinates from it, which is
-    /// the LIST view (an entry is visible as soon as it is listed), distinct from
-    /// the committed chain (an entry is committed only once a head certifies it).
-    pub listed_entries: Vec<super::membership::MembershipCoord>,
 }
 
 /// Load and anchor the cycle's membership chain once. Every successful listing
@@ -47,7 +42,7 @@ pub async fn load_cycle_membership(
     db: &Database,
 ) -> Result<CycleMembership, PullError> {
     let pinned_owner = db
-        .get_protocol_state(super::store::membership::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
     let root = db
@@ -55,26 +50,25 @@ pub async fn load_cycle_membership(
         .await
         .map_err(|error| PullError::Apply(format!("read Store root reference: {error}")))?
         .ok_or_else(|| PullError::Apply("Store root reference is absent".to_string()))?;
-    let root_value = super::store_objects::load_store_protocol_root(storage, &root)
+    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, &root)
         .await
         .map_err(PullError::MembershipObject)?
         .value;
     let owner = pinned_owner
         .clone()
         .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
-    let chain = super::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, db)
-        .await
-        .map_err(|error| match error {
-            super::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
-                PullError::MembershipLoad(error)
-            }
-            _ => PullError::MembershipTampered(error.to_string()),
-        })?;
-    let listed_entries = chain.author_heads();
+    let chain =
+        crate::sync::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, db)
+            .await
+            .map_err(|error| match error {
+                crate::sync::store::membership::AnchoredChainError::StorageUnavailable {
+                    ..
+                } => PullError::MembershipLoad(error),
+                _ => PullError::MembershipTampered(error.to_string()),
+            })?;
     Ok(CycleMembership {
         chain: Some(chain),
         pinned_owner: Some(owner),
-        listed_entries,
     })
 }
 
@@ -85,12 +79,12 @@ pub async fn load_cycle_membership(
 /// `max` becomes the value the caller advances the local HLC past, and that
 /// advance is deliberately uncapped (it trusts a value already written to disk).
 /// So the bound lives here, at the point a stamp is *collected*: a grossly-future
-/// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
+/// stamp — beyond `receiver_wall_ms` + [`crate::sync::hlc::MAX_FUTURE_SKEW_MS`] — is
 /// logged and skipped, so it can never ratchet the clock. A conflicting row with
 /// such a stamp was already refused by the apply, but a *non-conflicting* INSERT
 /// (no local row to conflict with) reaches here as an applied row, so this is the
 /// gate that stops it from dragging the clock forward.
-pub(super) fn advance_max_updated_at(
+pub(crate) fn advance_max_updated_at(
     max: &mut Option<Timestamp>,
     changes: &[RowChange],
     schema: &TableSchema,
@@ -151,7 +145,7 @@ pub enum BlobDownloadFailureCause {
     Invalid(String),
     Local(String),
     Metadata(String),
-    Storage(super::storage::StorageError),
+    Storage(crate::sync::storage::StorageError),
 }
 
 impl std::fmt::Display for BlobDownloadFailureCause {
@@ -291,7 +285,7 @@ pub(crate) fn cache_eager_blobs(
 /// position, so filesystem cleanup may happen afterward without leaving an
 /// unrecorded obligation. A DELETE removes its old blob; an UPDATE does so only
 /// when it repoints or clears the blob reference.
-pub(super) fn local_blob_cleanup_intents(
+pub(crate) fn local_blob_cleanup_intents(
     blob_decls: &BlobDecls,
     old_changes: &[RowChange],
     new_changes: &[RowChange],
@@ -361,18 +355,19 @@ pub(super) fn local_blob_cleanup_intents(
 /// the exact stored object and the authority needed to open it; this path performs
 /// no cloud listing or identity search.
 pub(crate) async fn download_blobs(
-    db: &Database,
+    database: &crate::sync::store::StoreDatabase,
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
 ) -> Result<(), BlobDownloadFailures> {
+    let db = database.sqlite();
     let mut failures = Vec::new();
     for download in blobs {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
-        let protection = match crate::blob::cache::opening_protection_for_authority(
-            db, storage, &authority, &stored,
+        let protection = match crate::sync::store::blob::opening_protection(
+            database, storage, &authority, &stored,
         )
         .await
         {
@@ -411,7 +406,7 @@ pub(crate) async fn verify_package_blobs(
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     bindings: &[crate::sync::audience_package::RowBlobLocatorBinding],
-    protection: super::storage::BlobSpoolProtection,
+    protection: crate::sync::storage::BlobSpoolProtection,
     eager: &[BlobDownload],
 ) -> Result<(), BlobDownloadFailures> {
     let mut verified = Vec::new();
@@ -448,7 +443,7 @@ async fn verify_blob_plaintext(
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     stored: &crate::blob::locator::StoredBlobRef,
-    protection: super::storage::BlobSpoolProtection,
+    protection: crate::sync::storage::BlobSpoolProtection,
     retain: bool,
 ) -> Result<(), BlobDownloadFailureCause> {
     let namespace = stored.locator().namespace();
@@ -514,7 +509,7 @@ async fn cached_exact_in_either_folder(
     cache: &std::path::Path,
     pinned: &std::path::Path,
     expected_size: u64,
-    expected_hash: super::store_commit::ObjectHash,
+    expected_hash: crate::sync::store_commit::ObjectHash,
 ) -> Result<bool, String> {
     for path in [cache, pinned] {
         if crate::local_blob::exists(path).await? {
@@ -529,9 +524,9 @@ async fn cached_exact_in_either_folder(
 
 #[derive(Debug)]
 pub enum PullError {
-    Storage(super::storage::StorageError),
-    MembershipObject(super::store_objects::StoreObjectError),
-    MembershipLoad(super::store::membership::AnchoredChainError),
+    Storage(crate::sync::storage::StorageError),
+    MembershipObject(crate::sync::store_objects::StoreObjectError),
+    MembershipLoad(crate::sync::store::membership::AnchoredChainError),
     Apply(String),
     /// The sync storage requires a schema version newer than ours.
     /// The client must upgrade before syncing.

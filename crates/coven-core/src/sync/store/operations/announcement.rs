@@ -169,11 +169,11 @@ async fn exact_next_announcement_slot_impl(
 }
 
 pub(crate) async fn reject_excluded_merge_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<(), StoreError> {
-    if crate::sync::store::database::StoreDatabase::new(db)
+    if database
         .author_exclusion_activation_for_candidate(candidate.clone(), author.clone())
         .await?
         .is_some()

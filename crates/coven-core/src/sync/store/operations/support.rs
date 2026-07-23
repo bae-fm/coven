@@ -63,15 +63,12 @@ pub(crate) fn blocked_status(error: &StoreError) -> Option<crate::WriteBlock> {
 }
 
 pub(crate) async fn publish_prepared_remote_objects(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     write_id: &crate::WriteId,
     store_root_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    for prepared in crate::sync::store::database::StoreDatabase::new(db)
-        .prepared_remote_objects(write_id)
-        .await?
-    {
+    for prepared in database.prepared_remote_objects(write_id).await? {
         let remote = prepared.record;
         let prepared_state = match &remote {
             super::remote_object::RemoteObjectRecord::CandidateCommit(record) => matches!(
@@ -112,7 +109,7 @@ pub(crate) async fn publish_prepared_remote_objects(
                     super::audience_package::PackageAudience::Circle {
                         circle_id, control, ..
                     } => {
-                        let (encryption, _) = db
+                        let (encryption, _) = database
                             .circle_publication_context(*circle_id, control.clone())
                             .await?;
                         (
@@ -156,7 +153,7 @@ pub(crate) async fn publish_prepared_remote_objects(
                 )
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                 let uploader = locator.uploader().clone();
-                let registration = db
+                let registration = database
                     .activated_store_device_registration(uploader.clone())
                     .await?;
                 let authority = BlobWriteAuthority::new(&uploader, &registration)
@@ -200,16 +197,18 @@ pub(crate) async fn publish_prepared_remote_objects(
             }
         }
         if prepared_state {
-            crate::sync::store::database::StoreDatabase::new(db)
-                .mark_remote_object_uploaded(remote)
-                .await?;
+            database.mark_remote_object_uploaded(remote).await?;
         }
     }
     Ok(())
 }
 
-pub(crate) async fn required_store_root(db: &Database) -> Result<StoreRootRef, StoreError> {
-    db.local_store_root_ref()
+pub(crate) async fn required_store_root(
+    database: &StoreDatabase,
+) -> Result<StoreRootRef, StoreError> {
+    database
+        .sqlite()
+        .local_store_root_ref()
         .await?
         .ok_or(StoreError::MissingState {
             key: STORE_ROOT_AUTHORITY,

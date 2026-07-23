@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::database::StoreDatabase;
@@ -16,16 +15,16 @@ use super::journal::{
 use super::OwnerPromotionError;
 
 async fn resume_request_publication(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     journal: OwnerPromotionJournal,
 ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
     let (previous, state) = journal.into_predecessor()?;
-    resume_request_publication_state(db, storage, previous, state).await
+    resume_request_publication_state(database, storage, previous, state).await
 }
 
 async fn resume_request_publication_state(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     mut previous: OwnerPromotionJournalPredecessor,
     mut state: OwnerPromotionJournalState,
@@ -40,7 +39,7 @@ async fn resume_request_publication_state(
             OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
                 let head = candidate.head_ref();
                 let outcome = crate::sync::store::operations::publish_prepared_store_operation(
-                    db, storage, candidate,
+                    database, storage, candidate,
                 )
                 .await?;
                 let next_state = match outcome {
@@ -79,7 +78,8 @@ async fn resume_request_publication_state(
                     target: previous.target.clone(),
                     state: next_state,
                 };
-                (previous, state) = advance_owner_promotion_journal(db, previous, next).await?;
+                (previous, state) =
+                    advance_owner_promotion_journal(database, previous, next).await?;
             }
             OwnerPromotionJournalState::AwaitingAcceptance { request, .. }
             | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
@@ -95,14 +95,14 @@ async fn resume_request_publication_state(
 }
 
 pub async fn begin_owner_promotion(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity: &UserKeypair,
     member_registration: StoreDeviceRegistrationRef,
 ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
-    let store_db = StoreDatabase::new(db);
-    let (allocated, failed_attempt) = if let Some(existing) = store_db
+    let db = database.sqlite();
+    let (allocated, failed_attempt) = if let Some(existing) = database
         .load_owner_promotion_target(target_key(&member_registration)?)
         .await?
     {
@@ -115,7 +115,7 @@ pub async fn begin_owner_promotion(
         ) {
             (None, Some(existing))
         } else {
-            return resume_request_publication(db, storage, existing).await;
+            return resume_request_publication(database, storage, existing).await;
         }
     } else {
         (None, None)
@@ -129,16 +129,21 @@ pub async fn begin_owner_promotion(
             .await
             .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
     let membership = load_current_merge_membership(db, storage, &root).await?;
-    let plan =
-        crate::sync::store::operations::prepare_plan(db, storage, &membership, device_id, identity)
-            .await?;
+    let plan = crate::sync::store::operations::prepare_plan(
+        database,
+        storage,
+        &membership,
+        device_id,
+        identity,
+    )
+    .await?;
     let member_grant = exact_merge_member_grant(&membership, &member.value.author_pubkey)?;
     let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
         OwnerPromotionError::Protocol("promotion author is not an Owner".to_string())
     })?;
     let reusable =
         membership.reusable_author_streams(&plan.registration().author_pubkey, &owner_grant);
-    let author_stream = db
+    let author_stream = database
         .select_membership_author_stream(&plan.registration().author_pubkey, &owner_grant, reusable)
         .await?;
     let (seq, previous_hash) = membership
@@ -163,12 +168,12 @@ pub async fn begin_owner_promotion(
             };
             match failed_attempt {
                 Some(previous) => {
-                    store_db
+                    database
                         .replace_failed_owner_promotion_journal(previous, allocation)
                         .await?
                 }
                 None => {
-                    store_db
+                    database
                         .begin_owner_promotion_journal(target_key(&allocation.target)?, allocation)
                         .await?
                 }
@@ -185,7 +190,7 @@ pub async fn begin_owner_promotion(
         identity,
     )?;
     let candidate = crate::sync::store::operations::prepare_candidate(
-        db,
+        database,
         storage,
         plan,
         StoreOperationBatch::OwnerPromotionRequest(request.clone()),
@@ -200,6 +205,6 @@ pub async fn begin_owner_promotion(
         },
     };
     let (previous, _) = allocation.into_predecessor()?;
-    let (previous, state) = advance_owner_promotion_journal(db, previous, prepared).await?;
-    resume_request_publication_state(db, storage, previous, state).await
+    let (previous, state) = advance_owner_promotion_journal(database, previous, prepared).await?;
+    resume_request_publication_state(database, storage, previous, state).await
 }

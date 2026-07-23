@@ -20,13 +20,14 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     break;
                 }
                 assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
-                assert!(db
+                assert!(StoreDatabase::new(&db)
                     .get_circles(&keys::public_key_hex(&signer))
                     .await
                     .expect("read active circles")
                     .is_empty());
                 assert_eq!(
-                    db.get_circle_operations()
+                    StoreDatabase::new(&db)
+                        .get_circle_operations()
                         .await
                         .expect("read pending circle operations"),
                     vec![crate::sync::circle::CircleOperationInfo {
@@ -69,7 +70,8 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     .is_none());
                 assert_eq!(activation_count(&db, expected.circle_id()).await, 1);
                 assert_eq!(
-                    db.get_circles(&keys::public_key_hex(&signer))
+                    StoreDatabase::new(&db)
+                        .get_circles(&keys::public_key_hex(&signer))
                         .await
                         .expect("read activated circle"),
                     vec![crate::sync::circle::CircleInfo {
@@ -78,7 +80,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         role: crate::sync::circle::CircleRole::Owner,
                     }]
                 );
-                assert!(db
+                assert!(StoreDatabase::new(&db)
                     .get_circle_operations()
                     .await
                     .expect("read completed circle operations")
@@ -120,7 +122,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
     )
     .expect("reopen circle database");
     assert_eq!(
-        reopened
+        StoreDatabase::new(&reopened)
             .get_circle_operations()
             .await
             .expect("list reopened Circle operations")
@@ -176,7 +178,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     .await
     .expect_err("failed exact create interrupts rename publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-    let operation_id = db
+    let operation_id = StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -225,7 +227,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .expect("resume reopened rename");
     assert_eq!(activation_count(&reopened, circle_id).await, 2);
     assert_eq!(
-        reopened
+        StoreDatabase::new(&reopened)
             .get_circles(&keys::public_key_hex(&signer))
             .await
             .expect("read renamed circle"),
@@ -235,7 +237,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
             role: crate::sync::circle::CircleRole::Owner,
         }]
     );
-    assert!(reopened
+    assert!(StoreDatabase::new(&reopened)
         .get_circle_operations()
         .await
         .expect("read completed rename operations")

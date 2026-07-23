@@ -35,7 +35,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
             &encryption,
             store.storage.store_id(),
             "Merge Store",
-            &founder_db,
+            &StoreDatabase::new(&founder_db),
         )
         .await
         .expect("invite Member identity");
@@ -72,9 +72,10 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     .await
     .expect("promote first Owner");
 
-    let membership = crate::sync::pull::load_cycle_membership(&store.storage, &second_owner_db)
-        .await
-        .expect("load second Owner membership");
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &second_owner_db)
+            .await
+            .expect("load second Owner membership");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let pull = crate::sync::store::pull_store_commits(
         &second_owner_db,
@@ -134,7 +135,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         &encryption,
         store.storage.store_id(),
         "Merge Store",
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("invite Member identity");
@@ -155,7 +156,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .expect("Member device id");
     let (_, member_registration, _, _) =
         crate::sync::store::operations::load_local_store_authority(
-            &member_db,
+            &StoreDatabase::new(&member_db),
             &member_device_id,
             &member,
         )
@@ -265,7 +266,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         &encryption,
         store.storage.store_id(),
         "Merge Store",
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
     )
     .await
     .expect("invite Member identity");
@@ -286,7 +287,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .expect("Owner device id");
     let (_, member_registration, _, _) =
         crate::sync::store::operations::load_local_store_authority(
-            &member_db,
+            &StoreDatabase::new(&member_db),
             &member_db
                 .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
                 .await
@@ -298,7 +299,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .expect("load Member registration");
     store.home.fail_exact_create_before_call(1);
     begin_owner_promotion(
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
         &store.storage,
         &owner_device_id,
         &owner,

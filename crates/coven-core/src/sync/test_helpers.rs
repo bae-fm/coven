@@ -1036,9 +1036,13 @@ pub async fn host_exec(db: &Database, sql: &str) {
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
-            tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
-        })
+        crate::sync::store::database::StoreDatabase::run_internal_store_write_transaction_on(
+            conn,
+            &tables,
+            None,
+            write_id,
+            |tx| tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from),
+        )
     })
     .await
     .unwrap_or_else(|e| panic!("exec failed: {e}"));
@@ -1168,7 +1172,8 @@ pub async fn load_exact_materialized_commit(
     )>,
     String,
 > {
-    let Some(reference) = db
+    let store_database = crate::sync::store::database::StoreDatabase::new(db);
+    let Some(reference) = store_database
         .exact_materialized_ref(stream_id, sequence)
         .await
         .map_err(|error| error.to_string())?
@@ -1198,7 +1203,7 @@ pub async fn load_exact_materialized_commit(
         .map_err(|error| error.to_string())?;
     let unverified: crate::sync::store_commit::StoreBatchCommit =
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let author = db
+    let author = store_database
         .activated_store_device_registration(unverified.author_registration)
         .await
         .map_err(|error| error.to_string())?;
@@ -1254,7 +1259,7 @@ pub async fn initialize_store_fixture(
         .value;
     crate::sync::cycle::ensure_owner_anchored_chain(storage, db, &root, &protocol_root, signer)
         .await?;
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
         .await
         .map_err(|error| error.to_string())?
         .chain
@@ -1271,10 +1276,11 @@ pub async fn publish_snapshot_fixture(
     membership: &crate::sync::membership::MembershipChain,
     db: &Database,
 ) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
+    let database = crate::sync::store::StoreDatabase::new(db);
     crate::sync::store::snapshot::push_store_snapshot(
         storage,
         root.store_root_hash,
-        crate::sync::snapshot::CreatedSnapshot {
+        crate::sync::store::snapshot::CreatedSnapshot {
             db_image,
             blobs: Vec::new(),
         },
@@ -1283,7 +1289,7 @@ pub async fn publish_snapshot_fixture(
         keypair,
         "2026-07-16T00:00:00Z".to_string(),
         membership,
-        db,
+        &database,
     )
     .await
     .map_err(|error| error.to_string())
@@ -1328,7 +1334,7 @@ pub async fn run_cycle_fixture(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
     let components = Box::pin(crate::sync::cycle::init_sync_over_storage(
-        db,
+        &crate::sync::store::StoreDatabase::new(db),
         storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root,
@@ -1360,6 +1366,8 @@ pub fn install_active_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     let future = async move {
+        let observer_database = crate::sync::store::StoreDatabase::new(observer_db);
+        let local_database = crate::sync::store::StoreDatabase::new(local_db);
         let authorization = Box::new(
             Box::pin(
                 crate::sync::store::device_join::load_current_device_join_authorization(
@@ -1377,7 +1385,7 @@ pub fn install_active_device_fixture<'a>(
             .ok_or_else(|| "provider administrator device id is absent".to_string())?;
         let (_, observer_registration, _, _) =
             crate::sync::store::operations::load_local_store_authority(
-                observer_db,
+                &observer_database,
                 &observer_device_id,
                 &store.signer,
             )
@@ -1402,7 +1410,7 @@ pub fn install_active_device_fixture<'a>(
         .map_err(|error| error.to_string())?;
         let offer = Box::new(
             Box::pin(crate::sync::store::device_join::begin_device_join(
-                observer_db,
+                &observer_database,
                 &store.storage,
                 &authorization,
                 &store.signer,
@@ -1429,7 +1437,7 @@ pub fn install_active_device_fixture<'a>(
         let approval = Box::new(
             Box::pin(
                 crate::sync::store::device_join::authorize_device_provider_access(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     None,
                     None,
@@ -1457,7 +1465,7 @@ pub fn install_active_device_fixture<'a>(
         let provisional = Box::new(
             Box::pin(
                 crate::sync::store::device_join::accept_device_registration_request(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     &authorization,
                     &store.signer,
@@ -1470,7 +1478,7 @@ pub fn install_active_device_fixture<'a>(
         let provider_ready = Box::new(
             Box::pin(
                 crate::sync::store::device_join::publish_device_provider_challenge(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     None,
                     *provisional,
@@ -1500,7 +1508,7 @@ pub fn install_active_device_fixture<'a>(
         }
         let readiness = Box::new(
             Box::pin(crate::sync::store::device_join::bootstrap_pending_device(
-                local_db,
+                &local_database,
                 &pending,
                 &store.storage,
                 None,
@@ -1514,7 +1522,7 @@ pub fn install_active_device_fixture<'a>(
         let completion = Box::new(
             Box::pin(
                 crate::sync::store::device_join::complete_device_provider_admission(
-                    observer_db,
+                    &observer_database,
                     None,
                     &store.signer,
                     *readiness,
@@ -1525,7 +1533,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let activation = Box::new(
             Box::pin(crate::sync::store::device_join::finalize_device_join(
-                observer_db,
+                &observer_database,
                 &store.storage,
                 &authorization,
                 &store.signer,
@@ -1535,7 +1543,7 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         Box::pin(crate::sync::store::device_join::complete_device_join(
-            local_db,
+            &local_database,
             &pending,
             &store.storage,
             *activation,
@@ -1555,6 +1563,8 @@ pub async fn promote_active_member_fixture(
     member: &UserKeypair,
     encryption: &crate::encryption::EncryptionService,
 ) -> Result<crate::sync::circle_control::StoreMembershipStateRef, String> {
+    let owner_database = crate::sync::store::StoreDatabase::new(owner_db);
+    let member_database = crate::sync::store::StoreDatabase::new(member_db);
     let owner_device_id = owner_db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1567,14 +1577,14 @@ pub async fn promote_active_member_fixture(
         .ok_or_else(|| "Member Store device id is absent".to_string())?;
     let (_, member_registration, _, _) =
         crate::sync::store::operations::load_local_store_authority(
-            member_db,
+            &member_database,
             &member_device_id,
             member,
         )
         .await
         .map_err(|error| error.to_string())?;
     let request = Box::pin(crate::sync::store::owner_promotion::begin_owner_promotion(
-        owner_db,
+        &owner_database,
         &store.storage,
         &owner_device_id,
         owner,
@@ -1583,7 +1593,7 @@ pub async fn promote_active_member_fixture(
     .await
     .map_err(|error| format!("begin Owner promotion: {error}"))?;
     let acceptance = Box::pin(crate::sync::store::owner_promotion::accept_owner_promotion(
-        member_db,
+        &member_database,
         &store.storage,
         &member_device_id,
         member,
@@ -1593,7 +1603,7 @@ pub async fn promote_active_member_fixture(
     .map_err(|error| format!("accept Owner promotion: {error}"))?;
     let finalized = Box::pin(
         crate::sync::store::owner_promotion::finalize_owner_promotion(
-            owner_db,
+            &owner_database,
             &store.storage,
             &owner_device_id,
             owner,
@@ -1603,7 +1613,7 @@ pub async fn promote_active_member_fixture(
     )
     .await
     .map_err(|error| format!("finalize Owner promotion: {error}"))?;
-    let membership = crate::sync::pull::load_cycle_membership(&store.storage, member_db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, member_db)
         .await
         .map_err(|error| error.to_string())?
         .chain
@@ -1673,6 +1683,8 @@ pub fn install_cross_principal_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
     Box::pin(async move {
+        let observer_database = crate::sync::store::StoreDatabase::new(observer_db);
+        let local_database = crate::sync::store::StoreDatabase::new(local_db);
         let authorization = Box::new(Box::pin(store.open_into(observer_db)).await?);
         let crate::sync::storage::StoreProviderBinding::Dropbox { namespace_id } =
             &store.protocol_root.descriptor.provider
@@ -1711,7 +1723,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         .map_err(|error| error.to_string())?;
         let offer = Box::new(
             Box::pin(crate::sync::store::device_join::begin_device_join(
-                observer_db,
+                &observer_database,
                 &store.storage,
                 &authorization,
                 &store.signer,
@@ -1746,7 +1758,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         let approval = Box::new(
             Box::pin(
                 crate::sync::store::device_join::authorize_device_provider_access(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     Some(store.home.as_ref()),
                     Some(&access_administrator),
@@ -1780,7 +1792,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         let provisional = Box::new(
             Box::pin(
                 crate::sync::store::device_join::accept_device_registration_request(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     &authorization,
                     &store.signer,
@@ -1793,7 +1805,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         let provider_ready = Box::new(
             Box::pin(
                 crate::sync::store::device_join::publish_device_provider_challenge(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                     Some(store.home.as_ref()),
                     *provisional,
@@ -1805,7 +1817,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         Box::pin(store.open_into(local_db)).await?;
         let readiness = Box::new(
             Box::pin(crate::sync::store::device_join::bootstrap_pending_device(
-                local_db,
+                &local_database,
                 &pending,
                 &peer_storage,
                 Some(peer_home.as_ref()),
@@ -1825,7 +1837,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         let completion = Box::new(
             Box::pin(
                 crate::sync::store::device_join::complete_device_provider_admission(
-                    observer_db,
+                    &observer_database,
                     Some(store.home.as_ref()),
                     &store.signer,
                     *readiness,
@@ -1842,7 +1854,7 @@ pub fn install_cross_principal_device_fixture<'a>(
         }
         let activation = Box::new(
             Box::pin(crate::sync::store::device_join::finalize_device_join(
-                observer_db,
+                &observer_database,
                 &store.storage,
                 &authorization,
                 &store.signer,
@@ -1852,7 +1864,7 @@ pub fn install_cross_principal_device_fixture<'a>(
             .map_err(|error| error.to_string())?,
         );
         Box::pin(crate::sync::store::device_join::complete_device_join(
-            local_db,
+            &local_database,
             &pending,
             &peer_storage,
             *activation,
@@ -2061,7 +2073,7 @@ impl TestStore {
                 .db
                 .clone()
         };
-        let (reference, registration) = db
+        let (reference, registration) = crate::sync::store::database::StoreDatabase::new(&db)
             .activated_store_device_registration_records()
             .await
             .map_err(|error| error.to_string())?
@@ -2090,7 +2102,7 @@ impl TestStore {
                 .map(|producer| producer.db.clone())
                 .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
         };
-        Ok(db
+        Ok(crate::sync::store::StoreDatabase::new(&db)
             .retained_merge_materialization(reference)
             .await
             .map_err(|error| error.to_string())?
@@ -2134,12 +2146,13 @@ impl TestStore {
                 "test producer {name:?} expected sequence {expected}, got {sequence}"
             ));
         }
-        crate::sync::store::database::StoreDatabase::new(&db)
+        let database = crate::sync::store::database::StoreDatabase::new(&db);
+        database
             .enqueue_store_changeset_for_test(changeset.to_vec())
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let membership = crate::sync::pull::load_cycle_membership(&self.storage, &db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &db)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
@@ -2147,7 +2160,7 @@ impl TestStore {
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
         let prepared = crate::sync::store::preparation::prepare_store_write(
-            &db,
+            &database,
             &self.storage,
             &device_id,
             "2026-07-16T00:00:00Z",
@@ -2160,7 +2173,7 @@ impl TestStore {
         if !prepared {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        crate::sync::store::publication::drain_store_writes(&db, &self.storage)
+        crate::sync::store::publication::drain_store_writes(&database, &self.storage)
             .await
             .map_err(|error| error.to_string())?;
         crate::sync::store::database::StoreDatabase::new(&db)
@@ -2238,7 +2251,7 @@ impl TestStore {
             &self.signer,
         );
         ensure.await?;
-        let load = crate::sync::pull::load_cycle_membership(&self.storage, db);
+        let load = crate::sync::store::pull::load_cycle_membership(&self.storage, db);
         load.await
             .map_err(|error| error.to_string())?
             .chain
@@ -2255,15 +2268,16 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let membership = crate::sync::pull::load_cycle_membership(&self.storage, db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, db)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
+        let database = crate::sync::store::database::StoreDatabase::new(db);
         let prepared = crate::sync::store::preparation::prepare_store_write(
-            db,
+            &database,
             &self.storage,
             &device_id,
             "2026-07-16T00:00:00Z",
@@ -2273,9 +2287,10 @@ impl TestStore {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let published = crate::sync::store::publication::drain_store_writes(db, &self.storage)
-            .await
-            .map_err(|error| error.to_string())?;
+        let published =
+            crate::sync::store::publication::drain_store_writes(&database, &self.storage)
+                .await
+                .map_err(|error| error.to_string())?;
         if published > 0 {
             crate::sync::cycle::drain_published_blob_drop_intents(db, store_dir, u64::MAX).await?;
             crate::blob::local_cleanup::drain(db, store_dir)

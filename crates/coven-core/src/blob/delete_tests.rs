@@ -24,6 +24,7 @@ use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::membership::MemberRole;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::test_helpers::{
     exec, open_test_db, open_test_db_with_blob, plant_blob_row, pubkey_hex, TestStore,
 };
@@ -92,9 +93,15 @@ async fn gc_tombstones_as(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    let membership = crate::sync::pull::load_cycle_membership(&storage.storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&storage.storage, db)
         .await
         .map_err(|e| e.to_string())?;
+    let activated_uploaders = StoreDatabase::new(db)
+        .activated_store_device_registration_records()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect();
     gc_tombstones(
         db,
         cloud_home,
@@ -102,6 +109,7 @@ async fn gc_tombstones_as(
         cipher,
         store_id,
         self_pubkey,
+        &activated_uploaders,
         membership.chain.as_ref(),
         clock,
         grace,
@@ -179,7 +187,7 @@ fn create_exact_blob_as<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::blob::locator::StoredBlobRef> + 'a>>
 {
     Box::pin(async move {
-        let (uploader, registration) = db
+        let (uploader, registration) = StoreDatabase::new(db)
             .local_blob_write_authority()
             .await
             .expect("load activated exact blob write authority");
@@ -306,24 +314,30 @@ async fn insert_local_blob_row(
     let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
     let hash = crate::sync::store_commit::ObjectHash::digest(bytes).to_string();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
-            tx.execute(
-                "INSERT INTO notes
+        StoreDatabase::run_internal_store_write_transaction_on(
+            conn,
+            &tables,
+            None,
+            write_id,
+            |tx| {
+                tx.execute(
+                    "INSERT INTO notes
                      (id, title, body, shared, _updated_at, created_at)
                      VALUES (?1, 'blob root', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-                [root_id.as_str()],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "INSERT INTO note_photos
+                    [root_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                tx.execute(
+                    "INSERT INTO note_photos
                      (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at)
                      VALUES (?1, ?2, 'cover', ?3, ?4, ?5, ?6,
                              '0000000001000-0000-dev1', '2026-01-01')",
-                rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
-            )
-            .map_err(DbError::from)?;
-            Ok(())
-        })
+                    rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
+                )
+                .map_err(DbError::from)?;
+                Ok(())
+            },
+        )
     })
     .await
     .expect("insert journaled Local blob row");
@@ -348,13 +362,21 @@ async fn publish_exact_remote_blob_binding(
         .await
         .expect("write host blob source");
     let hlc = crate::sync::hlc::Hlc::new("delete-tests".to_string());
-    crate::blob::transition::make_remote(db, store_dir, &hlc, "notes", root_id, false)
+    let database = StoreDatabase::new(db);
+    crate::blob::transition::make_remote(&database, store_dir, &hlc, "notes", root_id, false)
         .await
         .expect("start exact make_remote");
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
+    let (registration_ref, registration) = database
+        .local_blob_write_authority()
+        .await
+        .expect("load exact blob upload authority");
+    let authority = crate::sync::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+        .expect("validate exact blob upload authority");
     let outcome = crate::blob::upload::drain_uploads(
-        db,
+        &database,
         &storage.storage,
+        authority,
         store_dir,
         &clock,
         &hlc,
@@ -403,7 +425,7 @@ async fn storage_with_chain(db: &Database) -> (TestStore, UserKeypair, UserKeypa
         &crate::encryption::EncryptionService::from_key([42; 32]),
         "test-store",
         "Test Store",
-        db,
+        &StoreDatabase::new(db),
     )
     .await
     .expect("publish exact member invitation");
@@ -1432,7 +1454,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         create_exact_blob_as(&storage, &member_db, &member, "photos", "mineblob", b"mine").await;
     let foreign = create_exact_blob(&storage, "photos", "foreignblob", b"foreign").await;
     assert_eq!(
-        member_db
+        StoreDatabase::new(&member_db)
             .activated_store_device_registration(mine.locator().uploader().clone())
             .await
             .expect("member uploader activation is visible to GC")

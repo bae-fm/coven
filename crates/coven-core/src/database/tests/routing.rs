@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
+use crate::sync::store::database::StoreDatabase;
 
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
@@ -99,7 +100,7 @@ async fn capture_scoped_write_then_reopen(
     let capture_tables = tables.clone();
     let capture_circle_id = circle_id.clone();
     db.call(move |conn| {
-        Database::run_store_write_transaction_on(
+        StoreDatabase::run_store_write_transaction_on(
             conn,
             &capture_tables,
             &gates,
@@ -199,7 +200,7 @@ fn assert_prepared_partitions(
 #[tokio::test]
 async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
     let (_temp, reopened, expected) = capture_scoped_write_then_reopen("merge-restart").await;
-    let prepared = reopened
+    let prepared = StoreDatabase::new(&reopened)
         .prepare_store_write()
         .await
         .expect("prepare restarted Merge write")
@@ -229,7 +230,7 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
         .await
         .expect("plant controlled Local partition");
 
-    let error = match reopened.prepare_store_write().await {
+    let error = match StoreDatabase::new(&reopened).prepare_store_write().await {
         Err(error) => error,
         Ok(_) => panic!("controlled Local partition must fail preparation"),
     };
@@ -250,7 +251,7 @@ async fn assert_local_only_scoped_write(name: &str) {
     let routing = EncryptionService::from_key([7; 32]);
     let receipt = db
         .call(move |conn| {
-            Database::run_store_write_transaction_on(
+            StoreDatabase::run_store_write_transaction_on(
                 conn,
                 &tables,
                 &gates,

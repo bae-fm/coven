@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use super::session::SyncedTable;
-use super::storage::{StorageError, SyncStorage};
 use crate::database::Database;
 use crate::migration::Migration;
+use crate::sync::session::SyncedTable;
+use crate::sync::storage::{StorageError, SyncStorage};
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -33,8 +33,8 @@ pub(crate) struct SnapshotBlobFact {
 pub(crate) enum SnapshotBlobAudience {
     Store,
     Circle {
-        circle_id: super::circle::CircleId,
-        control: super::gate::CirclePartitionControl,
+        circle_id: crate::sync::circle::CircleId,
+        control: crate::sync::gate::CirclePartitionControl,
     },
 }
 
@@ -50,7 +50,7 @@ pub enum SnapshotError {
     #[error("storage error: {0}")]
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[source] super::store_objects::StoreObjectError),
+    StoreObject(#[source] crate::sync::store_objects::StoreObjectError),
     #[error("decryption failed: {0}")]
     Decryption(String),
     /// No synced tables were registered, so we cannot determine which tables
@@ -157,7 +157,7 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
 /// The authority is consumed by installation and cannot be duplicated:
 ///
 /// ```compile_fail
-/// fn duplicate(result: coven_core::sync::snapshot::BootstrapResult) {
+/// fn duplicate(result: coven_core::sync::store::snapshot::BootstrapResult) {
 ///     let _copy = result.clone();
 /// }
 /// ```
@@ -166,12 +166,14 @@ pub struct BootstrapResult {
     store_id: String,
     target_path: PathBuf,
     db_hash: String,
-    store_root: super::store_objects::VerifiedObject<super::store_commit::StoreProtocolRoot>,
-    founder_registration:
-        super::store_objects::VerifiedObject<super::store_commit::StoreDeviceRegistration>,
+    store_root:
+        crate::sync::store_objects::VerifiedObject<crate::sync::store_commit::StoreProtocolRoot>,
+    founder_registration: crate::sync::store_objects::VerifiedObject<
+        crate::sync::store_commit::StoreDeviceRegistration,
+    >,
     snapshot: crate::database::PublishedStoreSnapshot,
-    coverage: super::store_commit::CommitFrontier,
-    stability: super::store::pull::VerifiedStoreSnapshotStability,
+    coverage: crate::sync::store_commit::CommitFrontier,
+    stability: crate::sync::store::pull::VerifiedStoreSnapshotStability,
 }
 
 impl BootstrapResult {
@@ -391,13 +393,13 @@ fn snapshot_blob_facts(
         )
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?
         {
-            super::circle::Audience::Store => SnapshotBlobAudience::Store,
-            super::circle::Audience::Circle(circle_id) => SnapshotBlobAudience::Circle {
+            crate::sync::circle::Audience::Store => SnapshotBlobAudience::Store,
+            crate::sync::circle::Audience::Circle(circle_id) => SnapshotBlobAudience::Circle {
                 circle_id,
-                control: super::gate::active_circle_control(live, circle_id)
+                control: crate::sync::gate::active_circle_control(live, circle_id)
                     .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
             },
-            super::circle::Audience::Local => {
+            crate::sync::circle::Audience::Local => {
                 return Err(SnapshotError::ClearFailed(format!(
                     "scoped snapshot retains local blob row {:?}/{:?}",
                     publication.table, publication.row_id
@@ -583,7 +585,7 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    let coverage = crate::database::Database::materialized_frontier_on(&tx, None)
+    let coverage = crate::sync::store::StoreDatabase::materialized_frontier_on(&tx, None)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let cleared_materialization_tables = ["materialized_commits"];
     for table in cleared_materialization_tables {
@@ -593,9 +595,9 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         ))
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
-    crate::database::Database::retain_snapshot_author_exclusion_activations_on(&tx)
+    crate::sync::store::StoreDatabase::retain_snapshot_author_exclusion_activations_on(&tx)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    crate::database::Database::retain_snapshot_device_states_on(&tx, coverage)
+    crate::sync::store::StoreDatabase::retain_snapshot_device_states_on(&tx, coverage)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     for table in crate::db::user_table_names(conn)
         .map_err(|error| SnapshotError::ClearFailed(format!("list user tables: {error}")))?
@@ -744,25 +746,24 @@ pub fn should_create_snapshot(
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
     store_id: &str,
-    expected_store_root: super::store_commit::StoreRootRef,
+    expected_store_root: crate::sync::store_commit::StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
     binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (store_root, snapshot, plaintext, stability) =
-        Box::pin(super::store::snapshot::select_store_snapshot(
-            storage,
-            &expected_store_root,
-            membership_floor,
-            binary_schema_version,
-        ))
-        .await?;
+    let (store_root, snapshot, plaintext, stability) = Box::pin(super::select_store_snapshot(
+        storage,
+        &expected_store_root,
+        membership_floor,
+        binary_schema_version,
+    ))
+    .await?;
     let coverage = snapshot.meta.coverage.clone();
     write_snapshot_db(target_path, &plaintext)?;
     let founder_registration =
-        super::store_objects::load_founder_registration(storage, &expected_store_root)
+        crate::sync::store_objects::load_founder_registration(storage, &expected_store_root)
             .await
             .map_err(|error| SnapshotError::Parse(error.to_string()))?;
     let target_path = std::fs::canonicalize(target_path)?;
@@ -800,7 +801,7 @@ pub async fn bootstrap_from_snapshot(
 ///
 /// coven derives the blobs the DB at `db_path` references from the blob
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
-/// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
+/// [`crate::sync::store::pull::download_blobs`] path the incremental pull uses — into the
 /// locator-keyed evictable cache under `storage/cache/<namespace>`, skipping
 /// any already present in either cache folder. A failed download is logged there
 /// and reflected in the returned flag; the bootstrap that calls this refuses to
@@ -813,13 +814,14 @@ pub async fn bootstrap_from_snapshot(
 /// either way (a SELECT, which journals nothing), so it does not re-record rows
 /// or race the connection thread.
 pub async fn reconcile_snapshot_blobs(
-    db: &crate::database::Database,
+    database: &crate::sync::store::StoreDatabase,
     db_path: &Path,
     storage: &dyn SyncStorage,
     store_dir: &crate::store_dir::StoreDir,
     tables: &[SyncedTable],
     cancel: &watch::Receiver<bool>,
 ) -> Result<SnapshotBlobReconcile, crate::database::DbError> {
+    let db = database.sqlite();
     let row_ids: Vec<(String, String)> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
         let mut row_ids = Vec::new();
@@ -850,7 +852,7 @@ pub async fn reconcile_snapshot_blobs(
     for (table, row_id) in row_ids {
         let reference = db.row_blob_ref(&table, &row_id).await?;
         blobs.push(
-            crate::sync::pull::BlobDownload::from_row(reference)
+            crate::sync::store::pull::BlobDownload::from_row(reference)
                 .map_err(crate::database::DbError::Message)?,
         );
     }
@@ -875,7 +877,7 @@ pub async fn reconcile_snapshot_blobs(
             info!(total, "snapshot blob reconciliation cancelled");
             return Ok(SnapshotBlobReconcile::Cancelled);
         }
-        if crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir)
+        if crate::sync::store::pull::download_blobs(database, vec![blob], storage, store_dir)
             .await
             .is_err()
         {
@@ -909,6 +911,7 @@ mod tests {
 
     use super::*;
     use crate::keys::UserKeypair;
+    use crate::sync::store::StoreDatabase;
     use crate::sync::store_commit::CommitFrontier;
 
     #[tokio::test]
@@ -942,8 +945,8 @@ mod tests {
                 ),
             )
             .await;
-            assert!(super::super::store::preparation::prepare_store_write(
-                &source,
+            assert!(crate::sync::store::preparation::prepare_store_write(
+                &StoreDatabase::new(&source),
                 &store.storage,
                 &device_id,
                 "2026-07-21T00:00:00Z",
@@ -954,13 +957,16 @@ mod tests {
             .await
             .expect("prepare snapshot history write"));
             assert_eq!(
-                super::super::store::publication::drain_store_writes(&source, &store.storage)
-                    .await
-                    .expect("publish snapshot history write"),
+                crate::sync::store::publication::drain_store_writes(
+                    &StoreDatabase::new(&source),
+                    &store.storage,
+                )
+                .await
+                .expect("publish snapshot history write"),
                 1,
             );
         }
-        let expected = source
+        let expected = StoreDatabase::new(&source)
             .materialized_frontier()
             .await
             .expect("load snapshot frontier")
@@ -1078,16 +1084,18 @@ mod tests {
             Some(store.root.clone()),
         );
         let baseline = installed
-            .call(Database::generation_zero_replay_baseline_on)
+            .call(StoreDatabase::generation_zero_replay_baseline_on)
             .await
             .expect("load installed snapshot replay baseline");
         assert_eq!(baseline.exact_cut, published_snapshot.coverage);
         match &baseline.authority {
-            crate::sync::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) => {
+            crate::sync::store::retained_replay::RetainedReplayAuthority::StableSnapshot(
+                authority,
+            ) => {
                 assert_eq!(authority.store_root, store.root);
                 assert_eq!(authority.metadata, published_snapshot);
             }
-            crate::sync::retained_replay::RetainedReplayAuthority::Genesis(_) => {
+            crate::sync::store::retained_replay::RetainedReplayAuthority::Genesis(_) => {
                 panic!("snapshot bootstrap installed a genesis replay baseline")
             }
         }
@@ -1095,7 +1103,7 @@ mod tests {
             .validate_image()
             .expect("validate snapshot replay baseline");
         let mut tampered = baseline.authority.clone();
-        let crate::sync::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) =
+        let crate::sync::store::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) =
             &mut tampered
         else {
             panic!("snapshot bootstrap installed a genesis replay baseline")
@@ -1119,7 +1127,7 @@ mod tests {
             .await
             .expect("tamper retained snapshot metadata");
         installed
-            .call(Database::generation_zero_replay_baseline_on)
+            .call(StoreDatabase::generation_zero_replay_baseline_on)
             .await
             .expect_err("restart must reject retained snapshot metadata with another signature");
     }

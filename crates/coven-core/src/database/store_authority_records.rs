@@ -148,7 +148,7 @@ pub(crate) fn required_store_root_authority_on(
 ) -> Result<crate::sync::store_commit::StoreRootRef, DbError> {
     load_store_root_authority_on(conn)?
         .map(|(reference, _)| reference)
-        .ok_or_else(|| DbError::Message("exact Store root authority is absent".to_string()))
+        .ok_or(DbError::StoreRootHashMissing)
 }
 
 pub(super) fn install_store_root_authority_on(
@@ -258,7 +258,7 @@ pub(super) fn validate_generation_zero_replay_baseline_on(
 ) -> Result<(), DbError> {
     baseline.validate_image()?;
     validate_replay_authority_on(conn, baseline)?;
-    let image = crate::sync::retained_replay::open_image(&baseline.image_bytes)?;
+    let image = crate::sync::store::retained_replay::open_image(&baseline.image_bytes)?;
     let routing = load_coven_metadata(&image)?;
     if routing.hash() != baseline.routing_hash {
         return Err(DbError::Message(
@@ -279,7 +279,7 @@ struct StoredGenerationZeroReplayBaseline {
     authority_bytes: Vec<u8>,
 }
 
-pub(super) fn load_generation_zero_replay_baseline_on(
+pub(crate) fn load_generation_zero_replay_baseline_on(
     conn: &Connection,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn

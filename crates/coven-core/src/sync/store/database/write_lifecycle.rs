@@ -15,7 +15,7 @@ struct UnpublishedWriteCleanup {
     candidate: Option<crate::StoreBatchCommitRef>,
 }
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     fn unpublished_write_cleanup_on(
         tx: &rusqlite::Transaction<'_>,
         write_id: &WriteId,

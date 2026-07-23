@@ -4,7 +4,6 @@ use super::{
     load_circle_roster_state, read_exact_circle_object, resolve_circle_stream_authority,
     verify_circle_head_chain, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::sync::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleMetadata,
@@ -13,13 +12,14 @@ use crate::sync::circle::{
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StoreRootRef, StreamActivationId,
 };
 
 async fn load_metadata_author_roster(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -32,7 +32,7 @@ async fn load_metadata_author_roster(
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
     load_circle_roster_state(
-        db,
+        database,
         verified_prefix,
         storage,
         root,
@@ -48,7 +48,7 @@ async fn load_metadata_author_roster(
 }
 
 pub(super) async fn load_circle_metadata_state(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -125,7 +125,7 @@ pub(super) async fn load_circle_metadata_state(
             })?;
         let declared_ref = CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -246,7 +246,7 @@ pub(super) async fn load_circle_metadata_state(
             ));
         }
         let author_roster = load_metadata_author_roster(
-            db,
+            database,
             verified_prefix,
             storage,
             commit,

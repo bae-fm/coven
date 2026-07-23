@@ -5,7 +5,6 @@ use super::{
     load_exact_slot_bytes, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
-use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
@@ -870,7 +869,7 @@ pub(super) async fn prepare_circle_activation_objects(
     ))
 }
 pub(super) async fn prepare_circle_operation(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     metadata_stamp: &str,
@@ -878,7 +877,7 @@ pub(super) async fn prepare_circle_operation(
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     Box::pin(prepare_circle_operation_request(
-        db,
+        database,
         storage,
         device_id,
         metadata_stamp,
@@ -891,15 +890,17 @@ pub(super) async fn prepare_circle_operation(
 }
 
 pub(super) async fn prepare_circle_operation_request(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     metadata_stamp: &str,
     request: CircleOperationRequest,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
+    let db = database.sqlite();
     let (root, author_registration, author, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(db, device_id, signer).await?;
+        crate::sync::store::operations::load_local_store_authority(database, device_id, signer)
+            .await?;
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let founder = db
@@ -944,7 +945,7 @@ pub(super) async fn prepare_circle_operation_request(
                     "circle creator is not a current Store writer".to_string(),
                 )
             })?;
-        let base = StoreDatabase::new(db).latest_local_store_position().await?;
+        let base = database.latest_local_store_position().await?;
         let seq = base
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence() + 1);
@@ -953,9 +954,10 @@ pub(super) async fn prepare_circle_operation_request(
             &author_registration,
             crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let dependencies =
-            crate::sync::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
+            database.materialized_frontier().await?,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let coord = StoreCommitCoord {
             stream_id,
             sequence: seq,
@@ -965,7 +967,8 @@ pub(super) async fn prepare_circle_operation_request(
             predecessor: base.clone(),
             dependencies: dependencies.0,
         };
-        let (device_state, resolved_devices) = db.store_device_state_for_order(&order).await?;
+        let (device_state, resolved_devices) =
+            database.store_device_state_for_order(&order).await?;
         let membership_state = StoreMembershipStateRef::from_parts(
             heads,
             resolutions,
@@ -1071,7 +1074,7 @@ pub(super) async fn prepare_circle_operation_request(
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let history_summary = crate::sync::store::pull::prepare_merge_history_successor(
-            db,
+            database,
             &root,
             &commit,
             &commit_ref,

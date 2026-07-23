@@ -226,7 +226,7 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
 }
 
 pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     reference: &'a StoreBatchCommitRef,
@@ -234,12 +234,16 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
     membership_state: &'a StoreMembershipStateRef,
 ) -> StorePullFuture<'a, ()> {
     Box::pin(async move {
+        let db = database.sqlite();
         let StoreCommitCoord {
             stream_id,
             sequence,
         } = reference.coord;
         let stream_id = stream_id.to_string();
-        if let Some(materialized) = db.exact_materialized_ref(&stream_id, sequence).await? {
+        if let Some(materialized) = database
+            .exact_materialized_ref(&stream_id, sequence)
+            .await?
+        {
             if materialized == *reference {
                 return Ok(());
             }
@@ -315,7 +319,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             reference,
         )
         .await?;
-        let (_, predecessor_state) = db.store_device_state_for_order(&commit.order).await?;
+        let (_, predecessor_state) = database.store_device_state_for_order(&commit.order).await?;
         let (authorized_predecessor, recovery_author) =
             predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -334,7 +338,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             })
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         let history = prepare_merge_history_successor(
-            db,
+            database,
             root,
             &commit,
             reference,
@@ -367,7 +371,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         db.call(move |connection| {
             let tx = connection.unchecked_transaction().map_err(DbError::from)?;
             if let Some(materialized) =
-                Database::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+                crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(&tx, &stream_id, sequence)?
             {
                 if materialized != expected_ref {
                     return Err(DbError::Message(format!(
@@ -377,7 +381,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 tx.commit().map_err(DbError::from)?;
                 return Ok(());
             }
-            Database::record_activated_store_device_registrations_on(
+            crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                 &tx,
                 &commit,
                 &registrations,

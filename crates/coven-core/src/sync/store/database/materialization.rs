@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use rusqlite::OptionalExtension;
 
+use super::store_device_state::{
+    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
+};
 use super::{StoreDatabase, StoreDatabaseTransaction};
 use crate::database::{
-    apply_store_device_exclusion_freezes_on, install_store_founder_state_on,
-    load_activated_registration_on, load_declared_store_device_state_on, load_remote_object_on,
+    install_store_founder_state_on, load_activated_registration_on, load_remote_object_on,
     record_activated_store_ack_on, record_store_reclaim_activation_on,
     record_verified_stream_activations_on, required_store_root_authority_on,
     store_reclaim_journal_error, update_remote_object_on, Database, DbError,
@@ -24,7 +26,7 @@ use crate::sync::store_commit::{
     VerifiedStoreDeviceOperations,
 };
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
@@ -47,13 +49,13 @@ impl StoreDatabase<'_> {
                 &plan.genesis,
             )?;
 
-            let frontier = Database::materialized_frontier_on(&tx, None)?;
+            let frontier = crate::sync::store::database::StoreDatabase::materialized_frontier_on(&tx, None)?;
             let mut represented = BTreeSet::new();
             for prepared in &plan.commits {
                 let stream_id = prepared.reference.coord.stream_id.to_string();
                 let sequence = prepared.reference.coord.sequence();
                 if let Some(existing) =
-                    Database::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+                    crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(&tx, &stream_id, sequence)?
                 {
                     if existing != prepared.reference {
                         return Err(DbError::Message(format!(
@@ -102,7 +104,7 @@ impl StoreDatabase<'_> {
                     continue;
                 }
                 let stream_id = prepared.reference.coord.stream_id.to_string();
-                if let Some(existing) = Database::materialized_commit_ref_on(
+                if let Some(existing) = crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(
                     &tx,
                     &stream_id,
                     prepared.reference.coord.sequence(),
@@ -115,7 +117,7 @@ impl StoreDatabase<'_> {
                     }
                     continue;
                 }
-                Database::record_activated_store_device_registrations_on(
+                crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,
                     &prepared.commit,
                     &prepared.registrations,
@@ -161,7 +163,7 @@ impl StoreDatabase<'_> {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let root = required_store_root_authority_on(&tx)?;
                 let registrations = vec![(registration, authority)];
-                Database::record_activated_store_device_registrations_on(
+                crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,
                     &commit,
                     &registrations,
@@ -255,7 +257,10 @@ impl StoreDatabaseTransaction<'_, '_> {
             ));
         }
         let retained_commit_ref =
-            Database::retain_merge_materialization_on(conn, &materialization)?;
+            crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
+                conn,
+                &materialization,
+            )?;
         let activation = ReclaimCommitActivation::new(
             materialization.commit_ref().clone(),
             crate::sync::store_commit::StoreDeviceHeadRef {
@@ -457,7 +462,11 @@ impl StoreDatabaseTransaction<'_, '_> {
         let predecessor = if commit.seq() == 1 {
             None
         } else if let Some(reference) =
-            Database::materialized_commit_ref_on(conn, &stream_id, commit.seq() - 1)?
+            crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(
+                conn,
+                &stream_id,
+                commit.seq() - 1,
+            )?
         {
             Some(reference)
         } else {
@@ -750,7 +759,7 @@ impl StoreDatabaseTransaction<'_, '_> {
                     )));
                 }
             }
-            let current_state_payload = Database::reduce_circle_current_state_on(
+            let current_state_payload = StoreDatabase::reduce_circle_current_state_on(
                 conn,
                 commit.candidate_family(),
                 activation,

@@ -188,7 +188,7 @@ pub(super) fn update_store_device_exclusion_on(
     Ok(())
 }
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(in crate::sync::store) async fn lock_device_exclusion(
         &self,
     ) -> tokio::sync::OwnedMutexGuard<()> {
@@ -366,7 +366,7 @@ impl StoreDatabase<'_> {
                     .candidate()
                     .expect("candidate-prepared exclusion has a candidate");
                 let stream = candidate.reference.coord.stream_id.to_string();
-                if Database::materialized_commit_ref_on(
+                if crate::sync::store::database::StoreDatabase::materialized_commit_ref_on(
                     &tx,
                     &stream,
                     candidate.reference.coord.sequence(),

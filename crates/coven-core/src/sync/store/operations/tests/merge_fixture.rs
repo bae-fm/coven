@@ -6,6 +6,7 @@ pub(super) struct PreparedWriteFixture {
     pub(super) home: InMemoryCloudHome,
     pub(super) storage: CloudSyncStorage,
     pub(super) db: Database,
+    pub(super) database: StoreDatabase,
     pub(super) keypair: UserKeypair,
     pub(super) root: StoreRootRef,
     pub(super) device_id: String,
@@ -30,6 +31,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         let db = open_test_db();
         let (root, device_id) =
             initialize_exact_store(&db, &storage, "outbound-crash-test", &keypair).await;
+        let database = StoreDatabase::new(&db);
         let membership = crate::sync::store::membership::load_and_persist_owner_anchor(
             &storage,
             &root,
@@ -56,7 +58,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         )
         .await
         .expect("prepare outbound write"));
-        let batch = crate::sync::store::database::StoreDatabase::new(&db)
+        let batch = database
             .oldest_prepared_store_write()
             .await
             .expect("read prepared write")
@@ -74,6 +76,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
             home,
             storage,
             db,
+            database,
             keypair,
             root,
             device_id,
@@ -96,8 +99,7 @@ pub(super) async fn publish_competing_merge_head(
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
     let candidate = &batch.commit.value;
-    let registration = fixture
-        .db
+    let registration = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(candidate.author_registration.clone())
         .await
         .expect("load Merge author registration");
@@ -145,7 +147,7 @@ pub(super) async fn publish_competing_merge_head(
         .create_protocol_object(&package_prepared)
         .await
         .expect("publish competing package");
-    let membership = crate::sync::pull::load_cycle_membership(&fixture.storage, &fixture.db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&fixture.storage, &fixture.db)
         .await
         .expect("load competing commit membership")
         .chain
@@ -250,8 +252,7 @@ pub(super) async fn publish_alternate_head_for_prepared_commit(
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    let registration = fixture
-        .db
+    let registration = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(batch.head.value.author_registration.clone())
         .await
         .expect("load Merge author registration");

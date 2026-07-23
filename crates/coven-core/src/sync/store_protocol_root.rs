@@ -1079,7 +1079,7 @@ pub async fn open_store(
             "live provider namespace differs from the signed Store root".to_string(),
         ));
     }
-    if let Some(local) = db
+    if let Some(local) = crate::sync::store::database::StoreDatabase::new(db)
         .latest_local_store_device_registration()
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
@@ -1362,7 +1362,7 @@ mod tests {
             super::super::store_objects::load_founder_registration(&storage, &root_ref)
                 .await
                 .expect("open exact opaque founder registration");
-        let durable = db
+        let durable = crate::sync::store::database::StoreDatabase::new(&db)
             .latest_local_store_device_registration()
             .await
             .expect("read durable founder registration")

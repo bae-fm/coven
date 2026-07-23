@@ -70,12 +70,29 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
-use futures_util::stream::TryStreamExt;
-
 use crate::blob::{Provenance, RowBlobAuthority, RowBlobRef};
 use crate::database::{Database, DbError};
 use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::storage::{StorageError, SyncStorage};
+
+/// Closed cloud access for one exact Remote blob. Store code resolves the
+/// authority; the cache only reads bytes with the supplied protection.
+pub(crate) struct RemoteBlobAccess<'a> {
+    storage: &'a dyn SyncStorage,
+    protection: crate::sync::storage::BlobSpoolProtection,
+}
+
+impl<'a> RemoteBlobAccess<'a> {
+    pub(crate) fn new(
+        storage: &'a dyn SyncStorage,
+        protection: crate::sync::storage::BlobSpoolProtection,
+    ) -> Self {
+        Self {
+            storage,
+            protection,
+        }
+    }
+}
 
 /// Prefix for the `protocol_state` keys holding each namespace's device-local cache-size
 /// budget in bytes (a single decimal value per namespace, not per-blob accounting).
@@ -527,17 +544,17 @@ pub async fn is_pinned(
 /// **host-provided** blob is in the **local store** (`storage/local/<namespace>/<id>`,
 /// see [`local_files`](super::local_files)), its only copy — a miss is
 /// [`BlobCacheError::NoLocalCopy`], fail-loud corruption, never a cloud fetch.
-pub async fn read_blob(
+pub(crate) async fn read_blob(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     validate_row_reference(db, reference).await?;
     let blob = reference.blob();
     let bytes = match resolve_source(reference)? {
         // Remote: the bytes live in the cloud fronted by the device cache.
-        BlobSource::Cache => read_remote_whole(db, store_dir, storage, reference).await,
+        BlobSource::Cache => read_remote_whole(db, store_dir, remote, reference).await,
         // Local + user-provided: the user's own external file. Its ref must be present
         // — gate-resolved Local + UserProvided with no ref is corruption, not a miss.
         BlobSource::External => {
@@ -577,7 +594,7 @@ pub async fn read_blob(
 async fn read_remote_whole(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let blob = reference.blob();
@@ -593,11 +610,11 @@ async fn read_remote_whole(
     // store reaches here only when a Remote blob is read with no provider
     // connected — there is no storage to fetch it from, so surface that fault.
     let (_, cache) = remote_cache_paths(store_dir, reference)?;
-    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
+    let remote = remote.ok_or(BlobCacheError::NoCloudHome)?;
     let stored = remote_stored_ref(reference)?;
-    let protection = opening_protection(db, storage, reference).await?;
-    let staged = storage
-        .stage_verified_blob_plaintext(stored, protection, &cache)
+    let staged = remote
+        .storage
+        .stage_verified_blob_plaintext(stored, remote.protection, &cache)
         .await?;
     let bytes = crate::local_blob::read(staged.path())
         .await
@@ -645,10 +662,10 @@ async fn read_remote_whole(
 /// [`NoExternalRef`]: BlobCacheError::NoExternalRef
 /// [`ExternalMissing`]: BlobCacheError::ExternalMissing
 /// [`NoLocalCopy`]: BlobCacheError::NoLocalCopy
-pub async fn open_blob_stream(
+pub(crate) async fn open_blob_stream(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
     offset: u64,
     len: u64,
@@ -677,9 +694,7 @@ pub async fn open_blob_stream(
 
     let bytes = match resolve_source(reference)? {
         // Remote: the cache copy, else a verified cloud stage (populating nothing).
-        BlobSource::Cache => {
-            read_remote_range(db, store_dir, storage, reference, offset, len).await
-        }
+        BlobSource::Cache => read_remote_range(db, store_dir, remote, reference, offset, len).await,
         // Local + user-provided: range-read the user's external file. The window was
         // validated against `source_size`, and `read_range` reads exactly `len`
         // (failing loud on a short file). The ref must be present — no fallback.
@@ -720,7 +735,7 @@ pub async fn open_blob_stream(
 async fn read_remote_range(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
     offset: u64,
     len: u64,
@@ -737,12 +752,12 @@ async fn read_remote_range(
     // Miss: serve the range from the cloud (range read + decrypt over the resolved
     // scope) WITHOUT writing a cache file. Only `read_blob` populates the cache. A
     // home-less store has no storage to range-read a Remote blob from; surface it.
-    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
+    let remote = remote.ok_or(BlobCacheError::NoCloudHome)?;
     let stored = remote_stored_ref(reference)?;
-    let protection = opening_protection(db, storage, reference).await?;
     let (_, destination) = remote_cache_paths(store_dir, reference)?;
-    let staged = storage
-        .stage_verified_blob_plaintext(stored, protection, &destination)
+    let staged = remote
+        .storage
+        .stage_verified_blob_plaintext(stored, remote.protection, &destination)
         .await?;
     let bytes = crate::local_blob::read_range(staged.path(), offset, len)
         .await
@@ -758,7 +773,7 @@ async fn read_remote_range(
 pub(crate) async fn stage_remote_blob_plaintext(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
     dest: &std::path::Path,
 ) -> Result<crate::local_blob::AtomicStagedFile, BlobCacheError> {
@@ -769,11 +784,11 @@ pub(crate) async fn stage_remote_blob_plaintext(
         return Ok(staged);
     }
 
-    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
+    let remote = remote.ok_or(BlobCacheError::NoCloudHome)?;
     let stored = remote_stored_ref(reference)?;
-    let protection = opening_protection(db, storage, reference).await?;
-    let staged = storage
-        .stage_verified_blob_plaintext(stored, protection, dest)
+    let staged = remote
+        .storage
+        .stage_verified_blob_plaintext(stored, remote.protection, dest)
         .await?;
     validate_row_reference(db, reference).await?;
     Ok(staged)
@@ -783,10 +798,10 @@ pub(crate) async fn stage_remote_blob_plaintext(
 /// Remote blobs publish to their locator-keyed evictable cache path. Local and
 /// pending-remote blobs already have an authoritative local source, which this
 /// operation exact-verifies without creating a remote cache entry.
-pub async fn materialize_row_blob(
+pub(crate) async fn materialize_row_blob(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
 ) -> Result<(), BlobCacheError> {
     validate_row_reference(db, reference).await?;
@@ -801,8 +816,7 @@ pub async fn materialize_row_blob(
                 return Ok(());
             }
             let staged =
-                stage_remote_blob_plaintext(db, store_dir, storage, reference, &destination)
-                    .await?;
+                stage_remote_blob_plaintext(db, store_dir, remote, reference, &destination).await?;
             verify_exact_local_file(staged.path(), reference).await?;
             validate_row_reference(db, reference).await?;
             publish_materialization(staged, reference).await
@@ -866,11 +880,11 @@ async fn publish_exact_file(
 pub(crate) async fn materialize_remote_blob_to_file(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
     dest: &std::path::Path,
 ) -> Result<u64, BlobCacheError> {
-    let staged = stage_remote_blob_plaintext(db, store_dir, storage, reference, dest).await?;
+    let staged = stage_remote_blob_plaintext(db, store_dir, remote, reference, dest).await?;
     verify_exact_local_file(staged.path(), reference).await?;
     validate_row_reference(db, reference).await?;
     publish_materialization(staged, reference).await?;
@@ -886,35 +900,13 @@ pub(crate) async fn materialize_remote_blob_to_file(
 /// cloud fetch); in neither (fetch from the cloud and write straight to `pinned/`).
 /// `&[RowBlobRef]` rather than ids because every operation must use and revalidate
 /// the exact row version and locator.
-pub async fn pin(
-    db: &Database,
-    store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
-    blobs: &[RowBlobRef],
-) -> Result<(), BlobCacheError> {
-    // Fetch up to `max_concurrent_downloads` blobs at once, admitting in the given
-    // order and refilling as each completes. At limit 1 this is the one-at-a-time loop:
-    // pin one blob fully, then the next, returning the first error. Each blob is
-    // independent — its own `pinned/<ns>/<id>` destination and its own metadata reads
-    // (serialized on the connection thread) — so concurrent pins touch no shared
-    // mutable state (there is no cache-budget or write-batch interaction: `pinned/`
-    // is budget-exempt and materialize runs no eviction). A single blob's failure
-    // stops the pin and is returned, dropping the in-flight fetches.
-    let limit = db.transfer_limits().downloads.get();
-    futures_util::stream::iter(blobs.iter().map(Ok::<&RowBlobRef, BlobCacheError>))
-        .try_for_each_concurrent(limit, |reference| {
-            pin_one(db, store_dir, storage, reference)
-        })
-        .await
-}
-
 /// Pin one Remote blob into its locator-keyed pinned path: a no-op if already pinned, a verified move
 /// from the evictable cache if staged there, else a cloud fetch straight into
 /// `pinned/`. [`pin`] dispatches this per blob, up to its concurrency limit.
-async fn pin_one(
+pub(crate) async fn pin_one(
     db: &Database,
     store_dir: &StoreDir,
-    storage: Option<&dyn SyncStorage>,
+    remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
 ) -> Result<(), BlobCacheError> {
     validate_row_reference(db, reference).await?;
@@ -947,7 +939,7 @@ async fn pin_one(
 
     // In neither folder — fetch from the cloud straight into `pinned/`. A
     // home-less store has no storage to fetch a Remote blob from; surface it.
-    materialize_remote_blob_to_file(db, store_dir, storage, reference, &pinned).await?;
+    materialize_remote_blob_to_file(db, store_dir, remote, reference, &pinned).await?;
     Ok(())
 }
 
@@ -1267,56 +1259,6 @@ fn verify_local_file_identity_values(
         });
     }
     Ok(())
-}
-
-async fn opening_protection(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    reference: &RowBlobRef,
-) -> Result<crate::sync::storage::BlobSpoolProtection, BlobCacheError> {
-    let stored = remote_stored_ref(reference)?;
-    opening_protection_for_authority(db, storage, reference.authority(), stored).await
-}
-
-pub(crate) async fn opening_protection_for_authority(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    authority: &RowBlobAuthority,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<crate::sync::storage::BlobSpoolProtection, BlobCacheError> {
-    match authority {
-        RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
-            Err(BlobCacheError::LocalityUnresolved {
-                id: stored.locator().blob_id().to_string(),
-            })
-        }
-        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Store) => storage
-            .store_blob_protection()
-            .map_err(BlobCacheError::Storage),
-        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Circle {
-            circle_id,
-            control,
-            key_fingerprint,
-        }) => {
-            let (encryption, activated_fingerprint) = db
-                .circle_publication_context(*circle_id, control.clone())
-                .await
-                .map_err(BlobCacheError::Metadata)?;
-            if activated_fingerprint != *key_fingerprint
-                || stored.locator().key_fingerprint() != Some(*key_fingerprint)
-                || encryption.seal_key_fingerprint() != *key_fingerprint
-            {
-                return Err(BlobCacheError::Storage(StorageError::InvalidContent(
-                    format!(
-                        "Circle {circle_id} blob locator key differs from its exact activated authority"
-                    ),
-                )));
-            }
-            Ok(crate::sync::storage::BlobSpoolProtection::Opaque(
-                encryption,
-            ))
-        }
-    }
 }
 
 /// Look up the external file ref for `id`, mapping the DB error into the cache's

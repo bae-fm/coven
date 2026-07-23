@@ -3,6 +3,7 @@ use crate::database::connection_io::capture_changeset;
 
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
+use crate::sync::store::database::StoreDatabase;
 
 use super::fixtures::*;
 
@@ -87,7 +88,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     )
     .expect("open database");
 
-    let missing = db
+    let missing = StoreDatabase::new(&db)
         .required_store_root_hash()
         .await
         .expect_err("missing Store root must fail");
@@ -105,7 +106,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     })
     .await
     .expect("write malformed exact Store root authority");
-    let malformed = db
+    let malformed = StoreDatabase::new(&db)
         .required_store_root_hash()
         .await
         .expect_err("malformed Store root must fail");
@@ -182,7 +183,13 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     db.install_store_root_authority(reference, bytes)
         .await
         .expect("install exact Store root authority");
-    assert_eq!(db.required_store_root_hash().await.unwrap(), expected);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .required_store_root_hash()
+            .await
+            .unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -646,17 +653,23 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let write_id = db.new_write_id();
     let result = db
         .call(move |conn| {
-            Database::run_internal_store_write_transaction_on(conn, &tables, None, write_id, |tx| {
-                tx.execute(
-                    "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
-                    ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-                )?;
-                tx.execute(
-                    "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
-                    [],
-                )?;
-                Ok::<_, DbError>(())
-            })
+            StoreDatabase::run_internal_store_write_transaction_on(
+                conn,
+                &tables,
+                None,
+                write_id,
+                |tx| {
+                    tx.execute(
+                        "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
+                        ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
+                        [],
+                    )?;
+                    Ok::<_, DbError>(())
+                },
+            )
         })
         .await;
     let error = result.expect_err("invalid UUID must reject the host transaction");
@@ -712,7 +725,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let renamed = "01890a5d-ac96-774b-bcce-b302099c3f74";
     let update_write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
+        StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &update_tables,
             None,
@@ -733,7 +746,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let replaced = "8b1a9953-c461-4e20-8c66-826115d53552";
     let replace_write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
+        StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &replace_tables,
             None,
@@ -754,7 +767,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let ordinary_tables = tables.clone();
     let ordinary_write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(
+        StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &ordinary_tables,
             None,
@@ -794,7 +807,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let invalid_write_id = db.new_write_id();
     let invalid = db
         .call(move |conn| {
-            Database::run_internal_store_write_transaction_on(
+            StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &invalid_tables,
                 None,
@@ -853,39 +866,6 @@ async fn database_open_rejects_empty_device_id() {
         error.contains("device_id") && error.contains("empty"),
         "error names the empty device id: {error}",
     );
-}
-
-#[test]
-fn host_sql_authorizer_is_removed_after_success_error_and_panic() {
-    let conn = Connection::open_in_memory().expect("open");
-    conn.execute_batch(
-        "ATTACH ':memory:' AS coven_gate_empty; \
-         CREATE TABLE coven_gate_empty.baseline (id TEXT PRIMARY KEY) STRICT; \
-         INSERT INTO coven_gate_empty.baseline VALUES ('guarded');",
-    )
-    .expect("attach guarded schema");
-    let assert_guard_removed = || {
-        let id: String = conn
-            .query_row("SELECT id FROM coven_gate_empty.baseline", [], |row| {
-                row.get(0)
-            })
-            .expect("internal SQL can address the baseline after host SQL");
-        assert_eq!(id, "guarded");
-    };
-
-    Database::run_host_sql_on(&conn, || Ok::<_, DbError>(())).expect("successful host SQL");
-    assert_guard_removed();
-
-    let error = Database::run_host_sql_on(&conn, || Err::<(), _>(DbError::Message("host".into())));
-    assert!(error.is_err());
-    assert_guard_removed();
-
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Database::run_host_sql_on(&conn, || -> Result<(), DbError> { panic!("host panic") })
-            .expect("panicking host SQL closure never returns");
-    }));
-    assert!(panic.is_err());
-    assert_guard_removed();
 }
 
 #[tokio::test]

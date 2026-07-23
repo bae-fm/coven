@@ -26,11 +26,13 @@ impl MergeStreamBlock {
 }
 
 pub(crate) async fn load_active_merge_registrations(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
-    let durable = db.activated_store_device_registration_records().await?;
+    let durable = database
+        .activated_store_device_registration_records()
+        .await?;
     let mut verified = Vec::with_capacity(durable.len());
     for (reference, expected) in durable {
         let opened = load_registration_ref(storage, root, &reference).await?;

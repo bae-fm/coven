@@ -20,7 +20,7 @@ use super::operations::{
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_store_write(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     _timestamp: &str,
@@ -28,6 +28,7 @@ pub(crate) async fn prepare_store_write(
     store_dir: &StoreDir,
     membership: &MembershipChain,
 ) -> Result<bool, StoreError> {
+    let db = database.sqlite();
     let Some(PreparedStoreWrite {
         write_id,
         changeset,
@@ -35,7 +36,7 @@ pub(crate) async fn prepare_store_write(
         base,
         blob_facts,
         partitions,
-    }) = db.prepare_store_write().await?
+    }) = database.prepare_store_write().await?
     else {
         return Ok(false);
     };
@@ -49,7 +50,7 @@ pub(crate) async fn prepare_store_write(
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let preparation = async {
         let (root, registration_ref, registration, device_signer) =
-            load_local_store_authority(db, device_id, keypair).await?;
+            load_local_store_authority(database, device_id, keypair).await?;
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let store_root_hash = root.store_root_hash;
@@ -58,7 +59,7 @@ pub(crate) async fn prepare_store_write(
             &registration_ref,
             crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let previous = StoreDatabase::new(db).latest_local_store_position().await?;
+        let previous = database.latest_local_store_position().await?;
         let seq = next_store_sequence(previous.as_ref())?;
         let coord = StoreCommitCoord {
             stream_id,
@@ -71,7 +72,7 @@ pub(crate) async fn prepare_store_write(
         };
         let candidate_membership = membership;
         let authorization = super::pull::load_retained_merge_outbound_authorization(
-            db,
+            database,
             storage,
             &root,
             &order,
@@ -96,7 +97,7 @@ pub(crate) async fn prepare_store_write(
         if let Some(partition) = partitions.store {
             prepared_packages.push(
                 prepare_partition_package(
-                    db,
+                    database,
                     storage,
                     store_root_hash,
                     candidate_family,
@@ -116,7 +117,7 @@ pub(crate) async fn prepare_store_write(
         for partition in partitions.circles {
             prepared_packages.push(
                 prepare_partition_package(
-                    db,
+                    database,
                     storage,
                     store_root_hash,
                     candidate_family,
@@ -234,7 +235,7 @@ pub(crate) async fn prepare_store_write(
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let successor = super::pull::prepare_merge_history_successor(
-            db,
+            database,
             &root,
             &commit,
             &commit_ref,
@@ -299,25 +300,23 @@ pub(crate) async fn prepare_store_write(
     let preparation = match preparation {
         Ok(preparation) => preparation,
         Err(error) => {
-            record_preparation_failure(db, &write_id, &error).await?;
+            record_preparation_failure(database, &write_id, &error).await?;
             return Err(error);
         }
     };
-    StoreDatabase::new(db)
-        .prepare_store_write_commit(preparation)
-        .await?;
+    database.prepare_store_write_commit(preparation).await?;
     Ok(true)
 }
 
 async fn record_preparation_failure(
-    db: &Database,
+    database: &StoreDatabase,
     write_id: &crate::WriteId,
     error: &StoreError,
 ) -> Result<(), StoreError> {
     let Some(block) = blocked_status(error) else {
         return Ok(());
     };
-    crate::sync::store::database::StoreDatabase::new(db)
+    database
         .block_write_if_unresolved(write_id, block)
         .await
         .map(|_| ())

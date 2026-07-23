@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn load_local_store_authority(
-    db: &Database,
+    database: &StoreDatabase,
     expected_device_id: &str,
     identity_signer: &UserKeypair,
 ) -> Result<
@@ -13,18 +13,19 @@ pub(crate) async fn load_local_store_authority(
     ),
     StoreError,
 > {
+    let db = database.sqlite();
     let root = db
         .local_store_root_ref()
         .await?
         .ok_or(StoreError::MissingState {
             key: STORE_ROOT_AUTHORITY,
         })?;
-    let durable =
-        db.latest_local_store_device_registration()
-            .await?
-            .ok_or(StoreError::MissingState {
-                key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-            })?;
+    let durable = database
+        .latest_local_store_device_registration()
+        .await?
+        .ok_or(StoreError::MissingState {
+            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+        })?;
     if !durable.is_activated() || durable.device_id.to_string() != expected_device_id {
         return Err(StoreError::InvalidState {
             key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
@@ -43,7 +44,7 @@ pub(crate) async fn load_local_store_authority(
         &registration,
         durable.prepared.reference().clone(),
     );
-    let activated = db
+    let activated = database
         .activated_store_device_registration(reference.clone())
         .await?;
     if activated != registration {

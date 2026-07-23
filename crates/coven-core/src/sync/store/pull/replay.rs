@@ -31,7 +31,7 @@ pub(super) async fn replay_merge_device_history(
 }
 
 pub(super) async fn verified_terminal_merge_retractions(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     activation_head: &StoreDeviceHead,
@@ -43,7 +43,7 @@ pub(super) async fn verified_terminal_merge_retractions(
     device_operations: &VerifiedStoreDeviceOperations,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
 ) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StorePullError> {
-    let retained = Box::pin(db.retained_merge_replay_inputs()).await?;
+    let retained = Box::pin(database.retained_merge_replay_inputs()).await?;
     let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
         head_hash: activation_head.head_hash(),
         object: activation_head_object.clone(),
@@ -57,13 +57,10 @@ pub(super) async fn verified_terminal_merge_retractions(
     };
     let mut retractions = Vec::new();
     for materialization in &retained {
-        let mut locator = Box::pin(
-            crate::sync::store::database::StoreDatabase::new(db)
-                .author_exclusion_activation_for_candidate(
-                    materialization.commit_ref().clone(),
-                    materialization.commit().author_registration.clone(),
-                ),
-        )
+        let mut locator = Box::pin(database.author_exclusion_activation_for_candidate(
+            materialization.commit_ref().clone(),
+            materialization.commit().author_registration.clone(),
+        ))
         .await?;
         if locator.is_none() {
             let expected_stream =
@@ -185,7 +182,7 @@ pub(super) async fn verified_terminal_merge_retractions(
             let Some((_dependency_reference, dependency)) = dependency else {
                 continue;
             };
-            let author = Box::pin(db.activated_store_device_registration(
+            let author = Box::pin(database.activated_store_device_registration(
                 materialization.commit().author_registration.clone(),
             ))
             .await?;
@@ -241,13 +238,15 @@ pub(super) fn replay_retained_merge_projection_on(
     retracted: &BTreeSet<StoreBatchCommitRef>,
 ) -> Result<rusqlite::Connection, DbError> {
     super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
-    let baseline = Database::generation_zero_replay_baseline_on(live)?;
+    let baseline =
+        crate::sync::store::database::StoreDatabase::generation_zero_replay_baseline_on(live)?;
     let replay = super::retained_replay::open_image(&baseline.image_bytes)?;
     replay
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(DbError::from)?;
     let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
-    let retained = Database::load_retained_merge_replay_inputs_on(live)?;
+    let retained =
+        crate::sync::store::database::StoreDatabase::load_retained_merge_replay_inputs_on(live)?;
     let active_references = retained
         .iter()
         .filter(|materialization| !retracted.contains(materialization.commit_ref()))
@@ -296,11 +295,12 @@ pub(super) fn replay_retained_merge_projection_on(
         .filter(|materialization| retracted.contains(materialization.commit_ref()))
         .map(|materialization| materialization.commit().write_id.clone())
         .collect::<BTreeSet<_>>();
-    let write_overlays = Database::load_merge_replay_write_overlays_on(
-        live,
-        &active_accepted_writes,
-        &retracted_writes,
-    )?;
+    let write_overlays =
+        crate::sync::store::database::StoreDatabase::load_merge_replay_write_overlays_on(
+            live,
+            &active_accepted_writes,
+            &retracted_writes,
+        )?;
     let mut pending = retained
         .into_iter()
         .filter(|materialization| !retracted.contains(materialization.commit_ref()))

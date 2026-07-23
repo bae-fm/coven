@@ -12,7 +12,7 @@ use crate::sync::store_commit::{
 use crate::write::{WriteId, WriteResolution, WriteStatus};
 use rusqlite::OptionalExtension;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(crate) async fn blocked_merge_candidate(
         &self,
         write_id: WriteId,
@@ -686,7 +686,7 @@ impl StoreDatabase<'_> {
                     )
                     .map_err(DbError::from)?;
                 if exists {
-                    Database::load_merge_retraction_cleanup_on(conn, candidate)?;
+                    crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(conn, candidate)?;
                 }
                 return Ok(exists);
             }
@@ -762,7 +762,7 @@ impl StoreDatabase<'_> {
                     .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
                 if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &status {
                     witness.validate().map_err(DbError::Message)?;
-                    let candidate = Database::load_merge_retraction_cleanup_on(
+                    let candidate = crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
                         conn,
                         witness.original_position().commit(),
                     )?;
@@ -861,7 +861,11 @@ impl StoreDatabase<'_> {
                 };
                 witness.validate().map_err(DbError::Message)?;
                 let candidate_ref = witness.original_position().commit().clone();
-                let candidate = Database::load_merge_retraction_cleanup_on(&tx, &candidate_ref)?;
+                let candidate =
+                    crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
+                        &tx,
+                        &candidate_ref,
+                    )?;
                 if candidate.commit.write_id != write_id {
                     return Err(DbError::Message(
                         "Merge retraction cleanup names another write".to_string(),
@@ -901,8 +905,8 @@ impl StoreDatabase<'_> {
                     .map(|(stream_id, sequence, encoded_ref)| {
                         let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
                         let candidate =
-                            Database::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
-                        Database::load_merge_retraction_cleanup_on(conn, &candidate)?;
+                            crate::sync::store::database::StoreDatabase::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                        crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
                         Ok(candidate)
                     })
                     .collect()
@@ -915,7 +919,7 @@ impl StoreDatabase<'_> {
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
         self.database.call(move |conn| {
-            let prepared = Database::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            let prepared = crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
             let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
             let proof = remote
                 .candidate_nonactivation_proof(&candidate)
@@ -976,7 +980,10 @@ impl StoreDatabase<'_> {
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.database
             .call(move |conn| {
-                let prepared = Database::load_merge_retraction_cleanup_on(conn, &candidate)?;
+                let prepared =
+                    crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
+                        conn, &candidate,
+                    )?;
                 merge_candidate_cleanup_targets_on(
                     conn,
                     &prepared.commit.write_id,
@@ -997,7 +1004,10 @@ impl StoreDatabase<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         self.database
             .call(move |conn| {
-                let prepared = Database::load_merge_retraction_cleanup_on(conn, &candidate)?;
+                let prepared =
+                    crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
+                        conn, &candidate,
+                    )?;
                 if durable
                     .reference()
                     .map_err(|error| DbError::Message(error.to_string()))?
@@ -1059,7 +1069,10 @@ impl StoreDatabase<'_> {
         self.database
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let prepared = Database::load_merge_retraction_cleanup_on(&tx, &candidate)?;
+                let prepared =
+                    crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
+                        &tx, &candidate,
+                    )?;
                 finish_merge_retraction_cleanup_on(&tx, &prepared)?;
                 tx.commit().map_err(DbError::from)
             })
@@ -1083,7 +1096,7 @@ impl StoreDatabase<'_> {
             let mut candidates = Vec::new();
             if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
                 witness.validate().map_err(DbError::Message)?;
-                let candidate = Database::load_merge_retraction_cleanup_on(
+                let candidate = crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(
                     conn,
                     witness.original_position().commit(),
                 )?;
@@ -1219,7 +1232,7 @@ impl StoreDatabase<'_> {
                             .to_string(),
                     ));
                     }
-                    candidates.push(Database::load_merge_retraction_cleanup_on(&tx, &reference)?);
+                    candidates.push(crate::sync::store::database::StoreDatabase::load_merge_retraction_cleanup_on(&tx, &reference)?);
                 } else {
                     let raw_prepared = raw_prepared.ok_or_else(|| {
                         DbError::Message("Merge cleanup has no prepared candidate".to_string())

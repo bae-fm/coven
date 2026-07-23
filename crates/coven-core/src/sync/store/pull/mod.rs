@@ -21,9 +21,6 @@ use crate::sync::audience_package::{AudiencePackage, PackageAudience};
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
 use crate::sync::membership::{MembershipChain, MembershipStatus};
-use crate::sync::pull::{
-    advance_max_updated_at, cache_eager_blobs, local_blob_cleanup_intents, verify_package_blobs,
-};
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::{
     BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
@@ -33,6 +30,7 @@ use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 use crate::sync::store::device_join;
+use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 use crate::sync::store_commit::{
     head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
@@ -59,8 +57,8 @@ use crate::sync::store_objects::{
     run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::sync::{
-    causal_grants, circle, gate, hlc, membership, provider, remote_object, retained_replay,
-    session, store_commit, store_objects,
+    causal_grants, circle, gate, hlc, membership, provider, remote_object, session, store_commit,
+    store_objects,
 };
 
 mod ancestry;
@@ -88,6 +86,7 @@ mod retained_authority;
 mod root_validation;
 mod snapshot_authority;
 mod snapshot_evidence;
+mod support;
 mod terminal_authority;
 mod terminal_cleanup;
 
@@ -109,6 +108,14 @@ pub use model::{
 pub(crate) use registration::*;
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
+pub(crate) use support::{
+    advance_max_updated_at, cache_eager_blobs, download_blobs, local_blob_cleanup_intents,
+    verify_package_blobs, BlobDownload,
+};
+pub use support::{
+    load_cycle_membership, BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures,
+    CycleMembership, PullError,
+};
 
 pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence;
 pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
@@ -184,7 +191,7 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
     ) -> Result<StorePullResult, SyncCycleFailure> {
         pull_store_commits(
-            self.db(),
+            self.database(),
             self.db().synced_tables(),
             self.storage(),
             self.store_root().store_root_hash,
@@ -203,7 +210,7 @@ impl AuthorizedStore<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pull_store_commits<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     tables: &'a [crate::sync::session::SyncedTable],
     storage: &'a dyn SyncStorage,
     store_root_hash: crate::sync::store_commit::ObjectHash,
@@ -212,22 +219,23 @@ pub(crate) fn pull_store_commits<'a>(
     identity: Option<&'a UserKeypair>,
 ) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
+        let db = database.sqlite();
         let root = required_pull_root(db, store_root_hash).await?;
         let verified_root = load_store_protocol_root(storage, &root).await?.value;
-        resume_merge_retraction_cleanups(db, storage, &root).await?;
+        resume_merge_retraction_cleanups(database, storage, &root).await?;
 
-        let local_frontier = db.materialized_frontier().await.map_err(|error| {
+        let local_frontier = database.materialized_frontier().await.map_err(|error| {
             StorePullError::Database(format!("load discovery device-state frontier: {error}"))
         })?;
         let local_frontier = local_frontier
             .into_values()
             .map(|reference| (reference.coord.stream_id, reference))
             .collect::<BTreeMap<_, _>>();
-        let (_, discovery_device_state) = db
+        let (_, discovery_device_state) = database
             .store_device_state_for_history_cut(&StoreHistoryCut(local_frontier))
             .await?;
 
-        let mut active = load_active_merge_registrations(db, storage, &root)
+        let mut active = load_active_merge_registrations(database, storage, &root)
             .await
             .map_err(|error| {
                 StorePullError::Database(format!("load active Merge registrations: {error}"))
@@ -296,7 +304,7 @@ pub(crate) fn pull_store_commits<'a>(
                     continue;
                 }
                 let stream_id = commit_stream_id(&commit_ref.coord);
-                if let Some(materialized) = db
+                if let Some(materialized) = database
                     .exact_materialized_ref(&stream_id, commit_ref.coord.sequence())
                     .await?
                 {
@@ -453,7 +461,7 @@ pub(crate) fn pull_store_commits<'a>(
             }
         }
 
-        let retained = Box::pin(db.retained_merge_replay_inputs()).await?;
+        let retained = Box::pin(database.retained_merge_replay_inputs()).await?;
         let mut loaded_predecessor_memberships = BTreeMap::new();
         for materialization in retained {
             if materialization.commit().membership_authority.is_none() {
@@ -492,10 +500,13 @@ pub(crate) fn pull_store_commits<'a>(
                     })?,
             )
         };
-        let coverage = db.snapshot_coverage_frontier().await.map_err(|error| {
-            StorePullError::Database(format!("load snapshot coverage frontier: {error}"))
-        })?;
-        let mut frontier = db.materialized_frontier().await.map_err(|error| {
+        let coverage = database
+            .snapshot_coverage_frontier()
+            .await
+            .map_err(|error| {
+                StorePullError::Database(format!("load snapshot coverage frontier: {error}"))
+            })?;
+        let mut frontier = database.materialized_frontier().await.map_err(|error| {
             StorePullError::Database(format!("load materialized frontier: {error}"))
         })?;
         let mut applied_devices = BTreeSet::new();
@@ -513,14 +524,14 @@ pub(crate) fn pull_store_commits<'a>(
                         "Merge candidate disappeared while evaluating readiness".to_string(),
                     )
                 })?;
-                let exclusion_freezes = db.store_device_exclusion_freezes().await?;
+                let exclusion_freezes = database.store_device_exclusion_freezes().await?;
                 let current_frontier = CommitFrontier::from_refs(frontier.clone())
                     .map_err(|error| StorePullError::Database(error.to_string()))?;
-                let (_, current_device_state) = db
+                let (_, current_device_state) = database
                     .store_device_state_for_history_cut(&StoreHistoryCut(current_frontier.0))
                     .await?;
                 match readiness(
-                    db,
+                    database,
                     storage,
                     &root,
                     &coverage,
@@ -552,7 +563,7 @@ pub(crate) fn pull_store_commits<'a>(
                             )
                         })?;
                         match Box::pin(apply_candidate(
-                            db,
+                            database,
                             storage,
                             &root,
                             store_dir,

@@ -38,6 +38,51 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
     .expect("construct exclusion test storage")
 }
 
+fn store_database(db: &Database) -> StoreDatabase {
+    StoreDatabase::new(db)
+}
+
+async fn propose_device_exclusion(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity_signer: &UserKeypair,
+    target: &StoreDeviceRegistrationRef,
+) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+    super::propose_device_exclusion(&store_database(db), storage, identity_signer, target).await
+}
+
+async fn finalize_device_exclusion(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity_signer: &UserKeypair,
+    proposal: &StoreDeviceExclusionProposalRef,
+) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+    super::finalize_device_exclusion(&store_database(db), storage, identity_signer, proposal).await
+}
+
+async fn cancel_device_exclusion(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity_signer: &UserKeypair,
+    proposal: &StoreDeviceExclusionProposalRef,
+) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+    super::cancel_device_exclusion(&store_database(db), storage, identity_signer, proposal).await
+}
+
+async fn resume_device_exclusion(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity_signer: &UserKeypair,
+) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
+    super::resume_device_exclusion(&store_database(db), storage, identity_signer).await
+}
+
+async fn get_device_exclusion_operations(
+    db: &Database,
+) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
+    super::get_device_exclusion_operations(&store_database(db)).await
+}
+
 #[tokio::test]
 async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
     let directory = tempfile::tempdir().expect("exclusion test directory");
@@ -99,7 +144,7 @@ async fn run_remaining_device_exclusion() {
     .expect("activate peer Store device");
 
     let local_device_id = local_device_id(&owner_db).await.expect("local device id");
-    let target = owner_db
+    let target = store_database(&owner_db)
         .activated_store_device_registration_records()
         .await
         .expect("list active Store registrations")
@@ -145,7 +190,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     )
     .await;
     let owner_device_id = local_device_id(&owner_db).await.expect("owner device id");
-    let target = owner_db
+    let target = store_database(&owner_db)
         .activated_store_device_registration_records()
         .await
         .expect("list snapshot exclusion registrations")
@@ -154,7 +199,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .find(|reference| reference.device_id.to_string() != owner_device_id)
         .expect("snapshot exclusion peer registration");
     let exclusion = finalize_peer_exclusion(&owner_db, &store, &signer, &target).await;
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         &owner_db,
     ))
@@ -188,13 +233,13 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     let synced_tables = owner_db.synced_tables().to_vec();
     let image = owner_db
         .call(move |connection| {
-            crate::sync::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+            crate::sync::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await
         .expect("create author exclusion snapshot");
     let snapshot_coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        owner_db
+        store_database(&owner_db)
             .materialized_frontier()
             .await
             .expect("read author exclusion snapshot frontier"),
@@ -273,7 +318,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         ))
         .await;
         Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-            &restored,
+            &store_database(&restored),
             &store.storage,
             &target.device_id.to_string(),
             &signer,
@@ -325,7 +370,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .expect("snapshotted exclusion covers restored candidate");
     assert_eq!(
         Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-            &restored,
+            &store_database(&restored),
             &store.storage,
             &target.device_id.to_string(),
             &signer,
@@ -370,7 +415,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     )
     .await;
     let owner_device_id = local_device_id(&owner_db).await.expect("owner device id");
-    let target = owner_db
+    let target = store_database(&owner_db)
         .activated_store_device_registration_records()
         .await
         .expect("list bootstrap exclusion registrations")
@@ -385,13 +430,13 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     let synced_tables = owner_db.synced_tables().to_vec();
     let image = owner_db
         .call(move |connection| {
-            crate::sync::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+            crate::sync::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await
         .expect("create pre-exclusion snapshot");
     let snapshot_coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        owner_db
+        store_database(&owner_db)
             .materialized_frontier()
             .await
             .expect("read pre-exclusion frontier"),
@@ -490,7 +535,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     let bootstrap_floor = crate::join_code::MembershipFloor(membership.head_refs().to_vec());
     let bootstrap_path = database_path.clone();
     let bootstrap = tokio::spawn(async move {
-        crate::sync::snapshot::bootstrap_from_snapshot(
+        crate::sync::store::snapshot::bootstrap_from_snapshot(
             &bootstrap_store.storage,
             "bootstrap-author-exclusion-store",
             bootstrap_root,
@@ -545,7 +590,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     assert!(!stored.1.is_empty());
     assert_eq!(
         Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-            &joining_db,
+            &store_database(&joining_db),
             &store.storage,
             &target.device_id.to_string(),
             &signer,
@@ -591,7 +636,7 @@ async fn prepare_peer_exclusion(
         StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => proposal,
         result => panic!("unexpected exclusion proposal result: {result:?}"),
     };
-    let freezes = owner_db
+    let freezes = store_database(owner_db)
         .store_device_exclusion_freezes()
         .await
         .expect("read owner exclusion freeze");
@@ -600,7 +645,7 @@ async fn prepare_peer_exclusion(
     assert_eq!(&freezes[0].proposal.target, target);
 
     let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        owner_db
+        store_database(owner_db)
             .materialized_frontier()
             .await
             .expect("read owner exclusion frontier"),
@@ -651,7 +696,7 @@ async fn activate_peer_exclusion(
     else {
         panic!("unexpected exclusion result: {result:?}")
     };
-    assert!(owner_db
+    assert!(store_database(owner_db)
         .store_device_exclusion_freezes()
         .await
         .expect("read released owner exclusion freeze")
@@ -994,7 +1039,7 @@ async fn materialize_surviving_owner_commit(
                      '0000000001500-0000-owner', '2026-07-18')",
     )
     .await;
-    let owner_membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let owner_membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         owner_db,
     ))
@@ -1003,7 +1048,7 @@ async fn materialize_surviving_owner_commit(
     let owner_device_id = local_device_id(owner_db).await.expect("owner device id");
     assert!(
         Box::pin(crate::sync::store::preparation::prepare_store_write(
-            owner_db,
+            &store_database(owner_db),
             &store.storage,
             &owner_device_id,
             "2026-07-18T01:00:30Z",
@@ -1018,12 +1063,12 @@ async fn materialize_surviving_owner_commit(
         .expect("prepare surviving owner commit")
     );
     Box::pin(crate::sync::store::publication::drain_store_writes(
-        owner_db,
+        &store_database(owner_db),
         &store.storage,
     ))
     .await
     .expect("publish surviving owner commit");
-    let peer_membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let peer_membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         peer_db,
     ))
@@ -1084,7 +1129,7 @@ async fn assert_terminal_merge_transaction_rollback(
                 .expect("install early device-state deletion trigger");
         }
     }
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         peer_db,
     ))
@@ -1118,12 +1163,12 @@ async fn assert_terminal_merge_transaction_rollback(
         stream_id,
         sequence,
     } = &activation_commit.coord;
-    assert!(peer_db
+    assert!(store_database(peer_db)
         .exact_materialized_ref(&stream_id.to_string(), *sequence)
         .await
         .expect("reload rolled-back activation coordinate")
         .is_none());
-    peer_db
+    store_database(peer_db)
         .retained_merge_materialization(original.commit().clone())
         .await
         .expect("rolled-back retraction retains the original materialization");
@@ -1212,7 +1257,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                      '0000000002000-0000-excluded-peer', '2026-07-18')",
     )
     .await;
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         &peer_db,
     ))
@@ -1223,7 +1268,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("excluded peer device id");
     assert!(
         Box::pin(crate::sync::store::preparation::prepare_store_write(
-            &peer_db,
+            &store_database(&peer_db),
             &store.storage,
             &peer_device_id,
             "2026-07-18T01:01:00Z",
@@ -1282,7 +1327,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .mark_candidate_commit_uploaded(candidate_ref.clone())
         .await
         .expect("record uploaded excluded peer commit");
-    let (target, target_registration) = peer_db
+    let (target, target_registration) = store_database(&peer_db)
         .activated_store_device_registration_records()
         .await
         .expect("load excluded peer registration")
@@ -1300,7 +1345,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     .await;
     if materialize_before_exclusion {
         Box::pin(crate::sync::store::publication::drain_store_writes(
-            &peer_db,
+            &store_database(&peer_db),
             &store.storage,
         ))
         .await
@@ -1375,7 +1420,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             }
         }
         store.home.fail_exact_delete_on_call(1);
-        let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+        let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
             &store.storage,
             &peer_db,
         ))
@@ -1526,8 +1571,11 @@ async fn run_excluded_author_candidate_cleanup_case(
         let drain_db = peer_db.clone();
         let drain_store = store.clone();
         let drain = tokio::spawn(async move {
-            crate::sync::store::publication::drain_store_writes(&drain_db, &drain_store.storage)
-                .await
+            crate::sync::store::publication::drain_store_writes(
+                &store_database(&drain_db),
+                &drain_store.storage,
+            )
+            .await
         });
         commit_uploaded.notified().await;
         let expected_held = if matches!(
@@ -1586,9 +1634,12 @@ async fn run_excluded_author_candidate_cleanup_case(
                 candidate.head.value.to_bytes(),
             );
         }
-        crate::sync::store::publication::drain_store_writes(&peer_db, &store.storage)
-            .await
-            .expect_err("excluded peer cannot activate its late candidate")
+        crate::sync::store::publication::drain_store_writes(
+            &store_database(&peer_db),
+            &store.storage,
+        )
+        .await
+        .expect_err("excluded peer cannot activate its late candidate")
     };
     let local_position = crate::sync::store::database::StoreDatabase::new(&peer_db)
         .latest_local_store_position()
@@ -1701,7 +1752,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         store.home.fail_exact_delete_on_call(1);
         assert!(
             Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-                &reopened,
+                &store_database(&reopened),
                 &store.storage,
                 &peer_device_id,
                 &signer,
@@ -1717,7 +1768,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     } else {
         assert!(matches!(
             Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-                &reopened,
+                &store_database(&reopened),
                 &store.storage,
                 &peer_device_id,
                 &signer,
@@ -1804,7 +1855,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     {
         assert_eq!(
             Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-                &reopened,
+                &store_database(&reopened),
                 &store.storage,
                 &peer_device_id,
                 &signer,
@@ -1872,7 +1923,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .is_err());
         assert!(
             Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-                &reopened,
+                &store_database(&reopened),
                 &store.storage,
                 &peer_device_id,
                 &signer,
@@ -1888,7 +1939,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         let retried = open(&path, "excluded-peer-host");
         assert_eq!(
             Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-                &retried,
+                &store_database(&retried),
                 &store.storage,
                 &peer_device_id,
                 &signer,
@@ -2123,7 +2174,7 @@ async fn maybe_prepare_merge_abandonment(
         .expect("block candidate before abandonment preparation");
     assert!(Box::pin(
         crate::sync::store::abandonment::prepare_merge_candidate_abandonment(
-            peer_db,
+            &store_database(peer_db),
             &store.storage,
             peer_device_id,
             signer,
@@ -2185,7 +2236,7 @@ async fn publish_third_candidate_winner(
     signer: &UserKeypair,
     candidate: &crate::database::BlockedMergeCandidate,
 ) {
-    let registration = peer_db
+    let registration = store_database(peer_db)
         .activated_store_device_registration(candidate.commit.value.author_registration.clone())
         .await
         .expect("load third-winner device registration");
@@ -2396,7 +2447,7 @@ async fn finish_prepared_exclusion_cleanup(
     .await;
     assert_eq!(
         Box::pin(crate::sync::store::abandonment::abandon_merge_candidate(
-            peer_db,
+            &store_database(peer_db),
             &store.storage,
             peer_device_id,
             signer,
@@ -2458,7 +2509,7 @@ async fn pull_peer_exclusion(
     store_dir: &StoreDir,
     expected_held: ExpectedHeldCandidate<'_>,
 ) {
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         peer_db,
     ))
@@ -2525,7 +2576,7 @@ async fn open_published_exclusion_snapshot(
 ) -> (tempfile::TempDir, Database) {
     let directory = tempfile::tempdir().expect("restored exclusion directory");
     let path = directory.path().join("restored.db");
-    let bootstrap = crate::sync::snapshot::bootstrap_from_snapshot(
+    let bootstrap = crate::sync::store::snapshot::bootstrap_from_snapshot(
         &store.storage,
         store_id,
         store.root.clone(),
@@ -2864,7 +2915,7 @@ async fn prepare_transfer_candidate(
         ),
     )
     .await;
-    let membership = Box::pin(crate::sync::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
         peer_db,
     ))
@@ -2876,7 +2927,7 @@ async fn prepare_transfer_candidate(
     let (temporary, store_dir) = temp_store_dir();
     assert!(
         Box::pin(crate::sync::store::preparation::prepare_store_write(
-            peer_db,
+            &store_database(peer_db),
             &store.storage,
             &peer_device_id,
             "2026-07-18T00:02:00Z",
@@ -2921,7 +2972,7 @@ async fn create_exclusion_test_store(
     ))
     .await
     .expect("create exclusion test Store");
-    crate::sync::store::ensure_active_registration(db, storage)
+    crate::sync::store::ensure_active_registration(&store_database(db), storage)
         .await
         .expect("activate exclusion test registration");
 }
@@ -2931,12 +2982,12 @@ async fn stage_uploaded_proposal(
     storage: &CloudSyncStorage,
     signer: &UserKeypair,
 ) -> StoreDeviceExclusionProposalRef {
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
         .await
         .expect("load exclusion test membership");
     let device_id = local_device_id(db).await.expect("local device id");
     let plan = crate::sync::store::operations::prepare_plan(
-        db,
+        &store_database(db),
         storage,
         membership
             .chain
@@ -3000,7 +3051,7 @@ async fn stage_uploaded_proposal(
     )
     .expect("retain prepared exclusion proposal");
     let candidate = crate::sync::store::operations::prepare_candidate(
-        db,
+        &store_database(db),
         storage,
         plan,
         StoreOperationBatch::DeviceExclusionProposal(retained),
@@ -3056,7 +3107,7 @@ async fn resume_proposal_and_publish_freeze_ack(
         .await
         .expect("read exclusion journal")
         .is_none());
-    let freezes = reopened
+    let freezes = store_database(&reopened)
         .store_device_exclusion_freezes()
         .await
         .expect("read exclusion freezes");
@@ -3066,7 +3117,7 @@ async fn resume_proposal_and_publish_freeze_ack(
     );
 
     let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        reopened
+        store_database(&reopened)
             .materialized_frontier()
             .await
             .expect("read exclusion frontier"),
@@ -3129,7 +3180,7 @@ async fn race_cancellation_with_ack(
     candidate_staged.notified().await;
 
     let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        reopened
+        store_database(&reopened)
             .materialized_frontier()
             .await
             .expect("read competing acknowledgement frontier"),
@@ -3166,7 +3217,7 @@ async fn race_cancellation_with_ack(
             commit,
         } if commit.coord.sequence() == base_sequence + 2
     ));
-    assert!(reopened
+    assert!(store_database(&reopened)
         .store_device_exclusion_freezes()
         .await
         .expect("read released exclusion freezes")

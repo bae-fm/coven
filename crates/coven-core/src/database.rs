@@ -16,13 +16,13 @@ use crate::database::connection_io::open_connection;
 use crate::database::connection_io::open_connection_read_only;
 use crate::database::connection_io::scan_max_updated_at;
 use crate::database::connection_io::seed_from;
-use crate::database::local_store_identity::local_activated_registration_ref_on;
 use crate::database::local_store_identity::pin_host_device_id_on;
 use crate::database::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
 pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
 pub(crate) use crate::database::remote_object_records::candidate_graph_exact_objects;
 pub(crate) use crate::database::remote_object_records::finish_remote_candidate_nonactivation_on;
+pub(crate) use crate::database::remote_object_records::index_retained_replay_owner_on;
 pub(crate) use crate::database::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::mark_remote_object_uploaded_on;
@@ -39,15 +39,12 @@ pub(crate) use crate::database::remote_object_records::{
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
 pub(crate) use crate::database::store_ack_records::record_activated_store_ack_on;
 pub(crate) use crate::database::store_authority_records::install_store_founder_state_on;
-pub(crate) use crate::database::store_device_state::{
-    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
-    store_device_state_for_history_cut_on,
-};
 pub(crate) use crate::database::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
     parse_store_reclaim_operation, record_store_reclaim_activation_on, store_reclaim_journal_error,
     update_store_reclaim_operation_on,
 };
+pub(crate) use crate::database::stream_activation_records::load_registered_stream_activation_on;
 pub(crate) use crate::database::stream_activation_records::record_verified_stream_activations_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -56,11 +53,10 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
 use tracing::error;
-use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::blob::{BlobRef, Provenance, RowBlobAuthority, RowBlobRef};
+use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::db::{
     apply_coven_schema, expected_coven_schema_manifest, is_reserved_table_name,
     live_coven_schema_manifest, CovenSchemaManifest, ExternalBlob, OutboxEntry, OutboxOperation,
@@ -77,15 +73,13 @@ use crate::sync::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
 };
-use crate::sync::retained_replay::{
-    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority, GENERATION_ZERO,
-};
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::store::circle_controls::activation::{
-    VerifiedCircleActivations, VerifiedStreamActivations,
+use crate::sync::store::circle_controls::activation::VerifiedStreamActivations;
+use crate::sync::store::retained_replay::{
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    RetainedReplaySnapshotAuthority, GENERATION_ZERO,
 };
 use crate::sync::store::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
@@ -93,41 +87,31 @@ use crate::sync::store::{
 };
 use crate::sync::store_commit::{
     ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
-    ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceRegistrationActivations,
-    SnapshotImageRef, SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
-    StoreCommitCoord, StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
-    StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot, StoreSnapshotRef, StreamActivationId,
-    VerifiedStoreDeviceOperations,
+    ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta, StoreAck, StoreAckRef,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreSnapshotRef,
+    StreamActivationId,
 };
-use crate::write::{
-    AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteResolution,
-    WriteStatus,
-};
+use crate::write::{PendingWrite, WriteId, WriteStatus};
 
 mod blob_bindings;
 mod blob_records;
 mod circle_operation_records;
-mod circle_operations;
 mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
+pub(crate) use connection_io::{attach_session, capture_changeset};
 mod database_open;
 mod database_runtime;
-mod device_continuation;
 mod device_join_challenges;
 mod device_registration_journal;
-mod host_write_capture;
 mod local_state;
 mod local_store_identity;
 mod make_remote;
-mod materialized_commit_index;
-mod membership_mutations;
 mod operation_models;
 mod prepared_audience_objects;
 mod provider_probes;
 mod remote_object_records;
-mod retained_merge_replay;
 mod schema_contract;
 mod snapshot_objects;
 mod snapshot_publication;
@@ -138,18 +122,12 @@ mod store_authority;
 mod store_authority_records;
 mod store_coordinates;
 mod store_creation_attempts;
-mod store_device_state;
 mod store_reclaim_records;
 mod stream_activation_records;
 mod write_lifecycle;
 mod write_models;
 
 pub(crate) use crate::sync::store::database::candidate_records::CandidateCleanupObject;
-use crate::sync::store::database::candidate_records::PreparedMergeCandidate;
-use crate::sync::store::database::materialization_models::{
-    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedCommitActivationInput,
-    RetainedMergeMaterializationInput,
-};
 pub(crate) use crate::sync::store::database::materialization_models::{
     OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
     VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
@@ -159,15 +137,17 @@ pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
 };
 use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
-#[cfg(test)]
 pub(crate) use local_store_identity::local_merge_stream_id_on;
-pub(crate) use local_store_identity::local_store_authority_on;
+pub(crate) use local_store_identity::{
+    local_activated_registration_ref_on, local_store_authority_on,
+};
+pub(crate) use operation_models::LocalDeviceRegistrationJournalRow;
+use operation_models::PreparedLocalDeviceRegistrationRow;
 pub(crate) use operation_models::{
     DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
     LocalDeviceRegistrationState, MembershipMutationActivation, PreparedSnapshotBlob,
     PublishedStoreSnapshot,
 };
-use operation_models::{LocalDeviceRegistrationJournalRow, PreparedLocalDeviceRegistrationRow};
 #[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
 pub(crate) use prepared_audience_objects::{
@@ -178,14 +158,16 @@ pub(crate) use prepared_audience_objects::{
 use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+pub(crate) use snapshot_records::load_published_store_snapshot_on;
 pub(crate) use store_ack_records::{finish_outbound_store_ack_on, load_outbound_store_ack_on};
-pub(crate) use store_authority_records::required_store_root_authority_on;
 use store_authority_records::{
     consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
-    install_store_root_authority_on, load_generation_zero_replay_baseline_on,
-    load_local_store_founder_graph_on, load_store_root_authority_on, validate_founder_graph,
-    DurableFounderMembershipJournal,
+    install_store_root_authority_on, load_local_store_founder_graph_on,
+    load_store_root_authority_on, validate_founder_graph, DurableFounderMembershipJournal,
+};
+pub(crate) use store_authority_records::{
+    load_generation_zero_replay_baseline_on, required_store_root_authority_on,
 };
 pub(crate) use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
@@ -210,7 +192,9 @@ pub(crate) const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
-fn authorize_host_sql(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
+pub(crate) fn authorize_host_sql(
+    context: rusqlite::hooks::AuthContext<'_>,
+) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
 
     if context
@@ -248,10 +232,6 @@ impl DbError {
             Self::Message(message) => message,
             Self::StoreRootHashMissing => "Store protocol root hash is absent".to_string(),
         }
-    }
-
-    fn missing_store_root_hash() -> Self {
-        Self::StoreRootHashMissing
     }
 }
 

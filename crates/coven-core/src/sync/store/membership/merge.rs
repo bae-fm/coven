@@ -12,7 +12,7 @@ pub fn invite_member<'a>(
     encryption: &'a EncryptionService,
     store_id: &'a str,
     store_name: &'a str,
-    db: &'a Database,
+    database: &'a crate::sync::store::database::StoreDatabase,
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<Output = Result<crate::join_code::InviteCode, MembershipOpsError>>
@@ -31,7 +31,7 @@ pub fn invite_member<'a>(
         encryption,
         store_id,
         store_name,
-        db,
+        database,
     ))
 }
 async fn invite_merge_member_impl(
@@ -45,11 +45,12 @@ async fn invite_merge_member_impl(
     encryption: &EncryptionService,
     store_id: &str,
     store_name: &str,
-    db: &Database,
+    database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     validate_invitation(user_keypair, public_key_hex, &role)?;
 
     // Download existing membership entries
+    let db = database.sqlite();
     let root_ref = required_store_root_ref(db).await?;
     let store_root_hash = root_ref.store_root_hash;
 
@@ -87,7 +88,7 @@ async fn invite_merge_member_impl(
         encryption,
         &protocol_store_id,
         &invite_ts,
-        db,
+        database,
     ))
     .await?;
 
@@ -144,7 +145,7 @@ pub async fn remove_member(
     custody: &dyn MasterKeyCustody,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
-    db: &Database,
+    database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<String, MembershipOpsError> {
     remove_merge_member_impl(
         storage,
@@ -156,7 +157,7 @@ pub async fn remove_member(
         custody,
         cipher,
         pending_rotation,
-        db,
+        database,
     )
     .await
 }
@@ -170,8 +171,9 @@ async fn remove_merge_member_impl(
     custody: &dyn MasterKeyCustody,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
-    db: &Database,
+    database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<String, MembershipOpsError> {
+    let db = database.sqlite();
     let root_ref = required_store_root_ref(db).await?;
     let protocol_store_id = root_ref.store_root_id.to_string();
     // Download existing membership entries and build the chain.
@@ -200,7 +202,7 @@ async fn remove_merge_member_impl(
         &revoke_ts,
         current_encryption,
         pending_rotation,
-        db,
+        database,
     )
     .await?;
 
@@ -215,6 +217,6 @@ async fn remove_merge_member_impl(
     let generation = new_key.current_generation();
     let fingerprint = apply_key_rotation(new_key, custody, cipher)
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })?;
-    super::complete_revoke_rotation_adoption(db, pending_rotation, generation).await?;
+    super::complete_revoke_rotation_adoption(database, pending_rotation, generation).await?;
     Ok(fingerprint)
 }

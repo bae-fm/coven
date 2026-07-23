@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle_control::StoreMembershipStateRef;
@@ -75,7 +74,7 @@ fn prepare_promotion_wrap<'a>(
 }
 
 pub fn finalize_owner_promotion<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
@@ -89,6 +88,7 @@ pub fn finalize_owner_promotion<'a>(
     >,
 > {
     Box::pin(async move {
+        let db = database.sqlite();
         let root = db
             .local_store_root_ref()
             .await?
@@ -108,7 +108,7 @@ pub fn finalize_owner_promotion<'a>(
         .await?;
         loop {
             let resumed = resume_owner_promotion_finalization(
-                db,
+                database,
                 storage,
                 device_id,
                 identity,
@@ -121,12 +121,12 @@ pub fn finalize_owner_promotion<'a>(
                 OwnerPromotionResumeOutcome::Complete(membership) => return Ok(membership),
                 OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
                     match activate_owner_promotion_merge_head(
-                        db, storage, &root, &promoter, &previous, pending,
+                        database, storage, &root, &promoter, &previous, pending,
                     )
                     .await?
                     {
                         MergeHeadPublication::Continue(next) => {
-                            advance_owner_promotion_journal(db, previous, next).await?;
+                            advance_owner_promotion_journal(database, previous, next).await?;
                         }
                         MergeHeadPublication::DurablyComplete { membership } => {
                             return Ok(membership);
@@ -135,7 +135,7 @@ pub fn finalize_owner_promotion<'a>(
                             journal: next,
                             reason,
                         } => {
-                            advance_owner_promotion_journal(db, previous, next).await?;
+                            advance_owner_promotion_journal(database, previous, next).await?;
                             return Err(OwnerPromotionError::Stale(Box::new(reason)));
                         }
                     }
@@ -146,7 +146,7 @@ pub fn finalize_owner_promotion<'a>(
 }
 
 fn load_owner_promotion_promoter<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     device_id: &'a str,
     identity: &'a UserKeypair,
     root: &'a StoreRootRef,
@@ -163,10 +163,11 @@ fn load_owner_promotion_promoter<'a>(
     >,
 > {
     Box::pin(async move {
-        let (promoter_root, promoter_ref, promoter, _) = Box::pin(
-            crate::sync::store::operations::load_local_store_authority(db, device_id, identity),
-        )
-        .await?;
+        let (promoter_root, promoter_ref, promoter, _) =
+            Box::pin(crate::sync::store::operations::load_local_store_authority(
+                database, device_id, identity,
+            ))
+            .await?;
         if promoter_root != *root
             || promoter_ref != acceptance.request.promoter_registration
             || promoter.author_pubkey != keys::public_key_hex(identity)
@@ -188,7 +189,7 @@ enum OwnerPromotionPreparation {
 }
 
 fn prepare_owner_promotion_finalization<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
@@ -206,7 +207,7 @@ fn prepare_owner_promotion_finalization<'a>(
     let author_stream = acceptance.request.finalization.author_stream;
     let seq = acceptance.request.finalization.seq;
     prepare_merge_owner_promotion_finalization(
-        db,
+        database,
         storage,
         device_id,
         identity,
@@ -220,7 +221,7 @@ fn prepare_owner_promotion_finalization<'a>(
 }
 
 fn prepare_merge_owner_promotion_finalization<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
@@ -238,8 +239,9 @@ fn prepare_merge_owner_promotion_finalization<'a>(
     >,
 > {
     Box::pin(async move {
+        let db = database.sqlite();
         let promoter =
-            load_owner_promotion_promoter(db, device_id, identity, root, &acceptance).await?;
+            load_owner_promotion_promoter(database, device_id, identity, root, &acceptance).await?;
         let membership = Box::pin(load_current_merge_membership(db, storage, root)).await?;
         if let Some(winner) = membership.head_refs().iter().find(|head| {
             head.coord.author_pubkey == promoter.author_pubkey
@@ -297,7 +299,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         let transition = Box::pin(
             crate::sync::store::membership::prepare_membership_transition(
                 storage,
-                db,
+                database,
                 root.store_root_hash,
                 &membership,
                 entry,
@@ -320,7 +322,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
 }
 
 fn prepare_merge_store_candidate<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
@@ -337,6 +339,7 @@ fn prepare_merge_store_candidate<'a>(
     >,
 > {
     Box::pin(async move {
+        let db = database.sqlite();
         crate::sync::store::membership::publish_prepared_merge_membership_authority(
             storage,
             root.store_root_hash,
@@ -347,7 +350,7 @@ fn prepare_merge_store_candidate<'a>(
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let membership = Box::pin(load_current_merge_membership(db, storage, root)).await?;
         let plan = Box::pin(crate::sync::store::operations::prepare_plan(
-            db,
+            database,
             storage,
             &membership,
             device_id,
@@ -374,7 +377,7 @@ fn prepare_merge_store_candidate<'a>(
         ];
         stream_activations.sort();
         let mut candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
-            db,
+            database,
             storage,
             plan,
             StoreOperationBatch::MergeMembershipActivation {
@@ -385,7 +388,7 @@ fn prepare_merge_store_candidate<'a>(
         .await?;
         let publication = crate::sync::store::membership::finish_membership_transition(
             storage,
-            db,
+            database,
             root.store_root_hash,
             transition.as_ref().clone(),
             crate::sync::membership::MembershipHeadActivation::StoreCommit {
@@ -460,7 +463,7 @@ fn load_owner_promotion_remote_promoter<'a>(
 }
 
 fn activate_owner_promotion_merge_head<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     promoter: &'a crate::sync::store_commit::StoreDeviceRegistration,
@@ -539,7 +542,7 @@ fn activate_owner_promotion_merge_head<'a>(
                             .to_string(),
                     )
                 })?;
-            crate::sync::store::database::StoreDatabase::new(db)
+            database
                 .mark_remote_object_uploaded(remote)
                 .await
                 .map_err(|error| {
@@ -550,7 +553,7 @@ fn activate_owner_promotion_merge_head<'a>(
         }
         let outcome = Box::pin(
             crate::sync::store::membership::publish_prepared_merge_membership_activation(
-                db,
+                database,
                 storage,
                 root,
                 promoter,
@@ -631,7 +634,7 @@ enum OwnerPromotionResumeOutcome {
 }
 
 fn resume_owner_promotion_finalization<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
@@ -646,7 +649,7 @@ fn resume_owner_promotion_finalization<'a>(
     >,
 > {
     Box::pin(async move {
-        let existing = StoreDatabase::new(db)
+        let existing = database
             .load_owner_promotion_journal(acceptance.request.promotion_id)
             .await?;
         if let Some(existing) = &existing {
@@ -711,23 +714,25 @@ fn resume_owner_promotion_finalization<'a>(
                             acceptance: acceptance.clone(),
                         },
                     };
-                    (previous, state) = advance_owner_promotion_journal(db, previous, next).await?;
+                    (previous, state) =
+                        advance_owner_promotion_journal(database, previous, next).await?;
                 }
                 OwnerPromotionJournalState::AcceptanceReady { acceptance } => {
                     let preparation = prepare_owner_promotion_finalization(
-                        db, storage, device_id, identity, encryption, &root, &previous, acceptance,
+                        database, storage, device_id, identity, encryption, &root, &previous,
+                        acceptance,
                     )
                     .await?;
                     match preparation {
                         OwnerPromotionPreparation::Continue(next) => {
                             (previous, state) =
-                                advance_owner_promotion_journal(db, previous, next).await?;
+                                advance_owner_promotion_journal(database, previous, next).await?;
                         }
                         OwnerPromotionPreparation::Stale {
                             journal: next,
                             reason,
                         } => {
-                            advance_owner_promotion_journal(db, previous, next).await?;
+                            advance_owner_promotion_journal(database, previous, next).await?;
                             return Err(OwnerPromotionError::Stale(Box::new(reason)));
                         }
                     }
@@ -738,7 +743,7 @@ fn resume_owner_promotion_finalization<'a>(
                     transition,
                 } => {
                     let next = prepare_merge_store_candidate(
-                        db,
+                        database,
                         storage,
                         device_id,
                         identity,
@@ -749,7 +754,8 @@ fn resume_owner_promotion_finalization<'a>(
                         transition,
                     )
                     .await?;
-                    (previous, state) = advance_owner_promotion_journal(db, previous, next).await?;
+                    (previous, state) =
+                        advance_owner_promotion_journal(database, previous, next).await?;
                 }
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,

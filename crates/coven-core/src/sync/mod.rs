@@ -27,18 +27,15 @@ mod hlc_register_tests;
 pub mod loop_policy;
 pub mod membership;
 pub mod provider;
-pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;
 pub(crate) mod remote_object;
 pub mod restore_code;
-pub(crate) mod retained_replay;
 pub(crate) mod routing_contract;
 pub mod service;
 pub mod session;
-pub mod snapshot;
 pub mod status;
 pub mod storage;
 pub mod store_commit;

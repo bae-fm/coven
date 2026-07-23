@@ -235,16 +235,12 @@ impl Database {
 
     pub(crate) fn install_pulled_package_activation_on(
         conn: &Connection,
-        commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
+        domain: SharedLiveSetObjectDomain,
+        object: &ExactObjectRef,
         package: &AudiencePackage,
     ) -> Result<(), DbError> {
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let retained = Self::retained_audience_package(commit, commit_ref, package.clone())?;
-        let domain = retained.domain();
-        let object_id = remote_object_id(retained.object());
+        let object_id = remote_object_id(object);
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
@@ -264,7 +260,7 @@ impl Database {
                 remote
             };
             remote
-                .merge_package_activation(&domain, retained.package(), commit_ref)
+                .merge_package_activation(&domain, package, commit_ref)
                 .map_err(|error| {
                     DbError::Message(format!(
                         "merge pulled package activation {object_id}: {error}"
@@ -272,16 +268,13 @@ impl Database {
                 })?;
             update_remote_object_on(conn, object_id, &remote)
         } else {
-            let remote = RemoteObjectRecord::activated_external_package(
-                domain,
-                retained.package(),
-                commit_ref.clone(),
-            )
-            .map_err(|error| {
-                DbError::Message(format!(
-                    "construct pulled package activation {object_id}: {error}"
-                ))
-            })?;
+            let remote =
+                RemoteObjectRecord::activated_external_package(domain, package, commit_ref.clone())
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "construct pulled package activation {object_id}: {error}"
+                        ))
+                    })?;
             persist_exact_remote_object_on(conn, &remote, "pulled audience package")
         }
     }

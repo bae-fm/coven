@@ -1,26 +1,25 @@
 use super::*;
 
 pub(crate) async fn cleanup_merge_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     write_id: crate::WriteId,
 ) -> Result<(), StorePullError> {
+    let db = database.sqlite();
     let root = db.local_store_root_ref().await?.ok_or_else(|| {
         StorePullError::Database("Merge candidate cleanup has no Store root".to_string())
     })?;
-    for verification in crate::sync::store::database::StoreDatabase::new(db)
+    for verification in database
         .merge_candidate_terminal_verifications(write_id.clone())
         .await?
     {
         let nonactivation =
-            verify_terminal_cleanup_candidate(db, storage, &root, &verification).await?;
-        crate::sync::store::database::StoreDatabase::new(db)
+            verify_terminal_cleanup_candidate(database, storage, &root, &verification).await?;
+        database
             .reconcile_merge_candidate_terminal_head(write_id.clone(), nonactivation)
             .await?;
     }
-    let targets = crate::sync::store::database::StoreDatabase::new(db)
-        .merge_candidate_cleanup_targets(write_id)
-        .await?;
+    let targets = database.merge_candidate_cleanup_targets(write_id).await?;
     for target in targets {
         super::store_objects::delete_exact_object(storage, &target.object).await?;
         db.mark_candidate_cleanup_absent(target.object).await?;
@@ -29,7 +28,7 @@ pub(crate) async fn cleanup_merge_candidate(
 }
 
 async fn verify_terminal_cleanup_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     verification: &crate::database::TerminalCandidateCleanupVerification,
@@ -43,7 +42,7 @@ async fn verify_terminal_cleanup_candidate(
     match &verification.authority {
         crate::database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
             Box::pin(verify_author_exclusion_nonactivation(
-                db,
+                database,
                 storage,
                 root,
                 locator,
@@ -95,31 +94,28 @@ async fn verify_terminal_cleanup_candidate(
 }
 
 pub(crate) async fn resume_merge_retraction_cleanups(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<(), StorePullError> {
-    for candidate in crate::sync::store::database::StoreDatabase::new(db)
-        .pending_merge_retraction_cleanups()
-        .await?
-    {
-        let verification = crate::sync::store::database::StoreDatabase::new(db)
+    let db = database.sqlite();
+    for candidate in database.pending_merge_retraction_cleanups().await? {
+        let verification = database
             .merge_retraction_cleanup_verification(candidate.clone())
             .await?;
-        let verified = verify_terminal_cleanup_candidate(db, storage, root, &verification).await?;
-        crate::sync::store::database::StoreDatabase::new(db)
+        let verified =
+            verify_terminal_cleanup_candidate(database, storage, root, &verification).await?;
+        database
             .confirm_merge_retraction_cleanup_nonactivation(candidate.clone(), verified)
             .await?;
-        for target in crate::sync::store::database::StoreDatabase::new(db)
+        for target in database
             .merge_retraction_cleanup_targets(candidate.clone())
             .await?
         {
             super::store_objects::delete_exact_object(storage, &target.object).await?;
             db.mark_candidate_cleanup_absent(target.object).await?;
         }
-        crate::sync::store::database::StoreDatabase::new(db)
-            .finish_merge_retraction_cleanup(candidate)
-            .await?;
+        database.finish_merge_retraction_cleanup(candidate).await?;
     }
     Ok(())
 }

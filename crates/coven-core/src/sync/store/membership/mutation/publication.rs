@@ -1,9 +1,10 @@
-use crate::database::{Database, VerifiedMergeMembershipObjects, LOCAL_DEVICE_ID_STATE_KEY};
+use crate::database::{VerifiedMergeMembershipObjects, LOCAL_DEVICE_ID_STATE_KEY};
 use crate::keys::UserKeypair;
 use crate::sync::membership::{
     self, AuthorHead, MembershipChain, MembershipChange, MembershipEntry, MembershipHeadRef,
 };
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::operations;
 use crate::sync::store_commit::{
     self, membership_entry_semantic_prefix, membership_head_slot_prefix, SuccessorLink,
@@ -122,18 +123,24 @@ pub(crate) fn validate_prepared_transition(
 
 pub(crate) async fn prepare_membership_publication(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     store_root_hash: store_commit::ObjectHash,
     chain: &MembershipChain,
     entry: MembershipEntry,
     owner_keypair: &UserKeypair,
 ) -> Result<PreparedMembershipPublication, InviteError> {
-    let prepared =
-        prepare_membership_transition(storage, db, store_root_hash, chain, entry, owner_keypair)
-            .await?;
+    let prepared = prepare_membership_transition(
+        storage,
+        database,
+        store_root_hash,
+        chain,
+        entry,
+        owner_keypair,
+    )
+    .await?;
     finish_membership_transition(
         storage,
-        db,
+        database,
         store_root_hash,
         prepared,
         membership::MembershipHeadActivation::Direct,
@@ -144,13 +151,14 @@ pub(crate) async fn prepare_membership_publication(
 
 pub(crate) async fn prepare_membership_transition(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     store_root_hash: store_commit::ObjectHash,
     chain: &MembershipChain,
     entry: MembershipEntry,
     owner_keypair: &UserKeypair,
 ) -> Result<PreparedMembershipTransition, InviteError> {
-    let device_id = db
+    let device_id = database
+        .sqlite()
         .get_protocol_state(LOCAL_DEVICE_ID_STATE_KEY)
         .await?
         .ok_or_else(|| {
@@ -159,7 +167,7 @@ pub(crate) async fn prepare_membership_transition(
             )
         })?;
     let (root, registration_ref, registration, _) =
-        operations::load_local_store_authority(db, &device_id, owner_keypair)
+        operations::load_local_store_authority(database, &device_id, owner_keypair)
             .await
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     if root.store_root_hash != store_root_hash
@@ -273,13 +281,14 @@ pub(crate) async fn prepare_membership_transition(
 
 pub(crate) async fn finish_membership_transition(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     store_root_hash: store_commit::ObjectHash,
     prepared: PreparedMembershipTransition,
     activation: membership::MembershipHeadActivation,
     owner_keypair: &UserKeypair,
 ) -> Result<PreparedMembershipPublication, InviteError> {
-    let device_id = db
+    let device_id = database
+        .sqlite()
         .get_protocol_state(LOCAL_DEVICE_ID_STATE_KEY)
         .await?
         .ok_or_else(|| {
@@ -288,7 +297,7 @@ pub(crate) async fn finish_membership_transition(
             )
         })?;
     let (root, registration_ref, registration, device_signer) =
-        operations::load_local_store_authority(db, &device_id, owner_keypair)
+        operations::load_local_store_authority(database, &device_id, owner_keypair)
             .await
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     if root.store_root_hash != store_root_hash
@@ -384,7 +393,7 @@ pub(crate) async fn publish_prepared_merge_membership_authority(
 }
 
 pub(crate) async fn publish_prepared_merge_membership_activation(
-    db: &Database,
+    database: &crate::sync::store::StoreDatabase,
     storage: &dyn SyncStorage,
     root: &store_commit::StoreRootRef,
     author: &store_commit::StoreDeviceRegistration,
@@ -427,7 +436,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
     )
     .await
     .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    crate::sync::store::database::StoreDatabase::new(db)
+    database
         .mark_remote_object_uploaded(
             completion
                 .remote_object(&publication.head_ref.object)
@@ -447,7 +456,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
         publication.head_ref.clone(),
     )?;
     operations::publish_prepared_store_membership_operation(
-        db,
+        database,
         storage,
         candidate,
         membership_objects,

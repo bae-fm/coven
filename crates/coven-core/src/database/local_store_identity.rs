@@ -39,7 +39,7 @@ pub(crate) fn local_store_authority_on(
     Ok((root, reference, registration))
 }
 
-pub(super) fn local_activated_registration_ref_on(
+pub(crate) fn local_activated_registration_ref_on(
     conn: &Connection,
 ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
     let device_id: Option<String> = conn

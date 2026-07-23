@@ -6,6 +6,10 @@ use crate::sync::store_commit::{ObjectHash, StoreDeviceHead, StoreDeviceHeadRef}
 use crate::sync::test_helpers::{host_exec, open_test_db, temp_store_dir, TestStore};
 use std::sync::RwLock;
 
+fn store_database(db: &crate::database::Database) -> crate::sync::store::database::StoreDatabase {
+    crate::sync::store::database::StoreDatabase::new(db)
+}
+
 async fn publish_note(
     db: &crate::database::Database,
     store: &TestStore,
@@ -25,7 +29,7 @@ async fn publish_note(
     .await;
     assert!(
         super::store::preparation::prepare_store_write(
-            db,
+            &store_database(db),
             &store.storage,
             device_id,
             "2026-07-21T00:00:00Z",
@@ -38,7 +42,7 @@ async fn publish_note(
         "host write produces a prepared Store commit",
     );
     assert_eq!(
-        super::store::publication::drain_store_writes(db, &store.storage)
+        super::store::publication::drain_store_writes(&store_database(db), &store.storage)
             .await
             .expect("publish Merge Store write"),
         1,
@@ -61,7 +65,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::pull::load_cycle_membership(&store.storage, &db)
+    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load Merge membership")
         .chain
@@ -72,7 +76,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
     }
 
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load retained verified Merge history");
@@ -141,7 +145,7 @@ async fn published_history(
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::pull::load_cycle_membership(&store.storage, &db)
+    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load Merge membership")
         .chain
@@ -168,7 +172,7 @@ async fn prepare_sabotaged_successor(
     )
     .await;
     match super::store::preparation::prepare_store_write(
-        db,
+        &store_database(db),
         &store.storage,
         device_id,
         "2026-07-21T00:00:01Z",
@@ -179,10 +183,12 @@ async fn prepare_sabotaged_successor(
     .await
     {
         Err(error) => error.to_string(),
-        Ok(true) => super::store::publication::drain_store_writes(db, &store.storage)
-            .await
-            .expect_err("checkpoint sabotage must fail before remote publication")
-            .to_string(),
+        Ok(true) => {
+            super::store::publication::drain_store_writes(&store_database(db), &store.storage)
+                .await
+                .expect_err("checkpoint sabotage must fail before remote publication")
+                .to_string()
+        }
         Ok(false) => panic!("sabotaged host write produced no pending Store write"),
     }
 }
@@ -192,7 +198,7 @@ async fn assert_signed_head_rejects_summary(
     retained: &crate::database::OwnedVerifiedMergeMaterialization,
     summary: &crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 ) {
-    let state = db
+    let state = store_database(db)
         .resolved_store_device_state(&retained.history_summary().post_state)
         .await
         .expect("load retained post-state");
@@ -233,7 +239,7 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
 #[tokio::test]
 async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     let (db, store, device_id, membership, _temp, store_dir) = published_history(1).await;
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load retained history");
@@ -269,7 +275,7 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
 async fn outbound_successor_rejects_missing_or_forged_device_state() {
     for delete_state in [true, false] {
         let (db, store, device_id, membership, _temp, store_dir) = published_history(1).await;
-        let retained = db
+        let retained = store_database(&db)
             .retained_merge_replay_inputs()
             .await
             .expect("load retained history");
@@ -293,7 +299,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             .await
             .expect("delete checkpoint state");
         } else {
-            let state = db
+            let state = store_database(&db)
                 .resolved_store_device_state(&retained[0].history_summary().post_state)
                 .await
                 .expect("load canonical retained state");
@@ -349,12 +355,12 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
 #[tokio::test]
 async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
     let (db, store, device_id, _membership, _temp, _store_dir) = published_history(2).await;
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load retained history");
     let current = retained.last().expect("two retained commits");
-    let state = db
+    let state = store_database(&db)
         .resolved_store_device_state(&current.history_summary().post_state)
         .await
         .expect("load retained post-state");
@@ -380,9 +386,13 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
     );
 
     let (_, _, registration, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(&db, &device_id, &store.signer)
-            .await
-            .expect("load local device signer");
+        crate::sync::store::operations::load_local_store_authority(
+            &store_database(&db),
+            &device_id,
+            &store.signer,
+        )
+        .await
+        .expect("load local device signer");
     let forged_head = StoreDeviceHead::signed(
         current.activation_head().store_root_hash,
         current.activation_head().author_registration.clone(),
@@ -453,7 +463,8 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 async fn signed_head_rejects_an_omitted_acknowledgement() {
     let (db, store, _device_id, _membership, _temp, _store_dir) = published_history(1).await;
     let coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        db.materialized_frontier()
+        store_database(&db)
+            .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
     )
@@ -467,7 +478,7 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
     .await
     .expect("publish retained acknowledgement");
 
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load acknowledgement history");
@@ -506,7 +517,7 @@ async fn history_with_member_removal() -> (
         &encryption,
         store.storage.store_id(),
         "Retained removal proof",
-        &db,
+        &store_database(&db),
     )
     .await
     .expect("invite removable member");
@@ -544,11 +555,11 @@ async fn history_with_member_removal() -> (
         &custody,
         &cipher,
         &super::cloud_storage::PendingRotation::none(),
-        &db,
+        &store_database(&db),
     )
     .await
     .expect("remove retained member");
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load removal history");
@@ -563,7 +574,7 @@ async fn history_with_member_removal() -> (
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_membership_removal() {
     let (db, _store, summary) = Box::pin(history_with_member_removal()).await;
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("reload removal history");
@@ -641,7 +652,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
 
 async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     let (db, store, _summary) = Box::pin(history_with_member_removal()).await;
-    let membership = super::pull::load_cycle_membership(&store.storage, &db)
+    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load snapshot membership")
         .chain
@@ -651,13 +662,14 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     let synced_tables = db.synced_tables().to_vec();
     let image = db
         .call(move |connection| {
-            super::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+            super::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await
         .expect("create checkpoint snapshot image");
     let coverage = crate::sync::store_commit::CommitFrontier::from_refs(
-        db.materialized_frontier()
+        store_database(&db)
+            .materialized_frontier()
             .await
             .expect("load snapshot coverage"),
     )
@@ -679,7 +691,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         .expect("load published snapshot")
         .expect("published snapshot is recorded");
     let (_, _, author, device_signer) = crate::sync::store::operations::load_local_store_authority(
-        &db,
+        &store_database(&db),
         &db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("load snapshot device id")
@@ -757,7 +769,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
 #[tokio::test]
 async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_history() {
     let (db, store, device_id, membership, _temp, _store_dir) = published_history(4).await;
-    let retained = db
+    let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
         .expect("load retained history");
@@ -782,7 +794,8 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         .checked_add(1)
         .expect("test sequence advances");
     let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
-        db.materialized_frontier()
+        store_database(&db)
+            .materialized_frontier()
             .await
             .expect("load materialized frontier"),
     )
@@ -794,13 +807,17 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         dependencies,
     };
     let (root, registration_ref, registration, _) =
-        crate::sync::store::operations::load_local_store_authority(&db, &device_id, &store.signer)
-            .await
-            .expect("load local Store authority");
+        crate::sync::store::operations::load_local_store_authority(
+            &store_database(&db),
+            &device_id,
+            &store.signer,
+        )
+        .await
+        .expect("load local Store authority");
 
     store.home.clear_exact_reads();
     crate::sync::store::pull::load_merge_conflict_resolution_authorization(
-        &db,
+        &store_database(&db),
         &store.storage,
         &root,
         &order,

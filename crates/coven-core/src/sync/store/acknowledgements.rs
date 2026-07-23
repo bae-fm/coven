@@ -20,7 +20,7 @@ pub(crate) enum StoreAckError {
     #[error("Store acknowledgement activation: {0}")]
     Outbound(#[from] StoreError),
     #[error("Store acknowledgement snapshot: {0}")]
-    Snapshot(#[from] crate::sync::snapshot::SnapshotError),
+    Snapshot(#[from] crate::sync::store::snapshot::SnapshotError),
 }
 
 impl From<crate::database::DbError> for StoreAckError {
@@ -43,10 +43,11 @@ struct ResolvedStoreAckPlan {
 }
 
 async fn stage_resolved_store_ack(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     plan: ResolvedStoreAckPlan,
 ) -> Result<StoreAck, StoreAckError> {
+    let db = database.sqlite();
     if db.oldest_outbound_store_ack().await?.is_some() {
         return Err(StoreAckError::InvalidOutbound(
             "a prior acknowledgement remains queued".to_string(),
@@ -125,12 +126,13 @@ async fn stage_resolved_store_ack(
 }
 
 async fn publish_acknowledgement_object(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     outbound: &crate::database::OutboundStoreAck,
     candidate: &operations::PreparedStoreOperationCommit,
 ) -> Result<bool, StoreAckError> {
+    let db = database.sqlite();
     let context = ProtocolObjectContext::signed_plaintext(
         outbound.ack.value.store_root_hash,
         ProtocolObjectDomain::StoreAck,
@@ -178,7 +180,7 @@ async fn publish_acknowledgement_object(
                 "prepared activation does not own its acknowledgement object".to_string(),
             )
         })?;
-    crate::sync::store::database::StoreDatabase::new(db)
+    database
         .mark_remote_object_uploaded(acknowledgement_remote)
         .await?;
     Ok(true)
@@ -196,11 +198,11 @@ fn acknowledgement_first_slot(
 }
 
 pub(super) async fn finish_nonactivating_acknowledgement(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
 ) -> Result<(), crate::sync::store::StoreError> {
-    let database = StoreDatabase::new(db);
+    let db = database.sqlite();
     if let Some(target) = database
         .acknowledgement_cleanup_target(acknowledgement.clone())
         .await?
@@ -226,7 +228,7 @@ impl AuthorizedStore<'_> {
                 SyncCycleFailure::operation("publish queued Store acknowledgement", error)
             })?;
         let frontier = CommitFrontier::from_refs(
-            self.db()
+            self.database()
                 .materialized_frontier()
                 .await
                 .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?,
@@ -257,7 +259,7 @@ impl AuthorizedStore<'_> {
             ))?;
         let (root, registration_ref, registration, device_signer) =
             crate::sync::store::operations::load_local_store_authority(
-                self.db(),
+                self.database(),
                 &device_id,
                 identity,
             )
@@ -265,17 +267,17 @@ impl AuthorizedStore<'_> {
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
         let history_cut = crate::sync::store_commit::StoreHistoryCut::from_commits(commits.clone());
         let (device_state, _) = self
-            .db()
+            .database()
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let snapshot = self
             .select_acknowledgement_snapshot(&root, &frontier, &device_state)
             .await?;
         let exclusions = crate::sync::store_commit::StoreAckExclusionState {
-            proposal_freezes: self.db().store_device_exclusion_freezes().await?,
+            proposal_freezes: self.database().store_device_exclusion_freezes().await?,
         };
         stage_resolved_store_ack(
-            self.db(),
+            self.database(),
             self.storage(),
             ResolvedStoreAckPlan {
                 root,
@@ -300,7 +302,7 @@ impl AuthorizedStore<'_> {
         device_state: &crate::sync::store_commit::StoreDeviceStateRef,
     ) -> Result<Option<crate::sync::store_commit::StoreSnapshotLocator>, StoreAckError> {
         let registrations = self
-            .db()
+            .database()
             .activated_store_device_registration_records()
             .await?;
         let mut candidates = Vec::new();
@@ -322,7 +324,9 @@ impl AuthorizedStore<'_> {
                 pull::verify_snapshot_for_acknowledgement(self.storage(), root, &snapshot)
                     .await
                     .map_err(|error| {
-                        crate::sync::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
+                        crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(
+                            error.to_string(),
+                        )
                     })?;
                 candidates.push(snapshot);
             }
@@ -374,7 +378,7 @@ impl AuthorizedStore<'_> {
             let candidate = match outbound.activation.clone() {
                 crate::database::OutboundStoreAckActivation::AwaitingCandidate => {
                     let plan = operations::prepare_plan(
-                        self.db(),
+                        self.database(),
                         self.storage(),
                         self.membership(),
                         &device_id,
@@ -384,7 +388,7 @@ impl AuthorizedStore<'_> {
                     plan.common()
                         .validate_acknowledgement(&outbound.ack.value)?;
                     let candidate = Box::pin(operations::prepare_candidate(
-                        self.db(),
+                        self.database(),
                         self.storage(),
                         plan,
                         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
@@ -401,7 +405,7 @@ impl AuthorizedStore<'_> {
                 crate::database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
                 crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
                     finish_nonactivating_acknowledgement(
-                        self.db(),
+                        self.database(),
                         self.storage(),
                         outbound.reference,
                     )
@@ -413,7 +417,7 @@ impl AuthorizedStore<'_> {
                 }
             };
             if !publish_acknowledgement_object(
-                self.db(),
+                self.database(),
                 self.storage(),
                 &device_id,
                 &outbound,
@@ -424,7 +428,7 @@ impl AuthorizedStore<'_> {
                 continue;
             }
             match Box::pin(operations::publish_prepared(
-                self.db(),
+                self.database(),
                 self.storage(),
                 Box::new(candidate),
                 None,

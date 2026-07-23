@@ -27,8 +27,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
             panic!("competing Merge head was classified as author exclusion")
         }
     };
-    let author = fixture
-        .db
+    let author = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(batch.commit.value.author_registration.clone())
         .await
         .expect("load candidate author");

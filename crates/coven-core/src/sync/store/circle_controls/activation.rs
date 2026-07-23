@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 
 use super::CircleOperationError;
-use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
@@ -16,6 +15,7 @@ use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::storage::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
@@ -386,7 +386,7 @@ async fn verify_circle_head_chain(
 }
 
 async fn verify_covered_control_heads(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -418,7 +418,7 @@ async fn verify_covered_control_heads(
             ..
         } = &head.control;
         let authority = resolve_circle_stream_authority(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -456,7 +456,7 @@ async fn verify_covered_control_heads(
 }
 
 async fn resolve_circle_stream_authority(
-    db: &Database,
+    database: &StoreDatabase,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -480,7 +480,7 @@ async fn resolve_circle_stream_authority(
     {
         (activation.clone(), activating_commit.clone(), false)
     } else {
-        let registered = db
+        let registered = database
             .registered_stream_activation(claimed_activation_id)
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
@@ -565,7 +565,7 @@ async fn resolve_circle_stream_authority(
 }
 
 pub(crate) async fn load_circle_activations(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -576,7 +576,7 @@ pub(crate) async fn load_circle_activations(
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     Box::pin(load_circle_activations_with_prefix(
-        db,
+        database,
         storage,
         root,
         commit_ref,
@@ -590,7 +590,7 @@ pub(crate) async fn load_circle_activations(
 }
 
 pub(crate) async fn load_circle_activations_with_prefix(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -693,7 +693,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
             ..
         } = &head.control;
         let authority = resolve_circle_stream_authority(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -751,7 +751,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
             consumed_stream_activations.insert(authority.activation_id);
         }
         verify_covered_control_heads(
-            db,
+            database,
             verified_prefix,
             storage,
             root,
@@ -854,7 +854,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     })?,
                 );
                 let authority_roster = load_circle_authority_roster(
-                    db,
+                    database,
                     verified_prefix,
                     storage,
                     commit,
@@ -877,7 +877,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     ));
                 }
                 let resolved = load_circle_roster_state(
-                    db,
+                    database,
                     verified_prefix,
                     storage,
                     root,
@@ -910,7 +910,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                 }
                 let metadata_state = control.value.metadata_state_ref();
                 let metadata = load_circle_metadata_state(
-                    db,
+                    database,
                     verified_prefix,
                     storage,
                     commit,

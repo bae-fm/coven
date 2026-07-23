@@ -342,7 +342,7 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 }
 
 struct SnapshotCut {
-    snapshot: super::snapshot::CreatedSnapshot,
+    snapshot: super::store::snapshot::CreatedSnapshot,
     coverage: super::store_commit::CommitFrontier,
 }
 
@@ -368,10 +368,11 @@ async fn capture_snapshot_cut(
                 "snapshot cut refused while unpublished Store writes exist".to_string(),
             ));
         }
-        let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
-            .map_err(|e| DbError::Message(e.to_string()))?;
+        let snapshot =
+            super::store::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
+                .map_err(|e| DbError::Message(e.to_string()))?;
         let coverage = super::store_commit::CommitFrontier::from_refs(
-            Database::materialized_frontier_on(conn, None)?,
+            crate::sync::store::database::StoreDatabase::materialized_frontier_on(conn, None)?,
         )
         .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
         Ok(SnapshotCut { snapshot, coverage })
@@ -528,7 +529,8 @@ async fn prepare_cycle_before_pull(
     observer: Option<&dyn BlobTransitionObserver>,
     authorization: &AuthorizedStore<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
-    let db = authorization.db();
+    let database = authorization.database();
+    let db = database.sqlite();
     let storage = authorization.storage();
     let store_root = authorization.store_root();
     let store_root_hash = store_root.store_root_hash;
@@ -550,7 +552,7 @@ async fn prepare_cycle_before_pull(
         store_root_hash,
         cipher,
         pending_rotation,
-        db,
+        database,
         user_keypair,
         custody,
         &protocol_store_id,
@@ -611,7 +613,7 @@ async fn prepare_cycle_before_pull(
         }
     }
 
-    let local_seq = crate::sync::store::database::StoreDatabase::new(db)
+    let local_seq = database
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
@@ -642,17 +644,10 @@ async fn prepare_cycle_before_pull(
 
     let mut resume_drain_promptly = false;
     if rotation_pending.is_none() {
-        let outcome = crate::blob::upload::drain_uploads(
-            db,
-            storage,
-            store_dir,
-            clock,
-            hlc,
-            routing_encryption,
-            observer,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
+        let outcome = authorization
+            .drain_uploads(store_dir, clock, hlc, routing_encryption, observer)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
         if outcome.failures.has_transport_failure() {
             return Err(SyncCycleFailure::operation(
                 "upload queued blobs",
@@ -711,7 +706,8 @@ async fn complete_cycle_after_pull(
     prepared: PreparedCycle,
     store_pull: super::store::pull::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
-    let db = authorization.db();
+    let database = authorization.database();
+    let db = database.sqlite();
     let PreparedCycle {
         last_snapshot_time,
         last_snapshot_position,
@@ -751,7 +747,7 @@ async fn complete_cycle_after_pull(
         false
     };
 
-    let local_seq = crate::sync::store::database::StoreDatabase::new(db)
+    let local_seq = database
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position after publish: {error}"))?
@@ -797,7 +793,7 @@ async fn complete_cycle_after_pull(
     let resumed_snapshot = authorization.drain_snapshot().await?;
     let snapshot_due = !resumed_snapshot
         && (is_initial_sync
-            || super::snapshot::should_create_snapshot(
+            || super::store::snapshot::should_create_snapshot(
                 local_seq,
                 last_snapshot_position,
                 hours_since,
@@ -917,7 +913,7 @@ async fn refresh_authorization_state(
     store_root_hash: super::store_commit::ObjectHash,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
-    db: &Database,
+    database: &crate::sync::store::StoreDatabase,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     store_id: &str,
@@ -966,7 +962,7 @@ async fn refresh_authorization_state(
             let merged = live_keyring.merged_with(&new_encryption);
             if merged.key_count() == live_keyring.key_count() {
                 if pending_rotation.gate().is_some() {
-                    let gate = db
+                    let gate = database
                         .complete_peer_rotation_adoption(live_keyring.current_generation())
                         .await
                         .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
@@ -976,7 +972,7 @@ async fn refresh_authorization_state(
                 }
                 debug!("refresh: wrapped store key is already held by the live keyring");
             } else {
-                let gate = db
+                let gate = database
                     .record_peer_rotation(merged.current_generation())
                     .await
                     .map_err(|error| AuthorizationRefreshError::Database(error.to_string()))?;
@@ -1009,7 +1005,7 @@ async fn refresh_authorization_state(
                                 ));
                             }
                         };
-                        let gate = db
+                        let gate = database
                             .complete_peer_rotation_adoption(adopted_generation)
                             .await
                             .map_err(|error| {
@@ -1056,11 +1052,12 @@ pub enum StoreInitialization {
 }
 
 pub async fn init_sync_over_storage(
-    db: &Database,
+    store_database: &crate::sync::store::StoreDatabase,
     storage: CloudSyncStorage,
     initialization: StoreInitialization,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 ) -> Result<SyncComponents, InitSyncError> {
+    let db = store_database.sqlite();
     // Integration guard. The host declared its synced tables on the builder; an
     // empty set means a synced store would attach nothing, every changeset would
     // come out empty, and sync would silently become snapshot-only. Refuse loudly
@@ -1068,8 +1065,11 @@ pub async fn init_sync_over_storage(
     if db.synced_tables().is_empty() {
         return Err(InitSyncError::NoSyncedTables);
     }
-    Database::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())
-        .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
+    crate::sync::store::StoreDatabase::validate_store_write_routing(
+        db.gates().as_ref(),
+        routing_encryption.as_ref(),
+    )
+    .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
 
     let cipher = storage.cipher_state().clone();
     let cipher_is_plaintext = cipher.is_plaintext();
@@ -1139,9 +1139,14 @@ pub async fn init_sync_over_storage(
         && store_protocol_root.descriptor.founder_pubkey
             == crate::keys::public_key_hex(&user_keypair)
     {
-        super::store::install_existing_founder_device(db, &storage, &store_root_ref, &user_keypair)
-            .await
-            .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+        super::store::install_existing_founder_device(
+            store_database,
+            &storage,
+            &store_root_ref,
+            &user_keypair,
+        )
+        .await
+        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
         device_id = db
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
@@ -1156,8 +1161,13 @@ pub async fn init_sync_over_storage(
     info!("Sync initialized (device: {device_id})");
 
     let storage = std::sync::Arc::new(storage);
-    let store = Store::new(db.clone(), storage, store_root_ref, &store_protocol_root)
-        .map_err(InitSyncError::StoreProtocolRoot)?;
+    let store = Store::new(
+        store_database.clone(),
+        storage,
+        store_root_ref,
+        &store_protocol_root,
+    )
+    .map_err(InitSyncError::StoreProtocolRoot)?;
 
     Ok(SyncComponents {
         store,
@@ -1224,7 +1234,7 @@ pub struct SyncComponents {
 impl SyncComponents {
     #[doc(hidden)]
     pub fn database(&self) -> &Database {
-        self.store.database()
+        self.store.database().sqlite()
     }
 
     pub fn storage(&self) -> &std::sync::Arc<CloudSyncStorage> {
@@ -1258,6 +1268,9 @@ impl SyncComponents {
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
         self.store
+            .authorize()
+            .await
+            .map_err(|error| DbError::Message(error.to_string()))?
             .drain_uploads(
                 store_dir,
                 clock,

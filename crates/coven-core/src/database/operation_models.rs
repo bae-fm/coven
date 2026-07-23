@@ -23,7 +23,7 @@ pub(crate) enum LocalDeviceRegistrationState {
 
 pub(super) type PreparedLocalDeviceRegistrationRow =
     (String, String, Vec<u8>, String, String, Vec<u8>, String);
-pub(super) type LocalDeviceRegistrationJournalRow = (
+pub(crate) type LocalDeviceRegistrationJournalRow = (
     String,
     String,
     Vec<u8>,

@@ -23,11 +23,14 @@ use crate::sync::hlc::Hlc;
 use crate::sync::membership::{MemberRole, MembershipChain};
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::membership::{
-    apply_key_rotation, invite_member, remove_member, MembershipOpsError,
+    apply_key_rotation, invite_member as store_invite_member, remove_member as store_remove_member,
+    MembershipOpsError,
 };
 use crate::sync::store::membership::{
-    revoke_member_durable, signed_wrapped_keyring_for_test, unwrap_store_keyring_for_refs,
+    revoke_member_durable as store_revoke_member_durable, signed_wrapped_keyring_for_test,
+    unwrap_store_keyring_for_refs,
 };
+use crate::sync::store::StoreDatabase;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore,
 };
@@ -36,6 +39,94 @@ use crate::sync::wrapped_store_key::{
 };
 
 const LIB_ID: &str = "lib-refresh-test";
+
+#[allow(clippy::too_many_arguments)]
+async fn invite_member(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    store_name: &str,
+    db: &crate::database::Database,
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    store_invite_member(
+        storage,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        invitee_email,
+        role,
+        encryption,
+        store_id,
+        store_name,
+        &StoreDatabase::new(db),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn remove_member(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    current_encryption: &EncryptionService,
+    custody: &dyn MasterKeyCustody,
+    cipher: &dyn crate::sync::cloud_storage::CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    db: &crate::database::Database,
+) -> Result<String, MembershipOpsError> {
+    store_remove_member(
+        storage,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        current_encryption,
+        custody,
+        cipher,
+        pending_rotation,
+        &StoreDatabase::new(db),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn revoke_member_durable(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
+    chain: &mut MembershipChain,
+    owner_keypair: &UserKeypair,
+    revokee_pubkey: &str,
+    store_id: &str,
+    timestamp: &str,
+    current_encryption: &EncryptionService,
+    pending_rotation: &PendingRotation,
+    db: &crate::database::Database,
+) -> Result<EncryptionService, crate::sync::store::membership::InviteError> {
+    store_revoke_member_durable(
+        storage,
+        cloud_home,
+        store_root_hash,
+        chain,
+        owner_keypair,
+        revokee_pubkey,
+        store_id,
+        timestamp,
+        current_encryption,
+        pending_rotation,
+        &StoreDatabase::new(db),
+    )
+    .await
+}
 
 async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
     let owner_db = open_test_db();
@@ -555,7 +646,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     apply_key_rotation(rotated.clone(), &custody, &cipher)
         .expect("owner adopts the activated rotation");
     super::store::membership::complete_revoke_rotation_adoption(
-        &owner_db,
+        &StoreDatabase::new(&owner_db),
         &pending_rotation,
         rotated.current_generation(),
     )
@@ -1050,7 +1141,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     apply_key_rotation(founder_rotation.clone(), &founder_custody, &founder_cipher)
         .expect("founder adopts its activated rotation fork");
     super::store::membership::complete_revoke_rotation_adoption(
-        &founder_db,
+        &StoreDatabase::new(&founder_db),
         &founder_pending_rotation,
         founder_rotation.current_generation(),
     )

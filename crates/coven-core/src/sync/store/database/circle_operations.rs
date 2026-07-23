@@ -1,40 +1,47 @@
+use crate::database::*;
+use crate::encryption::EncryptionService;
+use crate::sync::store_commit::StoreBatchCommitRef;
+use rusqlite::{Connection, OptionalExtension};
+
 use super::*;
 
-impl Database {
+impl StoreDatabase {
     pub async fn get_circle_operations(
         &self,
     ) -> Result<Vec<crate::sync::circle::CircleOperationInfo>, DbError> {
-        self.call(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT operation_id, circle_id, payload
+        self.database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT operation_id, circle_id, payload
                      FROM circle_operations
                      ORDER BY rowid",
-                )
-                .map_err(DbError::from)?;
-            let operations = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                })
-                .map_err(DbError::from)?
-                .map(|row| {
-                    let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
-                    let journal = parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
-                    Ok(crate::sync::circle::CircleOperationInfo {
-                        operation_id: journal.operation_id.clone(),
-                        circle_id: journal.circle_id(),
-                        kind: journal.kind(),
-                        state: journal.state(),
+                    )
+                    .map_err(DbError::from)?;
+                let operations = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
                     })
-                })
-                .collect();
-            operations
-        })
-        .await
+                    .map_err(DbError::from)?
+                    .map(|row| {
+                        let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
+                        let journal =
+                            parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
+                        Ok(crate::sync::circle::CircleOperationInfo {
+                            operation_id: journal.operation_id.clone(),
+                            circle_id: journal.circle_id(),
+                            kind: journal.kind(),
+                            state: journal.state(),
+                        })
+                    })
+                    .collect();
+                operations
+            })
+            .await
     }
 
     pub async fn get_circles(
@@ -42,50 +49,51 @@ impl Database {
         identity_pubkey: &str,
     ) -> Result<Vec<crate::sync::circle::CircleInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
-        self.call(move |conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT circle_id, state
+        self.database
+            .call(move |conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT circle_id, state
                      FROM circle_current_state
                      ORDER BY circle_id",
-                )
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(DbError::from)?;
-            let mut circles = Vec::new();
-            for row in rows {
-                let (stored_circle_id, state) = row.map_err(DbError::from)?;
-                let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
-                if let Some((_current, access, roster, metadata)) = state.active() {
-                    let circle_id = state.circle_id();
-                    if access.recipient_pubkey != identity_pubkey {
-                        return Err(DbError::Message(format!(
-                            "active circle {circle_id} belongs to another local identity"
-                        )));
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(DbError::from)?;
+                let mut circles = Vec::new();
+                for row in rows {
+                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
+                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
+                    if let Some((_current, access, roster, metadata)) = state.active() {
+                        let circle_id = state.circle_id();
+                        if access.recipient_pubkey != identity_pubkey {
+                            return Err(DbError::Message(format!(
+                                "active circle {circle_id} belongs to another local identity"
+                            )));
+                        }
+                        let role =
+                            roster
+                                .members()
+                                .get(&identity_pubkey)
+                                .copied()
+                                .ok_or_else(|| {
+                                    DbError::Message(format!(
+                                        "activated circle {circle_id} excludes the local identity"
+                                    ))
+                                })?;
+                        circles.push(crate::sync::circle::CircleInfo {
+                            id: circle_id,
+                            name: metadata.name.clone(),
+                            role,
+                        });
                     }
-                    let role =
-                        roster
-                            .members()
-                            .get(&identity_pubkey)
-                            .copied()
-                            .ok_or_else(|| {
-                                DbError::Message(format!(
-                                    "activated circle {circle_id} excludes the local identity"
-                                ))
-                            })?;
-                    circles.push(crate::sync::circle::CircleInfo {
-                        id: circle_id,
-                        name: metadata.name.clone(),
-                        role,
-                    });
                 }
-            }
-            Ok(circles)
-        })
-        .await
+                Ok(circles)
+            })
+            .await
     }
 
     pub async fn get_circle_members(
@@ -95,32 +103,33 @@ impl Database {
         store_members: std::collections::BTreeSet<String>,
     ) -> Result<Vec<crate::sync::circle::CircleMemberInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
-        self.call(move |conn| {
-            let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
-                DbError::Message(format!("Circle {circle_id} has no current state"))
-            })?;
-            let Some((_current, access, roster, _metadata)) = state.active() else {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} has no active local state"
-                )));
-            };
-            if access.recipient_pubkey != identity_pubkey {
-                return Err(DbError::Message(format!(
-                    "active Circle {circle_id} belongs to another local identity"
-                )));
-            }
-            Ok(roster
-                .members()
-                .into_iter()
-                .filter(|(pubkey, _)| store_members.contains(pubkey))
-                .map(|(pubkey, role)| crate::sync::circle::CircleMemberInfo {
-                    is_self: pubkey == identity_pubkey,
-                    pubkey,
-                    role,
-                })
-                .collect())
-        })
-        .await
+        self.database
+            .call(move |conn| {
+                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no current state"))
+                })?;
+                let Some((_current, access, roster, _metadata)) = state.active() else {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} has no active local state"
+                    )));
+                };
+                if access.recipient_pubkey != identity_pubkey {
+                    return Err(DbError::Message(format!(
+                        "active Circle {circle_id} belongs to another local identity"
+                    )));
+                }
+                Ok(roster
+                    .members()
+                    .into_iter()
+                    .filter(|(pubkey, _)| store_members.contains(pubkey))
+                    .map(|(pubkey, role)| crate::sync::circle::CircleMemberInfo {
+                        is_self: pubkey == identity_pubkey,
+                        pubkey,
+                        role,
+                    })
+                    .collect())
+            })
+            .await
     }
 
     pub(crate) async fn circle_authoring_context(
@@ -135,7 +144,7 @@ impl Database {
         DbError,
     > {
         let identity_pubkey = identity_pubkey.to_string();
-        self.call(move |conn| {
+        self.database.call(move |conn| {
             let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
                 DbError::Message(format!("Circle {circle_id} has no current state"))
             })?;
@@ -188,7 +197,7 @@ impl Database {
                     retained_commit_ref,
                     retained_input_hash,
                 ) = row;
-                let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
+                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
                 let reference = Self::parse_materialized_commit_row_on(
                     conn,
                     &stream_id,
@@ -233,39 +242,42 @@ impl Database {
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
     ) -> Result<Option<(EncryptionService, crate::KeyFingerprint)>, DbError> {
-        self.call(move |conn| {
-            let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                return Ok(None);
-            };
-            let Some((current, access, _roster, _metadata)) = state.active() else {
-                return Ok(None);
-            };
-            if current.coordinate() != &expected_control {
-                return Ok(None);
-            }
-            let crate::sync::circle::CircleAccessDisposition::Active {
-                keyring,
-                key_fingerprint,
-                ..
-            } = &access.disposition
-            else {
-                return Err(DbError::Message(format!(
-                    "active Circle {circle_id} has inactive access"
-                )));
-            };
-            let encryption = EncryptionService::from(
-                crate::encryption::MasterKeyring::from_serialized(keyring).map_err(|error| {
-                    DbError::Message(format!("parse Circle publication keyring: {error}"))
-                })?,
-            );
-            if encryption.seal_key_fingerprint() != *key_fingerprint {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} publication key fingerprint is invalid"
-                )));
-            }
-            Ok(Some((encryption, *key_fingerprint)))
-        })
-        .await
+        self.database
+            .call(move |conn| {
+                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                    return Ok(None);
+                };
+                let Some((current, access, _roster, _metadata)) = state.active() else {
+                    return Ok(None);
+                };
+                if current.coordinate() != &expected_control {
+                    return Ok(None);
+                }
+                let crate::sync::circle::CircleAccessDisposition::Active {
+                    keyring,
+                    key_fingerprint,
+                    ..
+                } = &access.disposition
+                else {
+                    return Err(DbError::Message(format!(
+                        "active Circle {circle_id} has inactive access"
+                    )));
+                };
+                let encryption = EncryptionService::from(
+                    crate::encryption::MasterKeyring::from_serialized(keyring).map_err(
+                        |error| {
+                            DbError::Message(format!("parse Circle publication keyring: {error}"))
+                        },
+                    )?,
+                );
+                if encryption.seal_key_fingerprint() != *key_fingerprint {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} publication key fingerprint is invalid"
+                    )));
+                }
+                Ok(Some((encryption, *key_fingerprint)))
+            })
+            .await
     }
 
     pub(crate) async fn circle_authorizes_writer(
@@ -274,19 +286,20 @@ impl Database {
         expected_control: crate::sync::circle::CircleControlCoord,
         author_pubkey: String,
     ) -> Result<bool, DbError> {
-        self.call(move |conn| {
-            let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                return Ok(false);
-            };
-            let Some((current, _access, roster, _metadata)) = state.active() else {
-                return Ok(false);
-            };
-            if current.coordinate() != &expected_control {
-                return Ok(false);
-            }
-            Ok(roster.members().contains_key(&author_pubkey))
-        })
-        .await
+        self.database
+            .call(move |conn| {
+                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                    return Ok(false);
+                };
+                let Some((current, _access, roster, _metadata)) = state.active() else {
+                    return Ok(false);
+                };
+                if current.coordinate() != &expected_control {
+                    return Ok(false);
+                }
+                Ok(roster.members().contains_key(&author_pubkey))
+            })
+            .await
     }
 
     fn circle_current_state_on(

@@ -464,15 +464,4 @@ impl Database {
         })
         .await
     }
-
-    pub(super) fn required_store_root_hash_on(conn: &Connection) -> Result<ObjectHash, DbError> {
-        load_store_root_authority_on(conn)?
-            .map(|(reference, _)| reference.store_root_hash)
-            .ok_or_else(DbError::missing_store_root_hash)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn required_store_root_hash(&self) -> Result<ObjectHash, DbError> {
-        self.call(Self::required_store_root_hash_on).await
-    }
 }

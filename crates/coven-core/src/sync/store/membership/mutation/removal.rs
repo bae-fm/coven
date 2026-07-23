@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::encryption::{self, EncryptionService};
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, RevokeOutcome};
@@ -8,6 +7,7 @@ use crate::sync::membership::{
 };
 use crate::sync::remote_object;
 use crate::sync::storage::{self, SyncStorage};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit;
 use crate::sync::store_objects;
 use crate::sync::wrapped_store_key::{load_wrapped_store_key, prepare_wrapped_store_key};
@@ -27,7 +27,7 @@ use super::{
 /// publishes the signed membership change as one durable operation.
 async fn build_revoke_mutation(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     store_root_hash: store_commit::ObjectHash,
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
@@ -105,7 +105,8 @@ async fn build_revoke_mutation(
         .map(|wrap| wrap.prepared.reference.clone())
         .collect();
     let publication = if chain.is_owner_now(revokee_pubkey) {
-        let device_id = db
+        let device_id = database
+            .sqlite()
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?
             .ok_or_else(|| {
@@ -114,7 +115,7 @@ async fn build_revoke_mutation(
                 )
             })?;
         let operation = Box::pin(crate::sync::store::operations::prepare_plan(
-            db,
+            database,
             storage,
             chain,
             &device_id,
@@ -132,7 +133,7 @@ async fn build_revoke_mutation(
         )?;
         let transition = prepare_membership_transition(
             storage,
-            db,
+            database,
             store_root_hash,
             chain,
             entry,
@@ -140,7 +141,7 @@ async fn build_revoke_mutation(
         )
         .await?;
         let mut candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
-            db,
+            database,
             storage,
             operation,
             crate::sync::store::operations::StoreOperationBatch::MergeMembershipActivation {
@@ -152,7 +153,7 @@ async fn build_revoke_mutation(
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
         let head = finish_membership_transition(
             storage,
-            db,
+            database,
             store_root_hash,
             transition.clone(),
             membership::MembershipHeadActivation::StoreCommit {
@@ -181,7 +182,7 @@ async fn build_revoke_mutation(
             publication: Box::new(
                 prepare_membership_publication(
                     storage,
-                    db,
+                    database,
                     store_root_hash,
                     chain,
                     entry,
@@ -429,7 +430,7 @@ async fn finish_nonactivating_revoke(
     };
     let (candidate_objects, _) = plan.candidate_cleanup_objects();
     let cleanup = persistence
-        .db
+        .database
         .membership_candidate_cleanup_targets(
             persistence.intent_hash,
             candidate.reference.clone(),
@@ -464,13 +465,14 @@ async fn finish_nonactivating_revoke_with_targets(
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         persistence
-            .db
+            .database
+            .sqlite()
             .mark_candidate_cleanup_absent(target.object)
             .await?;
     }
     let (candidate_objects, retained) = plan.candidate_cleanup_objects();
     persistence
-        .db
+        .database
         .complete_nonactivating_membership_candidate_mutation(
             persistence.intent_hash,
             candidate.reference.clone(),
@@ -556,7 +558,8 @@ async fn execute_revoke_mutation(
     }
     let publication = plan.publication.publication().clone();
     let root = persistence
-        .db
+        .database
+        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| {
@@ -636,7 +639,8 @@ async fn execute_revoke_mutation(
     for wrapped in &plan.wraps {
         if let Some(remotes) = &remote_objects {
             let expected = exact_owned_remote(remotes, &wrapped.prepared.reference.object)?;
-            crate::sync::store::database::StoreDatabase::new(persistence.db)
+            persistence
+                .database
                 .mark_remote_object_uploaded(expected)
                 .await?;
         }
@@ -677,7 +681,8 @@ async fn execute_revoke_mutation(
     }
     if let Some(remotes) = &remote_objects {
         let expected = exact_owned_remote(remotes, &publication.entry_ref.object)?;
-        crate::sync::store::database::StoreDatabase::new(persistence.db)
+        persistence
+            .database
             .mark_remote_object_uploaded(expected)
             .await?;
     }
@@ -708,7 +713,7 @@ async fn execute_revoke_mutation(
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
             validated_chain.activate_head_ref(publication.head_ref.clone())?;
             persistence
-                .db
+                .database
                 .record_direct_revoke_activation(
                     persistence.intent_hash,
                     encode_membership_progress(&MembershipMutationProgress::RevokeActivated {
@@ -742,7 +747,8 @@ async fn execute_revoke_mutation(
             crate::sync::store::operations::upload_commit(storage, &candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            crate::sync::store::database::StoreDatabase::new(persistence.db)
+            persistence
+                .database
                 .mark_remote_object_uploaded(exact_owned_remote(
                     &initial_remotes,
                     &candidate.reference.object,
@@ -762,7 +768,7 @@ async fn execute_revoke_mutation(
                     )
                     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
                 let outcome = Box::pin(publish_prepared_merge_membership_activation(
-                    persistence.db,
+                    persistence.database,
                     storage,
                     &root,
                     &author,
@@ -846,7 +852,7 @@ async fn execute_revoke_mutation(
                         )?;
                         let previous_intent_hash = persistence.intent_hash;
                         let replacement_intent_hash = persistence
-                            .db
+                            .database
                             .adopt_merge_membership_candidate_head(
                                 persistence.intent_hash,
                                 plan_bytes,
@@ -883,7 +889,7 @@ async fn execute_revoke_mutation(
                         let (candidate_objects, retained) =
                             plan.candidate_cleanup_objects();
                         let cleanup = persistence
-                            .db
+                            .database
                             .begin_membership_candidate_nonactivation(
                                 persistence.intent_hash,
                                 candidate.reference.clone(),
@@ -979,10 +985,10 @@ pub(crate) async fn revoke_member_durable(
     timestamp: &str,
     current_encryption: &EncryptionService,
     pending_rotation: &cloud_storage::PendingRotation,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<EncryptionService, InviteError> {
-    let _mutation = db.lock_membership_mutation().await;
-    let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
+    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;
             let (pending, progress) = decode_membership_mutation(row)?;
@@ -1022,10 +1028,10 @@ pub(crate) async fn revoke_member_durable(
                 )
                 .await;
             }
-            let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
+            let stream_id = select_mutation_author_stream(database, chain, owner_keypair).await?;
             let plan = Box::pin(build_revoke_mutation(
                 storage,
-                db,
+                database,
                 store_root_hash,
                 chain,
                 owner_keypair,
@@ -1049,16 +1055,22 @@ pub(crate) async fn revoke_member_durable(
                     .current_generation();
             let intent_hash = match plan.candidate_remote_objects()? {
                 Some(remotes) => {
-                    db.stage_membership_candidate_mutation(
-                        encoded,
-                        progress_bytes,
-                        remotes,
-                        Some(pending_generation),
-                    )
-                    .await?
+                    database
+                        .stage_membership_candidate_mutation(
+                            encoded,
+                            progress_bytes,
+                            remotes,
+                            Some(pending_generation),
+                        )
+                        .await?
                 }
                 None => {
-                    db.stage_membership_mutation(encoded, progress_bytes, Some(pending_generation))
+                    database
+                        .stage_membership_mutation(
+                            encoded,
+                            progress_bytes,
+                            Some(pending_generation),
+                        )
                         .await?
                 }
             };
@@ -1082,23 +1094,29 @@ pub(crate) async fn revoke_member_durable(
         chain,
         plan,
         progress,
-        MutationPersistence { db, intent_hash },
+        MutationPersistence {
+            database,
+            intent_hash,
+        },
         pending_rotation,
     ))
     .await
 }
 
 pub(crate) async fn complete_revoke_rotation_adoption(
-    db: &Database,
+    database: &StoreDatabase,
     pending_rotation: &cloud_storage::PendingRotation,
     adopted_generation: u64,
 ) -> Result<(), InviteError> {
-    let _mutation = db.lock_membership_mutation().await;
-    let row = db.outbound_membership_mutation().await?.ok_or_else(|| {
-        InviteError::InvalidDurableMutation(
-            "activated removal journal is absent during key adoption".to_string(),
-        )
-    })?;
+    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let row = database
+        .outbound_membership_mutation()
+        .await?
+        .ok_or_else(|| {
+            InviteError::InvalidDurableMutation(
+                "activated removal journal is absent during key adoption".to_string(),
+            )
+        })?;
     let intent_hash = row.intent_hash;
     let (plan, progress) = decode_membership_mutation(row)?;
     let MembershipMutationPlan::Revoke(plan) = plan else {
@@ -1119,7 +1137,7 @@ pub(crate) async fn complete_revoke_rotation_adoption(
             "adopted key generation {adopted_generation} differs from the activated removal generation {planned_generation}"
         )));
     }
-    let gate = db
+    let gate = database
         .complete_local_rotation_adoption(intent_hash, adopted_generation)
         .await?;
     pending_rotation

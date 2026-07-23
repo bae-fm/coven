@@ -1124,7 +1124,7 @@ mod tests {
         })
         .await
         .expect("remove historical Circle projections");
-        let circles = db
+        let circles = crate::sync::store::StoreDatabase::new(&db)
             .get_circles(&author_pubkey)
             .await
             .expect("list Circle from its derived current state");
@@ -1136,10 +1136,11 @@ mod tests {
                 role: CircleRole::Owner,
             }]
         );
-        let (publication_encryption, publication_fingerprint) = db
-            .circle_publication_context(creation.circle_id, control.coord.clone())
-            .await
-            .expect("load publication authority from derived current state");
+        let (publication_encryption, publication_fingerprint) =
+            crate::sync::store::StoreDatabase::new(&db)
+                .circle_publication_context(creation.circle_id, control.coord.clone())
+                .await
+                .expect("load publication authority from derived current state");
         assert_eq!(
             publication_encryption.seal_key_fingerprint(),
             publication_fingerprint

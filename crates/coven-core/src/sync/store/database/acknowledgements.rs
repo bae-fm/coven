@@ -1,8 +1,8 @@
 use super::*;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(in crate::sync::store) async fn prepare_acknowledgement_activation(
-        self,
+        &self,
         expected: StoreAckRef,
         candidate: PreparedStoreOperationCommit,
     ) -> Result<(), DbError> {
@@ -73,7 +73,7 @@ impl StoreDatabase<'_> {
     }
 
     pub(in crate::sync::store) async fn begin_acknowledgement_nonactivation(
-        self,
+        &self,
         expected: StoreAckRef,
         nonactivation: VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
@@ -235,7 +235,7 @@ impl StoreDatabase<'_> {
     }
 
     pub(in crate::sync::store) async fn adopt_acknowledgement_head(
-        self,
+        &self,
         expected: StoreAckRef,
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
@@ -322,7 +322,7 @@ impl StoreDatabase<'_> {
     }
 
     pub(in crate::sync::store) async fn acknowledgement_cleanup_target(
-        self,
+        &self,
         expected: StoreAckRef,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
         self.database
@@ -362,7 +362,7 @@ impl StoreDatabase<'_> {
     }
 
     pub(in crate::sync::store) async fn complete_nonactivating_acknowledgement(
-        self,
+        &self,
         expected: StoreAckRef,
     ) -> Result<(), DbError> {
         self.database

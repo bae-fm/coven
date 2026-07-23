@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) enum DeviceStateResolver<'a> {
-    Database(&'a Database),
+    Database(&'a StoreDatabase),
     Loaded {
         genesis: &'a ResolvedStoreDeviceState,
         states: &'a BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,
@@ -47,7 +47,7 @@ async fn resolve_device_state(
     reference: &StoreDeviceStateRef,
 ) -> Result<ResolvedStoreDeviceState, RegistrationLoadError> {
     match resolver {
-        DeviceStateResolver::Database(db) => db
+        DeviceStateResolver::Database(database) => database
             .resolved_store_device_state(reference)
             .await
             .map_err(|error| RegistrationLoadError::Invalid(error.to_string())),

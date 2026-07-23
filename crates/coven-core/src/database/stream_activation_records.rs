@@ -51,7 +51,7 @@ pub(crate) fn record_verified_stream_activations_on(
     Ok(())
 }
 
-pub(super) fn load_registered_stream_activation_on(
+pub(crate) fn load_registered_stream_activation_on(
     conn: &Connection,
     key: &str,
 ) -> Result<Option<crate::sync::store_commit::RegisteredStreamActivation>, DbError> {

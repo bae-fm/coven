@@ -18,12 +18,13 @@ use crate::sync::store_commit::{
 };
 
 pub(super) async fn publish_circle_operation(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation_id: &CircleOperationId,
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let mut journal = StoreDatabase::new(db)
+    let db = database.sqlite();
+    let mut journal = database
         .circle_operation(operation_id)
         .await?
         .ok_or_else(|| {
@@ -40,7 +41,7 @@ pub(super) async fn publish_circle_operation(
             .map_err(|error| CircleOperationError::Journal(format!("circle keyring: {error}")))?,
     );
     let commit = journal.commit()?;
-    let author = db
+    let author = database
         .activated_store_device_registration(commit.author_registration.clone())
         .await?;
     let reference = commit.circle_controls();
@@ -79,7 +80,7 @@ pub(super) async fn publish_circle_operation(
     if !has_current_merge_authority(db, storage, &commit, &author).await? {
         let reason = "circle operation author is not a current Store writer under its exact grant"
             .to_string();
-        StoreDatabase::new(db)
+        database
             .block_circle_operation(operation_id, reason.clone())
             .await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
@@ -108,7 +109,7 @@ pub(super) async fn publish_circle_operation(
                 )
             })?;
         let (_, state_after) = crate::sync::store::pull::retained_merge_device_state_for_order(
-            db,
+            database,
             storage,
             &root,
             &commit.order,
@@ -138,7 +139,7 @@ pub(super) async fn publish_circle_operation(
             ))
         })?;
     append_step(
-        db,
+        database,
         storage,
         &mut journal,
         "metadata",
@@ -161,7 +162,7 @@ pub(super) async fn publish_circle_operation(
         ..
     } = &creation.policy_objects;
     append_step(
-        db,
+        database,
         storage,
         &mut journal,
         "metadata-head",
@@ -194,7 +195,7 @@ pub(super) async fn publish_circle_operation(
                 circle_encryption.clone(),
             );
             append_step(
-                db,
+                database,
                 storage,
                 &mut journal,
                 "roster-entry",
@@ -208,7 +209,7 @@ pub(super) async fn publish_circle_operation(
             )
             .await?;
             append_step(
-                db,
+                database,
                 storage,
                 &mut journal,
                 "roster-head",
@@ -241,7 +242,7 @@ pub(super) async fn publish_circle_operation(
     }
     for (index, access) in creation.access.iter().enumerate() {
         append_step(
-            db,
+            database,
             storage,
             &mut journal,
             &format!("access-leaf-{index}"),
@@ -262,7 +263,7 @@ pub(super) async fn publish_circle_operation(
         .await?;
     }
     append_step(
-        db,
+        database,
         storage,
         &mut journal,
         "control",
@@ -279,7 +280,7 @@ pub(super) async fn publish_circle_operation(
     .await?;
     let control_head = &creation.policy_objects.control_head;
     append_step(
-        db,
+        database,
         storage,
         &mut journal,
         "control-head",
@@ -297,7 +298,7 @@ pub(super) async fn publish_circle_operation(
     .await?;
     for (index, access) in creation.access.iter().enumerate() {
         append_step(
-            db,
+            database,
             storage,
             &mut journal,
             &format!("access-envelope-{index}"),
@@ -326,7 +327,7 @@ pub(super) async fn publish_circle_operation(
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let verified = load_circle_activations(
-        db,
+        database,
         storage,
         &root,
         &journal.operation().commit_ref,
@@ -348,7 +349,7 @@ pub(super) async fn publish_circle_operation(
         let commit_hash = journal.operation().commit_ref.commit_hash;
         let stream_id = journal.operation().commit_ref.coord.stream_id;
         append_step(
-            db,
+            database,
             storage,
             &mut journal,
             "store-commit",
@@ -366,7 +367,7 @@ pub(super) async fn publish_circle_operation(
         )
         .await?;
         append_step(
-            db,
+            database,
             storage,
             &mut journal,
             "store-head",
@@ -382,7 +383,7 @@ pub(super) async fn publish_circle_operation(
         )
         .await?;
     }
-    StoreDatabase::new(db)
+    database
         .activate_circle_operation(journal, verified)
         .await?;
     Ok(())
@@ -453,7 +454,7 @@ async fn has_current_merge_authority(
 }
 
 async fn append_step(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     journal: &mut CircleOperationJournal,
     step: &str,
@@ -493,8 +494,6 @@ async fn append_step(
         )));
     }
     journal.operation_mut().uploaded.insert(step.to_string());
-    StoreDatabase::new(db)
-        .update_circle_operation(journal.clone())
-        .await?;
+    database.update_circle_operation(journal.clone()).await?;
     Ok(())
 }

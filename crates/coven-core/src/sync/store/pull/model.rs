@@ -137,7 +137,7 @@ pub enum StorePullError {
     #[error("membership: {0}")]
     Membership(#[source] StorePullMembershipError),
     #[error("{0}")]
-    BlobDownloads(#[source] crate::sync::pull::BlobDownloadFailures),
+    BlobDownloads(#[source] crate::sync::store::pull::BlobDownloadFailures),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
 }

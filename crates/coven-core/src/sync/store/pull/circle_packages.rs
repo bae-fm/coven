@@ -6,7 +6,7 @@ pub(crate) enum PullCircleActivationError {
 }
 
 pub(crate) async fn load_circle_payload_activations(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -28,7 +28,8 @@ pub(crate) async fn load_circle_payload_activations(
             commit.seq()
         ))
     })?;
-    let founder = db
+    let founder = database
+        .sqlite()
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(PullCircleActivationError::Database)?
@@ -39,7 +40,7 @@ pub(crate) async fn load_circle_payload_activations(
         })?;
     Box::pin(
         crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
-            db,
+            database,
             storage,
             root,
             commit_ref,
@@ -108,7 +109,7 @@ fn circle_package_access(
 }
 
 pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -116,6 +117,7 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
     author: &StoreDeviceRegistration,
     prior_accesses: &CirclePackageAccesses,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
+    let db = database.sqlite();
     let mut loaded = Vec::new();
     for reference in commit.circle_packages() {
         if reference.package.schema_version > db.schema_version() {
@@ -171,7 +173,7 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
             }
             access.encryption.clone()
         } else {
-            let Some((encryption, key_fingerprint)) = db
+            let Some((encryption, key_fingerprint)) = database
                 .circle_access_context(reference.circle_id, reference.control.clone())
                 .await
                 .map_err(PullCircleActivationError::Database)?
@@ -183,7 +185,7 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
                 );
                 continue;
             };
-            if !db
+            if !database
                 .circle_authorizes_writer(
                     reference.circle_id,
                     reference.control.clone(),

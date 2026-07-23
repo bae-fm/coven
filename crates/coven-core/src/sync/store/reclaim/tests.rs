@@ -37,7 +37,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .expect("publish first Store position");
     let StoreCommitCoord { stream_id, .. } = first_commit.coord;
     let first_coverage = CommitFrontier(BTreeMap::from([(stream_id, first_commit.clone())]));
-    let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load Store membership");
     let chain = membership
@@ -93,7 +93,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
     )
     .await
     .expect("publish unacknowledged snapshot");
-    let registrations = db
+    let registrations = crate::sync::store::database::StoreDatabase::new(&db)
         .activated_store_device_registration_records()
         .await
         .expect("load active registrations");
@@ -325,7 +325,7 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         let transaction = connection
             .unchecked_transaction()
             .map_err(crate::database::DbError::from)?;
-        crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
+        crate::sync::store::database::StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
         transaction.commit().map_err(crate::database::DbError::from)
     })
     .await
@@ -348,7 +348,8 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         )
         .expect("valid reclaim activation"),
     };
-    let deletion = execute_reclaim_delete(&db, &store.storage, operation).await;
+    let deletion =
+        execute_reclaim_delete(&StoreDatabase::new(&db), &store.storage, operation).await;
     assert!(
         deletion.is_err(),
         "nonexistent snapshot and acknowledgement refs must not authorize deletion"
@@ -411,7 +412,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .clone();
     let StoreCommitCoord { stream_id, .. } = target_activation.coord;
     let coverage = CommitFrontier(BTreeMap::from([(stream_id, target_activation.clone())]));
-    let membership = crate::sync::pull::load_cycle_membership(&store.storage, &db)
+    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
         .await
         .expect("load reclaim membership");
     let chain = membership
@@ -447,7 +448,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         let transaction = connection
             .unchecked_transaction()
             .map_err(crate::database::DbError::from)?;
-        crate::database::Database::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
+        crate::sync::store::database::StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
         transaction.commit().map_err(crate::database::DbError::from)
     })
     .await
@@ -459,7 +460,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .expect("local device id exists");
     let reclaim_membership = chain;
     prepare_reclaim_authorization(
-        &db,
+        &StoreDatabase::new(&db),
         &store.storage,
         &device_id,
         &signer,
@@ -495,7 +496,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     };
     let activation_head_prepared = prepared_candidate.prepared_head.clone();
     drive_reclaim_candidate(
-        &db,
+        &StoreDatabase::new(&db),
         &store.storage,
         &device_id,
         &signer,
@@ -517,7 +518,8 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .next()
         .expect("activated reclaim exists");
 
-    let deletion = execute_reclaim_delete(&db, &store.storage, authorized.clone()).await;
+    let deletion =
+        execute_reclaim_delete(&StoreDatabase::new(&db), &store.storage, authorized.clone()).await;
 
     assert!(
         deletion.is_err(),
@@ -579,7 +581,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     .expect("retract reclaim activation materialization");
 
     assert!(
-        execute_reclaim_delete(&db, &store.storage, authorized)
+        execute_reclaim_delete(&StoreDatabase::new(&db), &store.storage, authorized)
             .await
             .is_err(),
         "a retracted Merge reclaim activation must not delete"

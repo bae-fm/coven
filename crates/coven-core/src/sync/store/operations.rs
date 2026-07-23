@@ -66,19 +66,20 @@ pub(crate) fn next_store_sequence(
 }
 
 pub(crate) async fn prepare_plan(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     candidate_membership: &crate::sync::membership::MembershipChain,
     device_id: &str,
     keypair: &UserKeypair,
 ) -> Result<StoreOperationCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
-        load_local_store_authority(db, device_id, keypair).await?;
-    let previous = StoreDatabase::new(db).latest_local_store_position().await?;
-    let dependencies =
-        crate::sync::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
-            .map(|frontier| frontier.commits().clone())
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        load_local_store_authority(database, device_id, keypair).await?;
+    let previous = database.latest_local_store_position().await?;
+    let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
+        database.materialized_frontier().await?,
+    )
+    .map(|frontier| frontier.commits().clone())
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
@@ -94,7 +95,7 @@ pub(crate) async fn prepare_plan(
         dependencies,
     };
     let authorization = super::pull::load_retained_merge_outbound_authorization(
-        db,
+        database,
         storage,
         &root,
         &order,
@@ -134,11 +135,12 @@ pub(crate) async fn prepare_plan(
 }
 
 pub(crate) async fn prepare_candidate(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<PreparedStoreOperationCommit, StoreError> {
+    let db = database.sqlite();
     let acknowledgement_evidence = match &batch {
         StoreOperationBatch::Acknowledgement { reference, value } => {
             Some((reference.clone(), value.clone()))
@@ -228,7 +230,7 @@ pub(crate) async fn prepare_candidate(
     );
     let device_id = plan.registration_ref().device_id.to_string();
     let successor = super::pull::prepare_merge_history_successor(
-        db,
+        database,
         plan.root(),
         &common.commit,
         &common.reference,
@@ -280,13 +282,13 @@ pub(crate) async fn prepare_candidate(
 }
 
 pub(crate) async fn publish_prepared(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     candidate: Box<PreparedStoreOperationCommit>,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
-    let root = required_store_root(db).await?;
+    let root = required_store_root(database).await?;
     let retained_operation_objects = retained_store_operation_objects(&candidate.commit)?;
     let head = candidate.head.clone();
     let prepared_head = candidate.prepared_head.clone();
@@ -305,7 +307,7 @@ pub(crate) async fn publish_prepared(
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
     };
     publish(
-        db,
+        database,
         storage,
         root,
         PreparedStoreOperationActivation {
@@ -355,7 +357,7 @@ pub(crate) async fn upload_commit(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     root: StoreRootRef,
     mut activation: PreparedStoreOperationActivation,
@@ -368,12 +370,13 @@ pub(crate) fn publish<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
 {
     Box::pin(async move {
+        let db = database.sqlite();
         let commit = activation.candidate.commit.clone();
         let reference = activation.candidate.reference.clone();
         upload_commit(storage, &activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
         let authorization = Box::pin(super::pull::load_retained_merge_outbound_authorization(
-            db,
+            database,
             storage,
             &root,
             &commit.order,
@@ -383,7 +386,7 @@ pub(crate) fn publish<'a>(
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
-            db,
+            database,
             storage,
             &root,
             &commit,
@@ -396,7 +399,7 @@ pub(crate) fn publish<'a>(
         let has_tracked_remote_objects =
             !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
         if has_tracked_remote_objects {
-            crate::sync::store::database::StoreDatabase::new(db)
+            database
                 .mark_candidate_commit_uploaded(reference.clone())
                 .await
                 .map_err(|error| {
@@ -415,7 +418,7 @@ pub(crate) fn publish<'a>(
             Ok(()) => {}
             Err(StorageError::SlotCollision(_)) => {
                 return Box::pin(resolve_head_collision(
-                    db,
+                    database,
                     storage,
                     activation.candidate,
                     commit,
@@ -442,7 +445,7 @@ pub(crate) fn publish<'a>(
             object: prepared_head.reference().clone(),
         };
         let operation_object_ids = if has_tracked_remote_objects {
-            crate::sync::store::database::StoreDatabase::new(db)
+            database
                 .mark_store_head_uploaded(activation_head.clone())
                 .await
                 .map_err(|error| {
@@ -504,7 +507,7 @@ pub(crate) fn publish<'a>(
                     .activate_store_operation_remote_objects(&recorded_ref, &object_ids)?;
             }
             if !registrations.is_empty() {
-                Database::record_activated_store_device_registrations_on(
+                crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,
                     &commit,
                     &registrations,
@@ -549,7 +552,7 @@ pub(crate) fn publish<'a>(
 
 #[allow(clippy::too_many_arguments)]
 async fn resolve_head_collision(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     mut candidate: Box<PreparedStoreOperationCommit>,
     commit: StoreBatchCommit,
@@ -559,7 +562,7 @@ async fn resolve_head_collision(
     head_prefix: String,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
     let observation = read_occupied_merge_head(
-        db,
+        database,
         storage,
         commit.store_root_hash,
         &head,
@@ -571,7 +574,7 @@ async fn resolve_head_collision(
     if observation.winner().commit == reference {
         let (winner, winner_prepared) = observation.into_head();
         if let Some(acknowledgement) = commit.acknowledgement().cloned() {
-            StoreDatabase::new(db)
+            database
                 .adopt_acknowledgement_head(acknowledgement, winner, winner_prepared)
                 .await?;
             return Ok(StoreOperationPublicationOutcome::Reprepared);
@@ -581,7 +584,7 @@ async fn resolve_head_collision(
             candidate,
         ));
     }
-    let registration = db
+    let registration = database
         .activated_store_device_registration(commit.author_registration.clone())
         .await?;
     let nonactivation = observation
@@ -600,10 +603,14 @@ async fn resolve_head_collision(
             nonactivation: Box::new(nonactivation),
         });
     };
-    StoreDatabase::new(db)
+    database
         .begin_acknowledgement_nonactivation(acknowledgement.clone(), nonactivation)
         .await?;
-    super::acknowledgements::finish_nonactivating_acknowledgement(db, storage, acknowledgement)
-        .await?;
+    super::acknowledgements::finish_nonactivating_acknowledgement(
+        database,
+        storage,
+        acknowledgement,
+    )
+    .await?;
     Ok(StoreOperationPublicationOutcome::Nonactivated(reference))
 }

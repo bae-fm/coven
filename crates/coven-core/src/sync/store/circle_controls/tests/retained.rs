@@ -20,7 +20,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         &encryption,
         "circle-merge-revoked-grant",
         "Revocation test Store",
-        &db,
+        &StoreDatabase::new(&db),
     )
     .await
     .expect("invite successor member through the production membership path");
@@ -64,7 +64,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         &custody,
         cipher.as_ref(),
         pending_rotation.as_ref(),
-        &db,
+        &StoreDatabase::new(&db),
     )
     .await
     .expect("remove successor through the production membership path");
@@ -83,7 +83,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         &rotated_encryption,
         "circle-merge-revoked-grant",
         "Revocation test Store",
-        &db,
+        &StoreDatabase::new(&db),
     )
     .await
     .expect("re-add successor under a new exact membership grant");
@@ -125,7 +125,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("read later journal")
         .is_none());
     assert_eq!(
-        successor_db
+        StoreDatabase::new(&successor_db)
             .get_circles(&successor_pubkey)
             .await
             .expect("read successor circles"),
@@ -177,7 +177,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &EncryptionService::from_key([73; 32]),
         "retained-circle-activation",
         "Retained Circle activation Store",
-        &db,
+        &StoreDatabase::new(&db),
     )
     .await
     .expect("invite retained Circle peer");
@@ -198,7 +198,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     }
     let commit = journal.commit().expect("parse retained Circle commit");
     let commit_ref = &journal.operation().commit_ref;
-    let author = db
+    let author = crate::sync::store::database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");

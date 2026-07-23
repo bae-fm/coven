@@ -33,6 +33,7 @@ use crate::sync::cycle::{InitSyncError, SyncComponents};
 pub(crate) use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::StoreDatabase;
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 
 /// Supplies the host's current config for building the next connection. Starting
@@ -94,7 +95,7 @@ pub(crate) struct SyncManager {
     key_service: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
-    db: Database,
+    database: StoreDatabase,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -183,7 +184,7 @@ impl SyncManager {
             key_service,
             custody,
             identity_custody,
-            db,
+            database: StoreDatabase::from_database(db),
             clock,
             cloudkit_ops,
             observer,
@@ -199,6 +200,10 @@ impl SyncManager {
         self.cloud_home.read().unwrap().clone()
     }
 
+    fn db(&self) -> &Database {
+        self.database.sqlite()
+    }
+
     pub(crate) fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {
         self.sync_loop_handle.read().unwrap().clone()
     }
@@ -210,14 +215,15 @@ impl SyncManager {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let device_id = self
-            .db
+            .database
+            .sqlite()
             .get_protocol_state(coven_core::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?
             .ok_or_else(|| {
                 SyncError::Protocol("local Store device identity is absent".to_string())
             })?;
         coven_core::sync::store::abandon_merge_candidate(
-            &self.db,
+            self.db(),
             Arc::clone(loop_handle.storage()),
             &device_id,
             &identity,
@@ -249,7 +255,7 @@ impl SyncManager {
     }
 
     fn routing_encryption(&self) -> Result<Option<EncryptionService>, SyncError> {
-        self.db
+        self.db()
             .gates()
             .has_scoped_graph()
             .then(|| crate::handle::routing_encryption_from_custody(self.custody.as_ref()))
@@ -326,7 +332,7 @@ impl SyncManager {
 
         let initialization = self.store_initialization().await?;
         let components = crate::sync::cycle::init_sync_over_storage(
-            &self.db,
+            &self.database,
             storage,
             initialization,
             routing_encryption,
@@ -428,7 +434,7 @@ impl SyncManager {
         )?;
         let initialization = self.store_initialization().await?;
         let components = crate::sync::cycle::init_sync_over_storage(
-            &self.db,
+            &self.database,
             storage,
             initialization,
             routing_encryption,
@@ -445,7 +451,7 @@ impl SyncManager {
     async fn store_initialization(
         &self,
     ) -> Result<crate::sync::cycle::StoreInitialization, SyncError> {
-        let Some(expected_store_root) = self.db.local_store_root_ref().await? else {
+        let Some(expected_store_root) = self.db().local_store_root_ref().await? else {
             return Ok(crate::sync::cycle::StoreInitialization::CreateStore);
         };
         Ok(crate::sync::cycle::StoreInitialization::OpenStore {
@@ -545,7 +551,7 @@ impl SyncManager {
             .sync_loop_handle()
             .ok_or(MakeRemoteError::SyncNotReady)?;
         transition::make_remote(
-            &self.db,
+            &self.database,
             sync_loop.store_dir(),
             sync_loop.hlc(),
             root_table,
@@ -568,7 +574,7 @@ impl SyncManager {
         if !self.is_sync_ready() {
             return Err(MakeRemoteError::SyncNotReady);
         }
-        transition::cancel_make_remote(&self.db, root_table, root_id).await?;
+        transition::cancel_make_remote(self.db(), root_table, root_id).await?;
         self.trigger_sync();
         Ok(())
     }
@@ -597,7 +603,7 @@ impl SyncManager {
             .ok_or(MakeLocalError::SyncNotReady)?;
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         transition::make_local(
-            &self.db,
+            &self.database,
             storage,
             sync_loop.store_dir(),
             sync_loop.hlc(),
@@ -639,7 +645,7 @@ impl SyncManager {
         crate::sync::store::membership::get_members(
             &*storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
-            &self.db,
+            self.db(),
         )
         .await
         .map_err(SyncError::from)
@@ -666,14 +672,14 @@ impl SyncManager {
             .await?;
 
         let pinned_owner = self
-            .db
+            .db()
             .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
             .await?;
         let founder_pubkey = pinned_owner.clone().ok_or_else(|| {
             SyncError::from(crate::sync::store::membership::MembershipOpsError::NoFounderChain)
         })?;
         let store_root =
-            self.db.local_store_root_ref().await?.ok_or_else(|| {
+            self.db().local_store_root_ref().await?.ok_or_else(|| {
                 SyncError::Protocol("store protocol root hash is absent".to_string())
             })?;
         let membership_floor = crate::join_code::MembershipFloor(
@@ -681,14 +687,14 @@ impl SyncManager {
                 &*storage,
                 &store_root,
                 pinned_owner.as_deref(),
-                Some(&self.db),
+                Some(self.db()),
             )
             .await
             .map_err(SyncError::from)?,
         );
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authority = crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(
-            self.db
+            self.database
                 .export_activated_device_continuation(&identity)
                 .await?,
         );
@@ -806,7 +812,7 @@ impl SyncManager {
             .into_iter()
             .map(|member| member.pubkey)
             .collect();
-        self.db
+        self.database
             .get_circle_members(*circle_id, &identity_pubkey, store_members)
             .await
             .map_err(SyncError::from)

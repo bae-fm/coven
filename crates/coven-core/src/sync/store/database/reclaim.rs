@@ -15,7 +15,7 @@ use crate::sync::store::{
 };
 use crate::sync::store_commit::{StoreBatchCommitRef, StoreCommitCoord, StorePackageRef};
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(in crate::sync::store) async fn begin_store_reclaim_operation(
         &self,
         operation: DurableStoreReclaimOperation,
@@ -89,7 +89,7 @@ impl StoreDatabase<'_> {
                         stream_id,
                         sequence,
                     } = &commit.coord;
-                    Database::load_retained_merge_materialization_on(
+                    crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_on(
                         conn,
                         &stream_id.to_string(),
                         *sequence,

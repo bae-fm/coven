@@ -12,10 +12,14 @@ use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 
 pub(crate) mod abandonment;
 mod acknowledgements;
+#[doc(hidden)]
+pub mod blob;
 pub(crate) mod circle_controls;
 pub(crate) mod database;
 #[cfg(test)]
 pub(in crate::sync) use database::record_verified_circle_activations_for_test;
+#[doc(hidden)]
+pub use database::StoreDatabase;
 pub(crate) mod device_exclusion;
 #[doc(hidden)]
 pub mod device_join;
@@ -27,10 +31,13 @@ pub mod owner_promotion;
 pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
-pub(crate) mod pull;
+#[doc(hidden)]
+pub mod pull;
 mod reclaim;
 mod registration;
-pub(crate) mod snapshot;
+pub(crate) mod retained_replay;
+#[doc(hidden)]
+pub mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
@@ -73,7 +80,7 @@ pub async fn ensure_active_registration_for_test(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<(), StoreRegistrationError> {
-    registration::ensure_active_registration(db, storage).await
+    registration::ensure_active_registration(&StoreDatabase::new(db), storage).await
 }
 
 enum StoreLoadError {
@@ -147,7 +154,8 @@ async fn load_store(
         .await
         .map_err(StoreLoadError::Object)?
         .value;
-    Store::new(db.clone(), storage, store_root, &verified_root).map_err(StoreLoadError::Invalid)
+    Store::new(StoreDatabase::new(db), storage, store_root, &verified_root)
+        .map_err(StoreLoadError::Invalid)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -215,15 +223,19 @@ pub fn pull_store_commits<'a>(
     membership: &'a super::membership::MembershipChain,
     identity: Option<&'a UserKeypair>,
 ) -> pull::StorePullFuture<'a, StorePullResult> {
-    pull::pull_store_commits(
-        db,
-        tables,
-        storage,
-        store_root_hash,
-        store_dir,
-        membership,
-        identity,
-    )
+    Box::pin(async move {
+        let database = StoreDatabase::new(db);
+        pull::pull_store_commits(
+            &database,
+            tables,
+            storage,
+            store_root_hash,
+            store_dir,
+            membership,
+            identity,
+        )
+        .await
+    })
 }
 
 pub(crate) fn load_verified_device_join_attempt_ref<'a>(
@@ -291,7 +303,7 @@ pub(crate) fn prepare_device_join_bootstrap<'a>(
 }
 
 pub(crate) fn materialize_device_join_activation<'a>(
-    db: &'a Database,
+    database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     reference: &'a super::store_commit::StoreBatchCommitRef,
@@ -299,7 +311,7 @@ pub(crate) fn materialize_device_join_activation<'a>(
     membership_state: &'a super::circle_control::StoreMembershipStateRef,
 ) -> pull::StorePullFuture<'a, ()> {
     pull::materialize_device_join_activation(
-        db,
+        database,
         storage,
         root,
         reference,
@@ -329,14 +341,14 @@ pub(crate) async fn verify_owner_promotion_acceptance(
 }
 
 pub(super) struct StoreContext {
-    db: Database,
+    database: StoreDatabase,
     storage: Arc<CloudSyncStorage>,
     store_root: StoreRootRef,
 }
 
 impl StoreContext {
-    fn db(&self) -> &Database {
-        &self.db
+    fn database(&self) -> &StoreDatabase {
+        &self.database
     }
 
     fn storage(&self) -> &Arc<CloudSyncStorage> {

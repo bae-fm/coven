@@ -23,6 +23,7 @@ use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::test_helpers::{
     create_exact_test_store, test_migrations, test_synced_tables_with_blob,
 };
@@ -264,6 +265,7 @@ impl ExactSlotStorage for InstrumentedHome {
 
 struct UploadFixture {
     db: Database,
+    database: StoreDatabase,
     storage: CloudSyncStorage,
     home: Arc<InstrumentedHome>,
 }
@@ -303,7 +305,13 @@ async fn upload_fixture_with_home(uploads: usize, home: Arc<InstrumentedHome>) -
         .await
         .expect("initialize exact local blob authority");
     home.reset_observations();
-    UploadFixture { db, storage, home }
+    let database = StoreDatabase::new(&db);
+    UploadFixture {
+        db,
+        database,
+        storage,
+        home,
+    }
 }
 
 async fn plant_uploads(
@@ -369,7 +377,7 @@ async fn plant_uploads(
         paths.push(path);
     }
     crate::blob::transition::make_remote(
-        &fixture.db,
+        &fixture.database,
         store_dir,
         &Hlc::new("test-device".to_string()),
         "notes",
@@ -387,9 +395,13 @@ async fn run_drain(
     clock: &dyn Clock,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
+    let (registration_ref, registration) = fixture.database.local_blob_write_authority().await?;
+    let authority = crate::sync::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+        .map_err(|error| DbError::Message(error.to_string()))?;
     drain_uploads(
-        &fixture.db,
+        &fixture.database,
         &fixture.storage,
+        authority,
         store_dir,
         clock,
         &Hlc::new("test-device".to_string()),

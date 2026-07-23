@@ -3047,12 +3047,13 @@ mod authority_tests {
             "circle_roster_author_stream/{circle_id}/{first_pubkey}/{}",
             resolution.replacement_grant
         );
-        let selected_stream = db
+        let selected_stream = crate::sync::store::StoreDatabase::new(&db)
             .select_causal_author_stream(stream_state_key.clone(), reusable)
             .await
             .unwrap();
         assert_eq!(
-            db.select_causal_author_stream(stream_state_key, BTreeSet::from([selected_stream]),)
+            crate::sync::store::StoreDatabase::new(&db)
+                .select_causal_author_stream(stream_state_key, BTreeSet::from([selected_stream]),)
                 .await
                 .unwrap(),
             selected_stream

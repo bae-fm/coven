@@ -1,7 +1,5 @@
 use super::*;
 
-use database::StoreDatabase;
-
 #[cfg(test)]
 pub(in crate::sync::store) async fn prepare_acknowledgement_activation_for_test(
     db: &Database,
@@ -19,7 +17,7 @@ pub(crate) struct Store {
 
 #[derive(Clone)]
 struct StoreAccess<'a> {
-    db: &'a Database,
+    database: StoreDatabase,
     storage: &'a dyn SyncStorage,
     store_root: StoreRootRef,
 }
@@ -31,7 +29,7 @@ pub(crate) struct AuthorizedStore<'a> {
 
 impl Store {
     pub(crate) fn new(
-        db: Database,
+        database: StoreDatabase,
         storage: Arc<CloudSyncStorage>,
         store_root: StoreRootRef,
         verified_root: &StoreProtocolRoot,
@@ -43,16 +41,12 @@ impl Store {
         }
         Ok(Self {
             context: StoreContext {
-                db,
+                database,
                 storage,
                 store_root,
             },
         })
     }
-    pub(crate) fn db(&self) -> &Database {
-        self.context.db()
-    }
-
     pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
         self.context.storage()
     }
@@ -61,8 +55,8 @@ impl Store {
         self.context.store_root()
     }
 
-    pub(crate) fn database(&self) -> &Database {
-        self.db()
+    pub(crate) fn database(&self) -> &StoreDatabase {
+        self.context.database()
     }
 
     pub(crate) fn cloud_storage(&self) -> &Arc<CloudSyncStorage> {
@@ -81,29 +75,9 @@ impl Store {
         self.storage().cloud_home()
     }
 
-    pub(crate) async fn drain_uploads(
-        &self,
-        store_dir: &StoreDir,
-        clock: &dyn crate::clock::Clock,
-        hlc: &crate::sync::hlc::Hlc,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-        crate::blob::upload::drain_uploads(
-            self.db(),
-            &**self.storage(),
-            store_dir,
-            clock,
-            hlc,
-            routing_encryption,
-            observer,
-        )
-        .await
-    }
-
     fn access(&self) -> StoreAccess<'_> {
         StoreAccess {
-            db: self.db(),
+            database: self.database().clone(),
             storage: &**self.storage(),
             store_root: self.store_root().clone(),
         }
@@ -117,7 +91,7 @@ impl Store {
             .await
             .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
         crate::sync::store::circle_controls::resume_circle_operations(
-            self.db(),
+            self.database(),
             &**self.storage(),
             identity,
         )
@@ -132,7 +106,7 @@ impl Store {
         write_id: crate::WriteId,
     ) -> Result<abandonment::MergeCandidateAbandonment, crate::sync::store::StoreError> {
         abandonment::abandon_merge_candidate(
-            self.db(),
+            self.database(),
             &**self.storage(),
             device_id,
             identity,
@@ -191,7 +165,7 @@ impl Store {
             encryption,
             store_id,
             store_name,
-            self.db(),
+            self.database(),
         )
         .await
     }
@@ -217,7 +191,7 @@ impl Store {
             custody,
             cipher,
             pending_rotation,
-            self.db(),
+            self.database(),
         )
         .await
     }
@@ -233,7 +207,7 @@ impl Store {
             return Err(super::CircleOperationError::BrowsableStorage);
         }
         crate::sync::store::circle_controls::create_circle(
-            self.db(),
+            self.database(),
             &**self.storage(),
             device_id,
             timestamp,
@@ -255,7 +229,7 @@ impl Store {
             return Err(super::CircleOperationError::BrowsableStorage);
         }
         crate::sync::store::circle_controls::rename_circle(
-            self.db(),
+            self.database(),
             &**self.storage(),
             device_id,
             timestamp,
@@ -269,11 +243,11 @@ impl Store {
 
 impl AuthorizedStore<'_> {
     pub(crate) fn db(&self) -> &Database {
-        self.access.db
+        self.access.database.sqlite()
     }
 
-    pub(super) fn database(&self) -> StoreDatabase<'_> {
-        StoreDatabase::new(self.db())
+    pub(crate) fn database(&self) -> &StoreDatabase {
+        &self.access.database
     }
 
     pub(super) fn membership(&self) -> &crate::sync::membership::MembershipChain {
@@ -286,6 +260,35 @@ impl AuthorizedStore<'_> {
 
     pub(crate) fn store_root(&self) -> &StoreRootRef {
         &self.access.store_root
+    }
+
+    pub(crate) async fn drain_uploads(
+        &self,
+        store_dir: &StoreDir,
+        clock: &dyn crate::clock::Clock,
+        hlc: &crate::sync::hlc::Hlc,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+        StoreDatabase::validate_store_write_routing(
+            self.db().gates().as_ref(),
+            routing_encryption,
+        )?;
+        let (registration_ref, registration) = self.database().local_blob_write_authority().await?;
+        let authority =
+            crate::sync::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        crate::blob::upload::drain_uploads(
+            self.database(),
+            self.storage(),
+            authority,
+            store_dir,
+            clock,
+            hlc,
+            routing_encryption,
+            observer,
+        )
+        .await
     }
 
     pub(crate) fn wrapped_keys(
@@ -310,6 +313,13 @@ impl AuthorizedStore<'_> {
         clock: &dyn crate::clock::Clock,
         grace: chrono::Duration,
     ) -> Result<usize, String> {
+        let activated_uploaders = self
+            .database()
+            .activated_store_device_registration_records()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
         crate::blob::delete::gc_tombstones(
             self.db(),
             cloud_home,
@@ -317,6 +327,7 @@ impl AuthorizedStore<'_> {
             cipher,
             store_id,
             self_pubkey,
+            &activated_uploaders,
             Some(&self.membership),
             clock,
             grace,
@@ -325,7 +336,7 @@ impl AuthorizedStore<'_> {
     }
 
     pub(crate) async fn drain_store_writes(&self) -> Result<u64, crate::sync::store::StoreError> {
-        publication::drain_store_writes(self.db(), self.storage()).await
+        publication::drain_store_writes(self.database(), self.storage()).await
     }
 
     pub(crate) async fn prepare_pending_store_write(
@@ -336,7 +347,7 @@ impl AuthorizedStore<'_> {
         store_dir: &StoreDir,
     ) -> Result<bool, SyncCycleFailure> {
         preparation::prepare_store_write(
-            self.db(),
+            self.database(),
             self.storage(),
             device_id,
             timestamp,
@@ -356,7 +367,7 @@ impl AuthorizedStore<'_> {
     ) -> Result<u64, SyncCycleFailure> {
         let (root, registration, _, _) =
             crate::sync::store::operations::load_local_store_authority(
-                self.db(),
+                self.database(),
                 device_id,
                 identity,
             )
@@ -377,7 +388,7 @@ impl AuthorizedStore<'_> {
 
     pub(crate) async fn push_snapshot(
         &self,
-        snapshot: crate::sync::snapshot::CreatedSnapshot,
+        snapshot: crate::sync::store::snapshot::CreatedSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
         identity: &UserKeypair,
@@ -392,14 +403,14 @@ impl AuthorizedStore<'_> {
             identity,
             created_at,
             &self.membership,
-            self.db(),
+            self.database(),
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("publish Store snapshot", error))
     }
 
     pub(crate) async fn drain_snapshot(&self) -> Result<bool, SyncCycleFailure> {
-        snapshot::drain_outbound_store_snapshot(self.storage(), self.db())
+        snapshot::drain_outbound_store_snapshot(self.storage(), self.database())
             .await
             .map(|snapshot| snapshot.is_some())
             .map_err(|error| SyncCycleFailure::operation("publish pending Store snapshot", error))
@@ -416,11 +427,10 @@ impl AuthorizedStore<'_> {
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
-    let crate::sync::pull::CycleMembership {
+    let crate::sync::store::pull::CycleMembership {
         chain,
         pinned_owner,
-        listed_entries: _,
-    } = crate::sync::pull::load_cycle_membership(access.storage, access.db)
+    } = crate::sync::store::pull::load_cycle_membership(access.storage, access.database.sqlite())
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
     let membership = match (pinned_owner, chain) {
@@ -446,7 +456,7 @@ pub(crate) async fn authorize_borrowed<'a>(
     store_root: StoreRootRef,
 ) -> Result<AuthorizedStore<'a>, SyncCycleFailure> {
     authorize(StoreAccess {
-        db,
+        database: StoreDatabase::new(db),
         storage,
         store_root,
     })

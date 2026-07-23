@@ -5,18 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{types::Value, Connection};
 use serde::{Deserialize, Serialize};
 
-use super::store_commit::{
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
-    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef,
-    StoreSnapshotRef,
-};
 use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
     STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
 use crate::sync::store::membership::{
     MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX, OWNER_PUBKEY_STATE_KEY,
+};
+use crate::sync::store_commit::{
+    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
+    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef,
+    StoreSnapshotRef,
 };
 
 pub(crate) const GENERATION_ZERO: u64 = 0;
@@ -179,7 +179,7 @@ fn validate_must_be_empty_replay_tables(
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM {}",
-                    super::session::quote_ident(table)
+                    crate::sync::session::quote_ident(table)
                 ),
                 [],
                 |row| row.get(0),
@@ -212,9 +212,9 @@ pub(crate) struct RetainedReplaySnapshotAuthority {
     pub(crate) accepted_cut: StoreHistoryCut,
     pub(crate) device_state: ResolvedStoreDeviceState,
     pub(crate) active_registrations:
-        BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
+        BTreeMap<crate::sync::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
     pub(crate) acknowledgements:
-        BTreeMap<super::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
+        BTreeMap<crate::sync::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +268,7 @@ impl RetainedReplaySnapshotAuthority {
             .filter_map(|(device_id, record)| {
                 matches!(
                     record.status,
-                    super::store_commit::StoreDeviceStatus::Active
+                    crate::sync::store_commit::StoreDeviceStatus::Active
                 )
                 .then_some((*device_id, &record.registration))
             })
@@ -506,7 +506,7 @@ pub(crate) fn replace_live_projection(
         target
             .execute_batch(&format!(
                 "DELETE FROM {}",
-                super::session::quote_ident(table)
+                crate::sync::session::quote_ident(table)
             ))
             .map_err(DbError::from)?;
     }
@@ -537,7 +537,10 @@ fn copy_table(
     target: &rusqlite::Transaction<'_>,
     table: &str,
 ) -> Result<(), DbError> {
-    let pragma = format!("PRAGMA table_info({})", super::session::quote_ident(table));
+    let pragma = format!(
+        "PRAGMA table_info({})",
+        crate::sync::session::quote_ident(table)
+    );
     let mut column_statement = source.prepare(&pragma).map_err(DbError::from)?;
     let columns = column_statement
         .query_map([], |row| row.get::<_, String>(1))
@@ -552,12 +555,12 @@ fn copy_table(
     }
     let quoted_columns = columns
         .iter()
-        .map(|column| super::session::quote_ident(column))
+        .map(|column| crate::sync::session::quote_ident(column))
         .collect::<Vec<_>>()
         .join(", ");
     let select = format!(
         "SELECT {quoted_columns} FROM {}",
-        super::session::quote_ident(table)
+        crate::sync::session::quote_ident(table)
     );
     let mut source_statement = source.prepare(&select).map_err(DbError::from)?;
     let rows = source_statement
@@ -576,7 +579,7 @@ fn copy_table(
         .join(", ");
     let insert = format!(
         "INSERT INTO {} ({quoted_columns}) VALUES ({placeholders})",
-        super::session::quote_ident(table)
+        crate::sync::session::quote_ident(table)
     );
     for values in rows {
         target
@@ -608,7 +611,7 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
         transaction
             .execute_batch(&format!(
                 "DELETE FROM {}",
-                super::session::quote_ident(&table)
+                crate::sync::session::quote_ident(&table)
             ))
             .map_err(DbError::from)?;
     }
@@ -667,7 +670,7 @@ fn validate_generation_zero_image(
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM {}",
-                    super::session::quote_ident(&table)
+                    crate::sync::session::quote_ident(&table)
                 ),
                 [],
                 |row| row.get(0),
@@ -768,7 +771,9 @@ fn validate_snapshot_replay_image(
             "snapshot replay baseline contains materialized_commits rows".to_string(),
         ));
     }
-    crate::database::Database::validate_snapshot_author_exclusion_activations_on(image)?;
+    crate::sync::store::database::StoreDatabase::validate_snapshot_author_exclusion_activations_on(
+        image,
+    )?;
     validate_replay_image_foreign_keys(image)
 }
 
@@ -820,9 +825,9 @@ fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<Strin
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    let root = super::store_commit::StoreProtocolRoot::parse(&bytes)
+    let root = crate::sync::store_commit::StoreProtocolRoot::parse(&bytes)
         .map_err(|error| DbError::Message(format!("retained replay Store root: {error}")))?;
-    let stream = super::membership::derive_founder_stream_id(
+    let stream = crate::sync::membership::derive_founder_stream_id(
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,
     );

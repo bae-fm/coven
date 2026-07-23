@@ -71,7 +71,7 @@ pub(crate) struct StoreWriteRemoteBlob {
 }
 
 impl StoreWriteBlobFact {
-    pub(super) fn identity_key(&self) -> (String, String, String, String) {
+    pub(crate) fn identity_key(&self) -> (String, String, String, String) {
         (
             self.table.clone(),
             self.row_id.clone(),

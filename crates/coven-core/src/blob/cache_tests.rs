@@ -8,8 +8,7 @@
 //! without a cloud round-trip.
 
 use super::cache::{
-    clear_cache, drop_cached_blob, evict_to_budget, is_pinned, materialize_row_blob,
-    open_blob_stream, pin, read_blob, unpin, write_blob, BlobCacheError,
+    clear_cache, drop_cached_blob, evict_to_budget, is_pinned, unpin, write_blob, BlobCacheError,
 };
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::Database;
@@ -29,6 +28,70 @@ use crate::sync::test_helpers::{
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
+
+async fn read_blob(
+    db: &Database,
+    store_dir: &crate::store_dir::StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    reference: &crate::blob::RowBlobRef,
+) -> Result<Vec<u8>, BlobCacheError> {
+    crate::sync::store::blob::read_blob(
+        &crate::sync::store::StoreDatabase::new(db),
+        store_dir,
+        storage,
+        reference,
+    )
+    .await
+}
+
+async fn open_blob_stream(
+    db: &Database,
+    store_dir: &crate::store_dir::StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    reference: &crate::blob::RowBlobRef,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, BlobCacheError> {
+    crate::sync::store::blob::open_blob_stream(
+        &crate::sync::store::StoreDatabase::new(db),
+        store_dir,
+        storage,
+        reference,
+        offset,
+        len,
+    )
+    .await
+}
+
+async fn materialize_row_blob(
+    db: &Database,
+    store_dir: &crate::store_dir::StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    reference: &crate::blob::RowBlobRef,
+) -> Result<(), BlobCacheError> {
+    crate::sync::store::blob::materialize_row_blob(
+        &crate::sync::store::StoreDatabase::new(db),
+        store_dir,
+        storage,
+        reference,
+    )
+    .await
+}
+
+async fn pin(
+    db: &Database,
+    store_dir: &crate::store_dir::StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    references: &[crate::blob::RowBlobRef],
+) -> Result<(), BlobCacheError> {
+    crate::sync::store::blob::pin(
+        &crate::sync::store::StoreDatabase::new(db),
+        store_dir,
+        storage,
+        references,
+    )
+    .await
+}
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
 /// cache `fill` and `Provenance::UserProvided`. Blob ids are ≥4 chars so they form

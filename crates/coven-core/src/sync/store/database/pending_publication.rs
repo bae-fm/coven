@@ -4,7 +4,7 @@ use super::{
 };
 use crate::database::{
     load_prepared_audience_objects_on, local_store_authority_on, required_store_root_authority_on,
-    Database, DbError, ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
+    DbError, ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
 };
 use crate::sync::store_commit::{
     CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
@@ -13,7 +13,7 @@ use crate::sync::store_commit::{
 use crate::write::WriteId;
 use rusqlite::OptionalExtension;
 
-impl StoreDatabase<'_> {
+impl StoreDatabase {
     pub(crate) async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
@@ -142,7 +142,7 @@ impl StoreDatabase<'_> {
                                 .to_string(),
                         ));
                     }
-                    let partitions = Database::store_write_partitions_on(
+                    let partitions = StoreDatabase::store_write_partitions_on(
                         conn,
                         write_id.as_str(),
                         &stored_changeset,
@@ -298,7 +298,9 @@ impl StoreDatabase<'_> {
                         crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
                     )
                     .to_string();
-                Database::latest_position_for_device_on(conn, &stream_id)
+                crate::sync::store::database::StoreDatabase::latest_position_for_device_on(
+                    conn, &stream_id,
+                )
             })
             .await
     }

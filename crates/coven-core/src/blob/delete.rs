@@ -475,6 +475,10 @@ pub async fn gc_tombstones(
     cipher: &dyn CloudCipherAccess,
     store_id: &str,
     self_pubkey: &str,
+    activated_uploaders: &std::collections::BTreeMap<
+        crate::sync::store_commit::StoreDeviceRegistrationRef,
+        crate::sync::store_commit::StoreDeviceRegistration,
+    >,
     membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
@@ -634,11 +638,13 @@ pub async fn gc_tombstones(
 
         // The exact locator names the activated device registration that uploaded
         // this object. Its author, or a current owner, may reclaim it.
-        let uploader = db
-            .activated_store_device_registration(tombstone.stored.locator().uploader().clone())
-            .await
-            .map_err(|error| {
-                format!("tombstone {key} cannot authenticate blob uploader: {error}")
+        let uploader = activated_uploaders
+            .get(tombstone.stored.locator().uploader())
+            .ok_or_else(|| {
+                format!(
+                    "tombstone {key} names an unactivated blob uploader {}",
+                    tombstone.stored.locator().uploader().device_id
+                )
             })?;
         if uploader.author_pubkey != self_pubkey && !is_owner {
             debug!(

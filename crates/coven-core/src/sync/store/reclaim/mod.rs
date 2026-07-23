@@ -546,7 +546,7 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
     ) -> Result<StoreReclaimResult, StoreReclaimError> {
         reclaim_store_packages(
-            self.db(),
+            self.database(),
             self.storage(),
             device_id,
             identity,
@@ -558,13 +558,14 @@ impl AuthorizedStore<'_> {
 }
 
 async fn reclaim_store_packages(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     store_root_hash: ObjectHash,
     membership: &MembershipChain,
 ) -> Result<StoreReclaimResult, StoreReclaimError> {
+    let db = database.sqlite();
     let root = db
         .local_store_root_ref()
         .await
@@ -576,7 +577,7 @@ async fn reclaim_store_packages(
         ));
     }
     let mut packages_deleted = Box::pin(resume_store_reclaim_operations(
-        db,
+        database,
         storage,
         device_id,
         identity_signer,
@@ -589,7 +590,7 @@ async fn reclaim_store_packages(
             physical_copies_deleted: packages_deleted,
         });
     }
-    let registrations = db
+    let registrations = database
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
@@ -597,17 +598,17 @@ async fn reclaim_store_packages(
 
     let targets = exact_package_targets(storage, &root, &snapshot.snapshot.meta.coverage).await?;
     for (commit, package) in targets {
-        if reclaim_target_is_recorded(db, &package).await? {
+        if reclaim_target_is_recorded(database, &package).await? {
             continue;
         }
-        if StoreDatabase::new(db)
+        if database
             .store_package_is_retained_for_replay(package.clone(), commit.clone())
             .await?
         {
             continue;
         }
         Box::pin(prepare_reclaim_authorization(
-            db,
+            database,
             storage,
             device_id,
             identity_signer,
@@ -630,7 +631,7 @@ async fn reclaim_store_packages(
     packages_deleted = packages_deleted
         .checked_add(
             Box::pin(resume_store_reclaim_operations(
-                db,
+                database,
                 storage,
                 device_id,
                 identity_signer,
@@ -648,10 +649,10 @@ async fn reclaim_store_packages(
 }
 
 async fn reclaim_target_is_recorded(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     target: &StorePackageRef,
 ) -> Result<bool, StoreReclaimError> {
-    for operation in StoreDatabase::new(db).store_reclaim_operations().await? {
+    for operation in database.store_reclaim_operations().await? {
         if operation.authorization().target() == target {
             return Ok(true);
         }
@@ -660,7 +661,7 @@ async fn reclaim_target_is_recorded(
 }
 
 async fn prepare_reclaim_authorization(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
@@ -669,7 +670,7 @@ async fn prepare_reclaim_authorization(
     claim: StorePackageReclaimClaim,
 ) -> Result<(), StoreReclaimError> {
     let plan = Box::pin(super::operations::prepare_plan(
-        db,
+        database,
         storage,
         membership,
         device_id,
@@ -730,7 +731,7 @@ async fn prepare_reclaim_authorization(
         authorization_prepared.reference().clone(),
     );
     let candidate = Box::pin(super::operations::prepare_candidate(
-        db,
+        database,
         storage,
         plan,
         super::operations::StoreOperationBatch::ReclaimAuthorization(Box::new(
@@ -749,12 +750,12 @@ async fn prepare_reclaim_authorization(
         }),
         candidate: Box::new(candidate),
     };
-    Box::pin(StoreDatabase::new(db).begin_store_reclaim_operation(operation)).await?;
+    Box::pin(database.begin_store_reclaim_operation(operation)).await?;
     Ok(())
 }
 
 async fn resume_store_reclaim_operations(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
@@ -762,14 +763,14 @@ async fn resume_store_reclaim_operations(
 ) -> Result<u64, StoreReclaimError> {
     let mut completed = 0_u64;
     loop {
-        let operations = StoreDatabase::new(db).store_reclaim_operations().await?;
+        let operations = database.store_reclaim_operations().await?;
         let mut progressed = false;
         for operation in operations {
             match &operation {
                 journal::DurableStoreReclaimOperation::AuthorizationCandidate { .. }
                 | journal::DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
                     Box::pin(drive_reclaim_candidate(
-                        db,
+                        database,
                         storage,
                         device_id,
                         identity_signer,
@@ -781,11 +782,14 @@ async fn resume_store_reclaim_operations(
                 }
                 journal::DurableStoreReclaimOperation::AuthorizationReplacing { .. }
                 | journal::DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
-                    Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;
+                    Box::pin(finish_reclaim_candidate_replacement(
+                        database, storage, operation,
+                    ))
+                    .await?;
                     progressed = true;
                 }
                 journal::DurableStoreReclaimOperation::Authorized { .. } => {
-                    Box::pin(execute_reclaim_delete(db, storage, operation)).await?;
+                    Box::pin(execute_reclaim_delete(database, storage, operation)).await?;
                     completed = completed.checked_add(1).ok_or_else(|| {
                         StoreReclaimError::Authorization(
                             "reclaimed package count exceeded u64".to_string(),
@@ -795,7 +799,7 @@ async fn resume_store_reclaim_operations(
                 }
                 journal::DurableStoreReclaimOperation::AbsentVerified { .. } => {
                     Box::pin(prepare_reclaim_receipt(
-                        db,
+                        database,
                         storage,
                         device_id,
                         identity_signer,
@@ -815,10 +819,11 @@ async fn resume_store_reclaim_operations(
 }
 
 async fn execute_reclaim_delete(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
+    let db = database.sqlite();
     let journal::DurableStoreReclaimOperation::Authorized {
         authorization,
         activation,
@@ -832,11 +837,16 @@ async fn execute_reclaim_delete(
         .local_store_root_ref()
         .await?
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
-    let verified =
-        verify_authorized_store_package_reclaim(db, storage, &root, authorization, activation)
-            .await?;
+    let verified = verify_authorized_store_package_reclaim(
+        database,
+        storage,
+        &root,
+        authorization,
+        activation,
+    )
+    .await?;
     let target = verified.target;
-    if StoreDatabase::new(db)
+    if database
         .store_package_is_retained_for_replay(target.package.clone(), target.activation.clone())
         .await?
     {
@@ -852,7 +862,7 @@ async fn execute_reclaim_delete(
             source,
         })?;
     verify_reclaim_target_absent(storage, &root, &target).await?;
-    StoreDatabase::new(db)
+    database
         .mark_store_reclaim_target_absent(operation, target.package)
         .await?;
     Ok(())
@@ -863,7 +873,7 @@ struct VerifiedAuthorizedStorePackageReclaim {
 }
 
 async fn verify_authorized_store_package_reclaim(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     authorization_ref: &ReclaimAuthorizationRef,
@@ -875,7 +885,7 @@ async fn verify_authorized_store_package_reclaim(
         authorization_ref,
     )
     .await?;
-    verify_reclaim_authorization_activation(db, storage, root, authorization_ref, activation)
+    verify_reclaim_authorization_activation(database, storage, root, authorization_ref, activation)
         .await?;
     let verified =
         verify_store_package_reclaim_evidence(storage, root, &opened.evidence.value).await?;
@@ -885,7 +895,7 @@ async fn verify_authorized_store_package_reclaim(
 }
 
 async fn verify_reclaim_authorization_activation(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     authorization: &ReclaimAuthorizationRef,
@@ -931,7 +941,7 @@ async fn verify_reclaim_authorization_activation(
             "reclaim activation head is not the exact accepted stream position".to_string(),
         ));
     }
-    super::pull::verify_merge_commit_currently_materialized(db, storage, root, commit)
+    super::pull::verify_merge_commit_currently_materialized(database, storage, root, commit)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
 }
@@ -1040,7 +1050,7 @@ async fn snapshot_covers_target(
 }
 
 async fn drive_reclaim_candidate(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
@@ -1076,13 +1086,13 @@ async fn drive_reclaim_candidate(
                             | crate::sync::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
                     )
             ) {
-                crate::sync::store::database::StoreDatabase::new(db)
+                database
                     .mark_reusable_retained_authority_uploaded(remote)
                     .await?;
             }
         }
         match Box::pin(super::operations::publish_prepared_store_operation(
-            db, storage, candidate,
+            database, storage, candidate,
         ))
         .await?
         {
@@ -1092,17 +1102,16 @@ async fn drive_reclaim_candidate(
             super::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
                 replacement,
             ) => {
-                operation = Box::pin(
-                    StoreDatabase::new(db).replace_store_reclaim_candidate(operation, *replacement),
-                )
-                .await?;
+                operation =
+                    Box::pin(database.replace_store_reclaim_candidate(operation, *replacement))
+                        .await?;
             }
             super::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
                 nonactivation,
                 ..
             } => {
                 let plan = Box::pin(super::operations::prepare_plan(
-                    db,
+                    database,
                     storage,
                     membership,
                     device_id,
@@ -1122,18 +1131,19 @@ async fn drive_reclaim_candidate(
                     }
                 };
                 let replacement = Box::pin(super::operations::prepare_candidate(
-                    db, storage, plan, batch,
+                    database, storage, plan, batch,
                 ))
                 .await?;
-                operation = Box::pin(
-                    StoreDatabase::new(db).begin_store_reclaim_candidate_replacement(
-                        operation,
-                        replacement,
-                        *nonactivation,
-                    ),
-                )
+                operation = Box::pin(database.begin_store_reclaim_candidate_replacement(
+                    operation,
+                    replacement,
+                    *nonactivation,
+                ))
                 .await?;
-                Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;
+                Box::pin(finish_reclaim_candidate_replacement(
+                    database, storage, operation,
+                ))
+                .await?;
                 return Ok(());
             }
             super::operations::StoreOperationPublicationOutcome::Nonactivated(_)
@@ -1147,31 +1157,35 @@ async fn drive_reclaim_candidate(
 }
 
 async fn finish_reclaim_candidate_replacement(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
-    for target in StoreDatabase::new(db)
+    for target in database
         .store_reclaim_replacement_cleanup_targets(operation.clone())
         .await?
     {
         crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
-        db.mark_candidate_cleanup_absent(target.object).await?;
+        database
+            .sqlite()
+            .mark_candidate_cleanup_absent(target.object)
+            .await?;
     }
-    StoreDatabase::new(db)
+    database
         .complete_store_reclaim_candidate_replacement(operation)
         .await?;
     Ok(())
 }
 
 async fn prepare_reclaim_receipt(
-    db: &crate::database::Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
+    let db = database.sqlite();
     let journal::DurableStoreReclaimOperation::AbsentVerified {
         authorization,
         target,
@@ -1196,7 +1210,7 @@ async fn prepare_reclaim_receipt(
     }
 
     let plan = Box::pin(super::operations::prepare_plan(
-        db,
+        database,
         storage,
         membership,
         device_id,
@@ -1239,13 +1253,13 @@ async fn prepare_reclaim_receipt(
     let prepared = storage.prepare_protocol_object(&context, slot, &prefix, receipt.to_bytes())?;
     let receipt_ref = ReclaimReceiptRef::from_receipt(&receipt, prepared.reference().clone());
     let candidate = Box::pin(super::operations::prepare_candidate(
-        db,
+        database,
         storage,
         plan,
         super::operations::StoreOperationBatch::ReclaimReceipt(Box::new(receipt_ref.clone())),
     ))
     .await?;
-    Box::pin(StoreDatabase::new(db).begin_store_reclaim_receipt(
+    Box::pin(database.begin_store_reclaim_receipt(
         operation,
         journal::DurableStoreReclaimObject::Receipt {
             receipt_ref,

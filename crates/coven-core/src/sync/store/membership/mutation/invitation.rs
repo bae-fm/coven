@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeJoinInfo};
@@ -7,6 +6,7 @@ use crate::sync::membership::{
     AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipError,
 };
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::ObjectHash;
 use crate::sync::store_objects;
 use crate::sync::wrapped_store_key::{prepare_wrapped_store_key, WrappedStoreKeyRef};
@@ -21,7 +21,7 @@ use super::{
 
 async fn build_invite_mutation(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     store_root_hash: ObjectHash,
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
@@ -80,9 +80,15 @@ async fn build_invite_mutation(
         wrapped_key.reference.clone(),
         timestamp.to_string(),
     )?;
-    let publication =
-        prepare_membership_publication(storage, db, store_root_hash, chain, entry, owner_keypair)
-            .await?;
+    let publication = prepare_membership_publication(
+        storage,
+        database,
+        store_root_hash,
+        chain,
+        entry,
+        owner_keypair,
+    )
+    .await?;
     Ok(InviteMutationPlan {
         publication,
         invitee_pubkey: invitee_ed25519_pubkey.to_string(),
@@ -139,7 +145,8 @@ async fn execute_invite_mutation(
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let root = persistence
-        .db
+        .database
+        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| {
@@ -251,10 +258,10 @@ pub(crate) async fn create_invitation_with_encryption_durable(
     encryption: &EncryptionService,
     store_id: &str,
     timestamp: &str,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
-    let _mutation = db.lock_membership_mutation().await;
-    let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
+    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;
             let (pending, progress) = decode_membership_mutation(row)?;
@@ -278,10 +285,10 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             (plan, progress, intent_hash)
         }
         None => {
-            let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
+            let stream_id = select_mutation_author_stream(database, chain, owner_keypair).await?;
             let plan = Box::pin(build_invite_mutation(
                 storage,
-                db,
+                database,
                 store_root_hash,
                 chain,
                 owner_keypair,
@@ -297,7 +304,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             let encoded =
                 encode_membership_mutation(&MembershipMutationPlan::Invite(plan.clone()))?;
             let progress = MembershipMutationProgress::Pending;
-            let intent_hash = db
+            let intent_hash = database
                 .stage_membership_mutation(encoded, encode_membership_progress(&progress)?, None)
                 .await?;
             (plan, progress, intent_hash)
@@ -310,7 +317,10 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         chain,
         plan,
         progress,
-        MutationPersistence { db, intent_hash },
+        MutationPersistence {
+            database,
+            intent_hash,
+        },
     ))
     .await
 }

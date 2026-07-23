@@ -1,6 +1,6 @@
 use super::*;
 
-fn store_database(db: &Database) -> crate::sync::store::database::StoreDatabase<'_> {
+fn store_database(db: &Database) -> crate::sync::store::database::StoreDatabase {
     crate::sync::store::database::StoreDatabase::new(db)
 }
 
@@ -130,8 +130,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             "the exact prepared write remains after exact create call {failed_call}",
         );
         assert_eq!(
-            fixture
-                .db
+            crate::sync::store::database::StoreDatabase::new(&fixture.db)
                 .exact_materialized_ref(&commit_stream(&fixture.commit_ref), 1)
                 .await
                 .unwrap(),
@@ -162,8 +161,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
                 .is_none()
         );
         assert_eq!(
-            fixture
-                .db
+            crate::sync::store::database::StoreDatabase::new(&fixture.db)
                 .exact_materialized_ref(&commit_stream(&fixture.commit_ref), 1)
                 .await
                 .unwrap(),
@@ -283,7 +281,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     );
     fixture.home.fail_exact_delete_on_call(2);
     assert!(crate::sync::store::pull::cleanup_merge_candidate(
-        &fixture.db,
+        &fixture.database,
         &fixture.storage,
         fixture.write_id.clone(),
     )
@@ -295,7 +293,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         &fixture.commit_ref.object
     ));
     crate::sync::store::pull::cleanup_merge_candidate(
-        &fixture.db,
+        &fixture.database,
         &fixture.storage,
         fixture.write_id.clone(),
     )
@@ -784,8 +782,7 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
     ));
     assert!(exact_object_exists(&fixture.home, &fixture.head_object));
     assert_eq!(
-        fixture
-            .db
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
             .exact_materialized_ref(&commit_stream(&fixture.commit_ref), 1)
             .await
             .unwrap(),
@@ -841,8 +838,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
             .is_some()
     );
     assert_eq!(
-        fixture
-            .db
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
             .exact_materialized_ref(&commit_stream(&fixture.commit_ref), 1)
             .await
             .unwrap(),
@@ -865,8 +861,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         1
     );
     assert_eq!(
-        fixture
-            .db
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
             .exact_materialized_ref(&commit_stream(&fixture.commit_ref), 1)
             .await
             .unwrap(),
@@ -971,7 +966,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let result = drain_store_writes(&reopened, &storage).await;
         match (invalid_root, result) {
             (None, Err(StoreError::Database(reason))) => {
-                assert!(reason.contains("exact Store root authority is absent"));
+                assert!(reason.contains("Store protocol root hash is absent"));
             }
             (Some(_), Err(StoreError::Database(reason))) => {
                 assert!(reason.contains("Store root authority hash differs"));

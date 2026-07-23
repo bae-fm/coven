@@ -1,31 +1,42 @@
-use crate::database::store_device_state::load_declared_store_device_state_on;
-use crate::database::store_device_state::load_store_device_exclusion_freezes_on;
-use crate::database::store_device_state::store_device_state_for_history_cut_on;
+use crate::database::*;
+use crate::sync::storage::PreparedExactObject;
+use crate::sync::store_commit::{
+    CommitFrontier, ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit,
+    StoreBatchCommitRef, StoreDeviceProposalAck, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
+};
+use rusqlite::{Connection, OptionalExtension};
+use std::collections::BTreeMap;
 
-use crate::database::blob_records::load_activated_registration_on;
-use crate::database::local_store_identity::local_store_authority_on;
-
+use super::store_device_state::{
+    load_declared_store_device_state_on, load_store_device_exclusion_freezes_on,
+    store_device_state_for_history_cut_on,
+};
 use super::*;
 
-impl Database {
+impl StoreDatabase {
     pub(crate) async fn materialized_frontier(
         &self,
     ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        self.call(|conn| Self::materialized_frontier_on(conn, None))
+        self.database
+            .call(|conn| Self::materialized_frontier_on(conn, None))
             .await
     }
 
     pub(crate) async fn retained_merge_replay_inputs(
         &self,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.call(Self::load_retained_merge_replay_inputs_on).await
+        self.database
+            .call(Self::load_retained_merge_replay_inputs_on)
+            .await
     }
 
     pub(crate) async fn retained_merge_materialization(
         &self,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.call(move |conn| Self::load_retained_merge_materialization_by_ref_on(conn, &reference))
+        self.database
+            .call(move |conn| Self::load_retained_merge_materialization_by_ref_on(conn, &reference))
             .await
     }
 
@@ -33,13 +44,16 @@ impl Database {
         &self,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<crate::sync::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
-        self.call(move |conn| {
-            references
-                .iter()
-                .map(|reference| Self::load_retained_merge_history_checkpoint_on(conn, reference))
-                .collect()
-        })
-        .await
+        self.database
+            .call(move |conn| {
+                references
+                    .iter()
+                    .map(|reference| {
+                        Self::load_retained_merge_history_checkpoint_on(conn, reference)
+                    })
+                    .collect()
+            })
+            .await
     }
 
     pub(crate) async fn exact_materialized_ref(
@@ -48,35 +62,38 @@ impl Database {
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let stream_id = stream_id.to_string();
-        self.call(move |conn| Self::materialized_commit_ref_on(conn, &stream_id, sequence))
+        self.database
+            .call(move |conn| Self::materialized_commit_ref_on(conn, &stream_id, sequence))
             .await
     }
 
     pub(crate) async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
-        self.call(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
-                .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
+        self.database
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                let mut frontier = BTreeMap::new();
+                for row in rows {
+                    let (device_id, seq, reference) = row.map_err(DbError::from)?;
+                    let seq = Database::sequence_from_sqlite(&device_id, seq)?;
+                    let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
+                    frontier.insert(device_id.clone(), reference);
+                }
+                CommitFrontier::from_refs(frontier).map_err(|error| {
+                    DbError::Message(format!("snapshot coverage frontier: {error}"))
                 })
-                .map_err(DbError::from)?;
-            let mut frontier = BTreeMap::new();
-            for row in rows {
-                let (device_id, seq, reference) = row.map_err(DbError::from)?;
-                let seq = Self::sequence_from_sqlite(&device_id, seq)?;
-                let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
-                frontier.insert(device_id.clone(), reference);
-            }
-            CommitFrontier::from_refs(frontier)
-                .map_err(|error| DbError::Message(format!("snapshot coverage frontier: {error}")))
-        })
-        .await
+            })
+            .await
     }
 
     pub(crate) fn materialized_frontier_on(
@@ -113,7 +130,7 @@ impl Database {
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }
-            let seq = Self::sequence_from_sqlite(&device_id, seq)?;
+            let seq = Database::sequence_from_sqlite(&device_id, seq)?;
             frontier.insert(
                 device_id.clone(),
                 Self::parse_materialized_commit_row_on(
@@ -144,7 +161,7 @@ impl Database {
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }
-            let seq = Self::sequence_from_sqlite(&device_id, seq)?;
+            let seq = Database::sequence_from_sqlite(&device_id, seq)?;
             let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
             if frontier
                 .get(&device_id)
@@ -209,7 +226,7 @@ impl Database {
         stream_id: &str,
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        let seq = Self::sequence_to_sqlite(stream_id, sequence)?;
+        let seq = Database::sequence_to_sqlite(stream_id, sequence)?;
         conn.query_row(
             "SELECT commit_ref, retained_commit_ref, retained_input_hash
              FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
@@ -268,7 +285,7 @@ impl Database {
             .map_err(DbError::from)?;
         let mut references = Vec::new();
         if let Some((seq, reference, retained_commit_ref, retained_input_hash)) = materialized {
-            let seq = Self::sequence_from_sqlite(device_id, seq)?;
+            let seq = Database::sequence_from_sqlite(device_id, seq)?;
             references.push(Self::parse_materialized_commit_row_on(
                 conn,
                 device_id,
@@ -279,7 +296,7 @@ impl Database {
             )?);
         }
         if let Some((seq, reference)) = coverage {
-            let seq = Self::sequence_from_sqlite(device_id, seq)?;
+            let seq = Database::sequence_from_sqlite(device_id, seq)?;
             references.push(Self::parse_stored_commit_ref(device_id, seq, &reference)?);
         }
         if references.len() == 2
@@ -645,7 +662,8 @@ impl Database {
         let cut = order
             .predecessor_cut()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+        self.database
+            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
             .await
     }
 
@@ -654,7 +672,8 @@ impl Database {
         cut: &StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
         let cut = cut.clone();
-        self.call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+        self.database
+            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
             .await
     }
 
@@ -663,33 +682,33 @@ impl Database {
         reference: &StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, DbError> {
         let reference = reference.clone();
-        self.call(move |conn| load_declared_store_device_state_on(conn, &reference))
+        self.database
+            .call(move |conn| load_declared_store_device_state_on(conn, &reference))
             .await
     }
 
     pub(crate) async fn store_device_exclusion_freezes(
         &self,
     ) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
-        let root = self
-            .local_store_root_ref()
-            .await?
-            .ok_or_else(DbError::missing_store_root_hash)?;
-        self.call(move |conn| {
-            Ok(load_store_device_exclusion_freezes_on(conn, &root)?
-                .into_values()
-                .collect())
-        })
-        .await
+        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading exclusion freezes".to_string())
+        })?;
+        self.database
+            .call(move |conn| {
+                Ok(load_store_device_exclusion_freezes_on(conn, &root)?
+                    .into_values()
+                    .collect())
+            })
+            .await
     }
 
     pub(crate) async fn activated_store_device_registration_records(
         &self,
     ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, DbError> {
-        let root = self
-            .local_store_root_ref()
-            .await?
-            .ok_or_else(DbError::missing_store_root_hash)?;
-        self.call(move |conn| {
+        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading activated devices".to_string())
+        })?;
+        self.database.call(move |conn| {
             let mut statement = conn
                 .prepare(
                     "SELECT device_id, registration_hash, registration_bytes,
@@ -755,21 +774,23 @@ impl Database {
         &self,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
-        self.call(move |conn| load_activated_registration_on(conn, &root, &reference))
+        self.database
+            .call(move |conn| load_activated_registration_on(conn, &root, &reference))
             .await
     }
 
     pub(crate) async fn local_blob_write_authority(
         &self,
     ) -> Result<(StoreDeviceRegistrationRef, StoreDeviceRegistration), DbError> {
-        self.call(|conn| {
-            local_store_authority_on(conn)
-                .map(|(_, reference, registration)| (reference, registration))
-        })
-        .await
+        self.database
+            .call(|conn| {
+                local_store_authority_on(conn)
+                    .map(|(_, reference, registration)| (reference, registration))
+            })
+            .await
     }
 
     pub(crate) async fn activated_store_device_registration_with_authority(
@@ -782,28 +803,29 @@ impl Database {
         ),
         DbError,
     > {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
-        self.call(move |conn| {
-            let registration = load_activated_registration_on(conn, &root, &reference)?;
-            let authority: String = conn
-                .query_row(
-                    "SELECT activation_authority FROM store_device_registration_activations \
+        self.database
+            .call(move |conn| {
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                let authority: String = conn
+                    .query_row(
+                        "SELECT activation_authority FROM store_device_registration_activations \
                      WHERE device_id = ?1 AND registration_hash = ?2",
-                    (
-                        reference.device_id.to_string(),
-                        reference.registration_hash.to_string(),
-                    ),
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let authority = serde_json::from_str(&authority).map_err(|error| {
-                DbError::Message(format!("activated Store registration authority: {error}"))
-            })?;
-            Ok((registration, authority))
-        })
-        .await
+                        (
+                            reference.device_id.to_string(),
+                            reference.registration_hash.to_string(),
+                        ),
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let authority = serde_json::from_str(&authority).map_err(|error| {
+                    DbError::Message(format!("activated Store registration authority: {error}"))
+                })?;
+                Ok((registration, authority))
+            })
+            .await
     }
 
     pub(crate) async fn activated_store_device_registration_for_device(
@@ -817,37 +839,38 @@ impl Database {
         )>,
         DbError,
     > {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
-        self.call(move |conn| {
-            let stored: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT registration_object, activation_authority \
+        self.database
+            .call(move |conn| {
+                let stored: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT registration_object, activation_authority \
                      FROM store_device_registration_activations WHERE device_id = ?1",
-                    [device_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let Some((reference, authority)) = stored else {
-                return Ok(None);
-            };
-            let reference: StoreDeviceRegistrationRef =
-                serde_json::from_str(&reference).map_err(|error| {
-                    DbError::Message(format!("activated Store registration ref: {error}"))
+                        [device_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let Some((reference, authority)) = stored else {
+                    return Ok(None);
+                };
+                let reference: StoreDeviceRegistrationRef = serde_json::from_str(&reference)
+                    .map_err(|error| {
+                        DbError::Message(format!("activated Store registration ref: {error}"))
+                    })?;
+                if reference.device_id != device_id {
+                    return Err(DbError::Message(
+                        "activated Store registration row names another device".to_string(),
+                    ));
+                }
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                let authority = serde_json::from_str(&authority).map_err(|error| {
+                    DbError::Message(format!("activated Store registration authority: {error}"))
                 })?;
-            if reference.device_id != device_id {
-                return Err(DbError::Message(
-                    "activated Store registration row names another device".to_string(),
-                ));
-            }
-            let registration = load_activated_registration_on(conn, &root, &reference)?;
-            let authority = serde_json::from_str(&authority).map_err(|error| {
-                DbError::Message(format!("activated Store registration authority: {error}"))
-            })?;
-            Ok(Some((reference, registration, authority)))
-        })
-        .await
+                Ok(Some((reference, registration, authority)))
+            })
+            .await
     }
 }

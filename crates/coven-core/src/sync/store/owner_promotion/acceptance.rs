@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::store::database::StoreDatabase;
@@ -12,13 +11,12 @@ use super::journal::{OwnerPromotionJournal, OwnerPromotionJournalState};
 use super::OwnerPromotionError;
 
 pub async fn accept_owner_promotion(
-    db: &Database,
+    store_db: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
     identity: &UserKeypair,
     request: OwnerPromotionRequest,
 ) -> Result<OwnerPromotionAcceptance, OwnerPromotionError> {
-    let store_db = StoreDatabase::new(db);
     if let Some(existing) = store_db
         .load_owner_promotion_journal(request.promotion_id)
         .await?
@@ -38,7 +36,8 @@ pub async fn accept_owner_promotion(
         ));
     }
     let (root, registration_ref, registration, _) =
-        crate::sync::store::operations::load_local_store_authority(db, device_id, identity).await?;
+        crate::sync::store::operations::load_local_store_authority(store_db, device_id, identity)
+            .await?;
     if registration_ref != request.member_registration
         || registration.author_pubkey != request.member_pubkey
     {

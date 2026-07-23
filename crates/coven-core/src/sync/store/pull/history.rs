@@ -619,7 +619,7 @@ fn insert_membership_proof(
 }
 
 pub(crate) async fn prepare_merge_history_successor(
-    db: &Database,
+    database: &StoreDatabase,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
     commit_ref: &StoreBatchCommitRef,
@@ -636,7 +636,7 @@ pub(crate) async fn prepare_merge_history_successor(
         StorePullError::Database(format!("validate Merge successor post-state: {error}"))
     })?;
     let predecessor_refs = commit_predecessor_references(commit);
-    let predecessors = db
+    let predecessors = database
         .retained_merge_history_frontier(predecessor_refs.clone())
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -645,7 +645,7 @@ pub(crate) async fn prepare_merge_history_successor(
             "Merge successor is missing a retained direct predecessor".to_string(),
         ));
     }
-    let (expected_predecessor_ref, predecessor_state) = db
+    let (expected_predecessor_ref, predecessor_state) = database
         .store_device_state_for_order(&commit.order)
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -949,7 +949,7 @@ fn compose_merge_history_successor(
 }
 
 pub(crate) async fn prepare_merge_snapshot_history_summary(
-    db: &Database,
+    database: &StoreDatabase,
     root: &StoreRootRef,
     coverage: &CommitFrontier,
     membership: &MembershipChain,
@@ -958,7 +958,7 @@ pub(crate) async fn prepare_merge_snapshot_history_summary(
     author: &StoreDeviceRegistration,
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
     let frontier = &coverage.0;
-    let predecessors = db
+    let predecessors = database
         .retained_merge_history_frontier(frontier.values().cloned().collect())
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;

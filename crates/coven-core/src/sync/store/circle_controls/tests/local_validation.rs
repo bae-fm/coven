@@ -207,7 +207,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .await
             .expect_err("Circle stream activation must name its signed Circle and grant");
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
-        assert!(db
+        assert!(crate::sync::store::database::StoreDatabase::new(&db)
             .exact_materialized_ref(&stream_id.to_string(), sequence)
             .await
             .expect("read rejected Circle Store position")
@@ -226,7 +226,8 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         &db,
         &store.storage,
         crate::sync::store_commit::CommitFrontier::from_refs(
-            db.materialized_frontier()
+            crate::sync::store::database::StoreDatabase::new(&db)
+                .materialized_frontier()
                 .await
                 .expect("read current Store frontier"),
         )
@@ -284,7 +285,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .expect_err("Circle journal must contain no operation besides its control");
     assert!(error.to_string().contains("control-only batch"), "{error}");
     assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
-    assert!(db
+    assert!(crate::sync::store::database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), sequence)
         .await
         .expect("read rejected Circle Store position")
@@ -315,7 +316,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
     )
     .await
     .expect_err("interrupt rename before its first exact upload");
-    let operation_id = db
+    let operation_id = StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -329,7 +330,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .expect("read interrupted rename")
         .expect("interrupted rename journal remains durable");
     let commit = journal.commit().expect("parse rename commit");
-    let author = db
+    let author = crate::sync::store::database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load rename author");

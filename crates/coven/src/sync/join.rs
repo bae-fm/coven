@@ -20,11 +20,11 @@ use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
-use crate::sync::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::membership::{unwrap_store_keyring, InviteError};
+use crate::sync::store::pull::PullError;
+use crate::sync::store::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -699,8 +699,9 @@ impl DeviceJoinClient {
             .await?;
         let published_at = self.clock.now().to_rfc3339();
         on_status("Installing device registration...");
+        let database = crate::sync::store::StoreDatabase::from_database(db.clone());
         let readiness = crate::sync::store::device_join::bootstrap_pending_device(
-            &db,
+            &database,
             &pending,
             &join.storage,
             Some(join.exact.as_ref()),
@@ -709,8 +710,8 @@ impl DeviceJoinClient {
             &published_at,
         )
         .await?;
-        match crate::sync::snapshot::reconcile_snapshot_blobs(
-            &db,
+        match crate::sync::store::snapshot::reconcile_snapshot_blobs(
+            &database,
             &db_path,
             &join.storage,
             &store_dir,
@@ -720,14 +721,14 @@ impl DeviceJoinClient {
         .await
         .map_err(|error| BootstrapError::Database(error.to_string()))?
         {
-            crate::sync::snapshot::SnapshotBlobReconcile::Complete => Ok(readiness),
-            crate::sync::snapshot::SnapshotBlobReconcile::Incomplete => {
+            crate::sync::store::snapshot::SnapshotBlobReconcile::Complete => Ok(readiness),
+            crate::sync::store::snapshot::SnapshotBlobReconcile::Incomplete => {
                 Err(BootstrapError::Database(
                     "snapshot blob reconciliation did not land every required eager blob"
                         .to_string(),
                 ))
             }
-            crate::sync::snapshot::SnapshotBlobReconcile::Cancelled => {
+            crate::sync::store::snapshot::SnapshotBlobReconcile::Cancelled => {
                 Err(BootstrapError::Cancelled)
             }
         }
@@ -793,8 +794,9 @@ impl DeviceJoinClient {
             &self.migrations,
         )
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        let database = crate::sync::store::StoreDatabase::from_database(db.clone());
         let joined = crate::sync::store::device_join::materialize_device_join_activation(
-            &db,
+            &database,
             &join.storage,
             activation.clone(),
         )
@@ -837,7 +839,7 @@ impl DeviceJoinClient {
         }
         config.save_to_config_yaml()?;
         crate::sync::store::device_join::complete_device_join(
-            &db,
+            &database,
             &pending,
             &join.storage,
             activation,
@@ -1108,8 +1110,9 @@ pub(crate) async fn open_db_and_pull(
     // coverage, so it never re-walks the INSERTs that first carried them. Missing
     // eager blobs abort the bootstrap before the store is saved. Cancellation is
     // checked between blobs inside the reconcile, surfacing as `Cancelled` here.
-    match crate::sync::snapshot::reconcile_snapshot_blobs(
-        &db,
+    let database = crate::sync::store::StoreDatabase::from_database(db.clone());
+    match crate::sync::store::snapshot::reconcile_snapshot_blobs(
+        &database,
         db_path,
         storage,
         store_dir,
@@ -1119,13 +1122,13 @@ pub(crate) async fn open_db_and_pull(
     .await
     .map_err(|e| BootstrapError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
     {
-        crate::sync::snapshot::SnapshotBlobReconcile::Complete => {}
-        crate::sync::snapshot::SnapshotBlobReconcile::Incomplete => {
+        crate::sync::store::snapshot::SnapshotBlobReconcile::Complete => {}
+        crate::sync::store::snapshot::SnapshotBlobReconcile::Incomplete => {
             return Err(BootstrapError::Database(
                 "Snapshot blob reconciliation did not land every required eager blob".to_string(),
             ));
         }
-        crate::sync::snapshot::SnapshotBlobReconcile::Cancelled => {
+        crate::sync::store::snapshot::SnapshotBlobReconcile::Cancelled => {
             return Err(BootstrapError::Cancelled);
         }
     }
@@ -1139,7 +1142,7 @@ pub(crate) async fn open_db_and_pull(
     // truth. Load and anchor the membership chain first (join is a standalone,
     // non-cycle pull), against the owner pinned above. Restore has not pinned an
     // owner yet, so it anchors the chain at its signed founder below.
-    let membership = crate::sync::pull::load_cycle_membership(storage, &db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
     let pull_result = Box::pin(crate::sync::store::pull_store_commits(
@@ -1203,15 +1206,16 @@ pub(crate) async fn open_db_and_pull(
             ),
             None => None,
         };
-        db.install_activated_device_continuation(
-            continuation.clone(),
-            identity_signer,
-            device_signer,
-            ack_chain,
-            latest_snapshot,
-        )
-        .await
-        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        database
+            .install_activated_device_continuation(
+                continuation.clone(),
+                identity_signer,
+                device_signer,
+                ack_chain,
+                latest_snapshot,
+            )
+            .await
+            .map_err(|error| BootstrapError::Database(error.to_string()))?;
     }
 
     if let Some((authority, identity_signer)) = owner_recovery {
@@ -1219,7 +1223,7 @@ pub(crate) async fn open_db_and_pull(
             BootstrapError::Membership("Owner recovery requires resolved membership".to_string())
         })?;
         Box::pin(crate::sync::store::recover_owner_device(
-            &db,
+            &database,
             storage,
             identity_signer,
             authority,

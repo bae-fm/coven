@@ -17,8 +17,8 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
-use crate::sync::pull::PullError;
 use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
+use crate::sync::store::pull::PullError;
 use crate::sync::store::pull::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
@@ -30,6 +30,10 @@ const SCHEMA_VERSION: u32 = 1;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::{ProtocolObjectDomain, SyncStorage};
 use crate::sync::test_helpers::*;
+
+fn store_database(db: &crate::database::Database) -> crate::sync::store::StoreDatabase {
+    crate::sync::store::StoreDatabase::new(db)
+}
 
 fn exact_cache_path(
     store_dir: &crate::store_dir::StoreDir,
@@ -344,7 +348,7 @@ fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) 
 async fn local_announcement_stream(
     db: &crate::database::Database,
 ) -> crate::sync::membership::AuthorStreamId {
-    let (registration_ref, registration) = db
+    let (registration_ref, registration) = store_database(db)
         .local_blob_write_authority()
         .await
         .expect("read active local Store registration");
@@ -458,11 +462,11 @@ async fn sync_for_test<S: TestStoreStorage>(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let membership = crate::sync::pull::load_cycle_membership(storage.sync_storage(), db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage.sync_storage(), db)
         .await
         .map_err(|error| error.to_string())?;
     let prepared = crate::sync::store::preparation::prepare_store_write(
-        db,
+        &store_database(db),
         storage.sync_storage(),
         &device_id,
         timestamp,
@@ -478,9 +482,12 @@ async fn sync_for_test<S: TestStoreStorage>(
     if !prepared {
         return Ok(None);
     }
-    crate::sync::store::publication::drain_store_writes(db, storage.sync_storage())
-        .await
-        .map_err(|error| error.to_string())?;
+    crate::sync::store::publication::drain_store_writes(
+        &store_database(db),
+        storage.sync_storage(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     crate::sync::store::database::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
@@ -513,7 +520,7 @@ async fn pull_exact_store_into(
     )
     .await
     .expect("anchor exact Store membership");
-    let membership = crate::sync::pull::load_cycle_membership(storage, destination)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, destination)
         .await
         .expect("load exact Store membership");
     let result = crate::sync::store::pull_store_commits(
@@ -659,16 +666,30 @@ async fn make_test_root_remote(
     root_id: &str,
 ) {
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store::ensure_active_registration(db, &storage.storage)
+    crate::sync::store::ensure_active_registration(&store_database(db), &storage.storage)
         .await
         .expect("activate exact fixture writer");
     let hlc = crate::sync::hlc::Hlc::new("blob-fixture".to_string());
-    crate::blob::transition::make_remote(db, store_dir, &hlc, "notes", root_id, false)
+    crate::blob::transition::make_remote(
+        &store_database(db),
+        store_dir,
+        &hlc,
+        "notes",
+        root_id,
+        false,
+    )
+    .await
+    .expect("queue exact blob fixture upload");
+    let (registration_ref, registration) = store_database(db)
+        .local_blob_write_authority()
         .await
-        .expect("queue exact blob fixture upload");
+        .expect("load exact blob fixture write authority");
+    let authority = crate::sync::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+        .expect("validate exact blob fixture write authority");
     let outcome = crate::blob::upload::drain_uploads(
-        db,
+        &store_database(db),
         &storage.storage,
+        authority,
         store_dir,
         &crate::clock::SystemClock,
         &hlc,
@@ -686,7 +707,8 @@ async fn make_test_root_remote(
 }
 
 async fn materialized_sequences(db: &crate::database::Database) -> HashMap<String, u64> {
-    db.materialized_frontier()
+    store_database(db)
+        .materialized_frontier()
         .await
         .expect("read materialized Store frontier")
         .into_iter()
@@ -1536,7 +1558,7 @@ async fn create_exact_blob(
     cloud_path: Option<&str>,
     bytes: &[u8],
 ) -> crate::blob::locator::StoredBlobRef {
-    let (uploader, registration) = db
+    let (uploader, registration) = store_database(db)
         .local_blob_write_authority()
         .await
         .expect("load exact blob write authority");
@@ -2094,9 +2116,16 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
         })
         .await;
     assert!(invalid_insert.is_err());
-    assert!(target.materialized_frontier().await.unwrap().is_empty());
+    assert!(store_database(&target)
+        .materialized_frontier()
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
-        target.snapshot_coverage_frontier().await.unwrap(),
+        store_database(&target)
+            .snapshot_coverage_frontier()
+            .await
+            .unwrap(),
         crate::CommitFrontier(std::collections::BTreeMap::new()),
     );
 }
@@ -2242,7 +2271,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
     assert!(encoded.contains(&package_application));
     let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
     replace_retained_merge_input(&target, stream_id.clone(), missing_receiver).await;
-    let error = target
+    let error = store_database(&target)
         .materialized_frontier()
         .await
         .expect_err("a retained package must carry its receive-time conflict bound");
@@ -2265,7 +2294,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
         })
         .await
         .expect("corrupt retained Merge input");
-    let error = target
+    let error = store_database(&target)
         .materialized_frontier()
         .await
         .expect_err("corrupt retained Merge input must invalidate its materialization");
@@ -2325,7 +2354,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
     ));
     replace_stored_remote_object(&target, &second_package.object, &missing).await;
-    assert!(target
+    assert!(store_database(&target)
         .materialized_frontier()
         .await
         .expect_err("missing replay pin must invalidate materialization")
@@ -2353,7 +2382,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         ),
     );
     replace_stored_remote_object(&target, &second_package.object, &tampered).await;
-    assert!(target
+    assert!(store_database(&target)
         .materialized_frontier()
         .await
         .expect_err("tampered replay pin must invalidate materialization")
@@ -2411,7 +2440,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure")
     );
-    assert!(target
+    assert!(store_database(&target)
         .materialized_frontier()
         .await
         .expect_err("invented replay pin must invalidate materialization")
@@ -2549,7 +2578,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     let write_id = target.new_write_id();
     target
         .call(move |conn| {
-            crate::database::Database::run_internal_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
                 None,
@@ -3988,7 +4017,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .expect("read scoped source device")
         .expect("scoped source device exists");
     let circle_id = crate::sync::store::circle_controls::create_circle(
-        &source,
+        &store_database(&source),
         &storage.storage,
         &device_id,
         "0000000001000-0000-owner",
@@ -4010,7 +4039,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     source
         .call(move |conn| {
             let routing = EncryptionService::from_key([42; 32]);
-            crate::database::Database::run_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_store_write_transaction_on(
                 conn,
                 &tables,
                 &gates,
@@ -4139,7 +4168,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .expect("read Circle activator device")
         .expect("Circle activator device exists");
     let circle_id = crate::sync::store::circle_controls::create_circle(
-        activator,
+        &store_database(activator),
         &storage.storage,
         &activator_device,
         "0000000001000-0000-owner",
@@ -4171,7 +4200,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .expect("read Circle successor device")
         .expect("Circle successor device exists");
     crate::sync::store::circle_controls::rename_circle(
-        successor,
+        &store_database(successor),
         &storage.storage,
         &successor_device,
         "0000000002000-0000-owner",
@@ -4201,7 +4230,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
 
     assert!(result.held_positions.is_empty(), "{result:?}");
     assert_eq!(
-        receiver
+        store_database(&receiver)
             .get_circles(&crate::keys::public_key_hex(&owner))
             .await
             .expect("read ordered Circle result")
@@ -5588,7 +5617,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .row_blob_ref("note_photos", "p1cover")
         .await
         .expect("read exact pulled row blob reference");
-    let uploader = db2
+    let uploader = store_database(&db2)
         .activated_store_device_registration(
             row_blob
                 .stored()
@@ -5716,7 +5745,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
     crate::blob::transition::make_local(
-        &db1,
+        &store_database(&db1),
         &storage.storage,
         &source_store_dir,
         &crate::sync::hlc::Hlc::new("delete-fixture".to_string()),
@@ -5887,7 +5916,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let update_write_id = target.new_write_id();
     let host_write = target
         .call(move |conn| {
-            crate::database::Database::run_internal_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
                 None,
@@ -5908,7 +5937,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         .await;
     let host_update = target
         .call(move |conn| {
-            crate::database::Database::run_internal_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &update_tables,
                 None,
@@ -6011,7 +6040,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     let write_id = target.new_write_id();
     let host_re_reference = target
         .call(move |conn| {
-            crate::database::Database::run_internal_store_write_transaction_on(
+            crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
                 None,
@@ -6243,7 +6272,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let result = crate::sync::pull::load_cycle_membership(&storage.storage, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db2).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a chain founded by a non-owner must be refused, got {:?}",
@@ -6281,7 +6310,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .expect("remove exact founder membership head");
 
-    let result = crate::sync::pull::load_cycle_membership(&storage.storage, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db2).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "an empty chain with a pinned owner must be refused, got {:?}",
@@ -6318,7 +6347,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
         &encryption,
         "test-lib",
         "Test Store",
-        &db,
+        &store_database(&db),
     )
     .await
     .expect("invite second Owner as a Member");
@@ -6384,7 +6413,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
             .expect("clear persisted-cycle owner pin");
     }
 
-    let initial = crate::sync::pull::load_cycle_membership(&storage.storage, &db)
+    let initial = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db)
         .await
         .expect("accept and persist the complete multi-author chain");
     assert!(!initial
@@ -6405,15 +6434,15 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(true).await;
 
-    let recovered = crate::sync::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
-        .await
-        .expect("empty LIST must use the persisted author floors");
+    let recovered =
+        crate::sync::store::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
+            .await
+            .expect("empty LIST must use the persisted author floors");
 
     assert_eq!(
         recovered.pinned_owner.as_deref(),
         Some(fixture.founder_pubkey.as_str())
     );
-    assert_eq!(recovered.listed_entries.len(), 2);
     assert!(!recovered
         .chain
         .expect("persisted membership chain")
@@ -6424,15 +6453,15 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(false).await;
 
-    let recovered = crate::sync::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
-        .await
-        .expect("an unpinned prior chain must not fall open on an empty LIST");
+    let recovered =
+        crate::sync::store::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
+            .await
+            .expect("an unpinned prior chain must not fall open on an empty LIST");
 
     assert_eq!(
         recovered.pinned_owner.as_deref(),
         Some(fixture.founder_pubkey.as_str())
     );
-    assert_eq!(recovered.listed_entries.len(), 2);
     assert!(!recovered
         .chain
         .expect("persisted membership chain")
@@ -6449,12 +6478,15 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
         .await
         .expect("delete exact persisted membership head");
 
-    let error =
-        match crate::sync::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db).await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("a persisted author floor requires its signed head"),
-        };
+    let error = match crate::sync::store::pull::load_cycle_membership(
+        &fixture.storage.storage,
+        &fixture.db,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a persisted author floor requires its signed head"),
+    };
 
     assert!(
         matches!(&error, PullError::MembershipTampered(message) if message.contains("durable cursor")),
@@ -6479,9 +6511,10 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .unwrap();
 
-    let cycle_membership = crate::sync::pull::load_cycle_membership(&storage.storage, &target)
-        .await
-        .expect("load founder at cycle start");
+    let cycle_membership =
+        crate::sync::store::pull::load_cycle_membership(&storage.storage, &target)
+            .await
+            .expect("load founder at cycle start");
 
     let add_member = chain
         .signed_set_member_in_stream(
@@ -6578,7 +6611,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = FaultingStorage::membership(&storage.storage, 1);
-    let result = crate::sync::pull::load_cycle_membership(&failing, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(&failing, &db2).await;
     assert!(
         matches!(result, Err(PullError::MembershipLoad(_))),
         "an exact membership read failure on an owner-pinned store must abort the cycle",
@@ -6660,7 +6693,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         &encryption,
         "test-store",
         "Test Store",
-        &source,
+        &store_database(&source),
     )
     .await
     .expect("invite second Owner as a Member");
@@ -6718,7 +6751,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         &second_owner_custody,
         &second_owner_cipher,
         &crate::sync::cloud_storage::PendingRotation::none(),
-        &second_owner_db,
+        &store_database(&second_owner_db),
     )
     .await
     .expect("successor Owner removes founder with exact recovery state");
@@ -6735,7 +6768,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     assert!(unauthorized_positions(&result).is_empty());
     let stream_id = commit_stream_id(&reference);
     assert_eq!(
-        target
+        store_database(&target)
             .exact_materialized_ref(&stream_id, reference.coord.sequence())
             .await
             .expect("load exact materialized predecessor-authorized commit"),
@@ -7258,7 +7291,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
     crate::sync::store::pull::cleanup_merge_candidate(
-        &member_db,
+        &store_database(&member_db),
         &storage.storage,
         write_id.clone(),
     )
@@ -7893,7 +7926,7 @@ mod blob_path_traversal {
         .await;
         let (_tmp, store_dir) = temp_store_dir();
         let error = crate::blob::transition::make_remote(
-            &db1,
+            &store_database(&db1),
             &store_dir,
             &crate::sync::hlc::Hlc::new("traversal-test".to_string()),
             "notes",
@@ -7937,7 +7970,7 @@ mod blob_path_traversal {
         .await;
         let (_tmp, store_dir) = temp_store_dir();
         let error = crate::blob::transition::make_remote(
-            &db1,
+            &store_database(&db1),
             &store_dir,
             &crate::sync::hlc::Hlc::new("short-id-test".to_string()),
             "notes",
@@ -8060,7 +8093,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
     let (_tu, ld_upd) = temp_store_dir();
     pull_into(db_upd, &storage, &ld_upd).await;
     assert_eq!(
-        db_upd
+        store_database(db_upd)
             .materialized_frontier()
             .await
             .expect("read updater materialized frontier")
@@ -8157,9 +8190,10 @@ async fn provider_blob_download_failure_remains_typed() {
     let failing = FaultingStorage::blob(&storage.storage);
     let (_temp, store_dir) = temp_store_dir();
 
-    let failures = crate::sync::pull::download_blobs(
-        &db,
-        vec![crate::sync::pull::BlobDownload::from_row(remote).expect("build exact blob download")],
+    let failures = crate::sync::store::pull::download_blobs(
+        &store_database(&db),
+        vec![crate::sync::store::pull::BlobDownload::from_row(remote)
+            .expect("build exact blob download")],
         &failing,
         &store_dir,
     )

@@ -459,7 +459,7 @@ impl Database {
         .await
     }
 
-    pub(super) async fn read_local_store_device_registration(
+    pub(crate) async fn read_local_store_device_registration(
         &self,
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {

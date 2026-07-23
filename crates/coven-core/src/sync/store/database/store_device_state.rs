@@ -1,4 +1,13 @@
-use super::*;
+use crate::database::*;
+use crate::sync::store_commit::{
+    CommitFrontier, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceExclusionProposalId,
+    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceStateRef, StoreHistoryCut,
+    VerifiedStoreDeviceOperations,
+};
+use rusqlite::Connection;
+use std::collections::BTreeMap;
+
+use super::StoreDatabase;
 
 pub(super) fn load_store_device_genesis_state_on(
     conn: &Connection,
@@ -14,7 +23,7 @@ pub(super) fn load_store_device_genesis_state_on(
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }
 
-pub(super) fn load_store_device_snapshot_on(
+pub(crate) fn load_store_device_snapshot_on(
     conn: &Connection,
     reference: &StoreBatchCommitRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
@@ -82,7 +91,7 @@ pub(crate) fn load_declared_store_device_state_on(
     Ok(state)
 }
 
-pub(super) fn load_store_device_exclusion_freezes_on(
+pub(crate) fn load_store_device_exclusion_freezes_on(
     conn: &Connection,
     root: &crate::sync::store_commit::StoreRootRef,
 ) -> Result<BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalAck>, DbError> {
@@ -212,7 +221,8 @@ pub(crate) fn apply_store_device_exclusion_freezes_on(
                     &reference.target,
                     crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
                 );
-            let target = Database::latest_position_for_device_on(conn, &target_stream.to_string())?;
+            let target =
+                StoreDatabase::latest_position_for_device_on(conn, &target_stream.to_string())?;
             desired.push(StoreDeviceProposalAck {
                 proposal: reference.clone(),
                 target_cut: StoreHistoryCut(match target {
@@ -226,7 +236,7 @@ pub(crate) fn apply_store_device_exclusion_freezes_on(
     replace_store_device_exclusion_freezes_on(conn, &desired)
 }
 
-pub(super) fn replace_store_device_exclusion_freezes_on(
+pub(crate) fn replace_store_device_exclusion_freezes_on(
     conn: &Connection,
     desired: &[StoreDeviceProposalAck],
 ) -> Result<(), DbError> {
