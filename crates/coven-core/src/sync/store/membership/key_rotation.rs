@@ -18,7 +18,10 @@ pub(crate) fn apply_key_rotation(
             "cannot rotate the key of a plaintext cloud home".to_string(),
         ));
     };
-    if live.merged_with(&new_encryption).key_count() != live.key_count() {
+    let retained = live
+        .merged_with(&new_encryption)
+        .map_err(|error| KeyError::Crypto(error.to_string()))?;
+    if retained.key_count() != live.key_count() {
         return Err(KeyError::Crypto(
             "live keyring changed without retaining an adopted rotation".to_string(),
         ));

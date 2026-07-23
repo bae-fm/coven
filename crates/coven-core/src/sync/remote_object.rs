@@ -4050,7 +4050,7 @@ mod tests {
             uploader,
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             7,
             ObjectHash::digest(label.as_bytes()),
         )
@@ -4324,7 +4324,7 @@ mod tests {
             uploader,
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             7,
             ObjectHash::digest(b"cover-a"),
         )

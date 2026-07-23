@@ -163,7 +163,9 @@ pub(crate) async fn unwrap_store_keyring_for_refs(
             )));
         }
         merged = Some(match merged {
-            Some(existing) => existing.merged_with(&keyring),
+            Some(existing) => existing
+                .merged_with(&keyring)
+                .map_err(|error| InviteError::Crypto(format!("merge wrapped keyrings: {error}")))?,
             None => keyring,
         });
     }

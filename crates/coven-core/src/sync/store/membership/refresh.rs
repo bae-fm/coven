@@ -11,6 +11,8 @@ pub(crate) enum AuthorizationRefreshError {
     InvalidState(String),
     #[error("rotation gate database state: {0}")]
     Database(#[source] crate::database::DbError),
+    #[error("merge this device's live and selected keyrings: {0}")]
+    InvalidKeyring(#[source] crate::encryption::EncryptionError),
     #[error("adopt committed store-key rotation: {0}")]
     KeyAdoption(#[source] KeyError),
 }
@@ -60,7 +62,9 @@ impl AuthorizedStore<'_> {
         .await
         {
             Ok(new_encryption) => {
-                let merged = live_keyring.merged_with(&new_encryption);
+                let merged = live_keyring
+                    .merged_with(&new_encryption)
+                    .map_err(AuthorizationRefreshError::InvalidKeyring)?;
                 if merged.key_count() == live_keyring.key_count() {
                     if pending_rotation.gate().is_some() {
                         let gate = self

@@ -985,7 +985,7 @@ fn indexed_shared_blob(
         uploader.clone(),
         crate::blob::locator::RemoteAudience::Store,
         crate::BlobScope::Master,
-        crate::KeyFingerprint::from_bytes([17; 8]),
+        crate::KeyFingerprint::from_bytes([17; 32]),
         1,
         ObjectHash::digest(format!("plaintext excluded-author blob {label}").as_bytes()),
     )

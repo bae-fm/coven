@@ -886,7 +886,9 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
 
     let current = EncryptionService::from_key(current_key);
     let replacement = EncryptionService::from_key(replacement_key);
-    let expected = current.merged_with(&replacement);
+    let expected = current
+        .merged_with(&replacement)
+        .expect("same-generation keyrings merge");
     let (storage, owner_db) = exact_store(&owner).await;
     invite_exact_member(
         &storage,

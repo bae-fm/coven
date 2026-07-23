@@ -1556,7 +1556,7 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
                     ObjectHash::digest(b"substituted control"),
                 ),
                 package,
-                key_fingerprint: KeyFingerprint::from_bytes([7; 8]),
+                key_fingerprint: KeyFingerprint::from_bytes([7; 32]),
             },
         };
     assert!(matches!(
@@ -1584,7 +1584,7 @@ fn candidate_manifest_rejects_one_exact_object_reached_twice() {
             ObjectHash::digest(b"duplicate exact object control"),
         ),
         package,
-        key_fingerprint: KeyFingerprint::from_bytes([9; 8]),
+        key_fingerprint: KeyFingerprint::from_bytes([9; 32]),
     });
 
     assert!(matches!(

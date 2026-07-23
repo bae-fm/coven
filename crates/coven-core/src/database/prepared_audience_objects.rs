@@ -312,7 +312,7 @@ pub fn exercise_exact_outbound_blob_graph(
         uploader,
         remote_audience.clone(),
         BlobScope::Master,
-        crate::KeyFingerprint::from_bytes([3; 8]),
+        crate::KeyFingerprint::from_bytes([3; 32]),
         7,
         ObjectHash::digest(b"content"),
     )
@@ -350,7 +350,7 @@ pub fn exercise_exact_outbound_blob_graph(
                 seq: 1,
                 control_hash: ObjectHash::digest(b"circle-control"),
             },
-            crate::KeyFingerprint::from_bytes([3; 8]),
+            crate::KeyFingerprint::from_bytes([3; 32]),
             b"changeset".to_vec(),
             bindings,
         )

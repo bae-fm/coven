@@ -1016,7 +1016,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         crate::sync::audience_package::PackageAudience::Circle {
             circle_id,
             control: successor.control.coord.clone(),
-            key_fingerprint: crate::KeyFingerprint::from_bytes([0x55; 8]),
+            key_fingerprint: crate::KeyFingerprint::from_bytes([0x55; 32]),
         },
     );
     let wrong_fingerprint_error = circle_blob_opening_error(

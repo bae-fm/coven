@@ -85,6 +85,10 @@ rebuild the deleted choice.
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
   capture and incoming changesets.
+- `KeyFingerprint` is the full 32-byte SHA-256 digest in key maps, serialized
+  locators, sealed app-data headers, and encrypted cloud-object tags. Keyring
+  construction, generation append, and union reject one fingerprint naming
+  different key bytes or generations while deduplicating identical entries.
 - Host capture writes authenticated Store mirrors and complete private route
   images; pull recomputes every private routing identifier before application.
 - Audience moves publish the Store mirror and destination image without a

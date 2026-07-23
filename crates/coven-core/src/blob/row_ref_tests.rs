@@ -84,7 +84,7 @@ fn row_blob_reference_rejects_locator_facts_from_another_blob() {
     let plaintext = b"cover plaintext";
     let plaintext_size = plaintext.len() as u64;
     let plaintext_hash = ObjectHash::digest(plaintext);
-    let fingerprint = KeyFingerprint::from_bytes([7; 8]);
+    let fingerprint = KeyFingerprint::from_bytes([7; 32]);
     let authority =
         RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Circle {
             circle_id: CircleId::from_bytes([3; 16]),
@@ -174,7 +174,7 @@ fn row_blob_reference_rejects_locator_facts_from_another_blob() {
             uploader(),
             RemoteAudience::Circle(CircleId::from_bytes([3; 16])),
             row_blob.scope.clone(),
-            KeyFingerprint::from_bytes([8; 8]),
+            KeyFingerprint::from_bytes([8; 32]),
             plaintext_size,
             plaintext_hash,
         )

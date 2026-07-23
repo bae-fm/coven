@@ -27,11 +27,11 @@ use crate::sync::storage::ProtocolObjectDomain;
 use crate::sync::store_commit::ObjectHash;
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
-/// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
-/// resolves that exact key from the keyring rather than trusting a generation
-/// number a fork could reuse.
+/// sealed under: magic, then the key's full SHA-256 fingerprint. A read resolves
+/// that exact key from the keyring rather than trusting a generation number a
+/// fork could reuse.
 const KEY_TAG_MAGIC: &[u8; 4] = b"CKF1";
-const KEY_FINGERPRINT_LEN: usize = 8;
+const KEY_FINGERPRINT_LEN: usize = 32;
 const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
@@ -109,7 +109,9 @@ impl CloudCipherState {
             ));
         };
         let mut live = live.write().unwrap();
-        let merged = live.merged_with(new_encryption);
+        let merged = live
+            .merged_with(new_encryption)
+            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
         if merged.key_count() == live.key_count() {
             return Ok(None);
         }
@@ -164,7 +166,9 @@ impl CloudCipherAccess for RwLock<CloudCipher> {
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };
-        let merged = live.merged_with(new_encryption);
+        let merged = live
+            .merged_with(new_encryption)
+            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
         if merged.key_count() == live.key_count() {
             return Ok(None);
         }
@@ -2221,6 +2225,25 @@ mod tests {
         DeviceStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
         StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
     };
+
+    #[test]
+    fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
+        let encryption = EncryptionService::from_key([0xA5u8; 32]);
+        let fingerprint = encryption.seal_key_fingerprint();
+        let cipher = CloudCipher::Encrypted(encryption);
+        let plaintext = b"full fingerprint cloud object".to_vec();
+        let aad = b"full-fingerprint-test";
+
+        let stored = cipher.seal(plaintext.clone(), aad);
+
+        assert_eq!(&stored[..KEY_TAG_MAGIC.len()], KEY_TAG_MAGIC);
+        assert_eq!(
+            &stored[KEY_TAG_MAGIC.len()..KEY_TAG_LEN],
+            fingerprint.as_bytes()
+        );
+        assert_eq!(stored.len() as u64, cipher.body_len(plaintext.len() as u64));
+        assert_eq!(cipher.open(stored, aad).unwrap(), plaintext);
+    }
 
     #[test]
     fn peer_rotation_cannot_stand_in_for_the_exact_local_candidate() {

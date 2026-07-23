@@ -32,21 +32,21 @@ const AEAD_V2_LABEL: &[u8] = b"coven-aead-v2";
 pub const APP_DATA_SEAL_VERSION: u8 = 1;
 
 /// The fixed header every sealed app-data payload carries ahead of its
-/// ciphertext: the version byte, then the sealing key's 8-byte fingerprint.
-const APP_DATA_FINGERPRINT_SIZE: usize = 8;
+/// ciphertext: the version byte, then the sealing key's full SHA-256 digest.
+const APP_DATA_FINGERPRINT_SIZE: usize = 32;
 const APP_DATA_HEADER_SIZE: usize = 1 + APP_DATA_FINGERPRINT_SIZE;
 
-/// Stable wire identity of one 32-byte encryption key: the first eight bytes
-/// of its SHA-256 digest, serialized as exactly sixteen lowercase hex digits.
+/// Stable wire identity of one 32-byte encryption key: its full SHA-256 digest,
+/// serialized as exactly 64 lowercase hex digits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyFingerprint([u8; 8]);
+pub struct KeyFingerprint([u8; 32]);
 
 impl KeyFingerprint {
-    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 8] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -67,14 +67,14 @@ impl FromStr for KeyFingerprint {
     type Err = KeyFingerprintParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 16
+        if value.len() != 64
             || value
                 .bytes()
                 .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
         {
             return Err(KeyFingerprintParseError(value.to_string()));
         }
-        let bytes: [u8; 8] = hex::decode(value)
+        let bytes: [u8; 32] = hex::decode(value)
             .map_err(|_| KeyFingerprintParseError(value.to_string()))?
             .try_into()
             .map_err(|_| KeyFingerprintParseError(value.to_string()))?;
@@ -103,7 +103,7 @@ impl<'de> serde::Deserialize<'de> for KeyFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("key fingerprint must be exactly sixteen lowercase hexadecimal characters: {0:?}")]
+#[error("key fingerprint must be exactly 64 lowercase hexadecimal characters: {0:?}")]
 pub struct KeyFingerprintParseError(String);
 
 /// Generate a random 32-byte key.
@@ -239,7 +239,7 @@ struct StoredKeyringGeneration {
 /// One key a keyring holds: its 32 bytes and the generation number that orders
 /// it. The key's fingerprint (not the generation) is its identity — two entries
 /// can share a generation number without colliding.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KeyEntry {
     generation: u64,
     key: [u8; 32],
@@ -251,7 +251,7 @@ struct KeyEntry {
 /// cipher machinery.
 #[derive(Clone)]
 pub struct MasterKeyring {
-    keys: BTreeMap<[u8; 8], KeyEntry>,
+    keys: BTreeMap<KeyFingerprint, KeyEntry>,
 }
 
 impl std::fmt::Debug for MasterKeyring {
@@ -283,8 +283,7 @@ impl MasterKeyring {
     }
 
     /// SHA-256 fingerprint of the seal key (the deterministically selected
-    /// key this keyring seals new data under), first 8 bytes hex-encoded. Short
-    /// enough to display in UI, long enough to detect wrong keys.
+    /// key this keyring seals new data under), hex-encoded in full.
     pub fn fingerprint(&self) -> String {
         EncryptionService::from(self.clone()).fingerprint()
     }
@@ -302,13 +301,28 @@ impl From<MasterKeyring> for EncryptionService {
     }
 }
 
-/// The 8-byte fingerprint of a key: the first 8 bytes of its SHA-256. A keyring
-/// entry's identity, and what a sealed object names to say which key sealed it.
-fn key_fingerprint_bytes(key: &[u8; 32]) -> [u8; 8] {
-    let hash = Sha256::digest(key);
-    let mut fingerprint = [0u8; 8];
-    fingerprint.copy_from_slice(&hash[..8]);
-    fingerprint
+/// The full SHA-256 digest of a key. A keyring entry's identity, and what a
+/// sealed object names to say which key sealed it.
+fn key_fingerprint(key: &[u8; 32]) -> KeyFingerprint {
+    KeyFingerprint::from_bytes(Sha256::digest(key).into())
+}
+
+fn insert_key_entry(
+    keys: &mut BTreeMap<KeyFingerprint, KeyEntry>,
+    fingerprint: KeyFingerprint,
+    entry: KeyEntry,
+) -> Result<(), EncryptionError> {
+    match keys.get(&fingerprint) {
+        None => {
+            keys.insert(fingerprint, entry);
+            Ok(())
+        }
+        Some(existing) if existing == &entry => Ok(()),
+        Some(existing) => Err(EncryptionError::KeyManagement(format!(
+            "key fingerprint {fingerprint} identifies conflicting entries at generations {} and {}",
+            existing.generation, entry.generation,
+        ))),
+    }
 }
 
 /// Manages encryption keys and provides XChaCha20-Poly1305 encryption/decryption
@@ -325,7 +339,7 @@ pub struct EncryptionService {
     // the union of both, they all converge on one seal key. A sealed object names
     // the key it was sealed under by fingerprint, so anything sealed under any key
     // this keyring holds stays decryptable regardless of which key is current.
-    keys: BTreeMap<[u8; 8], KeyEntry>,
+    keys: BTreeMap<KeyFingerprint, KeyEntry>,
 }
 impl std::fmt::Debug for EncryptionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -348,23 +362,27 @@ impl EncryptionService {
 
     pub fn from_key_at_generation(generation: u64, key: [u8; 32]) -> Self {
         let mut keys = BTreeMap::new();
-        keys.insert(key_fingerprint_bytes(&key), KeyEntry { generation, key });
+        keys.insert(key_fingerprint(&key), KeyEntry { generation, key });
         EncryptionService { keys }
     }
 
     pub fn from_keyring(
         keys: impl IntoIterator<Item = (u64, [u8; 32])>,
     ) -> Result<Self, EncryptionError> {
-        let keys: BTreeMap<[u8; 8], KeyEntry> = keys
-            .into_iter()
-            .map(|(generation, key)| (key_fingerprint_bytes(&key), KeyEntry { generation, key }))
-            .collect();
-        if keys.is_empty() {
+        let mut keyring = BTreeMap::new();
+        for (generation, key) in keys {
+            insert_key_entry(
+                &mut keyring,
+                key_fingerprint(&key),
+                KeyEntry { generation, key },
+            )?;
+        }
+        if keyring.is_empty() {
             return Err(EncryptionError::KeyManagement(
                 "keyring has no keys".to_string(),
             ));
         }
-        Ok(EncryptionService { keys })
+        Ok(EncryptionService { keys: keyring })
     }
 
     /// The keyring entry this device seals new data under, chosen
@@ -372,7 +390,7 @@ impl EncryptionService {
     /// keys sharing that generation, the greatest fingerprint. Once the wraps of
     /// a fork propagate so every device holds both keys, they all pick the same
     /// one here — a fork converges instead of partitioning.
-    fn seal_entry(&self) -> (&[u8; 8], &KeyEntry) {
+    fn seal_entry(&self) -> (&KeyFingerprint, &KeyEntry) {
         self.keys
             .iter()
             .max_by(|(fingerprint_a, a), (fingerprint_b, b)| {
@@ -400,16 +418,18 @@ impl EncryptionService {
             .collect()
     }
 
-    /// Union this keyring with `other`: every key either holds. A key already
-    /// present (same fingerprint) keeps its existing entry, so a merge never
-    /// drops a key already adopted and never rewrites one. This is how adoption
-    /// folds an incoming keyring in — keyrings merge, they never replace.
-    pub fn merged_with(&self, other: &EncryptionService) -> EncryptionService {
+    /// Union this keyring with `other`: every distinct key either holds.
+    /// Identical entries deduplicate. The same fingerprint naming different key
+    /// bytes or generations is invalid rather than silently choosing one entry.
+    pub fn merged_with(
+        &self,
+        other: &EncryptionService,
+    ) -> Result<EncryptionService, EncryptionError> {
         let mut keys = self.keys.clone();
         for (fingerprint, entry) in &other.keys {
-            keys.entry(*fingerprint).or_insert_with(|| entry.clone());
+            insert_key_entry(&mut keys, *fingerprint, entry.clone())?;
         }
-        EncryptionService { keys }
+        Ok(EncryptionService { keys })
     }
 
     pub fn to_keyring_string(&self) -> Result<String, EncryptionError> {
@@ -460,18 +480,16 @@ impl EncryptionService {
     /// The key with fingerprint `fingerprint`, if this keyring holds it. A sealed
     /// object names its sealing key this way, so decryption resolves the key by
     /// identity rather than by a generation number that a fork could reuse.
-    pub fn key_for_fingerprint(&self, fingerprint: &[u8; 8]) -> Result<[u8; 32], EncryptionError> {
-        self.keys.get(fingerprint).map(|e| e.key).ok_or_else(|| {
-            EncryptionError::KeyManagement(format!(
-                "no key with fingerprint {}",
-                hex::encode(fingerprint)
-            ))
+    pub fn key_for_fingerprint(&self, fingerprint: &[u8; 32]) -> Result<[u8; 32], EncryptionError> {
+        let fingerprint = KeyFingerprint::from_bytes(*fingerprint);
+        self.keys.get(&fingerprint).map(|e| e.key).ok_or_else(|| {
+            EncryptionError::KeyManagement(format!("no key with fingerprint {fingerprint}"))
         })
     }
 
     pub fn service_for_fingerprint(
         &self,
-        fingerprint: &[u8; 8],
+        fingerprint: &[u8; 32],
     ) -> Result<EncryptionService, EncryptionError> {
         let key = self.key_for_fingerprint(fingerprint)?;
         // The single-key service keeps the source key's generation so its own
@@ -479,7 +497,7 @@ impl EncryptionService {
         // it came from.
         let generation = self
             .keys
-            .get(fingerprint)
+            .get(&KeyFingerprint::from_bytes(*fingerprint))
             .expect("just resolved")
             .generation;
         Ok(EncryptionService::from_key_at_generation(generation, key))
@@ -497,20 +515,23 @@ impl EncryptionService {
             )));
         }
         let mut keys = self.keys.clone();
-        keys.insert(key_fingerprint_bytes(&key), KeyEntry { generation, key });
+        insert_key_entry(
+            &mut keys,
+            key_fingerprint(&key),
+            KeyEntry { generation, key },
+        )?;
         Ok(EncryptionService { keys })
     }
 
-    /// SHA-256 fingerprint of the seal key, first 8 bytes hex-encoded (16 hex
-    /// chars). Short enough to display in UI, long enough to detect wrong keys.
+    /// Full SHA-256 fingerprint of the seal key, hex-encoded.
     pub fn fingerprint(&self) -> String {
         hex::encode(self.seal_fingerprint())
     }
 
-    /// The seal key's 8-byte fingerprint — what a sealed object records so a
-    /// later read resolves the exact key, whatever the keyring has become since.
-    pub fn seal_fingerprint(&self) -> [u8; 8] {
-        *self.seal_entry().0
+    /// The seal key's full SHA-256 fingerprint — what a sealed object records
+    /// so a later read resolves the exact key, whatever the keyring has become.
+    pub fn seal_fingerprint(&self) -> [u8; 32] {
+        *self.seal_entry().0.as_bytes()
     }
 
     pub fn seal_key_fingerprint(&self) -> KeyFingerprint {
@@ -731,13 +752,13 @@ impl EncryptionService {
 
     pub fn derive_scoped_for_fingerprint(
         &self,
-        fingerprint: &[u8; 8],
+        fingerprint: &[u8; 32],
         scope_id: &str,
     ) -> Result<EncryptionService, EncryptionError> {
         let key = self.key_for_fingerprint(fingerprint)?;
         let generation = self
             .keys
-            .get(fingerprint)
+            .get(&KeyFingerprint::from_bytes(*fingerprint))
             .expect("just resolved")
             .generation;
         let derived = derive_key_from(&key, &format!("coven-scope-v1:{scope_id}"));
@@ -764,8 +785,8 @@ impl EncryptionService {
     ///
     /// ```text
     /// [0]     version = APP_DATA_SEAL_VERSION
-    /// [1..9]  the seal key's 8-byte fingerprint
-    /// [9..]   the chunked ciphertext `encrypt` produces under that key
+    /// [1..33] the seal key's full SHA-256 fingerprint
+    /// [33..]  the chunked ciphertext `encrypt` produces under that key
     /// ```
     ///
     /// Naming the key by fingerprint is what keeps the payload openable across
@@ -809,7 +830,7 @@ impl EncryptionService {
 /// A payload too short to hold the fixed header cannot name a version or a
 /// fingerprint, so it is a corrupt envelope — reported as a decryption failure
 /// rather than guessed at or padded.
-fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 8], &[u8]), SealError> {
+fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 32], &[u8]), SealError> {
     let (&version, rest) = sealed.split_first().ok_or_else(|| {
         SealError::Crypto(EncryptionError::Decryption(
             "sealed app-data payload is empty".to_string(),
@@ -824,7 +845,7 @@ fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 8], &[u8]), SealError> {
         )));
     }
     let (fingerprint, ciphertext) = rest.split_at(APP_DATA_FINGERPRINT_SIZE);
-    let fingerprint: [u8; 8] = fingerprint
+    let fingerprint: [u8; 32] = fingerprint
         .try_into()
         .expect("split_at yields exactly APP_DATA_FINGERPRINT_SIZE bytes");
     Ok((fingerprint, ciphertext))
@@ -1491,6 +1512,17 @@ mod tests {
     }
 
     #[test]
+    fn key_fingerprint_is_the_full_sha256_digest() {
+        let fingerprint = create_test_service().seal_key_fingerprint();
+        let expected: [u8; 32] = Sha256::digest(test_key()).into();
+
+        assert_eq!(fingerprint.as_bytes().as_slice(), expected.as_slice());
+        assert_eq!(fingerprint.to_string(), hex::encode(expected));
+        assert_eq!(fingerprint.to_string().len(), 64);
+        assert!("630dcd2966c43366".parse::<KeyFingerprint>().is_err());
+    }
+
+    #[test]
     fn derive_scoped_deterministic() {
         let service = create_test_service();
         let derived1 = service.derive_scoped("rel-123");
@@ -1593,8 +1625,8 @@ mod tests {
         let fork_a = base.with_appended_generation(2, [0xA0u8; 32]).unwrap();
         let fork_b = base.with_appended_generation(2, [0xB0u8; 32]).unwrap();
 
-        let a_then_b = fork_a.merged_with(&fork_b);
-        let b_then_a = fork_b.merged_with(&fork_a);
+        let a_then_b = fork_a.merged_with(&fork_b).unwrap();
+        let b_then_a = fork_b.merged_with(&fork_a).unwrap();
         assert_eq!(
             a_then_b.fingerprint(),
             b_then_a.fingerprint(),
@@ -1620,6 +1652,49 @@ mod tests {
     }
 
     #[test]
+    fn keyring_construction_rejects_one_key_at_conflicting_generations() {
+        let key = [0x44u8; 32];
+
+        assert!(EncryptionService::from_keyring([(1, key), (2, key)]).is_err());
+    }
+
+    #[test]
+    fn appending_a_generation_rejects_an_existing_key_fingerprint() {
+        let key = [0x55u8; 32];
+        let keyring = EncryptionService::from_key_at_generation(1, key);
+
+        assert!(keyring.with_appended_generation(2, key).is_err());
+    }
+
+    #[test]
+    fn merging_rejects_one_key_at_conflicting_generations() {
+        let key = [0x66u8; 32];
+        let generation_one = EncryptionService::from_key_at_generation(1, key);
+        let generation_two = EncryptionService::from_key_at_generation(2, key);
+
+        assert!(generation_one.merged_with(&generation_two).is_err());
+    }
+
+    #[test]
+    fn identical_duplicate_keyring_entries_are_deduplicated() {
+        let key = [0x77u8; 32];
+        let keyring =
+            EncryptionService::from_keyring([(1, key), (1, key)]).expect("identical entries");
+
+        assert_eq!(keyring.key_count(), 1);
+    }
+
+    #[test]
+    fn merging_identical_keyring_entries_deduplicates_them() {
+        let key = [0x88u8; 32];
+        let left = EncryptionService::from_key_at_generation(1, key);
+        let right = EncryptionService::from_key_at_generation(1, key);
+        let merged = left.merged_with(&right).expect("identical entries");
+
+        assert_eq!(merged.key_count(), 1);
+    }
+
+    #[test]
     fn master_keyring_debug_redacts_keys() {
         let keyring = MasterKeyring::generate();
         let debug = format!("{keyring:?}");
@@ -1632,13 +1707,13 @@ mod tests {
 
     /// What the pinned v1 fixture wraps: this payload sealed under [`test_key`]
     /// with this `aad`. The bytes are
-    /// `[01][63 0d cd 29 66 c4 33 66][24-byte nonce][ciphertext ++ tag]` — the
-    /// version, [`test_key`]'s 8-byte fingerprint, then the chunked ciphertext.
+    /// `[01][32-byte SHA-256 digest][24-byte nonce][ciphertext ++ tag]` — the
+    /// version, [`test_key`]'s full fingerprint, then the chunked ciphertext.
     const APP_DATA_V1_FIXTURE_PLAINTEXT: &[u8] = b"pinned app-data payload";
     const APP_DATA_V1_FIXTURE_AAD: &[u8] = b"pinned-app-data-context";
     const APP_DATA_V1_FIXTURE_HEX: &str = concat!(
         "01",
-        "630dcd2966c43366",
+        "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
         "2bdfe10d13cb397b648c2eb352bbadd92a19eafd8499b5c5",
         "b0d1e8eb56f757621ec41a78488c937427aac5df38b5e8af",
         "2b2b8c9155ead15242e0c87b00bbe8",
@@ -1647,8 +1722,8 @@ mod tests {
     /// The key fingerprint a sealed payload names, read straight out of its
     /// header — so the tests below assert the recorded key rather than trusting
     /// `open_app_data` to have picked the right one silently.
-    fn sealed_fingerprint(sealed: &[u8]) -> [u8; 8] {
-        sealed[1..9].try_into().expect("a sealed header")
+    fn sealed_fingerprint(sealed: &[u8]) -> [u8; 32] {
+        sealed[1..33].try_into().expect("a sealed header")
     }
 
     #[test]
@@ -1670,6 +1745,21 @@ mod tests {
             );
             assert_eq!(service.open_app_data(&sealed, TEST_AAD).unwrap(), payload);
         }
+    }
+
+    #[test]
+    fn sealed_app_data_header_carries_the_full_key_digest() {
+        let service = create_test_service();
+        let plaintext = b"full fingerprint header";
+        let sealed = service.seal_app_data(plaintext, TEST_AAD);
+        let expected: [u8; 32] = Sha256::digest(test_key()).into();
+
+        assert_eq!(&sealed[1..33], expected.as_slice());
+        assert_eq!(
+            sealed.len(),
+            33 + chunked_encrypted_len(plaintext.len() as u64) as usize
+        );
+        assert_eq!(service.open_app_data(&sealed, TEST_AAD).unwrap(), plaintext);
     }
 
     /// `aad` binds a payload to its context. Opening with a different one must

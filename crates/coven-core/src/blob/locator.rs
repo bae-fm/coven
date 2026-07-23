@@ -442,7 +442,7 @@ mod tests {
             uploader,
             RemoteAudience::Circle(CircleId::from_bytes([3; 16])),
             BlobScope::Derived("release-a".to_string()),
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             27,
             hash(b"cover"),
         )
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(locator.to_bytes()).unwrap(),
             format!(
-                "{{\"protection\":\"opaque\",\"namespace\":\"covers\",\"blob_id\":\"a1b2-blob\",\"uploader\":{uploader_json},\"audience\":{{\"circle\":\"{}\"}},\"scope\":{{\"Derived\":\"release-a\"}},\"key_fingerprint\":\"0404040404040404\",\"plaintext_size\":27,\"plaintext_hash\":\"{}\"}}",
+                "{{\"protection\":\"opaque\",\"namespace\":\"covers\",\"blob_id\":\"a1b2-blob\",\"uploader\":{uploader_json},\"audience\":{{\"circle\":\"{}\"}},\"scope\":{{\"Derived\":\"release-a\"}},\"key_fingerprint\":\"0404040404040404040404040404040404040404040404040404040404040404\",\"plaintext_size\":27,\"plaintext_hash\":\"{}\"}}",
                 CircleId::from_bytes([3; 16]),
                 hash(b"cover"),
             )
@@ -493,7 +493,7 @@ mod tests {
             uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             4,
             hash(b"body"),
         )
@@ -525,7 +525,7 @@ mod tests {
                 uploader(),
                 RemoteAudience::Store,
                 BlobScope::Master,
-                KeyFingerprint::from_bytes([4; 8]),
+                KeyFingerprint::from_bytes([4; 32]),
                 1,
                 hash(b"x"),
             ),
@@ -572,7 +572,7 @@ mod tests {
             uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             1,
             hash(b"x"),
         )
@@ -593,7 +593,7 @@ mod tests {
             uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             1,
             hash(b"x"),
         )
@@ -645,7 +645,7 @@ mod tests {
             uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
-            KeyFingerprint::from_bytes([4; 8]),
+            KeyFingerprint::from_bytes([4; 32]),
             1,
             hash(b"x"),
         )
