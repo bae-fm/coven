@@ -52,6 +52,7 @@ struct CanonicalTable {
     name: String,
     row_identity: CanonicalRowIdentity,
     role: CanonicalRole,
+    audience_parent_column: Option<String>,
     asset: bool,
     blob: Option<CanonicalBlob>,
     required_columns: Vec<CanonicalColumn>,
@@ -279,6 +280,9 @@ fn canonical_table(
     if let Some(column) = declaration.audience_column() {
         required_names.insert(column.to_string());
     }
+    if let Some(column) = declaration.audience_parent_column() {
+        required_names.insert(column.to_string());
+    }
     if let Some(blob) = declaration.blob() {
         required_names.insert(blob.id_column.clone());
         required_names.insert(blob.size_column.clone());
@@ -303,6 +307,7 @@ fn canonical_table(
             RowIdentity::SharedKey => CanonicalRowIdentity::SharedKey,
         },
         role,
+        audience_parent_column: declaration.audience_parent_column().map(str::to_string),
         asset: declaration.is_asset(),
         blob,
         required_columns,
@@ -535,7 +540,8 @@ mod tests {
 
     fn declarations() -> Vec<SyncedTable> {
         vec![
-            SyncedTable::new("children", RowIdentity::IndependentUuid),
+            SyncedTable::new("children", RowIdentity::IndependentUuid)
+                .inherits_audience_through("parent_id"),
             SyncedTable::new("parents", RowIdentity::IndependentUuid).scoped_by("audience"),
         ]
     }
@@ -560,7 +566,8 @@ mod tests {
         );
 
         let changed = vec![
-            SyncedTable::new("children", RowIdentity::SharedKey),
+            SyncedTable::new("children", RowIdentity::SharedKey)
+                .inherits_audience_through("parent_id"),
             declarations[1].clone(),
         ];
         assert_ne!(

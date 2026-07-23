@@ -241,6 +241,7 @@ pub struct SyncedTable {
     name: String,
     row_identity: RowIdentity,
     role: GateRole,
+    audience_parent_column: Option<String>,
     blob: Option<BlobDecl>,
     /// Whether this table is an asset of its FK subject: it rides the subject's
     /// gate as an inherited child but is excluded from the subject's
@@ -279,6 +280,7 @@ impl SyncedTable {
             name: name.into(),
             row_identity,
             role: GateRole::Plain,
+            audience_parent_column: None,
             blob: None,
             asset: false,
         }
@@ -299,6 +301,15 @@ impl SyncedTable {
         self.role = GateRole::ScopedRoot {
             audience_column: column.into(),
         };
+        self
+    }
+
+    /// Make this plain table inherit its audience through the foreign key whose
+    /// child column is `column`. Every descendant of an audience root must
+    /// select this relationship explicitly; coven never guesses among the
+    /// table's foreign keys.
+    pub fn inherits_audience_through(mut self, column: impl Into<String>) -> Self {
+        self.audience_parent_column = Some(column.into());
         self
     }
 
@@ -377,6 +388,11 @@ impl SyncedTable {
     /// The complete sync role included in the signed routing contract.
     pub fn gate_role(&self) -> &GateRole {
         &self.role
+    }
+
+    /// The child foreign-key column that selects this table's audience parent.
+    pub fn audience_parent_column(&self) -> Option<&str> {
+        self.audience_parent_column.as_deref()
     }
 
     /// Whether this is a remote root: rows sync unconditionally, and blob

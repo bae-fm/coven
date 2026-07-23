@@ -467,6 +467,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         &peer_pull_dir,
         &membership,
         Some(&signer),
+        None,
     )
     .await
     .expect("materialize pre-exclusion snapshot coverage on peer");
@@ -1085,6 +1086,7 @@ async fn materialize_surviving_owner_commit(
             .as_ref()
             .expect("opened peer Store has membership"),
         None,
+        None,
     ))
     .await
     .expect("materialize surviving owner commit on excluded peer");
@@ -1145,6 +1147,7 @@ async fn assert_terminal_merge_transaction_rollback(
             .chain
             .as_ref()
             .expect("opened Store has membership"),
+        None,
         None,
     ))
     .await
@@ -1436,6 +1439,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 .chain
                 .as_ref()
                 .expect("opened Store has membership"),
+            None,
             None,
         ))
         .await
@@ -2525,6 +2529,7 @@ async fn pull_peer_exclusion(
             .chain
             .as_ref()
             .expect("opened Store has membership"),
+        None,
         None,
     ))
     .await

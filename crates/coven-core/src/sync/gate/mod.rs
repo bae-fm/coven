@@ -71,8 +71,9 @@ mod outbound;
 
 pub(crate) use audience::{
     active_circle_control, capture_routing_changes, filter_inbound_circle_changeset,
-    is_routing_table, live_row_audience, partition_outbound, prune_ineligible_scoped_rows,
-    AudiencePartition, CirclePartitionControl, RoutingChanges,
+    is_routing_table, live_row_audience, normalize_inbound_private_routes, partition_outbound,
+    prune_ineligible_scoped_rows, validate_scoped_foreign_key_audiences, AudiencePartition,
+    CirclePartitionControl, RoutingChanges,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;
@@ -153,6 +154,14 @@ pub enum GateError {
         table: String,
         parent: String,
     },
+    MissingAudienceParentDeclaration {
+        table: String,
+    },
+    InvalidAudienceParentDeclaration {
+        table: String,
+        column: String,
+        reason: String,
+    },
     ScopedOutboundRequiresPartitioning {
         table: String,
     },
@@ -216,6 +225,18 @@ impl std::fmt::Display for GateError {
             GateError::CompositeGateForeignKey { table, parent } => write!(
                 f,
                 "table {table} inherits its gate through a composite foreign key to {parent}, but gate inheritance requires one child column"
+            ),
+            GateError::MissingAudienceParentDeclaration { table } => write!(
+                f,
+                "scoped descendant table {table} must declare its audience-parent foreign key"
+            ),
+            GateError::InvalidAudienceParentDeclaration {
+                table,
+                column,
+                reason,
+            } => write!(
+                f,
+                "table {table} cannot inherit its audience through {column}: {reason}"
             ),
             GateError::ScopedOutboundRequiresPartitioning { table } => write!(
                 f,
@@ -316,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_root_and_descendant_build_one_inheritance_graph() {
+    fn scoped_descendant_requires_a_declared_audience_parent() {
         let c = conn();
         exec(
             &c,
@@ -337,8 +358,28 @@ mod tests {
             SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
         ];
 
-        let gates = Gates::from_tables(&c, &tables).expect("build audience inheritance graph");
+        let error = match Gates::from_tables(&c, &tables) {
+            Ok(_) => panic!("a scoped descendant must select its audience-parent foreign key"),
+            Err(error) => error,
+        };
 
+        assert!(
+            error
+                .to_string()
+                .contains("must declare its audience-parent foreign key"),
+            "{error}"
+        );
+
+        let gates = Gates::from_tables(
+            &c,
+            &[
+                SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
+                    .scoped_by("audience"),
+                SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey)
+                    .inherits_audience_through("note_id"),
+            ],
+        )
+        .expect("build explicitly declared audience inheritance");
         assert!(gates.tables.contains_key("notes"));
         assert!(gates.tables.contains_key("note_tags"));
     }

@@ -189,6 +189,7 @@ impl AuthorizedStore<'_> {
         &self,
         store_dir: &StoreDir,
         identity: &UserKeypair,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
         pull_store_commits(
             self.database(),
@@ -198,6 +199,7 @@ impl AuthorizedStore<'_> {
             store_dir,
             self.membership(),
             Some(identity),
+            routing_encryption,
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))
@@ -218,11 +220,26 @@ pub fn pull_store_commits<'a>(
     store_dir: &'a StoreDir,
     membership: &'a crate::sync::membership::MembershipChain,
     identity: Option<&'a UserKeypair>,
+    routing_encryption: Option<&'a crate::encryption::EncryptionService>,
 ) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
         let db = database.sqlite();
         let root = required_pull_root(database, store_root_hash).await?;
         let verified_root = load_store_protocol_root(storage, &root).await?.value;
+        let routing_key = if db.gates().has_scoped_graph() {
+            let encryption = routing_encryption.ok_or_else(|| {
+                StorePullError::Database(
+                    "scoped Store pull requires row-routing encryption".to_string(),
+                )
+            })?;
+            Some(
+                crate::sync::circle::derive_row_routing_key(encryption, store_root_hash).map_err(
+                    |error| StorePullError::Database(format!("derive row routing key: {error}")),
+                )?,
+            )
+        } else {
+            None
+        };
         resume_merge_retraction_cleanups(database, storage, &root).await?;
 
         let local_frontier = database.materialized_frontier().await.map_err(|error| {
@@ -572,6 +589,7 @@ pub fn pull_store_commits<'a>(
                             &candidate,
                             &loaded_predecessor_memberships,
                             identity,
+                            routing_key.as_ref(),
                         ))
                         .await?
                         {

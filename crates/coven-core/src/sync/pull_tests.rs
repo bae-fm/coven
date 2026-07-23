@@ -517,6 +517,7 @@ async fn pull_exact_store_into(
     let membership = crate::sync::store::load_cycle_membership(storage, &destination_store)
         .await
         .expect("load exact Store membership");
+    let routing_encryption = EncryptionService::from_key([42; 32]);
     let result = crate::sync::store::pull_store_commits(
         &store_database(destination),
         destination.synced_tables(),
@@ -528,6 +529,7 @@ async fn pull_exact_store_into(
             .as_ref()
             .expect("opened Store has membership"),
         None,
+        Some(&routing_encryption),
     )
     .await
     .expect("pull exact Store commits");
@@ -3928,6 +3930,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         &ld,
         &membership,
         None,
+        None,
     )
     .await
     .expect_err("lazy blob verification failure rejects the Store commit");
@@ -3966,7 +3969,8 @@ fn open_scoped_circle_test_db() -> crate::database::Database {
             SyncedTable::new(
                 "comments",
                 crate::sync::session::RowIdentity::IndependentUuid,
-            ),
+            )
+            .inherits_audience_through("note_id"),
         ],
         vec![crate::migration::Migration::sql(
             1,
@@ -4048,6 +4052,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
         .expect("open scoped target Store");
     let (_target_temp, target_dir) = temp_store_dir();
+    let routing_encryption = EncryptionService::from_key([42; 32]);
     let result = crate::sync::store::pull_store_commits(
         &store_database(&target),
         target.synced_tables(),
@@ -4056,6 +4061,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         &target_dir,
         &target_membership,
         Some(&owner),
+        Some(&routing_encryption),
     )
     .await
     .expect("pull Circle-scoped rows");
@@ -4111,6 +4117,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
 #[tokio::test]
 async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_successor() {
     let owner = UserKeypair::generate();
+    let routing_encryption = EncryptionService::from_key([42; 32]);
     let observer = open_scoped_circle_test_db();
     let storage = TestStore::create(&observer, "circle-activation-order", owner.clone())
         .await
@@ -4175,6 +4182,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         &successor_dir,
         &successor_membership,
         Some(&owner),
+        Some(&routing_encryption),
     )
     .await
     .expect("pull Circle activation before authoring successor");
@@ -4210,6 +4218,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         &receiver_dir,
         &receiver_membership,
         Some(&owner),
+        Some(&routing_encryption),
     )
     .await
     .expect("pull Circle activation and successor in one pass");
@@ -6560,6 +6569,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
             .as_ref()
             .expect("opened Store has membership"),
         None,
+        None,
     )
     .await
     .expect("pull with an empty mid-cycle membership LIST");
@@ -7635,6 +7645,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         storage.root.store_root_hash,
         &temp_store_dir().1,
         &loaded,
+        None,
         None,
     )
     .await

@@ -197,7 +197,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("authorize Store pull");
     let pull = authorized_store
-        .pull(&store_dir, &signer)
+        .pull(&store_dir, &signer, None)
         .await
         .expect("pull reports the invented access commit as held");
     assert!(pull.held_positions.iter().any(|held| {

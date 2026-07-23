@@ -417,7 +417,9 @@ async fn run_single_sync_cycle_with_authorization(
         CycleBeforePull::Continue(prepared) => prepared,
         CycleBeforePull::Complete(result) => return Ok(result),
     };
-    let store_pull = authorization.pull(store_dir, user_keypair).await?;
+    let store_pull = authorization
+        .pull(store_dir, user_keypair, routing_encryption)
+        .await?;
     let post_pull = authorization.after_pull().await?;
     let completed = Box::pin(complete_cycle_after_pull(
         device_id,

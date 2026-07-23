@@ -11,7 +11,9 @@ use tracing::warn;
 
 use super::outbound::{query_column_text, resolve_root};
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::{foreign_key_edges, quote_ident, ForeignKeyEdge, SyncedTable};
+use crate::sync::session::{
+    foreign_key_edges, quote_ident, ForeignKeyEdge, RowIdentity, SyncedTable,
+};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {
@@ -55,6 +57,7 @@ pub(super) struct GateColumn {
 pub struct Gates {
     pub(super) tables: HashMap<String, TableGate>,
     synced_tables: HashSet<String>,
+    row_identities: HashMap<String, RowIdentity>,
 }
 
 #[cfg(test)]
@@ -98,6 +101,10 @@ impl Gates {
         self.synced_tables.contains(table)
     }
 
+    pub(super) fn row_identity(&self, table: &str) -> Option<RowIdentity> {
+        self.row_identities.get(table).copied()
+    }
+
     /// Build the gate model from the declared [`SyncedTable`]s and the live
     /// schema (`PRAGMA table_info` for gate-column indices, `PRAGMA
     /// foreign_key_list` for FK edges).
@@ -132,6 +139,29 @@ impl Gates {
         // are built below, once every plain table's downward parent is known, so
         // an ancestor is inserted already complete — never empty-then-filled.
         for t in tables {
+            let has_scoped_ancestor =
+                reaches_scoped_root(conn, t.name(), tables, &mut HashSet::new())?;
+            if let Some(column) = t.audience_parent_column().filter(|_| {
+                t.is_gated_by_descendants()
+                    || t.is_remote_root()
+                    || t.gate_column().is_some()
+                    || t.audience_column().is_some()
+            }) {
+                return Err(GateError::InvalidAudienceParentDeclaration {
+                    table: t.name().to_string(),
+                    column: column.to_string(),
+                    reason: "only a plain descendant table may select an audience parent"
+                        .to_string(),
+                });
+            }
+            if has_scoped_ancestor
+                && t.audience_column().is_none()
+                && t.audience_parent_column().is_none()
+            {
+                return Err(GateError::MissingAudienceParentDeclaration {
+                    table: t.name().to_string(),
+                });
+            }
             if t.is_gated_by_descendants() {
                 continue;
             }
@@ -159,9 +189,12 @@ impl Gates {
             // parent. Inheritance flows ONLY through declared FKs, toward synced
             // parents, and (for a multi-FK join row) toward the gated side, never
             // up an ancestor back-edge.
-            if let Some((fk_name, parent, parent_name)) =
+            let selected_parent = if let Some(column) = t.audience_parent_column() {
+                Some(select_audience_parent_fk(conn, t.name(), column, tables)?)
+            } else {
                 select_parent_fk(conn, t.name(), tables, &ancestors)?
-            {
+            };
+            if let Some((fk_name, parent, parent_name)) = selected_parent {
                 let fk_col = fk_column(&cols, t.name(), &fk_name)?;
                 let parent_cols = super::gate_table_columns(conn, &parent)?;
                 let parent_col = fk_column(&parent_cols, &parent, &parent_name)?;
@@ -175,6 +208,20 @@ impl Gates {
                 );
             }
             // else: ungated, unconditionally shared — not in the map.
+        }
+
+        for (table, column) in tables
+            .iter()
+            .filter_map(|table| table.audience_parent_column().map(|column| (table, column)))
+        {
+            if !gate_reaches_scoped_root(&gate_map, table.name()) {
+                return Err(GateError::InvalidAudienceParentDeclaration {
+                    table: table.name().to_string(),
+                    column: column.to_string(),
+                    reason: "the selected foreign-key chain does not end at an audience root"
+                        .to_string(),
+                });
+            }
         }
 
         // Children are filled once all downward parents are known. A keep-child
@@ -244,6 +291,10 @@ impl Gates {
             synced_tables: tables
                 .iter()
                 .map(|table| table.name().to_string())
+                .collect(),
+            row_identities: tables
+                .iter()
+                .map(|table| (table.name().to_string(), table.row_identity()))
                 .collect(),
         })
     }
@@ -893,6 +944,102 @@ fn select_parent_fk(
         edge.parent_table,
         column.parent.clone(),
     )))
+}
+
+fn select_audience_parent_fk(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    tables: &[SyncedTable],
+) -> Result<(String, String, String), GateError> {
+    let synced: HashSet<&str> = tables.iter().map(|table| table.name()).collect();
+    let mut matches = foreign_key_edges(conn, table)
+        .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+        .into_iter()
+        .filter(|edge| {
+            edge.columns
+                .iter()
+                .any(|candidate| candidate.child == column)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(GateError::InvalidAudienceParentDeclaration {
+            table: table.to_string(),
+            column: column.to_string(),
+            reason: match matches.len() {
+                0 => "no foreign key uses that child column".to_string(),
+                count => format!("{count} foreign keys use that child column"),
+            },
+        });
+    }
+    let edge = matches.remove(0);
+    if !synced.contains(edge.parent_table.as_str()) {
+        return Err(GateError::InvalidAudienceParentDeclaration {
+            table: table.to_string(),
+            column: column.to_string(),
+            reason: format!(
+                "its foreign key targets undeclared table {}",
+                edge.parent_table
+            ),
+        });
+    }
+    let [foreign_key_column] = edge.columns.as_slice() else {
+        return Err(GateError::CompositeGateForeignKey {
+            table: table.to_string(),
+            parent: edge.parent_table,
+        });
+    };
+    Ok((
+        foreign_key_column.child.clone(),
+        edge.parent_table,
+        foreign_key_column.parent.clone(),
+    ))
+}
+
+fn reaches_scoped_root(
+    conn: &Connection,
+    table: &str,
+    tables: &[SyncedTable],
+    visiting: &mut HashSet<String>,
+) -> Result<bool, GateError> {
+    if !visiting.insert(table.to_string()) {
+        return Ok(false);
+    }
+    let synced = tables
+        .iter()
+        .map(|declaration| (declaration.name(), declaration))
+        .collect::<HashMap<_, _>>();
+    let mut reaches = false;
+    for edge in foreign_key_edges(conn, table)
+        .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+    {
+        let Some(parent) = synced.get(edge.parent_table.as_str()) else {
+            continue;
+        };
+        if parent.audience_column().is_some()
+            || reaches_scoped_root(conn, parent.name(), tables, visiting)?
+        {
+            reaches = true;
+            break;
+        }
+    }
+    visiting.remove(table);
+    Ok(reaches)
+}
+
+fn gate_reaches_scoped_root(gates: &HashMap<String, TableGate>, table: &str) -> bool {
+    let mut current = table;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(current.to_string()) {
+            return false;
+        }
+        match gates.get(current) {
+            Some(TableGate::ScopedRoot { .. }) => return true,
+            Some(TableGate::Child { parent, .. }) => current = parent,
+            _ => return false,
+        }
+    }
 }
 
 /// Whether `parent`'s own gate eventually reaches a locality root downward, so a

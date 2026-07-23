@@ -89,6 +89,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
             .as_ref()
             .expect("opened Store has membership"),
         Some(&second_owner),
+        None,
     )
     .await
     .expect("pull second Owner through the first promotion");

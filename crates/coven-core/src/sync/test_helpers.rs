@@ -1495,6 +1495,7 @@ pub fn install_active_device_fixture<'a>(
         );
         let membership = Box::pin(store.open_into(local_db)).await?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
+        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
         let bootstrap_pull = Box::pin(crate::sync::store::pull_store_commits(
             &crate::sync::store::StoreDatabase::new(local_db),
             local_db.synced_tables(),
@@ -1503,6 +1504,7 @@ pub fn install_active_device_fixture<'a>(
             &bootstrap_store_dir,
             &membership,
             Some(identity),
+            Some(&routing_encryption),
         ))
         .await
         .map_err(|error| error.to_string())?;
@@ -1601,7 +1603,7 @@ pub async fn promote_active_member_fixture(
         .authorize()
         .await
         .map_err(|error| error.to_string())?
-        .pull(&store_dir, member)
+        .pull(&store_dir, member, None)
         .await
         .map_err(|error| error.to_string())?;
     if !pull.held_positions.is_empty() {
@@ -2334,6 +2336,7 @@ pub async fn pull_into_result(
             crate::sync::store::StorePullMembershipError::Message(error),
         )
     })?);
+    let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
     let result = Box::pin(crate::sync::store::pull_store_commits(
         &crate::sync::store::StoreDatabase::new(db),
         db.synced_tables(),
@@ -2342,6 +2345,7 @@ pub async fn pull_into_result(
         store_dir,
         &membership,
         None,
+        Some(&routing_encryption),
     ))
     .await?;
     let sequences = result

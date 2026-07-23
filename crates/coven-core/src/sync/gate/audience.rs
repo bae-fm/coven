@@ -54,17 +54,17 @@ impl CirclePartitionControl {
 }
 
 pub(crate) struct RoutingChanges {
-    changeset: Vec<u8>,
+    store_mirror: Vec<u8>,
+    private_routes: BTreeMap<Audience, Vec<u8>>,
     deleted_rows: BTreeMap<(String, String), Audience>,
-    deleted_routes: BTreeMap<String, Audience>,
 }
 
 impl RoutingChanges {
     pub(crate) fn empty() -> Self {
         Self {
-            changeset: Vec::new(),
+            store_mirror: Vec::new(),
+            private_routes: BTreeMap::new(),
             deleted_rows: BTreeMap::new(),
-            deleted_routes: BTreeMap::new(),
         }
     }
 }
@@ -88,8 +88,9 @@ pub(crate) fn filter_inbound_circle_changeset(
     changeset: &[u8],
     circle_id: CircleId,
     gates: &Gates,
+    routing_key: &RowRoutingKey,
 ) -> Result<Vec<u8>, GateError> {
-    unsafe { filter_inbound_circle_changeset_raw(conn, changeset, circle_id, gates) }
+    unsafe { filter_inbound_circle_changeset_raw(conn, changeset, circle_id, gates, routing_key) }
 }
 
 unsafe fn filter_inbound_circle_changeset_raw(
@@ -97,56 +98,20 @@ unsafe fn filter_inbound_circle_changeset_raw(
     changeset: &[u8],
     circle_id: CircleId,
     gates: &Gates,
+    routing_key: &RowRoutingKey,
 ) -> Result<Vec<u8>, GateError> {
-    let mut package_routes = HashMap::<(String, String), String>::new();
-    for_each_change(changeset, |_iter, row| {
+    let (normalized, package_routes) =
+        normalize_inbound_private_routes_raw(conn, changeset, gates, routing_key)?;
+    for_each_change(&normalized, |_iter, row| {
         if row.table == "_coven_audience" {
             return Err(GateError::InvalidInboundAudiencePackage(
                 "Circle package contains the Store audience mirror".to_string(),
             ));
         }
-        if row.table != "_coven_row_routes" {
-            if !gates.table_is_scoped(&row.table) {
-                return Err(GateError::InvalidInboundAudiencePackage(format!(
-                    "Circle package contains unscoped table {}",
-                    row.table
-                )));
-            }
-            return Ok(());
-        }
-        let routing_id = row
-            .pk()
-            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-        let table = row
-            .new_value(1)
-            .or_else(|| row.old_value(1))
-            .flatten()
-            .ok_or_else(|| {
-                GateError::InvalidInboundAudiencePackage(
-                    "private route has no table name".to_string(),
-                )
-            })?;
-        let row_id = row
-            .new_value(2)
-            .or_else(|| row.old_value(2))
-            .flatten()
-            .ok_or_else(|| {
-                GateError::InvalidInboundAudiencePackage("private route has no row id".to_string())
-            })?;
-        if !gates.table_is_scoped(table) {
+        if row.table != "_coven_row_routes" && !gates.table_is_scoped(&row.table) {
             return Err(GateError::InvalidInboundAudiencePackage(format!(
-                "private route names unscoped table {table}"
-            )));
-        }
-        if package_routes
-            .insert(
-                (table.to_string(), row_id.to_string()),
-                routing_id.to_string(),
-            )
-            .is_some()
-        {
-            return Err(GateError::InvalidInboundAudiencePackage(format!(
-                "duplicate private route for {table}.{row_id}"
+                "Circle package contains unscoped table {}",
+                row.table
             )));
         }
         Ok(())
@@ -155,7 +120,7 @@ unsafe fn filter_inbound_circle_changeset_raw(
     let group = Changegroup::new()?;
     group.set_schema(conn.handle())?;
     let expected_circle = circle_id.to_string();
-    for_each_change(changeset, |iter, row| {
+    for_each_change(&normalized, |iter, row| {
         let routing_id = if row.table == "_coven_row_routes" {
             row.pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?
@@ -164,7 +129,9 @@ unsafe fn filter_inbound_circle_changeset_raw(
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            if let Some(routing_id) = package_routes.get(&(row.table.clone(), row_id.to_string())) {
+            if let Some((routing_id, _)) =
+                package_routes.get(&(row.table.clone(), row_id.to_string()))
+            {
                 routing_id.clone()
             } else {
                 query_row_optional(
@@ -193,6 +160,208 @@ unsafe fn filter_inbound_circle_changeset_raw(
         Ok(())
     })?;
     group.output()
+}
+
+pub(crate) fn normalize_inbound_private_routes(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<Vec<u8>, GateError> {
+    unsafe {
+        normalize_inbound_private_routes_raw(conn, changeset, gates, routing_key)
+            .map(|(normalized, _)| normalized)
+    }
+}
+
+type PackageRoutes = HashMap<(String, String), (String, String)>;
+
+unsafe fn normalize_inbound_private_routes_raw(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<(Vec<u8>, PackageRoutes), GateError> {
+    let package_routes = validate_inbound_private_routes_raw(conn, changeset, gates, routing_key)?;
+    let group = Changegroup::new()?;
+    group.set_schema(conn.handle())?;
+    for_each_change(changeset, |iter, row| {
+        if row.table != "_coven_row_routes" {
+            group.add_change(iter)?;
+        }
+        Ok(())
+    })?;
+    let mut rows = package_routes
+        .iter()
+        .map(|((table, row_id), (routing_id, stamp))| {
+            (
+                routing_id.clone(),
+                table.clone(),
+                row_id.clone(),
+                stamp.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    let canonical_routes = private_route_insert_changeset(&rows)?;
+    for_each_change(&canonical_routes, |iter, _row| group.add_change(iter))?;
+    Ok((group.output()?, package_routes))
+}
+
+unsafe fn validate_inbound_private_routes_raw(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<PackageRoutes, GateError> {
+    let mut package_routes = PackageRoutes::new();
+    let mut package_row_inserts = HashSet::<(String, String)>::new();
+    let mut package_audience_stamps = HashMap::<String, String>::new();
+    for_each_change(changeset, |_iter, row| {
+        if row.table == "_coven_audience" {
+            if row.op == ffi::SQLITE_INSERT || row.op == ffi::SQLITE_UPDATE {
+                let routing_id = row
+                    .pk()
+                    .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+                let stamp = row.new_value(2).flatten().ok_or_else(|| {
+                    GateError::InvalidInboundAudiencePackage(format!(
+                        "Store audience transition {routing_id} has no _updated_at"
+                    ))
+                })?;
+                package_audience_stamps.insert(routing_id.to_string(), stamp.to_string());
+            }
+            return Ok(());
+        }
+        if row.table != "_coven_row_routes" {
+            if gates.table_is_scoped(&row.table) && row.op == ffi::SQLITE_INSERT {
+                let row_id = row
+                    .pk()
+                    .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+                let columns = super::gate_table_columns(conn, &row.table)?;
+                let stamp_index = columns
+                    .iter()
+                    .position(|column| column == "_updated_at")
+                    .ok_or_else(|| {
+                        GateError::MissingFkColumn(row.table.clone(), "_updated_at".to_string())
+                    })?;
+                row.new_value(stamp_index).flatten().ok_or_else(|| {
+                    GateError::InvalidInboundAudiencePackage(format!(
+                        "complete row INSERT {}.{row_id} has no _updated_at",
+                        row.table
+                    ))
+                })?;
+                package_row_inserts.insert((row.table.clone(), row_id.to_string()));
+            }
+            return Ok(());
+        }
+        if row.op != ffi::SQLITE_INSERT {
+            return Err(GateError::InvalidInboundAudiencePackage(
+                "private routes must be complete INSERT images".to_string(),
+            ));
+        }
+        let routing_id = row.new_value(0).flatten().ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage(
+                "private route INSERT has no routing id".to_string(),
+            )
+        })?;
+        let table = row.new_value(1).flatten().ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage("private route has no table name".to_string())
+        })?;
+        let row_id = row.new_value(2).flatten().ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage("private route has no row id".to_string())
+        })?;
+        let stamp = row.new_value(3).flatten().ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage("private route has no _updated_at".to_string())
+        })?;
+        if !gates.table_is_scoped(table) {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "private route names unscoped table {table}"
+            )));
+        }
+        let identity = gates.row_identity(table).ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage(format!(
+                "private route names undeclared table {table}"
+            ))
+        })?;
+        crate::sync::session::validate_row_identity(table, identity, row_id).map_err(|error| {
+            GateError::InvalidInboundAudiencePackage(format!(
+                "private route row identity is invalid: {error}"
+            ))
+        })?;
+        let expected_routing_id = row_routing_id(routing_key, table, row_id).to_string();
+        if routing_id != expected_routing_id {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "private route id does not authenticate {table}.{row_id}"
+            )));
+        }
+        if package_routes
+            .insert(
+                (table.to_string(), row_id.to_string()),
+                (routing_id.to_string(), stamp.to_string()),
+            )
+            .is_some()
+        {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "duplicate private route for {table}.{row_id}"
+            )));
+        }
+        Ok(())
+    })?;
+    for (row, (routing_id, route_stamp)) in &package_routes {
+        if !package_row_inserts.contains(row) {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "private route for {}.{} has no complete row INSERT",
+                row.0, row.1
+            )));
+        }
+        let audience_stamp = match package_audience_stamps.get(routing_id) {
+            Some(stamp) => Some(stamp.clone()),
+            None => query_row_optional(
+                conn,
+                "SELECT _updated_at FROM _coven_audience WHERE routing_id = ?1",
+                [routing_id],
+                |record| record.get::<_, String>(0),
+            )?,
+        }
+        .ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage(format!(
+                "private route for {}.{} has no Store audience transition",
+                row.0, row.1
+            ))
+        })?;
+        if route_stamp != &audience_stamp {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "private route for {}.{} has a different _updated_at than its Store audience transition",
+                row.0, row.1
+            )));
+        }
+    }
+    for row in &package_row_inserts {
+        if package_routes.contains_key(row) {
+            continue;
+        }
+        let existing = query_row_optional(
+            conn,
+            "SELECT routing_id FROM _coven_row_routes
+             WHERE table_name = ?1 AND row_id = ?2",
+            (&row.0, &row.1),
+            |record| record.get::<_, String>(0),
+        )?
+        .ok_or_else(|| {
+            GateError::InvalidInboundAudiencePackage(format!(
+                "scoped row INSERT {}.{} has no private route",
+                row.0, row.1
+            ))
+        })?;
+        let expected = row_routing_id(routing_key, &row.0, &row.1).to_string();
+        if existing != expected {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "stored private route does not authenticate {}.{}",
+                row.0, row.1
+            )));
+        }
+    }
+    Ok(package_routes)
 }
 
 pub(crate) fn prune_ineligible_scoped_rows(
@@ -383,9 +552,6 @@ unsafe fn partition_outbound_raw(
         if !gates.tables.contains_key(&row.table) {
             return Ok(());
         }
-        if gates.table_is_scoped(&row.table) {
-            validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
-        }
         if let Some((source, destination)) = row_audience_move(conn, gates, &row)? {
             let row_id = row
                 .pk()
@@ -450,20 +616,15 @@ unsafe fn partition_outbound_raw(
                 }
             }
         }
-        add_materialization(
-            conn,
-            gates,
-            &component,
-            FullStateDirection::Deletes,
-            partition_group(conn, &mut groups, source)?,
-        )?;
-        add_materialization(
-            conn,
-            gates,
-            &component,
-            FullStateDirection::Inserts,
-            partition_group(conn, &mut groups, destination)?,
-        )?;
+        if destination != Audience::Local {
+            add_materialization(
+                conn,
+                gates,
+                &component,
+                FullStateDirection::Inserts,
+                partition_group(conn, &mut groups, destination)?,
+            )?;
+        }
     }
     if !ancestor_inserts.is_empty() {
         add_materialization(
@@ -483,22 +644,31 @@ unsafe fn partition_outbound_raw(
             partition_group(conn, &mut groups, Audience::Store)?,
         )?;
     }
-    for_each_change(&routing.changeset, |iter, row| {
-        let audience = match row.table.as_str() {
-            "_coven_audience" => Audience::Store,
-            "_coven_row_routes" => routing_change_audience(conn, gates, routing, &row)?,
-            _ => {
-                return Err(GateError::Sql(
-                    format!("unexpected routing changeset table {}", row.table),
-                    rusqlite::Error::InvalidQuery,
-                ));
-            }
-        };
-        partition_group(conn, &mut groups, audience)?
+    for_each_change(&routing.store_mirror, |iter, row| {
+        if row.table != "_coven_audience" {
+            return Err(GateError::Sql(
+                format!("unexpected Store mirror changeset table {}", row.table),
+                rusqlite::Error::InvalidQuery,
+            ));
+        }
+        partition_group(conn, &mut groups, Audience::Store)?
             .group
             .add_change(iter)?;
         Ok(())
     })?;
+    for (audience, routes) in &routing.private_routes {
+        for_each_change(routes, |iter, row| {
+            if row.table != "_coven_row_routes" || row.op != ffi::SQLITE_INSERT {
+                return Err(GateError::InvalidInboundAudiencePackage(
+                    "generated private routes must be complete INSERT images".to_string(),
+                ));
+            }
+            partition_group(conn, &mut groups, audience.clone())?
+                .group
+                .add_change(iter)?;
+            Ok(())
+        })?;
+    }
     groups
         .into_iter()
         .map(|(audience, group)| {
@@ -511,52 +681,63 @@ unsafe fn partition_outbound_raw(
         .collect()
 }
 
-fn validate_outgoing_synced_fk_audiences(
+pub(crate) fn validate_scoped_foreign_key_audiences(
     conn: &Connection,
     gates: &Gates,
-    row: &ChangeRow,
 ) -> Result<(), GateError> {
-    if row.op == ffi::SQLITE_DELETE || !gates.table_is_scoped(&row.table) {
-        return Ok(());
-    }
-    let row_id = row
-        .pk()
-        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-    let row_audience = live_row_audience(conn, gates, &row.table, row_id)?;
-    for (fk_column, parent_table, parent_column) in foreign_keys(conn, &row.table)? {
-        if !gates.is_synced_table(&parent_table) {
-            continue;
-        }
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1",
-            quote_ident(&fk_column),
-            quote_ident(&row.table),
-        );
-        let parent_key = query_row_optional(conn, &sql, [row_id], |record| {
-            record.get::<_, Option<String>>(0)
-        })?
-        .ok_or_else(|| GateError::MissingAudienceRow {
-            table: row.table.clone(),
-            row_id: row_id.to_string(),
-        })?;
-        let Some(parent_key) = parent_key else {
-            continue;
-        };
-        let parent_id = row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
-            .ok_or_else(|| GateError::MissingAudienceParent {
-                table: row.table.clone(),
-                row_id: Some(row_id.to_string()),
-                parent: parent_table.clone(),
-            })?;
-        let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
-        if parent_audience != Audience::Store && parent_audience != row_audience {
-            return Err(GateError::InvalidAudience {
-                table: row.table.clone(),
-                value: row_audience.column_value(),
-                reason: format!(
-                    "relationship through {fk_column} references {parent_table}.{parent_id} in {parent_audience:?}"
-                ),
-            });
+    let mut tables = gates
+        .tables
+        .keys()
+        .filter(|table| gates.table_is_scoped(table))
+        .cloned()
+        .collect::<Vec<_>>();
+    tables.sort();
+    for table in tables {
+        let row_ids = query_mapped_rows(
+            conn,
+            &format!("SELECT id FROM {}", quote_ident(&table)),
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        for row_id in row_ids {
+            let row_audience = live_row_audience(conn, gates, &table, &row_id)?;
+            for (fk_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
+                if !gates.is_synced_table(&parent_table) {
+                    continue;
+                }
+                let sql = format!(
+                    "SELECT {} FROM {} WHERE id = ?1",
+                    quote_ident(&fk_column),
+                    quote_ident(&table),
+                );
+                let parent_key = query_row_optional(conn, &sql, [&row_id], |record| {
+                    record.get::<_, Option<String>>(0)
+                })?
+                .ok_or_else(|| GateError::MissingAudienceRow {
+                    table: table.clone(),
+                    row_id: row_id.clone(),
+                })?;
+                let Some(parent_key) = parent_key else {
+                    continue;
+                };
+                let parent_id =
+                    row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
+                        .ok_or_else(|| GateError::MissingAudienceParent {
+                            table: table.clone(),
+                            row_id: Some(row_id.clone()),
+                            parent: parent_table.clone(),
+                        })?;
+                let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
+                if parent_audience != Audience::Store && parent_audience != row_audience {
+                    return Err(GateError::InvalidAudience {
+                        table: table.clone(),
+                        value: row_audience.column_value(),
+                        reason: format!(
+                            "relationship through {fk_column} references {parent_table}.{parent_id} in {parent_audience:?}"
+                        ),
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -661,18 +842,16 @@ pub(crate) fn capture_routing_changes(
             operation: "create routing journal".to_string(),
             source,
         })?;
-    for table in ["_coven_audience", "_coven_row_routes"] {
-        session
-            .attach(Some(table))
-            .map_err(|source| GateError::Session {
-                operation: format!("attach routing table {table}"),
-                source,
-            })?;
-    }
+    session
+        .attach(Some("_coven_audience"))
+        .map_err(|source| GateError::Session {
+            operation: "attach Store audience mirror".to_string(),
+            source,
+        })?;
 
     let transitions = routing_transitions(conn, changeset, gates)?;
     let mut deleted_rows = BTreeMap::new();
-    let mut deleted_routes = BTreeMap::new();
+    let mut private_route_rows = BTreeMap::<Audience, Vec<(String, String, String, String)>>::new();
     for ((table, row_id), transition) in transitions {
         let routing_id = row_routing_id(key, &table, &row_id).to_string();
         let (audience, stamp) = match transition {
@@ -680,7 +859,6 @@ pub(crate) fn capture_routing_changes(
             RoutingTransition::Delete => {
                 let audience = stored_route_audience(conn, &routing_id, &table, &row_id)?;
                 deleted_rows.insert((table.clone(), row_id.clone()), audience.clone());
-                deleted_routes.insert(routing_id.clone(), audience.clone());
                 (audience, None)
             }
         };
@@ -707,6 +885,17 @@ pub(crate) fn capture_routing_changes(
             (&routing_id, &table, &row_id, &stamp),
         )
         .map_err(|source| GateError::Sql("persist private row route".to_string(), source))?;
+        if audience != Audience::Local {
+            private_route_rows
+                .entry(audience.clone())
+                .or_default()
+                .push((
+                    routing_id.clone(),
+                    table.clone(),
+                    row_id.clone(),
+                    stamp.clone(),
+                ));
+        }
         match audience {
             Audience::Local => {
                 conn.execute(
@@ -745,11 +934,52 @@ pub(crate) fn capture_routing_changes(
             operation: "extract routing journal".to_string(),
             source,
         })?;
+    let private_routes = private_route_rows
+        .into_iter()
+        .map(|(audience, rows)| Ok((audience, private_route_insert_changeset(&rows)?)))
+        .collect::<Result<BTreeMap<_, _>, GateError>>()?;
     Ok(RoutingChanges {
-        changeset: out,
+        store_mirror: out,
+        private_routes,
         deleted_rows,
-        deleted_routes,
     })
+}
+
+fn private_route_insert_changeset(
+    rows: &[(String, String, String, String)],
+) -> Result<Vec<u8>, GateError> {
+    let conn = Connection::open_in_memory()
+        .map_err(|source| GateError::Sql("open private route image".to_string(), source))?;
+    crate::db::apply_coven_routing_schema(&conn)
+        .map_err(|source| GateError::Sql("create private route image".to_string(), source))?;
+    let mut session =
+        rusqlite::session::Session::new(&conn).map_err(|source| GateError::Session {
+            operation: "create private route image".to_string(),
+            source,
+        })?;
+    session
+        .attach(Some("_coven_row_routes"))
+        .map_err(|source| GateError::Session {
+            operation: "attach private route image".to_string(),
+            source,
+        })?;
+    for (routing_id, table, row_id, stamp) in rows {
+        conn.execute(
+            "INSERT INTO _coven_row_routes
+             (routing_id, table_name, row_id, _updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            (routing_id, table, row_id, stamp),
+        )
+        .map_err(|source| GateError::Sql("insert private route image".to_string(), source))?;
+    }
+    let mut changeset = Vec::new();
+    session
+        .changeset_strm(&mut changeset)
+        .map_err(|source| GateError::Session {
+            operation: "extract private route image".to_string(),
+            source,
+        })?;
+    Ok(changeset)
 }
 
 enum RoutingTransition {
@@ -947,38 +1177,6 @@ fn live_row_stamp(conn: &Connection, table: &str, row_id: &str) -> Result<String
             row_id: row_id.to_string(),
         }
     })
-}
-
-fn routing_change_audience(
-    conn: &Connection,
-    gates: &Gates,
-    routing: &RoutingChanges,
-    row: &ChangeRow,
-) -> Result<Audience, GateError> {
-    let routing_id = row
-        .pk()
-        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-    if row.op == ffi::SQLITE_DELETE {
-        return routing
-            .deleted_routes
-            .get(routing_id)
-            .cloned()
-            .ok_or_else(|| GateError::MissingAudienceRow {
-                table: row.table.clone(),
-                row_id: routing_id.to_string(),
-            });
-    }
-    let route = query_row_optional(
-        conn,
-        "SELECT table_name, row_id FROM _coven_row_routes WHERE routing_id = ?1",
-        [routing_id],
-        |record| Ok((record.get::<_, String>(0)?, record.get::<_, String>(1)?)),
-    )?
-    .ok_or_else(|| GateError::MissingAudienceRow {
-        table: row.table.clone(),
-        row_id: routing_id.to_string(),
-    })?;
-    live_row_audience(conn, gates, &route.0, &route.1)
 }
 
 fn stored_route_audience(
@@ -1348,7 +1546,7 @@ pub(crate) fn active_circle_control(
 mod tests {
     use super::*;
     use crate::sync::session::{RowIdentity, SyncedTable};
-    use rusqlite::session::Session;
+    use rusqlite::session::{ConflictAction, Session};
 
     fn row_blob_locator_schema(conn: &Connection) {
         conn.execute_batch(
@@ -1393,9 +1591,17 @@ mod tests {
     fn note_gates(conn: &Connection) -> Gates {
         Gates::from_tables(
             conn,
-            &[SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")],
+            &[SyncedTable::new("notes", RowIdentity::SharedKey).scoped_by("audience")],
         )
         .expect("build scoped gates")
+    }
+
+    fn routing_key() -> RowRoutingKey {
+        crate::sync::circle::derive_row_routing_key(
+            &crate::encryption::EncryptionService::from_key([7; 32]),
+            crate::sync::store_commit::ObjectHash::digest(b"audience test"),
+        )
+        .expect("derive test row-routing key")
     }
 
     #[test]
@@ -1408,6 +1614,9 @@ mod tests {
         }
         let first = CircleId::from_bytes([1; 16]);
         let second = CircleId::from_bytes([2; 16]);
+        let key = routing_key();
+        let first_route = row_routing_id(&key, "notes", "first").to_string();
+        let second_route = row_routing_id(&key, "notes", "second").to_string();
         source
             .execute(
                 "INSERT INTO notes VALUES (?1, ?2, 'first', '1')",
@@ -1422,14 +1631,14 @@ mod tests {
             .expect("insert second note");
         source
             .execute(
-                "INSERT INTO _coven_row_routes VALUES ('route-first', 'notes', 'first', '1')",
-                [],
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'first', '1')",
+                [&first_route],
             )
             .expect("insert first route");
         source
             .execute(
-                "INSERT INTO _coven_row_routes VALUES ('route-second', 'notes', 'second', '1')",
-                [],
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'second', '1')",
+                [&second_route],
             )
             .expect("insert second route");
         let mut changeset = Vec::new();
@@ -1441,28 +1650,28 @@ mod tests {
         routing_schema(&target);
         target
             .execute(
-                "INSERT INTO _coven_audience VALUES ('route-first', ?1, '2')",
-                [first.to_string()],
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                (&first_route, first.to_string()),
             )
             .expect("install first mirror");
         target
             .execute(
-                "INSERT INTO _coven_audience VALUES ('route-second', ?1, '2')",
-                [second.to_string()],
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                (&second_route, second.to_string()),
             )
             .expect("install second mirror");
 
         let filtered =
-            filter_inbound_circle_changeset(&target, &changeset, first, &note_gates(&target))
+            filter_inbound_circle_changeset(&target, &changeset, first, &note_gates(&target), &key)
                 .expect("filter first Circle package");
         let rows = crate::changeset::walk(&filtered).expect("walk filtered changeset");
         assert_eq!(rows.len(), 2);
         assert!(rows
             .iter()
             .any(|row| row.table == "notes" && row.pk() == Some("first")));
-        assert!(rows
-            .iter()
-            .any(|row| { row.table == "_coven_row_routes" && row.pk() == Some("route-first") }));
+        assert!(rows.iter().any(|row| {
+            row.table == "_coven_row_routes" && row.pk() == Some(first_route.as_str())
+        }));
     }
 
     #[test]
@@ -1491,6 +1700,7 @@ mod tests {
             &changeset,
             CircleId::from_bytes([1; 16]),
             &note_gates(&target),
+            &routing_key(),
         )
         .expect_err("Circle package must not carry the Store mirror");
         assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
@@ -1524,10 +1734,319 @@ mod tests {
             )
             .expect("install winning mirror");
 
-        let error =
-            filter_inbound_circle_changeset(&target, &changeset, circle, &note_gates(&target))
-                .expect_err("Circle package route must name a scoped table");
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            circle,
+            &note_gates(&target),
+            &routing_key(),
+        )
+        .expect_err("Circle package route must name a scoped table");
         assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
+    }
+
+    #[test]
+    fn inbound_circle_filter_rejects_a_private_route_update() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        source
+            .execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     body TEXT,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )
+            .expect("create second scoped table");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES ('route', 'notes', 'row', '1')",
+                [],
+            )
+            .expect("seed private route");
+        let mut session = Session::new(&source).expect("create source session");
+        session
+            .attach(Some("_coven_row_routes"))
+            .expect("attach private routes");
+        source
+            .execute(
+                "UPDATE _coven_row_routes
+                 SET table_name = 'tasks', row_id = 'row2', _updated_at = '2'
+                 WHERE routing_id = 'route'",
+                [],
+            )
+            .expect("update private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract route update");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     body TEXT,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )
+            .expect("create second scoped table");
+        let circle = CircleId::from_bytes([1; 16]);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES ('route', ?1, '2')",
+                [circle.to_string()],
+            )
+            .expect("install winning mirror");
+        let gates = Gates::from_tables(
+            &target,
+            &[
+                SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
+                SyncedTable::new("tasks", RowIdentity::IndependentUuid).scoped_by("audience"),
+            ],
+        )
+        .expect("build scoped gates");
+
+        let error =
+            filter_inbound_circle_changeset(&target, &changeset, circle, &gates, &routing_key())
+                .expect_err("private routes must be complete INSERT images");
+        assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
+    }
+
+    #[test]
+    fn inbound_private_route_must_authenticate_its_table_and_row() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
+            .expect("insert scoped row");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+                ["0".repeat(64)],
+            )
+            .expect("insert forged private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract forged route package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let error = normalize_inbound_private_routes(
+            &target,
+            &changeset,
+            &note_gates(&target),
+            &routing_key(),
+        )
+        .expect_err("forged private route id must be rejected");
+        assert!(error
+            .to_string()
+            .contains("does not authenticate notes.row"));
+    }
+
+    #[test]
+    fn inbound_private_route_must_accompany_its_complete_row_insert() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let mut session = Session::new(&source).expect("create source session");
+        session
+            .attach(Some("_coven_row_routes"))
+            .expect("attach private routes");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+                [&routing_id],
+            )
+            .expect("insert orphan private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract orphan route package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let error =
+            normalize_inbound_private_routes(&target, &changeset, &note_gates(&target), &key)
+                .expect_err("orphan private route must be rejected");
+        assert!(error.to_string().contains("has no complete row INSERT"));
+    }
+
+    #[test]
+    fn inbound_private_route_uses_its_audience_transition_stamp() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let circle = CircleId::from_bytes([1; 16]);
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+                [circle.to_string()],
+            )
+            .expect("insert scoped row with an older content stamp");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '2')",
+                [&routing_id],
+            )
+            .expect("insert private route with the audience transition stamp");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract Circle package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '2')",
+                (&routing_id, circle.to_string()),
+            )
+            .expect("install winning audience transition");
+
+        let filtered = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            circle,
+            &note_gates(&target),
+            &key,
+        )
+        .expect("route stamp follows the audience transition, not row content");
+        assert_eq!(
+            crate::changeset::walk(&filtered)
+                .expect("walk filtered Circle package")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn inbound_private_route_is_rebuilt_as_canonical_text() {
+        let source = Connection::open_in_memory().expect("open source");
+        source
+            .execute_batch(
+                "CREATE TABLE notes (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     body TEXT,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;
+                 CREATE TABLE _coven_row_routes (
+                     routing_id PRIMARY KEY,
+                     table_name,
+                     row_id,
+                     _updated_at,
+                     UNIQUE(table_name, row_id)
+                 );",
+            )
+            .expect("create source schema with untyped private routes");
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
+            .expect("insert scoped row");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, ?2, ?3, ?4)",
+                (
+                    routing_id.as_bytes().to_vec(),
+                    b"notes".to_vec(),
+                    b"row".to_vec(),
+                    b"1".to_vec(),
+                ),
+            )
+            .expect("insert byte-valued private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract byte-valued route package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
+                [&routing_id],
+            )
+            .expect("install winning audience transition");
+        let normalized =
+            normalize_inbound_private_routes(&target, &changeset, &note_gates(&target), &key)
+                .expect("normalize authenticated private route");
+        target
+            .apply_strm(
+                &mut &normalized[..],
+                None::<fn(&str) -> bool>,
+                |_conflict, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+            )
+            .expect("apply normalized package");
+        let types = target
+            .query_row(
+                "SELECT typeof(routing_id), typeof(table_name), typeof(row_id), typeof(_updated_at)
+                 FROM _coven_row_routes",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("read normalized private route types");
+        assert_eq!(
+            types,
+            (
+                "text".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn inbound_scoped_row_insert_must_have_a_private_route() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let mut session = Session::new(&source).expect("create source session");
+        session.attach(Some("notes")).expect("attach scoped table");
+        source
+            .execute("INSERT INTO notes VALUES ('row', NULL, 'body', '1')", [])
+            .expect("insert unbound scoped row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract unbound row package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let error = normalize_inbound_private_routes(
+            &target,
+            &changeset,
+            &note_gates(&target),
+            &routing_key(),
+        )
+        .expect_err("unbound scoped row must be rejected");
+        assert!(error.to_string().contains("has no private route"));
     }
 
     #[test]
@@ -1578,7 +2097,8 @@ mod tests {
         .expect("install matching inactive mirror");
         let tables = vec![
             SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
-            SyncedTable::new("comments", RowIdentity::IndependentUuid),
+            SyncedTable::new("comments", RowIdentity::IndependentUuid)
+                .inherits_audience_through("note_id"),
         ];
         let gates = Gates::from_tables(&conn, &tables).expect("build scoped gates");
 

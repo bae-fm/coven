@@ -321,6 +321,7 @@ pub(super) async fn apply_candidate(
     merge_candidate: &MergeCandidate,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
     identity: Option<&crate::keys::UserKeypair>,
+    routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
@@ -431,6 +432,7 @@ pub(super) async fn apply_candidate(
         device_operations,
         verified_circle_activations,
         loaded_predecessor_memberships,
+        routing_key,
     ))
     .await?;
     #[cfg(any(test, feature = "test-utils"))]
@@ -548,6 +550,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
     synced_tables: &[SyncedTable],
+    routing_key: Option<&super::circle::RowRoutingKey>,
     timestamp_policy: IncomingTimestampPolicy,
     materialization: PreparedMergeMaterialization,
 ) -> Result<AppliedMergeMaterialization, DbError> {
@@ -602,13 +605,35 @@ pub(crate) fn apply_prepared_merge_materialization_on(
             cleanup,
         } = prepared;
         let applied_bytes = match package.audience() {
-            PackageAudience::Store => package.changeset().to_vec(),
+            PackageAudience::Store => {
+                if gates.has_scoped_graph() {
+                    super::gate::normalize_inbound_private_routes(
+                        conn,
+                        package.changeset(),
+                        gates,
+                        routing_key.ok_or_else(|| {
+                            DbError::Message(
+                                "scoped Store package application requires a row-routing key"
+                                    .to_string(),
+                            )
+                        })?,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                } else {
+                    package.changeset().to_vec()
+                }
+            }
             PackageAudience::Circle { circle_id, .. } => {
                 super::gate::filter_inbound_circle_changeset(
                     conn,
                     package.changeset(),
                     *circle_id,
                     gates,
+                    routing_key.ok_or_else(|| {
+                        DbError::Message(
+                            "Circle package application requires a row-routing key".to_string(),
+                        )
+                    })?,
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?
             }
@@ -682,6 +707,8 @@ pub(crate) fn apply_prepared_merge_materialization_on(
             .map_err(DbError::from)?;
     }
     super::gate::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    super::gate::validate_scoped_foreign_key_audiences(conn, gates)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let mut removal_changeset = Vec::new();
     removal_session
@@ -900,6 +927,7 @@ async fn commit_candidate(
     device_operations: VerifiedStoreDeviceOperations,
     verified_circle_activations: VerifiedCircleActivations,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+    routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
@@ -1038,6 +1066,7 @@ async fn commit_candidate(
     let blob_decls = db.blob_decls();
     let gates = db.gates();
     let synced_tables = db.synced_tables().to_vec();
+    let routing_key = routing_key.cloned();
     #[cfg(any(test, feature = "test-utils"))]
     let materialization_failure = db.merge_materialization_failure_injection();
     let applied = db
@@ -1048,6 +1077,7 @@ async fn commit_candidate(
                 &blob_decls,
                 &gates,
                 &synced_tables,
+                routing_key.as_ref(),
                 IncomingTimestampPolicy::Received { receiver_wall_ms },
                 materialization,
             )?;
@@ -1084,6 +1114,7 @@ async fn commit_candidate(
                         &blob_decls,
                         &gates,
                         &synced_tables,
+                        routing_key.as_ref(),
                         &retracted,
                     )?;
                     let projection_changeset = super::retained_replay::replace_live_projection(

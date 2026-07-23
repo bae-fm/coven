@@ -235,6 +235,7 @@ pub(super) fn replay_retained_merge_projection_on(
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
     synced_tables: &[SyncedTable],
+    routing_key: Option<&super::circle::RowRoutingKey>,
     retracted: &BTreeSet<StoreBatchCommitRef>,
 ) -> Result<rusqlite::Connection, DbError> {
     super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
@@ -390,6 +391,7 @@ pub(super) fn replay_retained_merge_projection_on(
                 blob_decls,
                 gates,
                 synced_tables,
+                routing_key,
                 timestamp_policy,
                 replay_materialization,
             )?;

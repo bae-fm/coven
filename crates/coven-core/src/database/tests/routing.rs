@@ -316,3 +316,281 @@ async fn assert_local_only_scoped_write(name: &str) {
 async fn merge_local_only_scoped_write_is_not_pending() {
     assert_local_only_scoped_write("merge-local-only").await;
 }
+
+#[tokio::test]
+async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
+    let tables = vec![
+        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
+            .scoped_by("audience"),
+    ];
+    let (db, _) = Database::open(
+        Path::new(":memory:"),
+        tables.clone(),
+        BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "move-device".to_string(),
+        &[Migration::sql(
+            1,
+            "accounts",
+            "CREATE TABLE accounts (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+    .expect("open scoped move Store");
+    crate::sync::test_helpers::TestStore::create(
+        &db,
+        "cross-circle-move",
+        crate::keys::UserKeypair::generate(),
+    )
+    .await
+    .expect("install scoped Store authority");
+    let (source, destination) = db
+        .call(|conn| {
+            let (source, _) =
+                crate::sync::test_helpers::install_test_active_circle(conn, "move-source");
+            let (destination, _) =
+                crate::sync::test_helpers::install_test_active_circle(conn, "move-destination");
+            Ok((source, destination))
+        })
+        .await
+        .expect("install source and destination Circles");
+    let routing = EncryptionService::from_key([7; 32]);
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let insert_tables = tables.clone();
+    let insert_id = db.new_write_id();
+    db.call(move |conn| {
+        StoreDatabase::run_store_write_transaction_on(
+            conn,
+            &insert_tables,
+            &gates,
+            &blob_decls,
+            Some(&routing),
+            insert_id,
+            |tx| {
+                tx.execute(
+                    "INSERT INTO accounts VALUES ('account', ?1, '0000000001000-0000-move')",
+                    [source.to_string()],
+                )?;
+                Ok::<_, DbError>(())
+            },
+        )
+    })
+    .await
+    .expect("insert source Circle row");
+
+    let routing = EncryptionService::from_key([7; 32]);
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let move_id = db.new_write_id();
+    let stored_move_id = move_id.clone();
+    db.call(move |conn| {
+        StoreDatabase::run_store_write_transaction_on(
+            conn,
+            &tables,
+            &gates,
+            &blob_decls,
+            Some(&routing),
+            move_id,
+            |tx| {
+                tx.execute(
+                    "UPDATE accounts
+                     SET audience = ?1, _updated_at = '0000000002000-0000-move'
+                     WHERE id = 'account'",
+                    [destination.to_string()],
+                )?;
+                Ok::<_, DbError>(())
+            },
+        )
+    })
+    .await
+    .expect("move row between Circles");
+
+    let partitions = db
+        .call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT audience, changeset
+                     FROM store_write_partitions
+                     WHERE write_id = ?1
+                     ORDER BY audience",
+                )
+                .map_err(DbError::from)?;
+            let partitions = statement
+                .query_map([stored_move_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            Ok(partitions)
+        })
+        .await
+        .expect("read move partitions");
+    assert_eq!(partitions.len(), 2);
+    assert!(partitions
+        .iter()
+        .all(|(audience, _)| audience != &source.to_string()));
+
+    let store = partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("move has Store mirror partition");
+    let store_rows = crate::changeset::walk(&store.1).expect("walk Store move partition");
+    assert_eq!(store_rows.len(), 1);
+    assert_eq!(store_rows[0].table, "_coven_audience");
+    assert_eq!(store_rows[0].op, crate::changeset::ChangeOp::Update);
+
+    let destination_rows = crate::changeset::walk(
+        &partitions
+            .iter()
+            .find(|(audience, _)| audience == &destination.to_string())
+            .expect("move has destination Circle partition")
+            .1,
+    )
+    .expect("walk destination move partition");
+    assert!(destination_rows
+        .iter()
+        .any(|row| { row.table == "accounts" && row.op == crate::changeset::ChangeOp::Insert }));
+    assert!(destination_rows.iter().any(|row| {
+        row.table == "_coven_row_routes" && row.op == crate::changeset::ChangeOp::Insert
+    }));
+    assert!(destination_rows
+        .iter()
+        .all(|row| row.op != crate::changeset::ChangeOp::Delete));
+}
+
+#[tokio::test]
+async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
+    let tables = vec![
+        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
+            .scoped_by("audience"),
+        SyncedTable::new("categories", crate::sync::session::RowIdentity::SharedKey)
+            .scoped_by("audience"),
+        SyncedTable::new("comments", crate::sync::session::RowIdentity::SharedKey)
+            .inherits_audience_through("note_id"),
+    ];
+    let (db, _) = Database::open(
+        Path::new(":memory:"),
+        tables.clone(),
+        BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "foreign-key-move-device".to_string(),
+        &[Migration::sql(
+            1,
+            "scoped relationship",
+            "CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE categories (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE comments (
+                 id TEXT PRIMARY KEY,
+                 note_id TEXT NOT NULL REFERENCES notes(id),
+                 category_id TEXT NOT NULL REFERENCES categories(id),
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+    .expect("open scoped relationship Store");
+    crate::sync::test_helpers::TestStore::create(
+        &db,
+        "foreign-key-move",
+        crate::keys::UserKeypair::generate(),
+    )
+    .await
+    .expect("install scoped Store authority");
+    let (source, destination) = db
+        .call(|conn| {
+            let (source, _) =
+                crate::sync::test_helpers::install_test_active_circle(conn, "relationship-source");
+            let (destination, _) = crate::sync::test_helpers::install_test_active_circle(
+                conn,
+                "relationship-destination",
+            );
+            Ok((source, destination))
+        })
+        .await
+        .expect("install relationship Circles");
+    let routing = EncryptionService::from_key([7; 32]);
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let insert_tables = tables.clone();
+    let insert_id = db.new_write_id();
+    db.call(move |conn| {
+        StoreDatabase::run_store_write_transaction_on(
+            conn,
+            &insert_tables,
+            &gates,
+            &blob_decls,
+            Some(&routing),
+            insert_id,
+            |tx| {
+                tx.execute(
+                    "INSERT INTO notes VALUES ('note', ?1, '0000000001000-0000-move')",
+                    [source.to_string()],
+                )?;
+                tx.execute(
+                    "INSERT INTO categories VALUES ('category', ?1, '0000000001000-0000-move')",
+                    [source.to_string()],
+                )?;
+                tx.execute(
+                    "INSERT INTO comments
+                     VALUES ('comment', 'note', 'category', '0000000001000-0000-move')",
+                    [],
+                )?;
+                Ok::<_, DbError>(())
+            },
+        )
+    })
+    .await
+    .expect("insert valid scoped relationship");
+
+    let routing = EncryptionService::from_key([7; 32]);
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let move_id = db.new_write_id();
+    let error = db
+        .call(move |conn| {
+            StoreDatabase::run_store_write_transaction_on(
+                conn,
+                &tables,
+                &gates,
+                &blob_decls,
+                Some(&routing),
+                move_id,
+                |tx| {
+                    tx.execute(
+                        "UPDATE notes
+                         SET audience = ?1, _updated_at = '0000000002000-0000-move'
+                         WHERE id = 'note'",
+                        [destination.to_string()],
+                    )?;
+                    Ok::<_, DbError>(())
+                },
+            )
+        })
+        .await
+        .expect_err("move must reject the unchanged cross-Circle relationship");
+    assert!(error
+        .to_string()
+        .contains("relationship through category_id"));
+    let audience = db
+        .call(|conn| {
+            conn.query_row("SELECT audience FROM notes WHERE id = 'note'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read rolled-back note audience");
+    assert_eq!(audience, source.to_string());
+}

@@ -53,12 +53,23 @@ rebuild the deleted choice.
   deterministic ordering, retained replay, and cumulative summaries.
 - Founder Circle creation and rename have durable operations and Store-commit
   activation.
+- The signed schema-routing contract records each descendant's explicitly
+  selected audience-parent foreign-key column.
+- Independent UUID and intentional shared-key identities are validated on host
+  capture and incoming changesets.
+- Host capture writes authenticated Store mirrors and complete private route
+  images; pull recomputes every private routing identifier before application.
+- Audience moves publish the Store mirror and destination image without a
+  source package.
+- Host commit and remote materialization validate every scoped row's final
+  synchronized foreign keys, including unchanged descendants.
 
 ### Required before Circles are complete
 
-- authenticate and normalize private routing rows on every local and remote
-  path;
-- enforce final-component foreign-key and audience validity atomically;
+- use the same authenticated routing boundary for snapshot, restore, and
+  bootstrap images;
+- finish adversarial arrival-order coverage for routing moves, deletes, and
+  concurrent edits;
 - complete Circle membership, access, epoch close, rotation, conflict
   resolution, deletion, and durable restart;
 - add Circle bootstrap, acknowledgement, snapshot, restore, and reclamation;
@@ -70,8 +81,10 @@ rebuild the deleted choice.
 ## Completion order
 
 1. **Complete.** Seal the single Store owner boundary.
-1. Finish schema contracts, row identity, routing authentication, moves, and
-   final-component validation.
+1. **In progress.** Schema contracts, row identity, host and pull routing
+   authentication, destination-only moves, and final-component validation are
+   implemented. Snapshot, restore, bootstrap, and adversarial arrival-order
+   coverage must use and verify the same boundary.
 1. Finish Circle authority, roster, metadata, access, epoch, and lifecycle
    operations.
 1. Finish Circle packages, pull, bootstrap, acknowledgement, snapshots,
@@ -256,11 +269,14 @@ The Store-visible mirror contains only convergent routing state:
 
 ```sql
 CREATE TABLE _coven_audience (
-    routing_id BLOB PRIMARY KEY,
-    circle_id BLOB,
-    _updated_at BLOB NOT NULL
+    routing_id TEXT PRIMARY KEY,
+    circle_id TEXT,
+    _updated_at TEXT NOT NULL
 );
 ```
+
+`routing_id` is the canonical lowercase hexadecimal encoding of
+`RowRoutingId`; `circle_id` uses the canonical `CircleId` text encoding.
 
 Meaning:
 
@@ -272,10 +288,10 @@ The private map contains the local meaning of a routing identifier:
 
 ```sql
 CREATE TABLE _coven_row_routes (
-    routing_id BLOB PRIMARY KEY,
+    routing_id TEXT PRIMARY KEY,
     table_name TEXT NOT NULL,
-    row_id BLOB NOT NULL,
-    _updated_at BLOB NOT NULL,
+    row_id TEXT NOT NULL,
+    _updated_at TEXT NOT NULL,
     UNIQUE (table_name, row_id)
 );
 ```
@@ -809,14 +825,18 @@ scoped graphs. Circle-capable Stores use opaque immutable object storage.
 There is no protocol-mode parameter.
 
 ```rust
-let coven = Coven::builder(database, storage)
-    .sync_table("artists")
-    .sync_table("albums")
-    .scoped_by("playlists", "audience_id")
-    .inherits_audience("playlist_tracks", "playlist_id")
-    .blob_column("playlist_tracks", "audio")
-    .open()
-    .await?;
+let coven = Coven::builder(config)
+    .synced_tables(vec![
+        SyncedTable::new("artists", RowIdentity::IndependentUuid),
+        SyncedTable::new("albums", RowIdentity::IndependentUuid),
+        SyncedTable::new("playlists", RowIdentity::IndependentUuid)
+            .scoped_by("audience_id"),
+        SyncedTable::new("playlist_tracks", RowIdentity::IndependentUuid)
+            .inherits_audience_through("playlist_id")
+            .carries_blob(audio_blob),
+    ])
+    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
+    .open()?;
 ```
 
 Host SQL remains ordinary SQL:

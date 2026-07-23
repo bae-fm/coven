@@ -322,12 +322,12 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
         coven_core::changeset::ChangeOp::Insert,
         "local-account"
     ));
-    assert!(has_change(
-        &local_changes,
-        "_coven_row_routes",
-        coven_core::changeset::ChangeOp::Insert,
-        &local_account_route
-    ));
+    assert!(
+        local_changes
+            .iter()
+            .all(|change| change.table != "_coven_row_routes"),
+        "Local routing metadata must remain in the local database"
+    );
 
     let routes = handle
         .sql_read(|conn| {
@@ -394,7 +394,8 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .key_custody(KeyCustody::InMemory(routing_keyring()))
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey),
+            SyncedTable::new("transactions", RowIdentity::SharedKey)
+                .inherits_audience_through("account_id"),
         ])
         .migrations(vec![Migration::sql(
             1,
@@ -632,25 +633,18 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(circle_changes.iter().any(|change| {
             change.table == "_coven_row_routes"
-                && change.op == coven_core::changeset::ChangeOp::Update
+                && change.op == coven_core::changeset::ChangeOp::Insert
                 && change.pk() == Some(routing_id)
         }));
     }
     let store = move_partitions
         .iter()
         .find(|(audience, _)| audience == "store")
-        .expect("old Store materialization partition");
+        .expect("Store audience mirror partition");
     let store_changes = coven_core::changeset::walk(&store.1).expect("walk Store partition");
-    assert!(store_changes.iter().any(|change| {
-        change.table == "accounts"
-            && change.op == coven_core::changeset::ChangeOp::Delete
-            && change.pk() == Some("store-account")
-    }));
-    assert!(store_changes.iter().any(|change| {
-        change.table == "transactions"
-            && change.op == coven_core::changeset::ChangeOp::Delete
-            && change.pk() == Some("store-transaction")
-    }));
+    assert!(store_changes
+        .iter()
+        .all(|change| change.table != "accounts" && change.table != "transactions"));
     for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
@@ -767,7 +761,7 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
 }
 
 #[tokio::test]
-async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_preserve_routes() {
+async fn circle_moves_materialize_destinations_and_delete_removes_current_rows() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
@@ -780,7 +774,8 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         .key_custody(KeyCustody::InMemory(routing_keyring()))
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey),
+            SyncedTable::new("transactions", RowIdentity::SharedKey)
+                .inherits_audience_through("account_id"),
         ])
         .migrations(vec![Migration::sql(
             1,
@@ -1002,40 +997,25 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         })
         .await
         .expect("read Circle-to-Local transition");
-    assert_eq!(local_partitions.len(), 3);
+    assert_eq!(local_partitions.len(), 1);
     let local_partition = |audience: &str| {
         local_partitions
             .iter()
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} Circle-to-Local partition"))
     };
-    let circle_retract =
-        coven_core::changeset::walk(&local_partition(&circle_id).1).expect("walk Circle retract");
-    assert!(has_change(
-        &circle_retract,
-        "accounts",
-        coven_core::changeset::ChangeOp::Delete,
-        "local-move-account"
-    ));
-    assert!(has_change(
-        &circle_retract,
-        "transactions",
-        coven_core::changeset::ChangeOp::Delete,
-        "local-move-transaction"
-    ));
-    let local_destination =
-        coven_core::changeset::walk(&local_partition("local").1).expect("walk Local destination");
-    for (table, row_id) in [
-        ("accounts", "local-move-account"),
-        ("transactions", "local-move-transaction"),
-    ] {
-        assert!(has_change(
-            &local_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            row_id
-        ));
-    }
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_id),
+        "a move must not publish deletes to its old Circle"
+    );
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != "local"),
+        "the host database is already the Local materialization"
+    );
     let store_mirror_retract =
         coven_core::changeset::walk(&local_partition("store").1).expect("walk Store mirror");
     for route in [&local_move_account_route, &local_move_transaction_route] {
@@ -1116,27 +1096,19 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         })
         .await
         .expect("read Circle-to-Store transition");
-    assert_eq!(store_partitions.len(), 2);
+    assert_eq!(store_partitions.len(), 1);
     let store_partition = |audience: &str| {
         store_partitions
             .iter()
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} Circle-to-Store partition"))
     };
-    let circle_retract =
-        coven_core::changeset::walk(&store_partition(&circle_id).1).expect("walk Circle retract");
-    assert!(has_change(
-        &circle_retract,
-        "accounts",
-        coven_core::changeset::ChangeOp::Delete,
-        "store-move-account"
-    ));
-    assert!(has_change(
-        &circle_retract,
-        "transactions",
-        coven_core::changeset::ChangeOp::Delete,
-        "store-move-transaction"
-    ));
+    assert!(
+        store_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_id),
+        "a move must not publish deletes to its old Circle"
+    );
     let store_destination =
         coven_core::changeset::walk(&store_partition("store").1).expect("walk Store destination");
     assert!(has_change(
@@ -1224,17 +1196,9 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
     };
     let circle_delete =
         coven_core::changeset::walk(&delete_partition(&circle_id).1).expect("walk Circle delete");
-    for (table, row_id, route_id) in [
-        (
-            "accounts",
-            "deleted-account",
-            deleted_account_route.as_str(),
-        ),
-        (
-            "transactions",
-            "deleted-transaction",
-            deleted_transaction_route.as_str(),
-        ),
+    for (table, row_id) in [
+        ("accounts", "deleted-account"),
+        ("transactions", "deleted-transaction"),
     ] {
         assert!(has_change(
             &circle_delete,
@@ -1242,13 +1206,13 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
             coven_core::changeset::ChangeOp::Delete,
             row_id
         ));
-        assert!(has_change(
-            &circle_delete,
-            "_coven_row_routes",
-            coven_core::changeset::ChangeOp::Delete,
-            route_id
-        ));
     }
+    assert!(
+        circle_delete
+            .iter()
+            .all(|change| change.table != "_coven_row_routes"),
+        "routing metadata must never be deleted through a private audience"
+    );
     let store_delete =
         coven_core::changeset::walk(&delete_partition("store").1).expect("walk Store delete");
     for route in [&deleted_account_route, &deleted_transaction_route] {
@@ -1394,7 +1358,7 @@ async fn every_outgoing_synced_fk_matches_its_child_audience() {
         .synced_tables(vec![
             SyncedTable::new("homes", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("targets", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("links", RowIdentity::SharedKey),
+            SyncedTable::new("links", RowIdentity::SharedKey).inherits_audience_through("home_id"),
         ])
         .migrations(vec![Migration::sql(
             1,
@@ -1604,8 +1568,10 @@ async fn inherited_reparenting_materializes_subtree() {
         .synced_tables(vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("requirements", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("transactions", RowIdentity::SharedKey),
-            SyncedTable::new("line_items", RowIdentity::SharedKey),
+            SyncedTable::new("transactions", RowIdentity::SharedKey)
+                .inherits_audience_through("account_id"),
+            SyncedTable::new("line_items", RowIdentity::SharedKey)
+                .inherits_audience_through("transaction_id"),
         ])
         .migrations(vec![Migration::sql(
             1,
@@ -1777,18 +1743,13 @@ async fn inherited_reparenting_materializes_subtree() {
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} reparent partition"))
     };
-    let store = coven_core::changeset::walk(&partition("store").1).expect("walk Store retract");
+    let store =
+        coven_core::changeset::walk(&partition("store").1).expect("walk Store audience mirror");
     let circle = coven_core::changeset::walk(&partition(&circle_b).1).expect("walk Circle insert");
     for (table, id) in [
         ("transactions", "to-circle-transaction"),
         ("line_items", "to-circle-transaction-line"),
     ] {
-        assert!(has_change(
-            &store,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            id
-        ));
         assert!(has_change(
             &circle,
             table,
@@ -1796,6 +1757,9 @@ async fn inherited_reparenting_materializes_subtree() {
             id
         ));
     }
+    assert!(store
+        .iter()
+        .all(|change| change.table != "transactions" && change.table != "line_items"));
 
     let to_local = handle
         .sql(|sql| {
@@ -1849,40 +1813,18 @@ async fn inherited_reparenting_materializes_subtree() {
             1
         )
     );
-    let local_source = local_partitions
-        .iter()
-        .find(|(audience, _)| audience == &circle_id)
-        .expect("Circle A Local-move source");
-    let local_source =
-        coven_core::changeset::walk(&local_source.1).expect("walk Circle-to-Local source");
-    for (table, id) in [
-        ("transactions", "to-local-transaction"),
-        ("line_items", "to-local-transaction-line"),
-    ] {
-        assert!(has_change(
-            &local_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            id
-        ));
-    }
-    let local_destination = local_partitions
-        .iter()
-        .find(|(audience, _)| audience == "local")
-        .expect("Local reparent destination");
-    let local_destination =
-        coven_core::changeset::walk(&local_destination.1).expect("walk Local reparent destination");
-    for (table, id) in [
-        ("transactions", "to-local-transaction"),
-        ("line_items", "to-local-transaction-line"),
-    ] {
-        assert!(has_change(
-            &local_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            id
-        ));
-    }
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_id),
+        "a reparent must not publish deletes to its old Circle"
+    );
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != "local"),
+        "the host database is already the Local materialization"
+    );
 
     let to_store = handle
         .sql(|sql| {
@@ -1919,20 +1861,18 @@ async fn inherited_reparenting_materializes_subtree() {
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} Circle-to-Store partition"))
     };
-    let circle_source = coven_core::changeset::walk(&store_partition(&circle_id).1)
-        .expect("walk Circle-to-Store source");
     let store_destination = coven_core::changeset::walk(&store_partition("store").1)
         .expect("walk Circle-to-Store destination");
+    assert!(
+        store_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_id),
+        "a reparent must not publish deletes to its old Circle"
+    );
     for (table, id) in [
         ("transactions", "to-store-transaction"),
         ("line_items", "to-store-transaction-line"),
     ] {
-        assert!(has_change(
-            &circle_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            id
-        ));
         assert!(has_change(
             &store_destination,
             table,
@@ -2060,7 +2000,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .synced_tables(vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
-            SyncedTable::new("details", RowIdentity::SharedKey),
+            SyncedTable::new("details", RowIdentity::SharedKey)
+                .inherits_audience_through("document_id"),
         ])
         .migrations(vec![Migration::sql(
             1,
@@ -2184,8 +2125,10 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     ));
     let circle = coven_core::changeset::walk(&partition(&circle_id).1)
         .expect("walk Circle descendant partition");
-    let local = coven_core::changeset::walk(&partition("local").1)
-        .expect("walk Local descendant source partition");
+    assert!(
+        partitions.iter().all(|(audience, _)| audience != "local"),
+        "a move must not publish deletes to its old Local audience"
+    );
     for (table, id) in [
         ("documents", "moving-document"),
         ("details", "moving-detail"),
@@ -2194,12 +2137,6 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
             &circle,
             table,
             coven_core::changeset::ChangeOp::Insert,
-            id
-        ));
-        assert!(has_change(
-            &local,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
             id
         ));
     }
@@ -2305,40 +2242,18 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         })
         .await
         .expect("read Circle A to Local move");
-    let circle_source = local_partitions
-        .iter()
-        .find(|(audience, _)| audience == &circle_id)
-        .expect("Circle A source partition");
-    let circle_source =
-        coven_core::changeset::walk(&circle_source.1).expect("walk Circle A source partition");
-    for (table, id) in [
-        ("documents", "moving-document"),
-        ("details", "moving-detail"),
-    ] {
-        assert!(has_change(
-            &circle_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            id
-        ));
-    }
-    let local_destination = local_partitions
-        .iter()
-        .find(|(audience, _)| audience == "local")
-        .expect("Local descendant destination partition");
-    let local_destination = coven_core::changeset::walk(&local_destination.1)
-        .expect("walk Local descendant destination partition");
-    for (table, id) in [
-        ("documents", "moving-document"),
-        ("details", "moving-detail"),
-    ] {
-        assert!(has_change(
-            &local_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            id
-        ));
-    }
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_id),
+        "a move must not publish deletes to its old Circle"
+    );
+    assert!(
+        local_partitions
+            .iter()
+            .all(|(audience, _)| audience != "local"),
+        "the host database is already the Local materialization"
+    );
     for (_, changeset) in &local_partitions {
         let changes =
             coven_core::changeset::walk(changeset).expect("walk Circle-to-Local partition");
@@ -2432,40 +2347,18 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         coven_core::changeset::ChangeOp::Delete,
         "required-folder"
     ));
-    let circle_b_source = sibling_local_partitions
-        .iter()
-        .find(|(audience, _)| audience == &circle_b)
-        .expect("Circle B source partition");
-    let circle_b_source =
-        coven_core::changeset::walk(&circle_b_source.1).expect("walk Circle B source partition");
-    for (table, id) in [
-        ("documents", "sibling-document"),
-        ("details", "sibling-detail"),
-    ] {
-        assert!(has_change(
-            &circle_b_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
-            id
-        ));
-    }
-    let local_destination = sibling_local_partitions
-        .iter()
-        .find(|(audience, _)| audience == "local")
-        .expect("final Local descendant destination partition");
-    let local_destination = coven_core::changeset::walk(&local_destination.1)
-        .expect("walk final Local descendant destination partition");
-    for (table, id) in [
-        ("documents", "sibling-document"),
-        ("details", "sibling-detail"),
-    ] {
-        assert!(has_change(
-            &local_destination,
-            table,
-            coven_core::changeset::ChangeOp::Insert,
-            id
-        ));
-    }
+    assert!(
+        sibling_local_partitions
+            .iter()
+            .all(|(audience, _)| audience != &circle_b),
+        "a move must not publish deletes to its old Circle"
+    );
+    assert!(
+        sibling_local_partitions
+            .iter()
+            .all(|(audience, _)| audience != "local"),
+        "the host database is already the Local materialization"
+    );
 
     let moved_store = handle
         .sql(|sql| {
@@ -2497,12 +2390,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("Store descendant destination partition");
-    let local_source = store_partitions
-        .iter()
-        .find(|(audience, _)| audience == "local")
-        .expect("Local descendant source partition");
-    let local_source = coven_core::changeset::walk(&local_source.1)
-        .expect("walk Local descendant source partition");
+    assert!(
+        store_partitions
+            .iter()
+            .all(|(audience, _)| audience != "local"),
+        "a move must not publish deletes to its old Local audience"
+    );
     let store_destination = coven_core::changeset::walk(&store_destination.1)
         .expect("walk Store descendant destination");
     for (table, id) in [
@@ -2514,17 +2407,6 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
             &store_destination,
             table,
             coven_core::changeset::ChangeOp::Insert,
-            id
-        ));
-    }
-    for (table, id) in [
-        ("documents", "moving-document"),
-        ("details", "moving-detail"),
-    ] {
-        assert!(has_change(
-            &local_source,
-            table,
-            coven_core::changeset::ChangeOp::Delete,
             id
         ));
     }

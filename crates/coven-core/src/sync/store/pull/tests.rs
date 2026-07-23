@@ -287,6 +287,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             .as_ref()
             .expect("candidate membership chain exists"),
         Some(&candidate),
+        None,
     ))
     .await
     .expect("pull candidate Owner to the common Store history");

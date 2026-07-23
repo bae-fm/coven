@@ -390,6 +390,9 @@ impl StoreDatabase {
                 .map_err(DbError::from)
                 .map_err(E::from)?;
             let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
+            gate::validate_scoped_foreign_key_audiences(&tx, gates)
+                .map_err(|error| DbError::Message(error.to_string()))
+                .map_err(E::from)?;
             let partitions = Self::partition_captured_write_on(&tx, &captured, gates, routing)
                 .map_err(E::from)?;
             let blob_facts = Self::capture_partition_blob_facts_on(&tx, &partitions, blob_decls)
