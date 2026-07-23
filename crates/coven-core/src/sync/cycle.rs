@@ -29,7 +29,7 @@ use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
 use super::store::HeldStorePosition;
-use super::store::{AuthorizedStore, Store, StoreDatabase};
+use super::store::{AuthorizedStore, Store};
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -1080,11 +1080,12 @@ pub async fn init_sync_over_storage(
     let hlc = db.hlc();
     let user_keypair = storage.user_keypair().clone();
     let store_id = storage.store_id().to_string();
-    let store_protocol_root = match initialization {
+    let storage = std::sync::Arc::new(storage);
+    let initialized = match initialization {
         StoreInitialization::CreateStore => {
-            super::store_protocol_root::create_store(
-                db,
-                &storage,
+            Store::create(
+                store_database.clone(),
+                std::sync::Arc::clone(&storage),
                 &hlc.now().to_string(),
                 &user_keypair,
             )
@@ -1092,27 +1093,24 @@ pub async fn init_sync_over_storage(
         }
         StoreInitialization::OpenStore {
             expected_store_root,
-        } => super::store_protocol_root::open_store(db, &storage, &expected_store_root).await,
-    }
-    .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-    let store_root_ref = store_database
-        .local_store_root_ref()
-        .await
-        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?
-        .ok_or_else(|| {
-            InitSyncError::StoreProtocolRoot(
-                "opened Store root has no durable exact reference".to_string(),
+        } => {
+            Store::open(
+                store_database.clone(),
+                std::sync::Arc::clone(&storage),
+                &expected_store_root,
+                &user_keypair,
             )
-        })?;
-    ensure_owner_anchored_chain(
-        &storage,
-        store_database,
-        &store_root_ref,
-        &store_protocol_root,
-        &user_keypair,
-    )
-    .await
-    .map_err(InitSyncError::MembershipAnchor)?;
+            .await
+        }
+    }
+    .map_err(|error| match error {
+        crate::sync::store::StoreInitializationError::ProtocolRoot(error) => {
+            InitSyncError::StoreProtocolRoot(error)
+        }
+        crate::sync::store::StoreInitializationError::MembershipAnchor(error) => {
+            InitSyncError::MembershipAnchor(error)
+        }
+    })?;
 
     // Restore any durably-recorded pending rotation into this connection's marker
     // before the first cycle seals anything, so a restart that interrupted an
@@ -1127,85 +1125,19 @@ pub async fn init_sync_over_storage(
         .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
     }
 
-    let mut device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-    if device_id.is_none()
-        && store_protocol_root.descriptor.founder_pubkey
-            == crate::keys::public_key_hex(&user_keypair)
-    {
-        super::store::install_existing_founder_device(
-            store_database,
-            &storage,
-            &store_root_ref,
-            &user_keypair,
-        )
-        .await
-        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-        device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-    }
-    let device_id = device_id.ok_or_else(|| {
-        InitSyncError::StoreProtocolRoot(
-            "initialized Store has no local device registration id".to_string(),
-        )
-    })?;
     let pending_rotation = storage.shared_pending_rotation();
-    info!("Sync initialized (device: {device_id})");
-
-    let storage = std::sync::Arc::new(storage);
-    let store = Store::new(
-        store_database.clone(),
-        storage,
-        store_root_ref,
-        &store_protocol_root,
-    )
-    .map_err(InitSyncError::StoreProtocolRoot)?;
+    info!("Sync initialized (device: {})", initialized.device_id);
 
     Ok(SyncComponents {
-        store,
+        store: initialized.store,
         hlc,
         store_id,
-        device_id,
+        device_id: initialized.device_id,
         cipher,
         pending_rotation,
         user_keypair,
         routing_encryption,
     })
-}
-
-pub async fn ensure_owner_anchored_chain(
-    storage: &dyn SyncStorage,
-    database: &StoreDatabase,
-    root: &super::store_commit::StoreRootRef,
-    store_protocol_root: &super::store_commit::StoreProtocolRoot,
-    owner_keypair: &UserKeypair,
-) -> Result<(), String> {
-    if root.store_root_hash != store_protocol_root.object_hash() {
-        return Err("local Store root reference differs from the opened Store root".to_string());
-    }
-    let chain = super::store::load_and_persist_owner_anchor(
-        storage,
-        root,
-        &crate::keys::public_key_hex(owner_keypair),
-        database,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let founder = chain
-        .founder_entry()
-        .ok_or_else(|| "membership founder is absent from Store membership chain".to_string())?;
-    if store_protocol_root
-        .descriptor
-        .validate_merge_founder_entry(founder)
-        .is_err()
-    {
-        return Err("membership founder does not match Store protocol root".to_string());
-    }
-    Ok(())
 }
 
 /// Components needed to run sync cycles.

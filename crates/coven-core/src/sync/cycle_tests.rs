@@ -134,7 +134,7 @@ async fn run_cycle_m_result(
     ld: &StoreDir,
 ) -> Result<(), String> {
     storage.open_into(db).await.expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(db),
         &storage.root,
@@ -205,7 +205,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let keypair = UserKeypair::generate();
     let storage = Arc::new(cycle_test_store(&db, &keypair).await);
     storage.open_into(&db).await.expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -1955,7 +1955,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .expect("store host-provided blob");
     assert_eq!(pending_write_count(&db).await, 0);
     let membership = storage.open_into(&db).await.expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2178,7 +2178,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         .expect("store host-provided snapshot blob");
     assert_eq!(pending_write_count(&db).await, 0);
     storage.open_into(&db).await.expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2290,7 +2290,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         .await
         .expect("store cleanup source blob");
     storage.open_into(&db).await.expect("open cleanup Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2400,7 +2400,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         .open_into(&db)
         .await
         .expect("open shared blob Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2497,7 +2497,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     .await
     .expect("register external snapshot blob");
     storage.open_into(&db).await.expect("open user blob Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2639,8 +2639,8 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
 /// connects anchor the chain to that pinned owner; and a wiped or refounded chain
 /// is refused as a takeover attempt.
 #[tokio::test]
-async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
-    use crate::sync::cycle::ensure_owner_anchored_chain;
+async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
+    use crate::sync::store::anchor_owner_membership;
     use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
@@ -2650,7 +2650,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .expect("create exact Store");
 
-    ensure_owner_anchored_chain(
+    anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2675,7 +2675,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         "the persisted chain is founded by the owner",
     );
 
-    ensure_owner_anchored_chain(
+    anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2697,7 +2697,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .expect("delete exact founder head");
     assert!(
-        ensure_owner_anchored_chain(
+        anchor_owner_membership(
             &storage.storage,
             &store_database(&db),
             &storage.root,
@@ -2722,10 +2722,13 @@ async fn owner_anchor_installs_founder_device_genesis() {
         .await
         .expect("create exact Store");
     let opened_db = open_test_db();
-    let root =
-        crate::sync::store_protocol_root::open_store(&opened_db, &storage.storage, &storage.root)
-            .await
-            .expect("open exact Store root");
+    let root = crate::sync::store_protocol_root::open_store(
+        &store_database(&opened_db),
+        &storage.storage,
+        &storage.root,
+    )
+    .await
+    .expect("open exact Store root");
     assert_eq!(
         opened_db
             .get_protocol_state("store_device_genesis_state")
@@ -2734,7 +2737,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
         None,
     );
 
-    crate::sync::cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&opened_db),
         &storage.root,
@@ -2761,7 +2764,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
 /// branch that previously adopted any founder on trust.
 #[tokio::test]
 async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
-    use crate::sync::cycle::ensure_owner_anchored_chain;
+    use crate::sync::store::anchor_owner_membership;
     use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
@@ -2773,7 +2776,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     db.delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .expect("remove local owner pin");
-    ensure_owner_anchored_chain(
+    anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -2794,12 +2797,15 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
         .await
         .expect("create foreign exact Store");
     let fresh_db = open_test_db();
-    let foreign_root =
-        crate::sync::store_protocol_root::open_store(&fresh_db, &seeded.storage, &seeded.root)
-            .await
-            .expect("open the pinned foreign Store root");
+    let foreign_root = crate::sync::store_protocol_root::open_store(
+        &store_database(&fresh_db),
+        &seeded.storage,
+        &seeded.root,
+    )
+    .await
+    .expect("open the pinned foreign Store root");
     assert!(
-        ensure_owner_anchored_chain(
+        anchor_owner_membership(
             &seeded.storage,
             &store_database(&fresh_db),
             &seeded.root,
@@ -5114,7 +5120,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     ));
     let storage = Arc::new(cycle_test_store(&db, &keypair).await);
     storage.open_into(&db).await.expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.storage,
         &store_database(&db),
         &storage.root,
@@ -5370,7 +5376,7 @@ async fn run_cycle_m_storage(
         .open_into(db)
         .await
         .expect("open exact test Store");
-    cycle::ensure_owner_anchored_chain(
+    crate::sync::store::anchor_owner_membership(
         &storage.inner.storage,
         &store_database(db),
         &storage.inner.root,

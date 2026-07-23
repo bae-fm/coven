@@ -1,5 +1,4 @@
 use coven_core::keys::UserKeypair;
-use coven_core::sync::store_objects::load_store_protocol_root;
 use coven_core::sync::test_helpers::{
     host_exec, open_test_db, pull_into, query_text, temp_store_dir, TestStore,
 };
@@ -11,20 +10,10 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let store = TestStore::create(&db, "exact-founder-graph", founder.clone())
         .await
         .expect("create Store with founder graph");
-    let root = load_store_protocol_root(&store.storage, &store.root)
+    store
+        .open_into(&db)
         .await
-        .expect("read exact Store root")
-        .value;
-
-    coven_core::sync::cycle::ensure_owner_anchored_chain(
-        &store.storage,
-        &coven_core::sync::store::StoreDatabase::from_database(db.clone()),
-        &store.root,
-        &root,
-        &founder,
-    )
-    .await
-    .expect("created Store founder chain is immediately readable");
+        .expect("created Store founder chain is immediately readable");
 }
 
 #[tokio::test]
@@ -35,20 +24,10 @@ async fn opened_store_persists_the_exact_root_needed_by_membership_pull() {
         .await
         .expect("create source Store");
     let opened_db = open_test_db();
-    let root =
-        coven_core::sync::store_protocol_root::open_store(&opened_db, &store.storage, &store.root)
-            .await
-            .expect("open existing exact Store root");
-
-    coven_core::sync::cycle::ensure_owner_anchored_chain(
-        &store.storage,
-        &coven_core::sync::store::StoreDatabase::from_database(opened_db.clone()),
-        &store.root,
-        &root,
-        &founder,
-    )
-    .await
-    .expect("opened Store membership uses its durable exact root");
+    store
+        .open_into(&opened_db)
+        .await
+        .expect("opened Store membership uses its durable exact root");
 }
 
 #[tokio::test]

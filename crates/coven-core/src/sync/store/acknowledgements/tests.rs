@@ -35,9 +35,14 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
 }
 
 async fn initialize(db: &Database, storage: &CloudSyncStorage, signer: &UserKeypair) {
-    crate::sync::store_protocol_root::create_store(db, storage, "ack-exact-store", signer)
-        .await
-        .expect("create acknowledgement test Store");
+    crate::sync::store_protocol_root::create_store(
+        &store_database(db),
+        storage,
+        "ack-exact-store",
+        signer,
+    )
+    .await
+    .expect("create acknowledgement test Store");
     crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), storage)
         .await
         .expect("activate acknowledgement test registration");

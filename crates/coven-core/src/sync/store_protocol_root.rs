@@ -1,6 +1,5 @@
 //! Durable creation and exact opening of the Store protocol root.
 
-use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::sync::store::database::StoreDatabase;
 
@@ -836,13 +835,12 @@ async fn rollback_founder_publication(
         .map_err(|error| error.to_string())
 }
 
-pub async fn create_store(
-    db: &Database,
+pub(crate) async fn create_store(
+    database: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
-    let database = StoreDatabase::new(db);
     let _creation = database.lock_store_creation().await;
     let mut graph = match database
         .local_store_founder_graph()
@@ -852,7 +850,7 @@ pub async fn create_store(
         Some(graph) => graph,
         None => {
             let graph = Box::pin(prepare_founder_graph(
-                &database,
+                database,
                 storage,
                 founder_timestamp,
                 signer,
@@ -879,7 +877,7 @@ pub async fn create_store(
         crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
     };
     if rollback_allowed {
-        Box::pin(rollback_founder_publication(&database, storage, &graph))
+        Box::pin(rollback_founder_publication(database, storage, &graph))
             .await
             .map_err(|rollback| {
                 StoreProtocolRootError::Database(format!(
@@ -897,7 +895,7 @@ pub async fn create_store(
             })?;
     }
     match Box::pin(publish_store_founder_graph(
-        &database,
+        database,
         storage,
         founder_timestamp,
         signer,
@@ -907,7 +905,7 @@ pub async fn create_store(
     {
         Ok(root) => Ok(root),
         Err(operation) if rollback_allowed => {
-            match Box::pin(rollback_founder_publication(&database, storage, &graph)).await {
+            match Box::pin(rollback_founder_publication(database, storage, &graph)).await {
                 Ok(()) => Err(operation),
                 Err(rollback) => Err(StoreProtocolRootError::Rollback {
                     operation: Box::new(operation),
@@ -1058,12 +1056,12 @@ async fn publish_store_founder_graph(
     Ok(store_protocol_root)
 }
 
-pub async fn open_store(
-    db: &Database,
+pub(crate) async fn open_store(
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
-    let database = StoreDatabase::new(db);
+    let db = database.sqlite();
     let context = super::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
@@ -1123,6 +1121,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::database::Database;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::test_helpers::{open_test_db, test_migrations, test_synced_tables};
@@ -1145,16 +1144,21 @@ mod tests {
         .expect("construct exact founder storage");
         let db = open_test_db();
 
-        let root = create_store(&db, &storage, "0000000000001-0000-founder", &founder)
-            .await
-            .expect("create Store with founder graph");
+        let root = create_store(
+            &store_database(&db),
+            &storage,
+            "0000000000001-0000-founder",
+            &founder,
+        )
+        .await
+        .expect("create Store with founder graph");
         let root_ref = store_database(&db)
             .local_store_root_ref()
             .await
             .expect("read exact Store root")
             .expect("created Store root exists");
 
-        super::super::cycle::ensure_owner_anchored_chain(
+        crate::sync::store::anchor_owner_membership(
             &storage,
             &store_database(&db),
             &root_ref,
@@ -1198,7 +1202,7 @@ mod tests {
             exact_objects.push(head.object.clone());
             home.fail_exact_create_before_call(failing_create);
 
-            create_store(&db, &storage, timestamp, &founder)
+            create_store(&store_database(&db), &storage, timestamp, &founder)
                 .await
                 .expect_err("injected founder publication failure must abort creation");
 
@@ -1209,7 +1213,7 @@ mod tests {
                     object.slot().logical_key(),
                 );
             }
-            create_store(&db, &storage, timestamp, &founder)
+            create_store(&store_database(&db), &storage, timestamp, &founder)
                 .await
                 .expect("retry creates the Store after complete rollback");
         }
@@ -1253,14 +1257,14 @@ mod tests {
         home.fail_exact_create_before_call(3);
         home.fail_exact_delete_on_call(1);
 
-        let failure = create_store(&db, &storage, timestamp, &founder)
+        let failure = create_store(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect_err("failed exact deletion must fail the creation call");
         assert!(matches!(failure, StoreProtocolRootError::Rollback { .. }));
         drop(db);
         let db = open();
 
-        create_store(&db, &storage, timestamp, &founder)
+        create_store(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect("retry resumes rollback before publishing the founder graph");
     }
@@ -1294,14 +1298,26 @@ mod tests {
         let first_storage = storage.clone();
         let first_founder = founder.clone();
         let first = tokio::spawn(async move {
-            create_store(&first_db, &first_storage, timestamp, &first_founder).await
+            create_store(
+                &store_database(&first_db),
+                &first_storage,
+                timestamp,
+                &first_founder,
+            )
+            .await
         });
         reached.notified().await;
         let second_db = db.clone();
         let second_storage = storage.clone();
         let second_founder = founder.clone();
         let second = tokio::spawn(async move {
-            create_store(&second_db, &second_storage, timestamp, &second_founder).await
+            create_store(
+                &store_database(&second_db),
+                &second_storage,
+                timestamp,
+                &second_founder,
+            )
+            .await
         });
         tokio::task::yield_now().await;
         assert!(
@@ -1345,7 +1361,7 @@ mod tests {
         let competing = b"different Store root occupant".to_vec();
         home.insert_exact_object(graph.root.object.slot().logical_key(), competing.clone());
 
-        create_store(&db, &storage, timestamp, &founder)
+        create_store(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect_err("different root occupant must prevent Store creation");
 
@@ -1370,9 +1386,14 @@ mod tests {
         .expect("construct opaque founder storage");
         let db = open_test_db();
 
-        create_store(&db, &storage, "0000000000001-0000-opaque-founder", &founder)
-            .await
-            .expect("create opaque Store");
+        create_store(
+            &store_database(&db),
+            &storage,
+            "0000000000001-0000-opaque-founder",
+            &founder,
+        )
+        .await
+        .expect("create opaque Store");
         let root_ref = store_database(&db)
             .local_store_root_ref()
             .await

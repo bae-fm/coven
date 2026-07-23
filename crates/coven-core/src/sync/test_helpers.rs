@@ -1229,12 +1229,13 @@ pub async fn create_exact_test_store(
     store_id: &str,
     signer: &UserKeypair,
 ) -> Result<crate::sync::store_commit::StoreRootRef, String> {
+    let database = crate::sync::store::database::StoreDatabase::new(db);
     Box::pin(crate::sync::store_protocol_root::create_store(
-        db, storage, store_id, signer,
+        &database, storage, store_id, signer,
     ))
     .await
     .map_err(|error| error.to_string())?;
-    crate::sync::store::database::StoreDatabase::new(db)
+    database
         .local_store_root_ref()
         .await
         .map_err(|error| error.to_string())?
@@ -1259,14 +1260,8 @@ pub async fn initialize_store_fixture(
         .await
         .map_err(|error| error.to_string())?
         .value;
-    crate::sync::cycle::ensure_owner_anchored_chain(
-        storage,
-        &database,
-        &root,
-        &protocol_root,
-        signer,
-    )
-    .await?;
+    crate::sync::store::anchor_owner_membership(storage, &database, &root, &protocol_root, signer)
+        .await?;
     let membership = crate::sync::store::load_cycle_membership(storage, &database)
         .await
         .map_err(|error| error.to_string())?
@@ -2279,9 +2274,10 @@ impl TestStore {
         db: &Database,
     ) -> Result<crate::sync::membership::MembershipChain, String> {
         let database = crate::sync::store::database::StoreDatabase::new(db);
-        let open = crate::sync::store_protocol_root::open_store(db, &self.storage, &self.root);
+        let open =
+            crate::sync::store_protocol_root::open_store(&database, &self.storage, &self.root);
         let root = open.await.map_err(|error| error.to_string())?;
-        let ensure = crate::sync::cycle::ensure_owner_anchored_chain(
+        let ensure = crate::sync::store::anchor_owner_membership(
             &self.storage,
             &database,
             &self.root,

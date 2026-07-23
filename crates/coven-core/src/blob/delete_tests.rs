@@ -1808,16 +1808,17 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // Opening this exact Store under the established owner refuses the forged root
     // before a cycle can load membership or run GC.
     let joining_db = open_test_db();
+    let joining_store = crate::sync::store::database::StoreDatabase::new(&joining_db);
     let result = match crate::sync::store_protocol_root::open_store(
-        &joining_db,
+        &joining_store,
         &storage.storage,
         &storage.root,
     )
     .await
     {
-        Ok(root) => crate::sync::cycle::ensure_owner_anchored_chain(
+        Ok(root) => crate::sync::store::anchor_owner_membership(
             &storage.storage,
-            &crate::sync::store::database::StoreDatabase::new(&joining_db),
+            &joining_store,
             &storage.root,
             &root,
             &real_owner,
@@ -1877,16 +1878,17 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     plant_tombstone(storage.home.as_ref(), &tombstone).await;
 
     let joining_db = open_test_db();
+    let joining_store = crate::sync::store::database::StoreDatabase::new(&joining_db);
     let result = match crate::sync::store_protocol_root::open_store(
-        &joining_db,
+        &joining_store,
         &storage.storage,
         &storage.root,
     )
     .await
     {
-        Ok(root) => crate::sync::cycle::ensure_owner_anchored_chain(
+        Ok(root) => crate::sync::store::anchor_owner_membership(
             &storage.storage,
-            &crate::sync::store::database::StoreDatabase::new(&joining_db),
+            &joining_store,
             &storage.root,
             &root,
             &real_owner,

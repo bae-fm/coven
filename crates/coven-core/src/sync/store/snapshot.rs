@@ -929,7 +929,7 @@ mod tests {
         signer: &UserKeypair,
     ) -> (ObjectHash, String, MembershipChain) {
         let root = crate::sync::store_protocol_root::create_store(
-            db,
+            &store_database(db),
             storage,
             "snapshot-exact-store",
             signer,

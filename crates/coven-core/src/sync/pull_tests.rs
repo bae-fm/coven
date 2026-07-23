@@ -403,9 +403,14 @@ impl TestStoreStorage for CloudSyncStorage {
             .map_err(|error| error.to_string())?
             .is_none()
         {
-            crate::sync::store_protocol_root::create_store(db, self, self.store_id(), keypair)
-                .await
-                .map_err(|error| error.to_string())?;
+            crate::sync::store_protocol_root::create_store(
+                &crate::sync::store::database::StoreDatabase::new(db),
+                self,
+                self.store_id(),
+                keypair,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -510,24 +515,23 @@ async fn pull_exact_store_into(
         .await
         .expect("read source Store root")
         .expect("source Store has exact root authority");
-    let protocol_root = crate::sync::store_protocol_root::open_store(destination, storage, &root)
-        .await
-        .expect("open exact Store on destination");
-    crate::sync::cycle::ensure_owner_anchored_chain(
+    let destination_store = crate::sync::store::database::StoreDatabase::new(destination);
+    let protocol_root =
+        crate::sync::store_protocol_root::open_store(&destination_store, storage, &root)
+            .await
+            .expect("open exact Store on destination");
+    crate::sync::store::anchor_owner_membership(
         storage,
-        &crate::sync::store::database::StoreDatabase::new(destination),
+        &destination_store,
         &root,
         &protocol_root,
         storage.user_keypair(),
     )
     .await
     .expect("anchor exact Store membership");
-    let membership = crate::sync::store::load_cycle_membership(
-        storage,
-        &crate::sync::store::database::StoreDatabase::new(destination),
-    )
-    .await
-    .expect("load exact Store membership");
+    let membership = crate::sync::store::load_cycle_membership(storage, &destination_store)
+        .await
+        .expect("load exact Store membership");
     let result = crate::sync::store::pull_store_commits(
         &store_database(destination),
         destination.synced_tables(),

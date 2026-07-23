@@ -23,6 +23,19 @@ pub struct StoreRestoreMembership {
     pub membership_floor: crate::join_code::MembershipFloor,
 }
 
+pub(crate) struct InitializedStore {
+    pub(crate) store: Store,
+    pub(crate) device_id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StoreInitializationError {
+    #[error("Store protocol root failed: {0}")]
+    ProtocolRoot(String),
+    #[error("membership chain bootstrap/anchor failed: {0}")]
+    MembershipAnchor(String),
+}
+
 #[derive(Clone)]
 struct StoreAccess<'a> {
     database: StoreDatabase,
@@ -36,6 +49,87 @@ pub(crate) struct AuthorizedStore<'a> {
 }
 
 impl Store {
+    pub(crate) async fn create(
+        database: StoreDatabase,
+        storage: Arc<CloudSyncStorage>,
+        founder_timestamp: &str,
+        identity: &UserKeypair,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let protocol_root = crate::sync::store_protocol_root::create_store(
+            &database,
+            &storage,
+            founder_timestamp,
+            identity,
+        )
+        .await
+        .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        Self::finish_initialization(database, storage, protocol_root, identity).await
+    }
+
+    pub(crate) async fn open(
+        database: StoreDatabase,
+        storage: Arc<CloudSyncStorage>,
+        expected_root: &StoreRootRef,
+        identity: &UserKeypair,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let protocol_root =
+            crate::sync::store_protocol_root::open_store(&database, &*storage, expected_root)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        Self::finish_initialization(database, storage, protocol_root, identity).await
+    }
+
+    async fn finish_initialization(
+        database: StoreDatabase,
+        storage: Arc<CloudSyncStorage>,
+        protocol_root: StoreProtocolRoot,
+        identity: &UserKeypair,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let store_root = database
+            .local_store_root_ref()
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
+            .ok_or_else(|| {
+                StoreInitializationError::ProtocolRoot(
+                    "opened Store root has no durable exact reference".to_string(),
+                )
+            })?;
+        anchor_owner_membership(&*storage, &database, &store_root, &protocol_root, identity)
+            .await
+            .map_err(StoreInitializationError::MembershipAnchor)?;
+
+        let mut device_id = database
+            .sqlite()
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        if device_id.is_none()
+            && protocol_root.descriptor.founder_pubkey == crate::keys::public_key_hex(identity)
+        {
+            registration::install_existing_founder_device(
+                &database,
+                &*storage,
+                &store_root,
+                identity,
+            )
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            device_id = database
+                .sqlite()
+                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        }
+        let device_id = device_id.ok_or_else(|| {
+            StoreInitializationError::ProtocolRoot(
+                "initialized Store has no local device registration id".to_string(),
+            )
+        })?;
+        let store = Self::new(database, storage, store_root, &protocol_root)
+            .map_err(StoreInitializationError::ProtocolRoot)?;
+        Ok(InitializedStore { store, device_id })
+    }
+
     #[doc(hidden)]
     pub async fn load(
         database: StoreDatabase,
@@ -56,7 +150,7 @@ impl Store {
             .map_err(StoreError::InvalidOutbound)
     }
 
-    pub(crate) fn new(
+    fn new(
         database: StoreDatabase,
         storage: Arc<CloudSyncStorage>,
         store_root: StoreRootRef,
@@ -563,6 +657,37 @@ impl AuthorizedStore<'_> {
         )
         .map_err(|error| error.to_string())
     }
+}
+
+pub(crate) async fn anchor_owner_membership(
+    storage: &dyn SyncStorage,
+    database: &StoreDatabase,
+    root: &StoreRootRef,
+    protocol_root: &StoreProtocolRoot,
+    owner: &UserKeypair,
+) -> Result<(), String> {
+    if root.store_root_hash != protocol_root.object_hash() {
+        return Err("local Store root reference differs from the opened Store root".to_string());
+    }
+    let chain = membership::load_and_persist_owner_anchor(
+        storage,
+        root,
+        &crate::keys::public_key_hex(owner),
+        database,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let founder = chain
+        .founder_entry()
+        .ok_or_else(|| "membership founder is absent from Store membership chain".to_string())?;
+    if protocol_root
+        .descriptor
+        .validate_merge_founder_entry(founder)
+        .is_err()
+    {
+        return Err("membership founder does not match Store protocol root".to_string());
+    }
+    Ok(())
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {

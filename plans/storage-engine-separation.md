@@ -75,6 +75,11 @@ This ownership work completes the Store foundation required by
   explicitly. Store tests that require private persistence algorithms live
   beside those algorithms rather than widening visibility or reaching through
   the root database.
+- Complete: Store creation and opening own protocol-root publication or
+  verification, exact membership anchoring, founder-device installation, and
+  construction of the runnable Store. Cycle receives the constructed Store and
+  local device identity as one result rather than assembling Store authority
+  from raw database and protocol-root operations.
 - Complete: Store creation, device registration, join challenges,
   acknowledgements, snapshot publication, and their durable transitions live
   on `StoreDatabase`; the former root `Database` workflow modules are absent.
@@ -103,9 +108,10 @@ This ownership work completes the Store foundation required by
   when every distinct resolver selects it. Disagreement retires every contested
   assignment, while each resolver's prior Owner grant is retired and replaced
   by the signed resolution authority.
-- Remaining: route cycle and application commands through the concrete Store
-  owner, make Store implementation modules private, reduce temporary
-  visibility, and seal the boundary.
+- Remaining: route the remaining application commands through the concrete
+  Store owner, move protocol-root implementation below Store ownership, make
+  Store implementation modules private, reduce temporary visibility, and seal
+  the boundary.
 
 ## Final dependency direction
 

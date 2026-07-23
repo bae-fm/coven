@@ -1325,7 +1325,7 @@ mod tests {
         )
         .expect("build attacker storage");
         let attacker_db = crate::sync::test_helpers::open_test_db();
-        crate::sync::store_protocol_root::create_store(
+        crate::sync::test_helpers::create_exact_test_store(
             &attacker_db,
             &attacker_storage,
             store_id,

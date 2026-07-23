@@ -2965,7 +2965,7 @@ async fn create_exclusion_test_store(
     signer: &UserKeypair,
 ) {
     Box::pin(crate::sync::store_protocol_root::create_store(
-        db,
+        &store_database(db),
         storage,
         "device-exclusion-store",
         signer,

@@ -89,9 +89,7 @@ pub use device_join::{
     ProvisionalDeviceBootstrap, SlotDisposition,
 };
 pub use error::StoreError;
-pub(crate) use membership::{
-    apply_key_rotation, load_and_persist_owner_anchor, unwrap_store_keyring_for_refs,
-};
+pub(crate) use membership::{apply_key_rotation, unwrap_store_keyring_for_refs};
 #[cfg(test)]
 pub(crate) use membership::{
     complete_revoke_rotation_adoption, load_exact_membership_head, revoke_member_durable,
@@ -102,7 +100,9 @@ pub(crate) use membership::{invite_member, remove_member};
 #[doc(hidden)]
 pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
-pub(crate) use owner::AuthorizedStore;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use owner::anchor_owner_membership;
+pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
 #[doc(hidden)]
 pub use owner::{Store, StoreRestoreMembership};
 pub(crate) use pull::VerifiedStoreSnapshotStability;
@@ -129,8 +129,7 @@ pub use reclaim::{
     StorePackageReclaimClaim, StorePackageReclaimTarget, StoreReclaimError, StoreReclaimResult,
 };
 pub(crate) use registration::{
-    bootstrap_pending_device, ensure_active_registration, install_existing_founder_device,
-    prepare_registration_for_origin,
+    bootstrap_pending_device, ensure_active_registration, prepare_registration_for_origin,
 };
 pub use registration::{recover_owner_device, StoreRegistrationError};
 #[cfg(test)]
