@@ -105,6 +105,8 @@ pub mod delete;
 pub mod local_cleanup;
 pub mod local_files;
 pub mod locator;
+#[cfg(test)]
+mod row_ref_tests;
 pub mod transition;
 pub mod upload;
 
@@ -494,6 +496,63 @@ impl RowBlobRef {
                 ));
             }
             _ => unreachable!("authority determines whether a remote audience exists"),
+        }
+        if let Some(stored) = &stored {
+            let locator = stored.locator();
+            if locator.namespace() != blob.namespace {
+                return Err(format!(
+                    "row blob namespace {:?} differs from locator namespace {:?}",
+                    blob.namespace,
+                    locator.namespace()
+                ));
+            }
+            if locator.blob_id() != blob.id {
+                return Err(format!(
+                    "row blob id {:?} differs from locator id {:?}",
+                    blob.id,
+                    locator.blob_id()
+                ));
+            }
+            if locator.plaintext_size() != plaintext_size
+                || locator.plaintext_hash() != plaintext_hash
+            {
+                return Err(
+                    "row blob plaintext size or hash differs from its exact locator".to_string(),
+                );
+            }
+            match locator {
+                locator::BlobLocator::Opaque {
+                    scope,
+                    key_fingerprint,
+                    ..
+                } => {
+                    if scope != &blob.scope {
+                        return Err(
+                            "row blob encryption scope differs from its exact locator".to_string()
+                        );
+                    }
+                    if let RowBlobAuthority::Remote(
+                        crate::sync::audience_package::PackageAudience::Circle {
+                            key_fingerprint: expected,
+                            ..
+                        },
+                    ) = &authority
+                    {
+                        if key_fingerprint != expected {
+                            return Err(
+                                "row blob Circle key differs from its exact locator".to_string()
+                            );
+                        }
+                    }
+                }
+                locator::BlobLocator::Browsable { cloud_path, .. } => {
+                    if blob.cloud_path.as_deref() != Some(cloud_path) {
+                        return Err(
+                            "row blob cloud path differs from its exact locator".to_string()
+                        );
+                    }
+                }
+            }
         }
         Ok(Self {
             table,
