@@ -6,8 +6,8 @@ use crate::sync::store_commit::{ObjectHash, StoreDeviceHead, StoreDeviceHeadRef}
 use crate::sync::test_helpers::{host_exec, open_test_db, temp_store_dir, TestStore};
 use std::sync::RwLock;
 
-fn store_database(db: &crate::database::Database) -> crate::sync::store::database::StoreDatabase {
-    crate::sync::store::database::StoreDatabase::new(db)
+fn store_database(db: &crate::database::Database) -> crate::sync::store::StoreDatabase {
+    crate::sync::store::StoreDatabase::new(db)
 }
 
 async fn publish_note(
@@ -135,7 +135,7 @@ async fn published_history(
         .expect("created Store has a local device id");
     let membership = super::store::load_cycle_membership(
         &store.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db),
+        &crate::sync::store::StoreDatabase::new(&db),
     )
     .await
     .expect("load Merge membership")
@@ -288,7 +288,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .resolved_store_device_state(&retained[0].history_summary().post_state)
                 .await
                 .expect("load canonical retained state");
-            let root = crate::sync::store::database::StoreDatabase::new(&db)
+            let root = crate::sync::store::StoreDatabase::new(&db)
                 .local_store_root_ref()
                 .await
                 .expect("load Store root")
@@ -370,7 +370,7 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
     );
 
     let (_, _, registration, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(
+        crate::sync::store::load_local_store_authority_for_test(
             &store_database(&db),
             &device_id,
             &store.signer,
@@ -638,7 +638,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     let (db, store, _summary) = Box::pin(history_with_member_removal()).await;
     let membership = super::store::load_cycle_membership(
         &store.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db),
+        &crate::sync::store::StoreDatabase::new(&db),
     )
     .await
     .expect("load snapshot membership")
@@ -672,12 +672,12 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     )
     .await
     .expect("publish checkpoint snapshot");
-    let published = crate::sync::store::database::StoreDatabase::new(&db)
+    let published = crate::sync::store::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load published snapshot")
         .expect("published snapshot is recorded");
-    let (_, _, author, device_signer) = crate::sync::store::operations::load_local_store_authority(
+    let (_, _, author, device_signer) = crate::sync::store::load_local_store_authority_for_test(
         &store_database(&db),
         &db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
@@ -769,7 +769,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             ]
         })
         .collect::<Vec<_>>();
-    let previous = crate::sync::store::database::StoreDatabase::new(&db)
+    let previous = crate::sync::store::StoreDatabase::new(&db)
         .latest_local_store_position()
         .await
         .expect("load local Store position");
@@ -794,7 +794,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         dependencies,
     };
     let (root, registration_ref, registration, _) =
-        crate::sync::store::operations::load_local_store_authority(
+        crate::sync::store::load_local_store_authority_for_test(
             &store_database(&db),
             &device_id,
             &store.signer,

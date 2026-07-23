@@ -258,7 +258,7 @@ pub(super) fn validate_generation_zero_replay_baseline_on(
 ) -> Result<(), DbError> {
     baseline.validate_image()?;
     validate_replay_authority_on(conn, baseline)?;
-    let image = crate::sync::store::retained_replay::open_image(&baseline.image_bytes)?;
+    let image = baseline.open_image()?;
     let routing = load_coven_metadata(&image)?;
     if routing.hash() != baseline.routing_hash {
         return Err(DbError::Message(

@@ -545,7 +545,7 @@ async fn install_exact_remote_blob_binding_for_row(
         ],
     )
     .await;
-    let sequence = crate::sync::store::database::StoreDatabase::new(db)
+    let sequence = crate::sync::store::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .expect("load exact test producer position")
@@ -2622,7 +2622,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
             .expect("publish exact source write"),
         "source write publishes a Store commit",
     );
-    let blob_owner = crate::sync::store::database::StoreDatabase::new(&db1)
+    let blob_owner = crate::sync::store::StoreDatabase::new(&db1)
         .latest_local_store_position()
         .await
         .expect("load source Store position")

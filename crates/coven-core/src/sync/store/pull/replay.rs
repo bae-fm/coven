@@ -240,7 +240,7 @@ pub(super) fn replay_retained_merge_projection_on(
     super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
     let baseline =
         crate::sync::store::database::StoreDatabase::generation_zero_replay_baseline_on(live)?;
-    let replay = super::retained_replay::open_image(&baseline.image_bytes)?;
+    let replay = baseline.open_image()?;
     replay
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(DbError::from)?;

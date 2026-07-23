@@ -2,7 +2,7 @@ use crate::database::blob_records::remote_audience_to_db;
 use crate::database::store_reclaim_records::store_reclaim_journal_error;
 
 use super::*;
-use crate::sync::store::database::candidate_records::load_author_exclusion_activation_locator_on;
+use crate::sync::store::load_author_exclusion_activation_locator_on;
 
 pub(crate) enum RemoteStoredRepresentationRef<'a> {
     Inline(&'a [u8]),

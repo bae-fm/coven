@@ -24,7 +24,7 @@ use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::membership::MemberRole;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::StoreDatabase;
 use crate::sync::test_helpers::{
     exec, open_test_db, open_test_db_with_blob, plant_blob_row, pubkey_hex, TestStore,
 };
@@ -95,7 +95,7 @@ async fn gc_tombstones_as(
 ) -> Result<usize, String> {
     let membership = crate::sync::store::load_cycle_membership(
         &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(db),
+        &crate::sync::store::StoreDatabase::new(db),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -1840,7 +1840,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     let storage = TestStore::create(&founder_db, "test-store", UserKeypair::generate())
         .await
         .expect("create exact Store before wiping its membership head");
-    let founder_graph = crate::sync::store::database::StoreDatabase::new(&founder_db)
+    let founder_graph = crate::sync::store::StoreDatabase::new(&founder_db)
         .local_store_founder_graph()
         .await
         .expect("load exact founder graph")

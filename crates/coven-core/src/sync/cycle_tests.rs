@@ -25,7 +25,7 @@ use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::StoreDatabase;
 use crate::sync::store_commit::SnapshotMeta;
 use crate::sync::test_helpers::*;
 
@@ -3616,7 +3616,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 activate_joined_test_device(&inner, &producer_db, &db_m, &keypair).await;
                 retain_store_packages_for_assertion(&db_m, &inner, b"existing-host-write-snapshot")
                     .await;
-                let peer_sequence = crate::sync::store::database::StoreDatabase::new(&producer_db)
+                let peer_sequence = crate::sync::store::StoreDatabase::new(&producer_db)
                     .latest_local_store_position()
                     .await
                     .expect("read producer Store position after activating M")
@@ -3715,7 +3715,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         ],
     )
     .await;
-    let peer_sequence = crate::sync::store::database::StoreDatabase::new(&producer_db)
+    let peer_sequence = crate::sync::store::StoreDatabase::new(&producer_db)
         .latest_local_store_position()
         .await
         .expect("read producer Store position after activating M")
@@ -3748,7 +3748,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 
     // Cycle 2 has no host write. The applied row must not create a local data
     // commit because apply bypasses the host write ledger.
-    let before = crate::sync::store::database::StoreDatabase::new(&db_m)
+    let before = crate::sync::store::StoreDatabase::new(&db_m)
         .latest_local_store_position()
         .await
         .expect("read local Store position before the empty cycle");
@@ -3763,7 +3763,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     )
     .await
     .expect("M's empty cycle succeeds");
-    let after = crate::sync::store::database::StoreDatabase::new(&db_m)
+    let after = crate::sync::store::StoreDatabase::new(&db_m)
         .latest_local_store_position()
         .await
         .expect("read local Store position after the empty cycle")
@@ -3859,7 +3859,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let rejected_blobs = reject_blob_create.rejected_blobs();
     assert_eq!(rejected_blobs.len(), 1);
     let prepared_blob = rejected_blobs[0].clone();
-    let prepared = crate::sync::store::database::StoreDatabase::new(&db)
+    let prepared = crate::sync::store::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write after blob failure")
@@ -4712,7 +4712,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "publish Store write: storage operation failed: InMemoryCloudHome: forced failure before exact create call 1",
         "cycle surfaces the exact Store package append failure",
     );
-    let prepared = crate::sync::store::database::StoreDatabase::new(&db)
+    let prepared = crate::sync::store::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read outbound Store queue")
@@ -4938,7 +4938,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         let peer_at_snapshot = peer_at_snapshot.expect("peer Store stream reaches sequence 6");
         let (_peer_temp, peer_store_dir) = temp_store_dir();
         pull_into(&db, &storage, &peer_store_dir).await;
-        let local_at_snapshot = crate::sync::store::database::StoreDatabase::new(&db)
+        let local_at_snapshot = crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .expect("read local Store position after peer setup")
@@ -4980,7 +4980,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 .expect("publish local Store commit after snapshot");
         }
         assert_eq!(
-            crate::sync::store::database::StoreDatabase::new(&db)
+            crate::sync::store::StoreDatabase::new(&db)
                 .latest_local_store_position()
                 .await
                 .expect("read latest local Store commit")
@@ -5077,7 +5077,7 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     .await
     .expect_err("the first Store package append fails");
     assert!(
-        crate::sync::store::database::StoreDatabase::new(&db)
+        crate::sync::store::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("read outbound Store queue")
@@ -5097,7 +5097,7 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     )
     .await
     .expect("retry prepared Store write");
-    assert!(crate::sync::store::database::StoreDatabase::new(&db)
+    assert!(crate::sync::store::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read retried outbound Store queue")
@@ -5166,7 +5166,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     )
     .await
     .expect_err("the first Store package append fails");
-    let first_write_id = crate::sync::store::database::StoreDatabase::new(&db)
+    let first_write_id = crate::sync::store::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write")
@@ -5601,7 +5601,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         ],
     )
     .await;
-    let second_sequence = crate::sync::store::database::StoreDatabase::new(&owner_db)
+    let second_sequence = crate::sync::store::StoreDatabase::new(&owner_db)
         .latest_local_store_position()
         .await
         .expect("read owner Store position after registration activation")
@@ -5626,7 +5626,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("derive owner Store announcement activation")
             .author_stream_id()
             .to_string();
-        let second_sequence = crate::sync::store::database::StoreDatabase::new(&owner_db)
+        let second_sequence = crate::sync::store::StoreDatabase::new(&owner_db)
             .latest_local_store_position()
             .await
             .expect("read published owner Store position")
@@ -5913,7 +5913,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .await
         .expect("load local device id")
         .expect("active founder device id");
-    let plan = crate::sync::store::operations::prepare_plan(
+    let plan = crate::sync::store::prepare_store_operation_plan_for_test(
         &crate::sync::store::StoreDatabase::new(&owner_db),
         &storage.storage,
         &fixture.authorization,
@@ -6224,7 +6224,7 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) = crate::sync::store::operations::exact_next_announcement_slot(
+    let (next_slot, _) = crate::sync::store::exact_next_announcement_slot_for_test(
         &storage.storage,
         &storage.root,
         &owner_ref,
@@ -6285,16 +6285,15 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, accepted_head_ref) =
-        crate::sync::store::operations::exact_next_announcement_slot(
-            &storage.storage,
-            &storage.root,
-            &owner_ref,
-            &owner_registration,
-            Some(&activation),
-        )
-        .await
-        .expect("load exact next announcement slot");
+    let (next_slot, accepted_head_ref) = crate::sync::store::exact_next_announcement_slot_for_test(
+        &storage.storage,
+        &storage.root,
+        &owner_ref,
+        &owner_registration,
+        Some(&activation),
+    )
+    .await
+    .expect("load exact next announcement slot");
     let accepted_head_ref = accepted_head_ref.expect("activation has an accepted Store head");
     let accepted_head = crate::sync::store_objects::load_head_ref(
         &storage.storage,

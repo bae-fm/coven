@@ -466,7 +466,7 @@ pub trait DeviceJoinChallengePublicationJournal: Send + Sync {
 }
 
 #[async_trait]
-impl DeviceJoinChallengePublicationJournal for crate::sync::store::database::StoreDatabase {
+impl DeviceJoinChallengePublicationJournal for crate::sync::store::StoreDatabase {
     async fn prepare(
         &self,
         challenge: &CrossPrincipalProbeChallenge,

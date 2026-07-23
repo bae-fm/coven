@@ -3,7 +3,7 @@ use crate::database::connection_io::capture_changeset;
 
 use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::StoreDatabase;
 
 use super::fixtures::*;
 
@@ -180,7 +180,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             ObjectHash::digest(&bytes),
         ),
     };
-    crate::sync::store::database::StoreDatabase::new(&db)
+    crate::sync::store::StoreDatabase::new(&db)
         .install_store_root_authority(reference, bytes)
         .await
         .expect("install exact Store root authority");

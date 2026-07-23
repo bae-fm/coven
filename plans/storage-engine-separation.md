@@ -112,6 +112,10 @@ This ownership work completes the Store foundation required by
 - Complete: abandonment, device exclusion, Owner promotion, package
   preparation, write preparation, and write publication implementation modules
   are private.
+- Complete: Store database, operation-planning, and retained-replay
+  implementation modules are private. External database code names only the
+  closed Store types it persists or verifies; test-only operation probes are
+  exposed without opening the implementation modules.
 - Complete: revocation-cycle and concurrent-assignment membership conflicts are
   read and resolved through concrete Store and application operations.
   Applications receive opaque choices with member read models; exact heads and
@@ -323,12 +327,11 @@ commits wholly or rolls back.
    Keep host-facing read models on `Database`; Store protocol progress and
    completion transitions live on `StoreDatabase`.
 1. **In progress.** Route the remaining cycle and application commands through
-   Store operations, remove raw Store workflow methods from `Database`, make
-   the remaining Store implementation modules private, move manual membership
-   conflict resolution behind Store ownership, and reduce widened helper
-   visibility to the exact remaining callers. Per-cycle membership/key refresh,
-   atomic snapshot-cut capture, and Circle creation, rename, and restart now
-   enter their Store owners.
+   Store operations, remove raw Store workflow methods from `Database`, and
+   reduce widened helper visibility to the exact remaining callers. Store
+   implementation modules are private; per-cycle membership/key refresh,
+   atomic snapshot-cut capture, manual membership conflict resolution, and
+   Circle creation, rename, and restart enter their Store owners.
 1. Run the boundary searches, sabotage tests, focused failure-injection tests,
    strict lint, repository hook, and manual rules review; then update the
    dependent plans to the sealed one-protocol shape.

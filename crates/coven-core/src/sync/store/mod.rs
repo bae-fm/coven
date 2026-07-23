@@ -15,7 +15,7 @@ mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
 mod circle_controls;
-pub(crate) mod database;
+mod database;
 #[cfg(test)]
 pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 #[doc(hidden)]
@@ -24,7 +24,7 @@ mod device_exclusion;
 mod device_join;
 mod error;
 mod membership;
-pub(crate) mod operations;
+mod operations;
 mod owner;
 mod owner_promotion;
 mod package_preparation;
@@ -37,7 +37,7 @@ mod publication;
 mod pull;
 mod reclaim;
 mod registration;
-pub(crate) mod retained_replay;
+mod retained_replay;
 mod snapshot;
 
 #[doc(hidden)]
@@ -51,7 +51,17 @@ pub(crate) use circle_controls::{
     VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
 };
 #[cfg(test)]
+pub(crate) use database::candidate_records::select_author_exclusion_activation_locator;
+pub(crate) use database::candidate_records::{
+    load_author_exclusion_activation_locator_on, CandidateCleanupObject,
+};
+pub(crate) use database::materialization_models::{
+    OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+};
+#[cfg(test)]
 pub(in crate::sync) use database::store_package_is_retained_for_replay_for_test;
+pub(crate) use database::StoreDatabaseRuntime;
 pub(crate) use device_exclusion::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
@@ -114,6 +124,14 @@ pub(crate) use membership::{invite_member, remove_member};
 pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
 #[cfg(any(test, feature = "test-utils"))]
+pub(crate) use operations::load_local_store_authority as load_local_store_authority_for_test;
+pub(crate) use operations::PreparedStoreOperationCommit;
+#[cfg(test)]
+pub(crate) use operations::{
+    exact_next_announcement_slot as exact_next_announcement_slot_for_test,
+    prepare_plan as prepare_store_operation_plan_for_test,
+};
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use owner::anchor_owner_membership;
 pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
 #[doc(hidden)]
@@ -147,6 +165,10 @@ pub(crate) use registration::{
     bootstrap_pending_device, ensure_active_registration, prepare_registration_for_origin,
 };
 pub use registration::{recover_owner_device, StoreRegistrationError};
+pub(crate) use retained_replay::{
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    RetainedReplaySnapshotAuthority,
+};
 #[cfg(test)]
 pub(crate) use snapshot::drain_outbound_store_snapshot;
 #[cfg(any(test, feature = "test-utils"))]

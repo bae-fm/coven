@@ -35,7 +35,7 @@ use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::storage::SyncStorage;
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::StoreDatabase;
 use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
     host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
@@ -755,7 +755,7 @@ async fn publish_fixture_position(
         .publish_pending(db, store_dir)
         .await
         .expect("publish fixture Store position"));
-    crate::sync::store::database::StoreDatabase::new(db)
+    crate::sync::store::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .expect("read fixture Store position")

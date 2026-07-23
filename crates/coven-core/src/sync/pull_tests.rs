@@ -397,14 +397,14 @@ impl TestStoreStorage for CloudSyncStorage {
         db: &crate::database::Database,
         keypair: &UserKeypair,
     ) -> Result<(), String> {
-        if crate::sync::store::database::StoreDatabase::new(db)
+        if crate::sync::store::StoreDatabase::new(db)
             .local_store_root_ref()
             .await
             .map_err(|error| error.to_string())?
             .is_none()
         {
             crate::sync::store::protocol_root::create_store(
-                &crate::sync::store::database::StoreDatabase::new(db),
+                &crate::sync::store::StoreDatabase::new(db),
                 self,
                 self.store_id(),
                 keypair,
@@ -447,7 +447,7 @@ async fn sync_for_test<S: TestStoreStorage>(
         "Store commits carry no arbitrary message"
     );
     storage.bind_for_test_publish(db, keypair).await?;
-    let before = crate::sync::store::database::StoreDatabase::new(db)
+    let before = crate::sync::store::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())?;
@@ -457,7 +457,7 @@ async fn sync_for_test<S: TestStoreStorage>(
             .map_or(0, |position| position.coord.sequence()),
         local_seq
     );
-    crate::sync::store::database::StoreDatabase::new(db)
+    crate::sync::store::StoreDatabase::new(db)
         .enqueue_store_changeset_for_test(outgoing)
         .await
         .map_err(|error| error.to_string())?;
@@ -480,7 +480,7 @@ async fn sync_for_test<S: TestStoreStorage>(
         .drain_store_writes()
         .await
         .map_err(|error| error.to_string())?;
-    crate::sync::store::database::StoreDatabase::new(db)
+    crate::sync::store::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())
@@ -495,12 +495,12 @@ async fn pull_exact_store_into(
     std::collections::BTreeMap<String, u64>,
     crate::sync::store::StorePullResult,
 ) {
-    let root = crate::sync::store::database::StoreDatabase::new(source)
+    let root = crate::sync::store::StoreDatabase::new(source)
         .local_store_root_ref()
         .await
         .expect("read source Store root")
         .expect("source Store has exact root authority");
-    let destination_store = crate::sync::store::database::StoreDatabase::new(destination);
+    let destination_store = crate::sync::store::StoreDatabase::new(destination);
     let protocol_root =
         crate::sync::store::protocol_root::open_store(&destination_store, storage, &root)
             .await
@@ -3268,7 +3268,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let (_source_tmp, source_store_dir) = temp_store_dir();
     store_local(&source_store_dir, "ph1", b"PHOTO-BYTES").await;
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
-    let first_commit = crate::sync::store::database::StoreDatabase::new(&db1)
+    let first_commit = crate::sync::store::StoreDatabase::new(&db1)
         .latest_local_store_position()
         .await
         .expect("read first exact Store position")
@@ -3793,7 +3793,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let (_source_tmp, source_store_dir) = temp_store_dir();
     store_local(&source_store_dir, "p1ab", b"PHOTOBYTES").await;
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
-    let commit = crate::sync::store::database::StoreDatabase::new(&db1)
+    let commit = crate::sync::store::StoreDatabase::new(&db1)
         .latest_local_store_position()
         .await
         .expect("read blob commit position")
@@ -4286,7 +4286,7 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
     .expect("a Local blob does not require remote object authority");
     assert!(result.is_some(), "the changeset publishes a Store commit");
     assert!(
-        crate::sync::store::database::StoreDatabase::new(&db)
+        crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .expect("read exact local Store position")
@@ -4344,7 +4344,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         "the error must name the absent remote blob: {err}",
     );
     assert!(
-        crate::sync::store::database::StoreDatabase::new(&db)
+        crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .expect("read exact local Store position")
@@ -4387,7 +4387,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     .await
     .expect("register exact external audio fixture");
     make_test_root_remote(&db, &storage, &store_dir, "n1").await;
-    let result = crate::sync::store::database::StoreDatabase::new(&db)
+    let result = crate::sync::store::StoreDatabase::new(&db)
         .latest_local_store_position()
         .await
         .expect("read exact local Store position");
@@ -6260,7 +6260,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
 
     let result = crate::sync::store::load_cycle_membership(
         &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db2),
+        &crate::sync::store::StoreDatabase::new(&db2),
     )
     .await;
     assert!(
@@ -6302,7 +6302,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
     let result = crate::sync::store::load_cycle_membership(
         &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db2),
+        &crate::sync::store::StoreDatabase::new(&db2),
     )
     .await;
     assert!(
@@ -6409,7 +6409,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 
     let initial = crate::sync::store::load_cycle_membership(
         &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db),
+        &crate::sync::store::StoreDatabase::new(&db),
     )
     .await
     .expect("accept and persist the complete multi-author chain");
@@ -6433,7 +6433,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 
     let recovered = crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+        &crate::sync::store::StoreDatabase::new(&fixture.db),
     )
     .await
     .expect("empty LIST must use the persisted author floors");
@@ -6454,7 +6454,7 @@ async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
 
     let recovered = crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+        &crate::sync::store::StoreDatabase::new(&fixture.db),
     )
     .await
     .expect("an unpinned prior chain must not fall open on an empty LIST");
@@ -6481,7 +6481,7 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
 
     let error = match crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+        &crate::sync::store::StoreDatabase::new(&fixture.db),
     )
     .await
     {
@@ -6514,7 +6514,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
 
     let cycle_membership = crate::sync::store::load_cycle_membership(
         &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&target),
+        &crate::sync::store::StoreDatabase::new(&target),
     )
     .await
     .expect("load founder at cycle start");
@@ -6616,7 +6616,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     let failing = FaultingStorage::membership(&storage.storage, 1);
     let result = crate::sync::store::load_cycle_membership(
         &failing,
-        &crate::sync::store::database::StoreDatabase::new(&db2),
+        &crate::sync::store::StoreDatabase::new(&db2),
     )
     .await;
     assert!(
@@ -7272,7 +7272,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     )
     .await;
     let (_owner_temp, owner_store_dir) = temp_store_dir();
-    let owner_sequence = crate::sync::store::database::StoreDatabase::new(&owner_db)
+    let owner_sequence = crate::sync::store::StoreDatabase::new(&owner_db)
         .latest_local_store_position()
         .await
         .expect("read Owner witness predecessor")
@@ -7304,7 +7304,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     )
     .await
     .expect("verify and resume removed-member candidate cleanup");
-    crate::sync::store::database::StoreDatabase::new(&member_db)
+    crate::sync::store::StoreDatabase::new(&member_db)
         .finish_retracted_merge_candidate_cleanup(write_id.clone())
         .await
         .expect("finalize removed-member candidate cleanup");
@@ -7324,13 +7324,11 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         crate::WriteStatus::Resolved(crate::WriteResolution::Retracted { witness })
             if witness.original_position().commit() == &candidate_graph.reference
     ));
-    assert!(
-        !crate::sync::store::database::StoreDatabase::new(&member_db)
-            .merge_candidate_cleanup_pending(&write_id)
-            .await
-            .expect("read completed member cleanup")
-    );
-    assert!(crate::sync::store::database::StoreDatabase::new(&member_db)
+    assert!(!crate::sync::store::StoreDatabase::new(&member_db)
+        .merge_candidate_cleanup_pending(&write_id)
+        .await
+        .expect("read completed member cleanup"));
+    assert!(crate::sync::store::StoreDatabase::new(&member_db)
         .protocol_inert_object(candidate_graph.head_object)
         .await
         .expect("read terminal member head")
@@ -8088,7 +8086,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
     )
     .await;
     push_cycle_as(db_ins, &tables, &storage, insert, 0, &keypair, &ld_ins).await;
-    let insert_position = crate::sync::store::database::StoreDatabase::new(db_ins)
+    let insert_position = crate::sync::store::StoreDatabase::new(db_ins)
         .latest_local_store_position()
         .await
         .expect("read inserter position")

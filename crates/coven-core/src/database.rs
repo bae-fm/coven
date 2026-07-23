@@ -85,14 +85,14 @@ use crate::sync::remote_object::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::store::retained_replay::{
-    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority,
-};
 use crate::sync::store::VerifiedStreamActivations;
 use crate::sync::store::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
     StoreReclaimJournalError,
+};
+use crate::sync::store::{
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    RetainedReplaySnapshotAuthority,
 };
 use crate::sync::store_commit::{
     ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
@@ -129,10 +129,9 @@ mod stream_activation_records;
 mod write_lifecycle;
 mod write_models;
 
-pub(crate) use crate::sync::store::database::candidate_records::CandidateCleanupObject;
-pub(crate) use crate::sync::store::database::materialization_models::{
-    OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+pub(crate) use crate::sync::store::{
+    CandidateCleanupObject, OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
 pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
 pub(crate) use circle_operation_records::{
@@ -269,7 +268,7 @@ struct DatabaseState {
     /// drain and the pin loop (both hold `&Database`). Open-time host config carried
     /// here for the same single-owner reason as `blob_tombstone_grace`.
     transfer_limits: crate::blob::TransferLimits,
-    store_runtime: crate::sync::store::database::StoreDatabaseRuntime,
+    store_runtime: crate::sync::store::StoreDatabaseRuntime,
     /// Serializes the full durable-intent to filesystem-deletion to intent-removal
     /// operation across every clone of this database.
     local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,

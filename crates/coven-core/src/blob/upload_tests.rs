@@ -23,7 +23,7 @@ use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::StoreDatabase;
 use crate::sync::test_helpers::{
     create_exact_test_store, test_migrations, test_synced_tables_with_blob,
 };

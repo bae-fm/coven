@@ -10,7 +10,7 @@ impl Database {
         WriteId::from_generated(self.state.ids.new_id())
     }
 
-    pub(crate) fn store_runtime(&self) -> crate::sync::store::database::StoreDatabaseRuntime {
+    pub(crate) fn store_runtime(&self) -> crate::sync::store::StoreDatabaseRuntime {
         self.state.store_runtime.clone()
     }
 

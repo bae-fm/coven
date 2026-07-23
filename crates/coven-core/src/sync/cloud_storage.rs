@@ -2961,7 +2961,7 @@ mod tests {
         )
         .await
         .expect("initialize pending-rotation Store");
-        let root = crate::sync::store::database::StoreDatabase::new(&db)
+        let root = crate::sync::store::StoreDatabase::new(&db)
             .local_store_root_ref()
             .await
             .expect("read pending-rotation Store root")

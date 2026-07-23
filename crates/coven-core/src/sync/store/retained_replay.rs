@@ -428,6 +428,10 @@ impl RetainedReplayBaseline {
         })
     }
 
+    pub(crate) fn open_image(&self) -> Result<Connection, DbError> {
+        open_image(&self.image_bytes)
+    }
+
     pub(crate) fn validate_image(&self) -> Result<(), DbError> {
         if self.generation != GENERATION_ZERO
             || self.image_hash != ObjectHash::digest(&self.image_bytes)
@@ -464,7 +468,7 @@ impl RetainedReplayBaseline {
     }
 }
 
-pub(crate) fn open_image(image: &[u8]) -> Result<Connection, DbError> {
+fn open_image(image: &[u8]) -> Result<Connection, DbError> {
     if image.len() < 20 || &image[..SQLITE_DATABASE_HEADER.len()] != SQLITE_DATABASE_HEADER {
         return Err(DbError::Message(
             "retained replay image is not a SQLite database".to_string(),

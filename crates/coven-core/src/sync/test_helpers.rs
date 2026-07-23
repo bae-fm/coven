@@ -1036,7 +1036,7 @@ pub async fn host_exec(db: &Database, sql: &str) {
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
     db.call(move |conn| {
-        crate::sync::store::database::StoreDatabase::run_internal_store_write_transaction_on(
+        crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
             conn,
             &tables,
             None,
@@ -1172,7 +1172,7 @@ pub async fn load_exact_materialized_commit(
     )>,
     String,
 > {
-    let store_database = crate::sync::store::database::StoreDatabase::new(db);
+    let store_database = crate::sync::store::StoreDatabase::new(db);
     let Some(reference) = store_database
         .exact_materialized_ref(stream_id, sequence)
         .await
@@ -1229,7 +1229,7 @@ pub async fn create_exact_test_store(
     store_id: &str,
     signer: &UserKeypair,
 ) -> Result<crate::sync::store_commit::StoreRootRef, String> {
-    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let database = crate::sync::store::StoreDatabase::new(db);
     Box::pin(crate::sync::store::protocol_root::create_store(
         &database, storage, store_id, signer,
     ))
@@ -1248,7 +1248,7 @@ pub async fn open_exact_test_store_as(
     root: &crate::sync::store_commit::StoreRootRef,
     identity: &UserKeypair,
 ) -> Result<(), String> {
-    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let database = crate::sync::store::StoreDatabase::new(db);
     let protocol_root = crate::sync::store::protocol_root::open_store(&database, storage, root)
         .await
         .map_err(|error| error.to_string())?;
@@ -1268,7 +1268,7 @@ pub async fn initialize_store_fixture(
     ),
     String,
 > {
-    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let database = crate::sync::store::StoreDatabase::new(db);
     let root = create_exact_test_store(db, storage, store_id, signer).await?;
     let protocol_root = crate::sync::store_objects::load_store_protocol_root(storage, &root)
         .await
@@ -1345,7 +1345,7 @@ pub async fn run_cycle_fixture(
     storage: crate::sync::cloud_storage::CloudSyncStorage,
     store_dir: &StoreDir,
 ) -> Result<crate::sync::cycle::SyncComponents, String> {
-    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let database = crate::sync::store::StoreDatabase::new(db);
     let expected_store_root = database
         .local_store_root_ref()
         .await
@@ -1370,7 +1370,7 @@ pub async fn run_cycle_fixture(
 pub async fn latest_local_store_position_fixture(
     db: &Database,
 ) -> Result<Option<crate::sync::store_commit::StoreBatchCommitRef>, String> {
-    crate::sync::store::database::StoreDatabase::new(db)
+    crate::sync::store::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())
@@ -1400,7 +1400,7 @@ pub fn install_active_device_fixture<'a>(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "provider administrator device id is absent".to_string())?;
         let (_, observer_registration, _, _) =
-            crate::sync::store::operations::load_local_store_authority(
+            crate::sync::store::load_local_store_authority_for_test(
                 &observer_database,
                 &observer_device_id,
                 &store.signer,
@@ -2067,7 +2067,7 @@ impl TestStore {
                 .db
                 .clone()
         };
-        crate::sync::store::database::StoreDatabase::new(&db)
+        crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
@@ -2100,7 +2100,7 @@ impl TestStore {
                 .db
                 .clone()
         };
-        let (reference, registration) = crate::sync::store::database::StoreDatabase::new(&db)
+        let (reference, registration) = crate::sync::store::StoreDatabase::new(&db)
             .activated_store_device_registration_records()
             .await
             .map_err(|error| error.to_string())?
@@ -2161,7 +2161,7 @@ impl TestStore {
                 db.schema_version()
             ));
         }
-        let before = crate::sync::store::database::StoreDatabase::new(&db)
+        let before = crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?;
@@ -2173,7 +2173,7 @@ impl TestStore {
                 "test producer {name:?} expected sequence {expected}, got {sequence}"
             ));
         }
-        let database = crate::sync::store::database::StoreDatabase::new(&db);
+        let database = crate::sync::store::StoreDatabase::new(&db);
         database
             .enqueue_store_changeset_for_test(changeset.to_vec())
             .await
@@ -2198,7 +2198,7 @@ impl TestStore {
             .drain_store_writes()
             .await
             .map_err(|error| error.to_string())?;
-        crate::sync::store::database::StoreDatabase::new(&db)
+        crate::sync::store::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
@@ -2263,7 +2263,7 @@ impl TestStore {
         &self,
         db: &Database,
     ) -> Result<crate::sync::membership::MembershipChain, String> {
-        let database = crate::sync::store::database::StoreDatabase::new(db);
+        let database = crate::sync::store::StoreDatabase::new(db);
         let open =
             crate::sync::store::protocol_root::open_store(&database, &self.storage, &self.root);
         let root = open.await.map_err(|error| error.to_string())?;
