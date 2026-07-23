@@ -11,7 +11,8 @@ use super::journal::{OwnerPromotionJournal, OwnerPromotionJournalState};
 use super::OwnerPromotionError;
 
 impl Store {
-    pub(crate) async fn accept_owner_promotion(
+    /// Accept an activated promotion request on the exact member device it names.
+    pub async fn accept_owner_promotion(
         &self,
         device_id: &str,
         identity: &UserKeypair,

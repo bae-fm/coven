@@ -96,7 +96,8 @@ async fn resume_request_publication_state(
 }
 
 impl Store {
-    pub(crate) async fn begin_owner_promotion(
+    /// Publish a request that promotes one exact active member device to Owner.
+    pub async fn begin_owner_promotion(
         &self,
         device_id: &str,
         identity: &UserKeypair,

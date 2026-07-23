@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
-use crate::encryption::{EncryptionError, MasterKeyring};
+use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
 use crate::join_code::{InviteCode, MembershipFloor};
 use crate::keys::{
@@ -962,6 +962,7 @@ pub(crate) async fn bootstrap_and_save_store(
         // Pull Store commits beyond the snapshot coverage.
         error_if_cancelled(cancel)?;
         on_status("Applying recent changes...");
+        let routing_encryption = master_key.map(|keyring| EncryptionService::from(keyring.clone()));
         let changesets_applied = open_db_and_pull(
             store_id,
             &db_path,
@@ -973,6 +974,7 @@ pub(crate) async fn bootstrap_and_save_store(
             context.activated_continuation(),
             context.owner_recovery(),
             membership_floor,
+            routing_encryption.as_ref(),
             storage,
             bootstrap_result,
             store_dir,
@@ -1051,6 +1053,7 @@ pub(crate) async fn open_db_and_pull(
         &UserKeypair,
     )>,
     membership_floor: &MembershipFloor,
+    routing_encryption: Option<&EncryptionService>,
     storage: &dyn SyncStorage,
     bootstrap: BootstrapResult,
     store_dir: &StoreDir,
@@ -1138,6 +1141,7 @@ pub(crate) async fn open_db_and_pull(
             .as_ref()
             .ok_or_else(|| BootstrapError::Membership("membership is unresolved".to_string()))?,
         None,
+        routing_encryption,
     ))
     .await?;
 

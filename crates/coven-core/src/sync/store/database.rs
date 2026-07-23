@@ -84,6 +84,7 @@ impl StoreDatabase {
         Self { database, runtime }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn new(database: &Database) -> Self {
         Self::from_database(database.clone())
     }

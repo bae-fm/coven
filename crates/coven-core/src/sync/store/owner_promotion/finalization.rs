@@ -75,7 +75,8 @@ fn prepare_promotion_wrap<'a>(
 }
 
 impl Store {
-    pub(crate) async fn finalize_owner_promotion(
+    /// Activate an accepted promotion through Store membership and recovery state.
+    pub async fn finalize_owner_promotion(
         &self,
         device_id: &str,
         identity: &UserKeypair,

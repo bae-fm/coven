@@ -1506,6 +1506,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         None,
         None,
         &MembershipFloor(chain.head_refs().to_vec()),
+        None,
         &storage.storage,
         boot,
         &lib_b,
