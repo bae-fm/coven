@@ -269,7 +269,7 @@ fn install_test_circle_current_state(
         MembershipStatus,
     };
     use crate::sync::storage::ExactObjectRef;
-    use crate::sync::store::circle_controls::activation::{
+    use crate::sync::store::{
         CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
     };
     use crate::sync::store_commit::{

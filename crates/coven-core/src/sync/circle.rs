@@ -1074,14 +1074,14 @@ mod tests {
             .iter()
             .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
             .expect("author access");
-        let verified = crate::sync::store::circle_controls::VerifiedCircleReference {
+        let verified = crate::sync::store::VerifiedCircleReference {
             reference,
             circle_id: creation.circle_id,
             control: control.clone(),
-            local_access: Some(crate::sync::store::circle_controls::VerifiedCircleAccess {
+            local_access: Some(crate::sync::store::VerifiedCircleAccess {
                 envelope: own_access.envelope.clone(),
                 leaf: own_access.leaf.clone(),
-                active: Some(crate::sync::store::circle_controls::VerifiedCircleActive {
+                active: Some(crate::sync::store::VerifiedCircleActive {
                     roster: creation.roster.clone(),
                     metadata: creation.metadata.clone(),
                 }),
@@ -1228,14 +1228,12 @@ mod tests {
                     conn,
                     &second_commit,
                     &second_commit_ref,
-                    &[
-                        crate::sync::store::circle_controls::VerifiedCircleReference {
-                            reference: second_reference,
-                            circle_id: creation.circle_id,
-                            control: second_control,
-                            local_access: None,
-                        },
-                    ],
+                    &[crate::sync::store::VerifiedCircleReference {
+                        reference: second_reference,
+                        circle_id: creation.circle_id,
+                        control: second_control,
+                        local_access: None,
+                    }],
                 )
             })
             .await

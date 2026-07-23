@@ -4001,16 +4001,13 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
         .expect("read scoped source device")
         .expect("scoped source device exists");
-    let circle_id = crate::sync::store::circle_controls::create_circle(
-        &store_database(&source),
-        &storage.storage,
-        &device_id,
-        "0000000001000-0000-owner",
-        "Readers",
-        &owner,
-    )
-    .await
-    .expect("create exact Circle");
+    let circle_id = storage
+        .loaded_store(&source)
+        .await
+        .expect("load scoped source Store")
+        .create_circle(&device_id, "0000000001000-0000-owner", "Readers", &owner)
+        .await
+        .expect("create exact Circle");
     let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
     let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     let sql = format!(
@@ -4152,16 +4149,18 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("read Circle activator device")
         .expect("Circle activator device exists");
-    let circle_id = crate::sync::store::circle_controls::create_circle(
-        &store_database(activator),
-        &storage.storage,
-        &activator_device,
-        "0000000001000-0000-owner",
-        "Readers",
-        &owner,
-    )
-    .await
-    .expect("create Circle on the later-sorted stream");
+    let circle_id = storage
+        .loaded_store(activator)
+        .await
+        .expect("load Circle activator Store")
+        .create_circle(
+            &activator_device,
+            "0000000001000-0000-owner",
+            "Readers",
+            &owner,
+        )
+        .await
+        .expect("create Circle on the later-sorted stream");
 
     let (_successor_temp, successor_dir) = temp_store_dir();
     let successor_membership = storage
@@ -4184,17 +4183,19 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("read Circle successor device")
         .expect("Circle successor device exists");
-    crate::sync::store::circle_controls::rename_circle(
-        &store_database(successor),
-        &storage.storage,
-        &successor_device,
-        "0000000002000-0000-owner",
-        circle_id,
-        "Renamed readers",
-        &owner,
-    )
-    .await
-    .expect("publish Circle successor from the earlier-sorted stream");
+    storage
+        .loaded_store(successor)
+        .await
+        .expect("load Circle successor Store")
+        .rename_circle(
+            &successor_device,
+            "0000000002000-0000-owner",
+            circle_id,
+            "Renamed readers",
+            &owner,
+        )
+        .await
+        .expect("publish Circle successor from the earlier-sorted stream");
 
     let (_receiver_temp, receiver_dir) = temp_store_dir();
     let receiver_membership = storage

@@ -14,7 +14,7 @@ mod abandonment;
 mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
-pub(crate) mod circle_controls;
+mod circle_controls;
 pub(crate) mod database;
 #[cfg(test)]
 pub(in crate::sync) use database::record_verified_circle_activations_for_test;
@@ -43,6 +43,13 @@ mod snapshot;
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
 pub use circle_controls::CircleOperationError;
+pub(crate) use circle_controls::{
+    CircleCurrentState, CircleOperationJournal, VerifiedStreamActivations,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use circle_controls::{
+    VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
+};
 #[cfg(test)]
 pub(in crate::sync) use database::store_package_is_retained_for_replay_for_test;
 pub(crate) use device_exclusion::{

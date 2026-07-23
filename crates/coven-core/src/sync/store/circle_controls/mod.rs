@@ -9,9 +9,9 @@ mod publication;
 
 pub(crate) use activation::{
     load_circle_activations, load_exact_slot_bytes, verify_control_context, CircleAuthoringState,
-    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleReference,
+    CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive,
+    VerifiedCircleReference, VerifiedStreamActivations,
 };
-pub(crate) use commands::{create_circle, rename_circle, resume_circle_operations};
 pub use error::CircleOperationError;
 pub(crate) use journal::{
     CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,

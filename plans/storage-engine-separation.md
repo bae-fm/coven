@@ -64,8 +64,9 @@ This ownership work completes the Store foundation required by
   Store, while the root workflow and raw `Database` command methods are absent.
 - Complete: Circle creation, rename, restart, preparation, publication,
   activation verification, journal validation, atomic database transitions,
-  and tests live below `sync::store`; the root Circle workflow and verifier
-  modules are absent.
+  and tests live below `sync::store`. Circle commands enter the loaded Store,
+  their bodies live with the Circle subsystem, and the Circle implementation
+  module is private. The root Circle workflow and verifier modules are absent.
 - Complete: verified materialization, retained replay, audience activation,
   outbound capture, preparation, publication, abandonment, Circle controls,
   device exclusion, Owner promotion, and membership-mutation transitions live
@@ -325,8 +326,9 @@ commits wholly or rolls back.
    Store operations, remove raw Store workflow methods from `Database`, make
    the remaining Store implementation modules private, move manual membership
    conflict resolution behind Store ownership, and reduce widened helper
-   visibility to the exact remaining callers. Per-cycle membership/key refresh
-   and atomic snapshot-cut capture now live under their Store owners.
+   visibility to the exact remaining callers. Per-cycle membership/key refresh,
+   atomic snapshot-cut capture, and Circle creation, rename, and restart now
+   enter their Store owners.
 1. Run the boundary searches, sabotage tests, focused failure-injection tests,
    strict lint, repository hook, and manual rules review; then update the
    dependent plans to the sealed one-protocol shape.

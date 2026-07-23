@@ -80,32 +80,29 @@ async fn publish_circle_operation(
 
 async fn resume_circle_operations(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    super::resume_circle_operations(&StoreDatabase::new(db), storage, signer).await
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+        .await?
+        .resume_circle_operations(signer)
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn rename_circle(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     device_id: &str,
     metadata_stamp: &str,
     circle_id: CircleId,
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    super::rename_circle(
-        &StoreDatabase::new(db),
-        storage,
-        device_id,
-        metadata_stamp,
-        circle_id,
-        name,
-        signer,
-    )
-    .await
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+        .await?
+        .rename_circle(device_id, metadata_stamp, circle_id, name, signer)
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]

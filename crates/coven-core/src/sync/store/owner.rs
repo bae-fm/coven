@@ -212,13 +212,9 @@ impl Store {
         self.resume_device_exclusion(identity)
             .await
             .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
-        crate::sync::store::circle_controls::resume_circle_operations(
-            self.database(),
-            &**self.storage(),
-            identity,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
+        self.resume_circle_operations(identity)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }
 
     #[doc(hidden)]
@@ -425,50 +421,6 @@ impl Store {
             cipher,
             pending_rotation,
             self.database(),
-        )
-        .await
-    }
-
-    pub(crate) async fn create_circle(
-        &self,
-        device_id: &str,
-        timestamp: &str,
-        name: &str,
-        identity: &UserKeypair,
-    ) -> Result<crate::sync::circle::CircleId, super::CircleOperationError> {
-        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(super::CircleOperationError::BrowsableStorage);
-        }
-        crate::sync::store::circle_controls::create_circle(
-            self.database(),
-            &**self.storage(),
-            device_id,
-            timestamp,
-            name,
-            identity,
-        )
-        .await
-    }
-
-    pub(crate) async fn rename_circle(
-        &self,
-        device_id: &str,
-        timestamp: &str,
-        circle_id: crate::sync::circle::CircleId,
-        name: &str,
-        identity: &UserKeypair,
-    ) -> Result<(), super::CircleOperationError> {
-        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(super::CircleOperationError::BrowsableStorage);
-        }
-        crate::sync::store::circle_controls::rename_circle(
-            self.database(),
-            &**self.storage(),
-            device_id,
-            timestamp,
-            circle_id,
-            name,
-            identity,
         )
         .await
     }

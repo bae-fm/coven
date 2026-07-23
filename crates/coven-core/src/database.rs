@@ -85,11 +85,11 @@ use crate::sync::remote_object::{
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
 use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::store::circle_controls::activation::VerifiedStreamActivations;
 use crate::sync::store::retained_replay::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority,
 };
+use crate::sync::store::VerifiedStreamActivations;
 use crate::sync::store::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
     StoreReclaimJournalError,

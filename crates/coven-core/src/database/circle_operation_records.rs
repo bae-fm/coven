@@ -8,7 +8,7 @@ pub(crate) struct PreparedCircleOperationRow {
 
 impl PreparedCircleOperationRow {
     pub(crate) fn from_journal(
-        journal: crate::sync::store::circle_controls::CircleOperationJournal,
+        journal: crate::sync::store::CircleOperationJournal,
     ) -> Result<Self, DbError> {
         journal
             .validate_identity()
@@ -30,11 +30,9 @@ pub(crate) fn parse_circle_operation_row(
     stored_operation_id: &str,
     stored_circle_id: &str,
     payload: &[u8],
-) -> Result<crate::sync::store::circle_controls::CircleOperationJournal, DbError> {
-    let journal: crate::sync::store::circle_controls::CircleOperationJournal =
-        serde_json::from_slice(payload).map_err(|error| {
-            DbError::Message(format!("parse circle operation journal: {error}"))
-        })?;
+) -> Result<crate::sync::store::CircleOperationJournal, DbError> {
+    let journal: crate::sync::store::CircleOperationJournal = serde_json::from_slice(payload)
+        .map_err(|error| DbError::Message(format!("parse circle operation journal: {error}")))?;
     journal
         .validate_identity()
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -56,7 +54,7 @@ pub(crate) fn parse_circle_operation_row(
 pub(crate) fn load_circle_operation_on(
     conn: &Connection,
     operation_id: &str,
-) -> Result<Option<crate::sync::store::circle_controls::CircleOperationJournal>, DbError> {
+) -> Result<Option<crate::sync::store::CircleOperationJournal>, DbError> {
     conn.query_row(
         "SELECT operation_id, circle_id, payload
          FROM circle_operations
