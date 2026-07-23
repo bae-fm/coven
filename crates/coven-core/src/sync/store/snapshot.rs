@@ -3,12 +3,12 @@
 mod image;
 
 pub use image::{
-    bootstrap_from_snapshot, create_snapshot, reconcile_snapshot_blobs, should_create_snapshot,
-    BootstrapResult, SnapshotBlobReconcile, SnapshotError,
+    bootstrap_from_snapshot, create_snapshot, reconcile_snapshot_blobs, BootstrapResult,
+    SnapshotBlobReconcile, SnapshotError,
 };
 pub(crate) use image::{
-    create_snapshot_with_host_blobs, install_snapshot_blob_graph, CreatedSnapshot,
-    SnapshotBlobAudience,
+    create_snapshot_with_host_blobs, install_snapshot_blob_graph, should_create_snapshot,
+    CreatedSnapshot, SnapshotBlobAudience,
 };
 
 use crate::keys::UserKeypair;

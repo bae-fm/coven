@@ -1285,10 +1285,10 @@ pub async fn publish_snapshot_fixture(
     db: &Database,
 ) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
     let database = crate::sync::store::StoreDatabase::new(db);
-    crate::sync::store::snapshot::push_store_snapshot(
+    crate::sync::store::push_store_snapshot(
         storage,
         root.store_root_hash,
-        crate::sync::store::snapshot::CreatedSnapshot {
+        crate::sync::store::CreatedSnapshot {
             db_image,
             blobs: Vec::new(),
         },

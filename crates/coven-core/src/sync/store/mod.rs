@@ -24,7 +24,7 @@ pub(crate) mod device_exclusion;
 #[doc(hidden)]
 pub mod device_join;
 mod error;
-pub mod membership;
+mod membership;
 pub(crate) mod operations;
 mod owner;
 pub mod owner_promotion;
@@ -35,8 +35,7 @@ mod pull;
 mod reclaim;
 mod registration;
 pub(crate) mod retained_replay;
-#[doc(hidden)]
-pub mod snapshot;
+mod snapshot;
 
 #[doc(hidden)]
 pub use abandonment::MergeCandidateAbandonment;
@@ -52,9 +51,26 @@ pub use device_exclusion::{
     StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
 };
 pub use error::StoreError;
+pub(crate) use membership::{
+    apply_key_rotation, load_and_persist_owner_anchor, unwrap_store_keyring_for_refs,
+};
+#[cfg(test)]
+pub(crate) use membership::{
+    complete_revoke_rotation_adoption, load_exact_membership_head, revoke_member_durable,
+    signed_wrapped_keyring_for_test,
+};
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub use membership::{invite_member, remove_member};
+pub use membership::{
+    resolve_membership_conflict, AnchoredChainError, InviteError, MembershipOpsError,
+    OWNER_PUBKEY_STATE_KEY,
+};
+#[doc(hidden)]
+pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub(crate) use owner::AuthorizedStore;
 #[doc(hidden)]
-pub use owner::Store;
+pub use owner::{Store, StoreRestoreMembership};
 pub(crate) use pull::VerifiedStoreSnapshotStability;
 #[cfg(test)]
 pub(crate) use pull::{
@@ -83,7 +99,16 @@ pub(crate) use registration::{
     prepare_registration_for_origin,
 };
 pub use registration::{recover_owner_device, StoreRegistrationError};
-pub use snapshot::load_store_snapshot_ref;
+#[cfg(test)]
+pub(crate) use snapshot::drain_outbound_store_snapshot;
+#[doc(hidden)]
+pub use snapshot::{
+    bootstrap_from_snapshot, create_snapshot, load_store_snapshot_ref, reconcile_snapshot_blobs,
+    BootstrapResult, SnapshotBlobReconcile, SnapshotError,
+};
+pub(crate) use snapshot::{
+    create_snapshot_with_host_blobs, push_store_snapshot, should_create_snapshot, CreatedSnapshot,
+};
 
 #[cfg(feature = "test-utils")]
 #[doc(hidden)]

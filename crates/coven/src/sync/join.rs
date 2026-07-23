@@ -22,9 +22,10 @@ use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::SyncStorage;
-use crate::sync::store::membership::{unwrap_store_keyring, InviteError};
-use crate::sync::store::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
-use crate::sync::store::PullError;
+use crate::sync::store::{
+    bootstrap_from_snapshot, unwrap_store_keyring, BootstrapResult, InviteError, PullError,
+    SnapshotBlobReconcile, SnapshotError,
+};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -710,7 +711,7 @@ impl DeviceJoinClient {
             &published_at,
         )
         .await?;
-        match crate::sync::store::snapshot::reconcile_snapshot_blobs(
+        match crate::sync::store::reconcile_snapshot_blobs(
             &database,
             &db_path,
             &join.storage,
@@ -721,16 +722,11 @@ impl DeviceJoinClient {
         .await
         .map_err(|error| BootstrapError::Database(error.to_string()))?
         {
-            crate::sync::store::snapshot::SnapshotBlobReconcile::Complete => Ok(readiness),
-            crate::sync::store::snapshot::SnapshotBlobReconcile::Incomplete => {
-                Err(BootstrapError::Database(
-                    "snapshot blob reconciliation did not land every required eager blob"
-                        .to_string(),
-                ))
-            }
-            crate::sync::store::snapshot::SnapshotBlobReconcile::Cancelled => {
-                Err(BootstrapError::Cancelled)
-            }
+            SnapshotBlobReconcile::Complete => Ok(readiness),
+            SnapshotBlobReconcile::Incomplete => Err(BootstrapError::Database(
+                "snapshot blob reconciliation did not land every required eager blob".to_string(),
+            )),
+            SnapshotBlobReconcile::Cancelled => Err(BootstrapError::Cancelled),
         }
     }
 
@@ -1092,18 +1088,15 @@ pub(crate) async fn open_db_and_pull(
     // head — including an older one a storage provider chooses to serve, e.g.
     // from before a removal the floor already reflects. Seeding it here makes
     // that first load monotonic from the start, exactly like every later cycle.
-    crate::sync::store::membership::seed_head_watermark(&db, &membership_floor.0)
+    crate::sync::store::seed_head_watermark(&db, &membership_floor.0)
         .await
         .map_err(|e| {
             BootstrapError::Database(format!("Failed to seed membership head watermark: {e}"))
         })?;
 
-    db.set_protocol_state(
-        crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
-        owner_pubkey,
-    )
-    .await
-    .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
+    db.set_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY, owner_pubkey)
+        .await
+        .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
 
     // Download the blob files the snapshot's rows reference: the snapshot carried
     // the catalog rows but no blob files, and the pull starts past its signed
@@ -1111,7 +1104,7 @@ pub(crate) async fn open_db_and_pull(
     // eager blobs abort the bootstrap before the store is saved. Cancellation is
     // checked between blobs inside the reconcile, surfacing as `Cancelled` here.
     let database = crate::sync::store::StoreDatabase::from_database(db.clone());
-    match crate::sync::store::snapshot::reconcile_snapshot_blobs(
+    match crate::sync::store::reconcile_snapshot_blobs(
         &database,
         db_path,
         storage,
@@ -1122,13 +1115,13 @@ pub(crate) async fn open_db_and_pull(
     .await
     .map_err(|e| BootstrapError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
     {
-        crate::sync::store::snapshot::SnapshotBlobReconcile::Complete => {}
-        crate::sync::store::snapshot::SnapshotBlobReconcile::Incomplete => {
+        SnapshotBlobReconcile::Complete => {}
+        SnapshotBlobReconcile::Incomplete => {
             return Err(BootstrapError::Database(
                 "Snapshot blob reconciliation did not land every required eager blob".to_string(),
             ));
         }
-        crate::sync::store::snapshot::SnapshotBlobReconcile::Cancelled => {
+        SnapshotBlobReconcile::Cancelled => {
             return Err(BootstrapError::Cancelled);
         }
     }

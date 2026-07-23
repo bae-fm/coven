@@ -16,6 +16,13 @@ pub struct Store {
     context: StoreContext,
 }
 
+#[doc(hidden)]
+pub struct StoreRestoreMembership {
+    pub store_root: StoreRootRef,
+    pub founder_pubkey: String,
+    pub membership_floor: crate::join_code::MembershipFloor,
+}
+
 #[derive(Clone)]
 struct StoreAccess<'a> {
     database: StoreDatabase,
@@ -135,6 +142,38 @@ impl Store {
             write_id,
         )
         .await
+    }
+
+    #[doc(hidden)]
+    pub async fn members(
+        &self,
+        user_pubkey: Option<&[u8]>,
+    ) -> Result<Vec<crate::sync::membership::MemberInfo>, membership::MembershipOpsError> {
+        membership::get_members(self.storage().as_ref(), user_pubkey, self.database()).await
+    }
+
+    #[doc(hidden)]
+    pub async fn restore_membership(
+        &self,
+    ) -> Result<StoreRestoreMembership, membership::MembershipOpsError> {
+        let founder_pubkey = self
+            .database()
+            .local_store_founder_pubkey()
+            .await
+            .map_err(|error| membership::MembershipOpsError::Database(error.to_string()))?
+            .ok_or(membership::MembershipOpsError::NoFounderChain)?;
+        let membership_floor = membership::current_membership_floor(
+            self.storage().as_ref(),
+            self.store_root(),
+            Some(&founder_pubkey),
+            Some(self.database()),
+        )
+        .await?;
+        Ok(StoreRestoreMembership {
+            store_root: self.store_root().clone(),
+            founder_pubkey,
+            membership_floor: crate::join_code::MembershipFloor(membership_floor),
+        })
     }
 
     pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
@@ -356,7 +395,7 @@ impl AuthorizedStore<'_> {
             store_id,
             self_pubkey,
             &activated_uploaders,
-            Some(&self.membership),
+            &self.membership,
             clock,
             grace,
         )

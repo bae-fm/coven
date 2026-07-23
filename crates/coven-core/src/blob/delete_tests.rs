@@ -105,6 +105,10 @@ async fn gc_tombstones_as(
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect();
+    let membership = membership
+        .chain
+        .as_ref()
+        .ok_or_else(|| "tombstone GC test Store has no membership chain".to_string())?;
     gc_tombstones(
         db,
         cloud_home,
@@ -113,7 +117,7 @@ async fn gc_tombstones_as(
         store_id,
         self_pubkey,
         &activated_uploaders,
-        membership.chain.as_ref(),
+        membership,
         clock,
         grace,
     )
@@ -417,7 +421,7 @@ async fn storage_with_chain(db: &Database) -> (TestStore, UserKeypair, UserKeypa
     let storage = TestStore::create(db, "test-store", founder.clone())
         .await
         .expect("create exact Store membership fixture");
-    crate::sync::store::membership::invite_member(
+    crate::sync::store::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &founder,

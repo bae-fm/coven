@@ -62,10 +62,12 @@ pub enum SyncError {
     Init(#[from] InitSyncError),
     #[error("Store protocol state: {0}")]
     Protocol(String),
+    #[error("Store operation: {0}")]
+    Store(#[from] crate::sync::store::StoreError),
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
-    Membership(Box<crate::sync::store::membership::MembershipOpsError>),
+    Membership(Box<crate::sync::store::MembershipOpsError>),
     #[error("circle operation: {0}")]
     Circle(#[from] crate::sync::store::CircleOperationError),
     #[error("device join: {0}")]
@@ -78,8 +80,8 @@ pub enum SyncError {
     Loop(SyncLoopError),
 }
 
-impl From<crate::sync::store::membership::MembershipOpsError> for SyncError {
-    fn from(error: crate::sync::store::membership::MembershipOpsError) -> Self {
+impl From<crate::sync::store::MembershipOpsError> for SyncError {
+    fn from(error: crate::sync::store::MembershipOpsError) -> Self {
         Self::Membership(Box::new(error))
     }
 }
@@ -639,13 +641,11 @@ impl SyncManager {
             .await?;
 
         let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
-        crate::sync::store::membership::get_members(
-            &*storage,
-            user_pubkey.as_ref().map(|k| k.as_slice()),
-            &self.database,
-        )
-        .await
-        .map_err(SyncError::from)
+        Store::load(self.database.clone(), storage)
+            .await?
+            .members(user_pubkey.as_ref().map(|key| key.as_slice()))
+            .await
+            .map_err(SyncError::from)
     }
 
     /// Build a restore code for this store: fetch the current membership-head
@@ -668,27 +668,11 @@ impl SyncManager {
             .storage_for_command(&config, active_loop.as_ref())
             .await?;
 
-        let pinned_owner = self
-            .db()
-            .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
-            .await?;
-        let founder_pubkey = pinned_owner.clone().ok_or_else(|| {
-            SyncError::from(crate::sync::store::membership::MembershipOpsError::NoFounderChain)
-        })?;
-        let store_root =
-            self.database.local_store_root_ref().await?.ok_or_else(|| {
-                SyncError::Protocol("store protocol root hash is absent".to_string())
-            })?;
-        let membership_floor = crate::join_code::MembershipFloor(
-            crate::sync::store::membership::current_membership_floor(
-                &*storage,
-                &store_root,
-                pinned_owner.as_deref(),
-                Some(&self.database),
-            )
+        let restore_membership = Store::load(self.database.clone(), storage)
+            .await?
+            .restore_membership()
             .await
-            .map_err(SyncError::from)?,
-        );
+            .map_err(SyncError::from)?;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authority = crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(
             self.database
@@ -700,9 +684,9 @@ impl SyncManager {
             &config,
             &self.key_service,
             self.custody.as_ref(),
-            store_root,
-            founder_pubkey,
-            membership_floor,
+            restore_membership.store_root,
+            restore_membership.founder_pubkey,
+            restore_membership.membership_floor,
             authority,
         )
         .map_err(SyncError::from)
@@ -1343,7 +1327,7 @@ mod tests {
         assert!(manager.sync_loop_handle().is_none());
         assert!(manager.cloud_home().is_none());
         assert_eq!(
-            db.get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
+            db.get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)
                 .await
                 .unwrap(),
             None,

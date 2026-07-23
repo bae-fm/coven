@@ -512,7 +512,7 @@ async fn history_with_member_removal() -> (
     let store = TestStore::create(&db, "retained-removal-proof", owner.clone())
         .await
         .expect("create removal-proof Store");
-    super::store::membership::invite_member(
+    super::store::invite_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -551,7 +551,7 @@ async fn history_with_member_removal() -> (
     let cipher = RwLock::new(super::cloud_storage::CloudCipher::Encrypted(
         encryption.clone(),
     ));
-    super::store::membership::remove_member(
+    super::store::remove_member(
         &store.storage,
         store.home.as_ref(),
         &owner,
@@ -671,7 +671,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     let synced_tables = db.synced_tables().to_vec();
     let image = db
         .call(move |connection| {
-            super::store::snapshot::create_snapshot(connection, &snapshot_dir, &synced_tables)
+            super::store::create_snapshot(connection, &snapshot_dir, &synced_tables)
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))
         })
         .await

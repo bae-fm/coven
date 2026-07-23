@@ -254,7 +254,8 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     if code.membership_floor.0.is_empty() {
         return Err(RestoreCodeError::EmptyMembershipFloor);
     }
-    super::store::membership::validate_membership_floor(&code.membership_floor.0)
+    code.membership_floor
+        .validate()
         .map_err(RestoreCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }

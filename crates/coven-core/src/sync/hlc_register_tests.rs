@@ -329,7 +329,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("create exact revocation test Store");
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::membership::invite_member(
+    crate::sync::store::invite_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,
@@ -407,7 +407,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     custody.set_initial_key([42; 32]);
     let cipher = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
-    crate::sync::store::membership::remove_member(
+    crate::sync::store::remove_member(
         &storage.storage,
         storage.home.as_ref(),
         &owner,

@@ -21,6 +21,12 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn local_store_founder_pubkey(&self) -> Result<Option<String>, DbError> {
+        self.sqlite()
+            .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
+            .await
+    }
+
     pub(crate) async fn install_store_root_authority(
         &self,
         reference: crate::sync::store_commit::StoreRootRef,

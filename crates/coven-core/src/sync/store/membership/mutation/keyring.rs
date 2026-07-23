@@ -1,8 +1,8 @@
 use crate::encryption::EncryptionService;
 use crate::keys::{self, UserKeypair};
-use crate::sync::membership::MembershipHeadRef;
+use crate::sync::membership::{validate_membership_floor, MembershipHeadRef};
 use crate::sync::storage::{StorageError, SyncStorage};
-use crate::sync::store::membership::{load_exact_anchored_chain, validate_membership_floor};
+use crate::sync::store::membership::load_exact_anchored_chain;
 use crate::sync::store_commit::{ObjectHash, StoreRootRef};
 use crate::sync::wrapped_store_key::{load_wrapped_store_key, WrappedStoreKey, WrappedStoreKeyRef};
 

@@ -49,9 +49,6 @@ use crate::storage::cloud::{no_progress, CloudHome};
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{StorageError, SyncStorage};
-use crate::sync::store::membership::{
-    authorize_loaded_membership_author, MembershipAuthorRequirement,
-};
 
 /// The default convergence window a host gets if it configures none: how long a
 /// deleted blob is kept after its tombstone is written, before a GC pass reclaims
@@ -462,9 +459,8 @@ async fn record_outbox_failure(
 /// trust-on-first-use: this GC runs in production and deletes user blobs, so it
 /// must refuse a wiped-and-refounded chain exactly like the snapshot restore path.
 /// The signature has already proven *who* authored the tombstone; the owner-anchored
-/// chain proves they *may* delete. `None` is reserved for pre-initialization
-/// callers; every initialized store has a membership chain, regardless of its
-/// storage representation.
+/// chain proves they *may* delete. Tombstone collection is an initialized Store
+/// operation, so its authorized membership chain is required.
 ///
 /// Returns the number of blobs deleted this pass. Provider and local-state failures
 /// fail the pass; invalid or unauthorized bucket objects remain non-actionable.
@@ -479,7 +475,7 @@ pub async fn gc_tombstones(
         crate::sync::store_commit::StoreDeviceRegistrationRef,
         crate::sync::store_commit::StoreDeviceRegistration,
     >,
-    membership_chain: Option<&MembershipChain>,
+    membership_chain: &MembershipChain,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
@@ -493,7 +489,7 @@ pub async fn gc_tombstones(
     // prefix; an owner additionally sweeps every other member's prefix (owners
     // retain bucket-wide delete, which a provider ACL can grant). This is what lets
     // the ACL express "members write/delete their own prefix, owners anywhere".
-    let is_owner = membership_chain.is_some_and(|chain| chain.is_owner_now(self_pubkey));
+    let is_owner = membership_chain.is_owner_now(self_pubkey);
 
     let now = clock.now();
     let mut deleted = 0;
@@ -557,17 +553,12 @@ pub async fn gc_tombstones(
         // already anchored to the pinned owner: only a current write-capable member
         // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
         // (a bucket writer forging a deletion), or one authored by the forged founder
-        // of a wiped/refounded chain, fails here and is skipped. Only a
-        // pre-initialization caller can supply no chain and rely on the verified
-        // signature alone.
-        let authorization = authorize_loaded_membership_author(
-            membership_chain,
-            &tombstone.author_pubkey,
-            MembershipAuthorRequirement::WriteCapable,
-        )
-        .map_err(|error| error.to_string());
-        if let Err(error) = authorization {
-            warn!("skipping tombstone {key}: {error}");
+        // of a wiped/refounded chain, fails here and is skipped.
+        if !membership_chain.can_write_now(&tombstone.author_pubkey) {
+            warn!(
+                "skipping tombstone {key}: author {} is not a current write-capable member",
+                tombstone.author_pubkey
+            );
             continue;
         }
 

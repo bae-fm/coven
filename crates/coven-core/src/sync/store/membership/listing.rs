@@ -1,6 +1,6 @@
 use super::*;
 
-pub async fn current_membership_floor(
+pub(crate) async fn current_membership_floor(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     pinned_owner: Option<&str>,
@@ -11,7 +11,7 @@ pub async fn current_membership_floor(
 }
 
 /// Read the membership chain from the sync storage and return the current members.
-pub async fn get_members(
+pub(crate) async fn get_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
     database: &StoreDatabase,

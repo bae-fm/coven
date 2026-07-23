@@ -389,6 +389,21 @@ pub struct MembershipHeadRef {
     pub object: ExactObjectRef,
 }
 
+pub(crate) fn validate_membership_floor(floor: &[MembershipHeadRef]) -> Result<(), String> {
+    if floor.is_empty() {
+        return Err("membership floor is empty".to_string());
+    }
+    for (index, reference) in floor.iter().enumerate() {
+        if reference.coord.seq == 0 {
+            return Err("membership floor contains sequence zero".to_string());
+        }
+        if index > 0 && floor[index - 1].coord.stream_key() >= reference.coord.stream_key() {
+            return Err("membership floor is not strictly ordered by author stream".to_string());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MembershipError {
     #[error("membership chain is empty")]

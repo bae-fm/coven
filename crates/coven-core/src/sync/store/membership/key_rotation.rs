@@ -1,7 +1,7 @@
 use super::*;
 
 /// Persist and activate a membership key rotation on this device.
-pub fn apply_key_rotation(
+pub(crate) fn apply_key_rotation(
     new_encryption: EncryptionService,
     custody: &dyn MasterKeyCustody,
     cipher: &dyn CloudCipherAccess,

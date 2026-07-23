@@ -69,15 +69,12 @@ pub enum AnchoredChainError {
 pub(crate) enum MembershipAuthorRequirement {
     /// The author must be a current Owner.
     Owner,
-    /// The author must be a current Owner or Member.
-    WriteCapable,
 }
 
 impl MembershipAuthorRequirement {
     fn permits(self, chain: &MembershipChain, author_pubkey: &str) -> bool {
         match self {
             MembershipAuthorRequirement::Owner => chain.is_owner_now(author_pubkey),
-            MembershipAuthorRequirement::WriteCapable => chain.can_write_now(author_pubkey),
         }
     }
 
@@ -85,9 +82,6 @@ impl MembershipAuthorRequirement {
         match self {
             MembershipAuthorRequirement::Owner => {
                 format!("author {author_pubkey} is not a current owner")
-            }
-            MembershipAuthorRequirement::WriteCapable => {
-                format!("author {author_pubkey} is not a current write-capable member")
             }
         }
     }

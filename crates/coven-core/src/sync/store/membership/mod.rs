@@ -14,9 +14,9 @@ use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::{
-    AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipChange, MembershipConflict,
-    MembershipCoord, MembershipEntry, MembershipGrantId, MembershipHeadRef,
-    StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
+    validate_membership_floor, AuthorHead, MemberInfo, MemberRole, MembershipChain,
+    MembershipChange, MembershipConflict, MembershipCoord, MembershipEntry, MembershipGrantId,
+    MembershipHeadRef, StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
 use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
@@ -127,8 +127,8 @@ mod mutation;
 
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
-pub use key_rotation::apply_key_rotation;
-pub use listing::{current_membership_floor, get_members};
+pub(crate) use key_rotation::apply_key_rotation;
+pub(crate) use listing::{current_membership_floor, get_members};
 pub use merge::{invite_member, remove_member};
 pub use mutation::{resolve_membership_conflict, unwrap_store_keyring, InviteError};
 
@@ -143,9 +143,7 @@ pub(crate) use mutation::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
 
-pub(crate) use cursors::{
-    load_and_persist_owner_anchor, upsert_head_cursor_on, validate_membership_floor,
-};
+pub(crate) use cursors::{load_and_persist_owner_anchor, upsert_head_cursor_on};
 use cursors::{persist_head_cursors, read_head_cursors};
 use exact_chain::map_membership_object_error;
 pub(crate) use exact_chain::{

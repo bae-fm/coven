@@ -707,7 +707,7 @@ fn scope_authenticated_blob_graph(
 /// - `hours_since_snapshot` >= the time threshold (24h), OR
 /// - No snapshot has ever been created (`last_snapshot_seq` is None)
 ///   AND at least one changeset has been pushed.
-pub fn should_create_snapshot(
+pub(crate) fn should_create_snapshot(
     local_seq: u64,
     last_snapshot_seq: Option<u64>,
     hours_since_snapshot: Option<u64>,

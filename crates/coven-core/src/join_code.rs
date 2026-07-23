@@ -14,6 +14,12 @@ pub const INVITE_CODE_VERSION: u8 = 4;
 #[serde(transparent)]
 pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
 
+impl MembershipFloor {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        crate::sync::membership::validate_membership_floor(&self.0)
+    }
+}
+
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
 /// an encrypted, obfuscated home. The invite therefore carries no visibility
@@ -77,7 +83,8 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     if code.membership_floor.0.is_empty() {
         return Err(JoinCodeError::EmptyMembershipFloor);
     }
-    crate::sync::store::membership::validate_membership_floor(&code.membership_floor.0)
+    code.membership_floor
+        .validate()
         .map_err(JoinCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }

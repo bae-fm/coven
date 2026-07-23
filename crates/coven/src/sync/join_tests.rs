@@ -10,7 +10,7 @@ use crate::join_code::encode;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{no_progress, BlobBody, CloudHomeJoinInfo, ExactSlotStorage};
 use crate::sync::hlc::Hlc;
-use crate::sync::store::snapshot::create_snapshot;
+use crate::sync::store::create_snapshot;
 use crate::sync::test_helpers::*;
 use async_trait::async_trait;
 
@@ -46,7 +46,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("decode join request")
         .public_key;
     let invitation_home = GrantingCloudHome(store.home.as_ref().clone());
-    let invite = crate::sync::store::membership::invite_member(
+    let invite = crate::sync::store::invite_member(
         &store.storage,
         &invitation_home,
         &owner,
