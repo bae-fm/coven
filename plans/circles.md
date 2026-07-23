@@ -503,6 +503,12 @@ successor state.
 Each Circle epoch has a random content key. Access is distributed through a
 signed access root containing exact refs to recipient-sealed leaves.
 
+`KeyFingerprint` is the full 32-byte SHA-256 digest of the key, serialized as
+64 lowercase hexadecimal characters. It is the protocol identity of a key, not
+a shortened display value. Keyring parsing, construction, and union reject
+duplicate fingerprints whose key bytes or generation differ; collection into a
+map must never overwrite one entry with another.
+
 Each leaf is bound to:
 
 - Store root and Circle id;
@@ -1084,6 +1090,8 @@ trait, API, fixture, or test may preserve it.
 - excluded devices must install the successor bootstrap before writing;
 - access leaves cannot be replayed across recipients, Stores, Circles, epochs,
   controls, or bootstraps;
+- full key fingerprints round-trip canonically, and malformed or ambiguous
+  keyrings fail without dropping an entry;
 - every crash point resumes from the exact durable operation without guessing
   remote state.
 
