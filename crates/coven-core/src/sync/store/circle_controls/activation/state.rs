@@ -724,6 +724,19 @@ impl CircleCurrentState {
         }
     }
 
+    pub(crate) fn closing_authoring_state(&self) -> Option<CircleAuthoringState> {
+        match self {
+            Self::Closing(closing) => Some(CircleAuthoringState {
+                candidate_family: closing.candidate_family,
+                control: closing.current.control.clone(),
+                access: closing.access.clone(),
+                roster: closing.roster.clone(),
+                metadata: closing.metadata.clone(),
+            }),
+            Self::Active(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+        }
+    }
+
     pub(crate) fn package_access(
         &self,
         expected_control: &CircleControlCoord,

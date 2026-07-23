@@ -143,7 +143,11 @@ pub(super) async fn load_circle_metadata_state(
         .await?;
         verify_circle_head_chain(
             storage,
-            &context,
+            &ProtocolObjectContext::circle(
+                store_root_hash,
+                ProtocolObjectDomain::CircleMetadata,
+                encryption.clone(),
+            ),
             CircleHeadKind::Metadata,
             CircleHeadValue::Metadata(head.clone()),
             object.object.clone(),

@@ -1,7 +1,12 @@
-use super::CircleOperationError;
+use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
+use super::{
+    prepare_circle_operation_request, publish_circle_operation, CircleOperationError,
+    CircleOperationIntent,
+};
 use crate::keys::UserKeypair;
 use crate::sync::circle::{
     circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseResponse,
+    CircleEpochCloseResponseRef, PreparedCircleControl,
 };
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store::{operations, AuthorizedStore};
@@ -9,6 +14,230 @@ use crate::sync::store_commit::CommitFrontier;
 use crate::sync::store_objects::StoreObjectError;
 
 impl AuthorizedStore<'_> {
+    pub(crate) async fn finalize_ready_circle_epoch_closes(
+        &self,
+        device_id: &str,
+        metadata_stamp: &str,
+        store_dir: &crate::store_dir::StoreDir,
+        routing_encryption: &crate::encryption::EncryptionService,
+        identity: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        for mut journal in self.database().waiting_circle_operations().await? {
+            let member_pubkey = match &journal.intent {
+                CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
+                _ => {
+                    return Err(CircleOperationError::Journal(format!(
+                        "Circle operation {} waits for close responses without a removal intent",
+                        journal.operation_id
+                    )));
+                }
+            };
+            let identity_pubkey = crate::keys::public_key_hex(identity);
+            let (current, activation_commit_ref) = self
+                .database()
+                .circle_closing_context(journal.circle_id, &identity_pubkey)
+                .await?;
+            let CircleControlState::EpochClose(close) = current.control.value.state() else {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle close-finalization context is active".to_string(),
+                ));
+            };
+            if close.close_id
+                != crate::sync::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
+            {
+                return Err(CircleOperationError::Journal(format!(
+                    "Circle operation {} differs from its close id",
+                    journal.operation_id
+                )));
+            }
+            let Some(responses) = self
+                .load_complete_circle_epoch_close_responses(&current.control)
+                .await?
+            else {
+                continue;
+            };
+            let cutoff = responses.iter().try_fold(
+                close.provisional_frontier.clone(),
+                |cutoff, (response, _)| {
+                    cutoff
+                        .join(response.frontier.clone())
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+                },
+            )?;
+            let bootstrap = self
+                .capture_circle_snapshot_at_cutoff(
+                    store_dir.as_ref().to_path_buf(),
+                    routing_encryption,
+                    journal.circle_id,
+                    cutoff,
+                )
+                .await?;
+            let root = self
+                .database()
+                .local_store_root_ref()
+                .await?
+                .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+            let (activation_commit, activation_author) =
+                crate::sync::store::pull::load_commit_with_author(
+                    self.storage(),
+                    &root,
+                    &activation_commit_ref,
+                )
+                .await?;
+            if activation_commit.candidate_family() != current.candidate_family {
+                return Err(CircleOperationError::InvalidState(format!(
+                    "Circle {} closing state differs from its activating Store commit",
+                    journal.circle_id
+                )));
+            }
+            let reference = activation_commit
+                .circle_controls()
+                .iter()
+                .find(|reference| {
+                    reference.circle_id() == journal.circle_id
+                        && reference.control() == &current.control.coord
+                })
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(format!(
+                        "Circle {} closing control is absent from its activating Store commit",
+                        journal.circle_id
+                    ))
+                })?;
+            let keyring = match &current.access.disposition {
+                crate::sync::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+                crate::sync::circle::CircleAccessDisposition::Inactive => {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle close finalization lost its retained keyring".to_string(),
+                    ));
+                }
+            };
+            let roster_chain = super::activation::load_circle_control_roster_chain(
+                self.database(),
+                self.storage(),
+                &root,
+                &activation_commit_ref,
+                &activation_commit,
+                &activation_author,
+                reference,
+                &current.control,
+                keyring,
+            )
+            .await?;
+            let intent = journal
+                .operation()
+                .creation
+                .close_intent
+                .clone()
+                .ok_or_else(|| {
+                    CircleOperationError::Journal(format!(
+                        "Circle operation {} lost its close intent",
+                        journal.operation_id
+                    ))
+                })?;
+            let prepared = Box::pin(prepare_circle_operation_request(
+                self.database(),
+                self.storage(),
+                device_id,
+                CircleOperationRequest::FinalizeEpochClose(Box::new(
+                    CircleFinalizeEpochCloseRequest {
+                        operation_id: journal.operation_id.clone(),
+                        circle_id: journal.circle_id,
+                        member_pubkey,
+                        metadata_stamp: metadata_stamp.to_string(),
+                        current,
+                        previous_control: reference.clone(),
+                        roster_chain,
+                        intent,
+                        responses: responses
+                            .into_iter()
+                            .map(|(reference, _)| reference)
+                            .collect(),
+                        bootstrap,
+                    },
+                )),
+                identity,
+            ))
+            .await?;
+            if prepared.operation_id != journal.operation_id
+                || prepared.circle_id != journal.circle_id
+                || prepared.intent != journal.intent
+            {
+                return Err(CircleOperationError::Journal(format!(
+                    "Circle operation {} finalization changed its durable identity",
+                    journal.operation_id
+                )));
+            }
+            journal.begin_finalization(prepared.operation().clone())?;
+            self.database()
+                .begin_circle_operation_finalization(journal.clone())
+                .await?;
+            Box::pin(publish_circle_operation(
+                self.database(),
+                self.storage(),
+                &journal.operation_id,
+                identity,
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn load_complete_circle_epoch_close_responses(
+        &self,
+        control: &PreparedCircleControl,
+    ) -> Result<
+        Option<Vec<(CircleEpochCloseResponseRef, CircleEpochCloseResponse)>>,
+        CircleOperationError,
+    > {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle close-response collection received an active control".to_string(),
+            ));
+        };
+        let context = ProtocolObjectContext::store_encrypted(
+            control.value.store_root_hash,
+            ProtocolObjectDomain::CircleEpochCloseResponse,
+        );
+        let mut responses = Vec::with_capacity(close.participants.len());
+        for participant in &close.participants {
+            let prefix = circle_epoch_close_response_semantic_prefix(
+                control.value.circle_id,
+                close.close_id,
+                participant.registration.device_id,
+            );
+            let (bytes, object) = match self
+                .storage()
+                .read_protocol_slot(&context, &participant.response_slot, &prefix)
+                .await
+            {
+                Ok(response) => response,
+                Err(StorageError::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(StoreObjectError::from(error).into()),
+            };
+            let registration = self
+                .database()
+                .activated_store_device_registration(participant.registration.clone())
+                .await?;
+            let response = CircleEpochCloseResponse::parse_for(&bytes, control, &registration)
+                .map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "Circle epoch-close response from device {} failed verification: {error}",
+                        participant.registration.device_id
+                    ))
+                })?;
+            let reference = CircleEpochCloseResponseRef::from_response(&response, object).map_err(
+                |error| {
+                    CircleOperationError::InvalidState(format!(
+                        "Circle epoch-close response from device {} has an invalid exact reference: {error}",
+                        participant.registration.device_id
+                    ))
+                },
+            )?;
+            responses.push((reference, response));
+        }
+        Ok(Some(responses))
+    }
+
     pub(crate) async fn publish_circle_epoch_close_responses(
         &self,
         identity: &UserKeypair,

@@ -230,13 +230,15 @@ pub(super) async fn verified_terminal_merge_retractions(
     Ok(verified_by_reference.into_values().collect())
 }
 
-pub(super) fn replay_retained_merge_projection_on(
+pub(crate) fn replay_retained_merge_projection_on(
     live: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
     synced_tables: &[SyncedTable],
     routing_key: Option<&super::circle::RowRoutingKey>,
     retracted: &BTreeSet<StoreBatchCommitRef>,
+    history_cut: Option<&CommitFrontier>,
+    include_local_write_overlays: bool,
 ) -> Result<rusqlite::Connection, DbError> {
     super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
     let baseline =
@@ -248,14 +250,20 @@ pub(super) fn replay_retained_merge_projection_on(
     let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
     let retained =
         crate::sync::store::database::StoreDatabase::load_retained_merge_replay_inputs_on(live)?;
+    let circle_epochs =
+        crate::sync::store::database::StoreDatabase::circle_replay_epoch_index_on(live)?;
     let active_references = retained
         .iter()
-        .filter(|materialization| !retracted.contains(materialization.commit_ref()))
+        .filter(|materialization| {
+            !retracted.contains(materialization.commit_ref())
+                && history_cut
+                    .is_none_or(|cutoff| cutoff.covers_commit(materialization.commit_ref()))
+        })
         .map(|materialization| materialization.commit_ref().clone())
         .collect::<BTreeSet<_>>();
     for materialization in retained
         .iter()
-        .filter(|materialization| !retracted.contains(materialization.commit_ref()))
+        .filter(|materialization| active_references.contains(materialization.commit_ref()))
     {
         let mut dependencies = materialization
             .commit()
@@ -288,7 +296,7 @@ pub(super) fn replay_retained_merge_projection_on(
     }
     let active_accepted_writes = retained
         .iter()
-        .filter(|materialization| !retracted.contains(materialization.commit_ref()))
+        .filter(|materialization| active_references.contains(materialization.commit_ref()))
         .map(|materialization| materialization.commit().write_id.clone())
         .collect::<BTreeSet<_>>();
     let retracted_writes = retained
@@ -296,15 +304,18 @@ pub(super) fn replay_retained_merge_projection_on(
         .filter(|materialization| retracted.contains(materialization.commit_ref()))
         .map(|materialization| materialization.commit().write_id.clone())
         .collect::<BTreeSet<_>>();
-    let write_overlays =
+    let write_overlays = if include_local_write_overlays {
         crate::sync::store::database::StoreDatabase::load_merge_replay_write_overlays_on(
             live,
             &active_accepted_writes,
             &retracted_writes,
-        )?;
+        )?
+    } else {
+        Vec::new()
+    };
     let mut pending = retained
         .into_iter()
-        .filter(|materialization| !retracted.contains(materialization.commit_ref()))
+        .filter(|materialization| active_references.contains(materialization.commit_ref()))
         .map(|materialization| (materialization.commit_ref().clone(), materialization))
         .collect::<BTreeMap<_, _>>();
     let mut applied = BTreeSet::new();
@@ -351,10 +362,31 @@ pub(super) fn replay_retained_merge_projection_on(
                     IncomingTimestampPolicy::LocallyAuthored
                 }
             };
-            let packages = materialization
-                .packages()
-                .iter()
-                .cloned()
+            let mut retained_packages = Vec::new();
+            for package in materialization.packages() {
+                if let crate::sync::audience_package::PackageAudience::Circle {
+                    circle_id,
+                    control,
+                    ..
+                } = package.audience()
+                {
+                    if !circle_epochs.permits(materialization.commit_ref(), *circle_id, control)? {
+                        continue;
+                    }
+                }
+                retained_packages.push(package.clone());
+            }
+            let package_application = if retained_packages.is_empty() {
+                None
+            } else {
+                Some(materialization.package_application().ok_or_else(|| {
+                    DbError::Message(
+                        "retained Merge packages lack their application timestamp".to_string(),
+                    )
+                })?)
+            };
+            let packages = retained_packages
+                .into_iter()
                 .map(|package| {
                     let changeset =
                         ValidatedChangeset::new(package.changeset().to_vec(), schema.clone())
@@ -405,7 +437,7 @@ pub(super) fn replay_retained_merge_projection_on(
                 packages,
                 device_operations: materialization.device_operations().clone(),
                 circle_activations: materialization.circle_activations().clone(),
-                package_application: materialization.package_application(),
+                package_application,
             };
             let tx = replay.unchecked_transaction().map_err(DbError::from)?;
             let outcome = apply_prepared_merge_materialization_on(

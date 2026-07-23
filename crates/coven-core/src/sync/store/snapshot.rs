@@ -69,6 +69,68 @@ impl super::AuthorizedStore<'_> {
         .await
     }
 
+    pub(crate) async fn capture_circle_snapshot_at_cutoff(
+        &self,
+        temp_dir: std::path::PathBuf,
+        routing_encryption: &crate::encryption::EncryptionService,
+        circle_id: crate::sync::circle::CircleId,
+        cutoff: CommitFrontier,
+    ) -> Result<SnapshotCut, crate::database::DbError> {
+        let tables = self.db().synced_tables().to_vec();
+        let routing_encryption = routing_encryption.clone();
+        let blob_decls = self.db().blob_decls();
+        let gates = self.db().gates();
+        let routing_key = crate::sync::circle::derive_row_routing_key(
+            &routing_encryption,
+            self.store_root().store_root_hash,
+        )
+        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        self.db()
+            .call(move |connection| {
+                require_no_unpublished_store_writes(connection)?;
+                let transaction = connection
+                    .unchecked_transaction()
+                    .map_err(crate::database::DbError::from)?;
+                let replay = super::pull::replay_retained_merge_projection_on(
+                    &transaction,
+                    &blob_decls,
+                    &gates,
+                    &tables,
+                    Some(&routing_key),
+                    &std::collections::BTreeSet::new(),
+                    Some(&cutoff),
+                    false,
+                )?;
+                transaction
+                    .rollback()
+                    .map_err(crate::database::DbError::from)?;
+                let replay_frontier = CommitFrontier::from_refs(
+                    crate::sync::store::database::StoreDatabase::materialized_frontier_on(
+                        &replay, None,
+                    )?,
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+                if replay_frontier != cutoff {
+                    return Err(crate::database::DbError::Message(
+                        "Circle close cutoff is not an exact retained Store frontier".to_string(),
+                    ));
+                }
+                let snapshot = create_circle_snapshot_with_host_blobs(
+                    &replay,
+                    &temp_dir,
+                    &tables,
+                    &routing_encryption,
+                    circle_id,
+                )
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+                Ok(SnapshotCut {
+                    snapshot,
+                    coverage: cutoff,
+                })
+            })
+            .await
+    }
+
     async fn capture_projected_snapshot_cut(
         &self,
         temp_dir: std::path::PathBuf,
@@ -77,22 +139,7 @@ impl super::AuthorizedStore<'_> {
     ) -> Result<SnapshotCut, crate::database::DbError> {
         self.db()
             .call(move |connection| {
-                let pending: i64 = connection
-                    .query_row(
-                        "SELECT EXISTS(
-                            SELECT 1 FROM store_writes
-                            WHERE status != '\"local_only\"'
-                              AND json_extract(status, '$.published') IS NULL
-                        )",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                if pending != 0 {
-                    return Err(crate::database::DbError::Message(
-                        "snapshot cut refused while unpublished Store writes exist".to_string(),
-                    ));
-                }
+                require_no_unpublished_store_writes(connection)?;
                 let snapshot = match projection {
                     SnapshotCutProjection::Store { routing_encryption } => {
                         create_snapshot_with_host_blobs(
@@ -126,6 +173,28 @@ impl super::AuthorizedStore<'_> {
             })
             .await
     }
+}
+
+fn require_no_unpublished_store_writes(
+    connection: &rusqlite::Connection,
+) -> Result<(), crate::database::DbError> {
+    let pending: i64 = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM store_writes
+                WHERE status != '\"local_only\"'
+                  AND json_extract(status, '$.published') IS NULL
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::database::DbError::from)?;
+    if pending != 0 {
+        return Err(crate::database::DbError::Message(
+            "snapshot cut refused while unpublished Store writes exist".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

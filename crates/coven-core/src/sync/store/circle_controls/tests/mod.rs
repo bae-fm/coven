@@ -383,6 +383,7 @@ fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitio
         policy,
         metadata: creation.metadata.clone(),
         close_intent: creation.close_intent.clone(),
+        close_finalization: None,
         access: creation.access.clone(),
         control: creation.control.clone(),
     }

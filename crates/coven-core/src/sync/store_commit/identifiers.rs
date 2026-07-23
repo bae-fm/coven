@@ -588,17 +588,35 @@ impl CommitFrontier {
     }
 
     pub fn covers(&self, covered: &Self) -> bool {
-        covered.0.iter().all(|(stream, covered_ref)| {
-            self.0.get(stream).is_some_and(|current_ref| {
-                current_ref.coord.sequence() > covered_ref.coord.sequence()
-                    || current_ref.coord.sequence() == covered_ref.coord.sequence()
-                        && current_ref == covered_ref
-            })
-        })
+        covered
+            .0
+            .iter()
+            .all(|(stream, covered_ref)| self.covers_commit_on_stream(stream, covered_ref))
     }
 
     pub fn commits(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
         &self.0
+    }
+
+    pub(crate) fn covers_commit(&self, commit: &StoreBatchCommitRef) -> bool {
+        self.covers_commit_on_stream(&commit.coord.stream_id, commit)
+    }
+
+    fn covers_commit_on_stream(
+        &self,
+        stream: &AuthorStreamId,
+        covered: &StoreBatchCommitRef,
+    ) -> bool {
+        self.0.get(stream).is_some_and(|current| {
+            current.coord.sequence() > covered.coord.sequence()
+                || current.coord.sequence() == covered.coord.sequence() && current == covered
+        })
+    }
+
+    pub(crate) fn join(self, other: Self) -> Result<Self, StoreProtocolError> {
+        StoreHistoryCut::from_commits(self.0)
+            .join(StoreHistoryCut::from_commits(other.0))
+            .map(|cut| cut.frontier())
     }
 }
 

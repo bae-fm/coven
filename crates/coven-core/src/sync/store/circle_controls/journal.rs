@@ -59,10 +59,19 @@ pub(crate) enum CircleOperationIntent {
 pub(crate) enum CircleOperationProgress {
     Ready(Box<PreparedCircleOperation>),
     WaitingForCloseResponses(Box<PreparedCircleOperation>),
+    Finalizing(Box<PreparedCircleOperation>),
     Blocked {
         reason: String,
+        phase: CircleOperationPhase,
         operation: Box<PreparedCircleOperation>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CircleOperationPhase {
+    Initial,
+    Finalization,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +92,7 @@ impl CircleOperationJournal {
         match &self.progress {
             CircleOperationProgress::Ready(operation)
             | CircleOperationProgress::WaitingForCloseResponses(operation)
+            | CircleOperationProgress::Finalizing(operation)
             | CircleOperationProgress::Blocked { operation, .. } => operation,
         }
     }
@@ -91,6 +101,7 @@ impl CircleOperationJournal {
         match &mut self.progress {
             CircleOperationProgress::Ready(operation)
             | CircleOperationProgress::WaitingForCloseResponses(operation)
+            | CircleOperationProgress::Finalizing(operation)
             | CircleOperationProgress::Blocked { operation, .. } => operation,
         }
     }
@@ -155,6 +166,29 @@ impl CircleOperationJournal {
             _ => {
                 return Err(CircleOperationError::Journal(
                     "Circle epoch-close intent does not match its signed candidate graph"
+                        .to_string(),
+                ));
+            }
+        }
+        match (
+            &circle_reference.objects().close_outcome,
+            &operation.creation.close_outcome,
+        ) {
+            (Some(reference), Some(outcome))
+                if reference.close_id == outcome.close_id
+                    && reference.outcome_hash == outcome.outcome_hash() =>
+            {
+                let prepared = prepared_for(&reference.object)?;
+                materials.push(crate::sync::remote_object::CandidateObjectMaterial {
+                    object: reference.object.clone(),
+                    canonical_semantic_bytes: outcome.to_bytes(),
+                    stored_bytes: prepared.stored_bytes().to_vec(),
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(CircleOperationError::Journal(
+                    "Circle epoch-close outcome does not match its signed candidate graph"
                         .to_string(),
                 ));
             }
@@ -282,6 +316,7 @@ impl CircleOperationJournal {
             CircleOperationProgress::WaitingForCloseResponses(_) => {
                 CircleOperationState::WaitingForCloseResponses
             }
+            CircleOperationProgress::Finalizing(_) => CircleOperationState::Finalizing,
             CircleOperationProgress::Blocked { reason, .. } => CircleOperationState::Blocked {
                 reason: reason.clone(),
             },
@@ -289,14 +324,26 @@ impl CircleOperationJournal {
     }
 
     pub(crate) fn block(&mut self, reason: String) -> Result<(), CircleOperationError> {
-        let CircleOperationProgress::Ready(operation) = &mut self.progress else {
-            return Err(CircleOperationError::Journal(format!(
-                "Circle operation {} is already blocked",
-                self.operation_id
-            )));
+        let (phase, operation) = match &self.progress {
+            CircleOperationProgress::Ready(operation) => {
+                (CircleOperationPhase::Initial, operation.clone())
+            }
+            CircleOperationProgress::Finalizing(operation) => {
+                (CircleOperationPhase::Finalization, operation.clone())
+            }
+            CircleOperationProgress::WaitingForCloseResponses(_)
+            | CircleOperationProgress::Blocked { .. } => {
+                return Err(CircleOperationError::Journal(format!(
+                    "Circle operation {} is not publishable",
+                    self.operation_id
+                )));
+            }
         };
-        let operation = operation.clone();
-        self.progress = CircleOperationProgress::Blocked { reason, operation };
+        self.progress = CircleOperationProgress::Blocked {
+            reason,
+            phase,
+            operation,
+        };
         Ok(())
     }
 
@@ -310,6 +357,41 @@ impl CircleOperationJournal {
         let operation = operation.clone();
         self.progress = CircleOperationProgress::WaitingForCloseResponses(operation);
         Ok(())
+    }
+
+    pub(crate) fn begin_finalization(
+        &mut self,
+        operation: PreparedCircleOperation,
+    ) -> Result<(), CircleOperationError> {
+        if !matches!(
+            &self.progress,
+            CircleOperationProgress::WaitingForCloseResponses(_)
+        ) {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} is not waiting for close responses",
+                self.operation_id
+            )));
+        }
+        self.progress = CircleOperationProgress::Finalizing(Box::new(operation));
+        Ok(())
+    }
+
+    pub(crate) fn is_finalizing(&self) -> bool {
+        matches!(
+            &self.progress,
+            CircleOperationProgress::Finalizing(_)
+                | CircleOperationProgress::Blocked {
+                    phase: CircleOperationPhase::Finalization,
+                    ..
+                }
+        )
+    }
+
+    pub(crate) fn is_publishable(&self) -> bool {
+        matches!(
+            &self.progress,
+            CircleOperationProgress::Ready(_) | CircleOperationProgress::Finalizing(_)
+        )
     }
 
     pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleOperationError> {
@@ -327,7 +409,12 @@ impl CircleOperationJournal {
             )));
         }
         let commit = self.commit()?;
-        if commit.write_id.as_str() != self.operation_id.as_str() {
+        let expected_write_id = if self.is_finalizing() {
+            self.operation_id.finalization_write_id()
+        } else {
+            crate::WriteId::from_generated(self.operation_id.as_str().to_string())
+        };
+        if commit.write_id != expected_write_id {
             return Err(CircleOperationError::Journal(format!(
                 "circle operation id {} differs from payload commit operation id {}",
                 self.operation_id, commit.write_id

@@ -151,6 +151,19 @@ impl CircleOperationId {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    pub(crate) fn finalization_write_id(&self) -> crate::WriteId {
+        crate::WriteId::from_generated(
+            crate::sync::store_commit::ObjectHash::digest(
+                &[
+                    b"coven.circle-epoch-close-finalization-write.v1\0".as_slice(),
+                    self.as_str().as_bytes(),
+                ]
+                .concat(),
+            )
+            .to_string(),
+        )
+    }
 }
 
 impl fmt::Display for CircleOperationId {
@@ -194,6 +207,7 @@ pub enum CircleOperationKind {
 pub enum CircleOperationState {
     Pending,
     WaitingForCloseResponses,
+    Finalizing,
     Blocked { reason: String },
 }
 
@@ -652,6 +666,7 @@ mod tests {
         let objects = super::super::store_commit::CircleActivationObjects {
             control: control_object,
             close_intent: None,
+            close_outcome: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
             roster_resolutions: BTreeMap::new(),

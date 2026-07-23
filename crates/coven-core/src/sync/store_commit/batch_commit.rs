@@ -1405,6 +1405,12 @@ pub(super) fn candidate_manifest(
                         reference: reference.clone(),
                     });
                 }
+                if let Some(reference) = &control.objects().close_outcome {
+                    objects.push(CandidateExclusiveObjectRef::CircleEpochCloseOutcome {
+                        circle_id,
+                        reference: reference.clone(),
+                    });
+                }
                 if control
                     .objects()
                     .access
@@ -1452,6 +1458,9 @@ pub(super) fn candidate_manifest(
                 insert_candidate_exact_ref(&mut exact_refs, &access.envelope.object)?;
             }
             CandidateExclusiveObjectRef::CircleEpochCloseIntent { reference, .. } => {
+                insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
+            }
+            CandidateExclusiveObjectRef::CircleEpochCloseOutcome { reference, .. } => {
                 insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
             }
             CandidateExclusiveObjectRef::StorePackage(reference) => {
@@ -1512,6 +1521,25 @@ fn validate_candidate_object_path(
                     *circle_id,
                     reference.close_id,
                     reference.intent_hash,
+                )
+            );
+            if reference.object.slot().logical_key() != expected {
+                return Err(StoreProtocolError::RelocatedCandidateObject {
+                    expected,
+                    actual: reference.object.slot().logical_key().to_string(),
+                });
+            }
+            Ok(())
+        }
+        CandidateExclusiveObjectRef::CircleEpochCloseOutcome {
+            circle_id,
+            reference,
+        } => {
+            let expected = format!(
+                "{}.json",
+                crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                    *circle_id,
+                    reference.close_id,
                 )
             );
             if reference.object.slot().logical_key() != expected {

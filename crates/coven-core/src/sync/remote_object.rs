@@ -2222,6 +2222,11 @@ pub(crate) enum CandidateExclusiveObjectDomain {
         circle_id: CircleId,
         reference: super::circle_control::CircleEpochCloseIntentRef,
     },
+    CircleEpochCloseOutcome {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::circle_control::CircleEpochCloseOutcomeRef,
+    },
     CircleBootstrapImage {
         family: CandidateFamilyId,
         circle_id: CircleId,
@@ -2243,6 +2248,7 @@ impl CandidateExclusiveObjectDomain {
             Self::CircleAccessLeaf { family, .. }
             | Self::CircleAccessEnvelope { family, .. }
             | Self::CircleEpochCloseIntent { family, .. }
+            | Self::CircleEpochCloseOutcome { family, .. }
             | Self::CircleBootstrapImage { family, .. } => *family,
         }
     }
@@ -2257,6 +2263,7 @@ impl CandidateExclusiveObjectDomain {
             Self::CircleAccessLeaf { reference, .. } => &reference.object,
             Self::CircleAccessEnvelope { reference, .. } => &reference.object,
             Self::CircleEpochCloseIntent { reference, .. } => &reference.object,
+            Self::CircleEpochCloseOutcome { reference, .. } => &reference.object,
             Self::CircleBootstrapImage { reference, .. } => &reference.object,
         }
     }
@@ -2279,7 +2286,8 @@ impl CandidateExclusiveObjectDomain {
             | Self::MergeMembershipWrappedStoreKey { .. }
             | Self::CircleAccessLeaf { .. }
             | Self::CircleAccessEnvelope { .. }
-            | Self::CircleEpochCloseIntent { .. } => None,
+            | Self::CircleEpochCloseIntent { .. }
+            | Self::CircleEpochCloseOutcome { .. } => None,
         }
     }
 
@@ -2323,6 +2331,15 @@ impl CandidateExclusiveObjectDomain {
                 circle_id,
                 reference,
             } => Some(RetainedAuthorityObjectDomain::CircleEpochCloseIntent {
+                family: *family,
+                circle_id: *circle_id,
+                reference: reference.clone(),
+            }),
+            Self::CircleEpochCloseOutcome {
+                family,
+                circle_id,
+                reference,
+            } => Some(RetainedAuthorityObjectDomain::CircleEpochCloseOutcome {
                 family: *family,
                 circle_id: *circle_id,
                 reference: reference.clone(),
@@ -2409,6 +2426,16 @@ impl CandidateObjectGraph {
                     reference,
                 } => {
                     objects.push(CandidateExclusiveObjectDomain::CircleEpochCloseIntent {
+                        family: manifest.family,
+                        circle_id: *circle_id,
+                        reference: reference.clone(),
+                    });
+                }
+                super::store_commit::CandidateExclusiveObjectRef::CircleEpochCloseOutcome {
+                    circle_id,
+                    reference,
+                } => {
+                    objects.push(CandidateExclusiveObjectDomain::CircleEpochCloseOutcome {
                         family: manifest.family,
                         circle_id: *circle_id,
                         reference: reference.clone(),
@@ -2687,6 +2714,16 @@ fn validate_candidate_exclusive_identity(
             canonical_semantic_bytes,
             &identity.object,
         ),
+        CandidateExclusiveObjectDomain::CircleEpochCloseOutcome {
+            circle_id,
+            reference,
+            ..
+        } => validate_circle_epoch_close_outcome_identity(
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        ),
         CandidateExclusiveObjectDomain::CircleBootstrapImage {
             circle_id,
             owner_pubkey,
@@ -2835,6 +2872,37 @@ fn validate_circle_epoch_close_intent_identity(
         || intent.circle_id != circle_id
         || intent.close_id != reference.close_id
         || intent.intent_hash() != reference.intent_hash
+        || reference.object != *object
+        || reference.object.slot().logical_key() != expected
+    {
+        return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(())
+}
+
+fn validate_circle_epoch_close_outcome_identity(
+    circle_id: CircleId,
+    reference: &super::circle_control::CircleEpochCloseOutcomeRef,
+    canonical_semantic_bytes: &[u8],
+    object: &ExactObjectRef,
+) -> Result<(), RemoteObjectRecordError> {
+    let outcome: super::circle_control::CircleEpochCloseOutcome =
+        serde_json::from_slice(canonical_semantic_bytes)
+            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let parsed_bytes = serde_json::to_vec(&outcome)
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let expected = format!(
+        "{}.json",
+        super::circle_control::circle_epoch_close_outcome_semantic_prefix(
+            circle_id,
+            reference.close_id,
+        )
+    );
+    if parsed_bytes != canonical_semantic_bytes
+        || !outcome.verify_signature()
+        || outcome.circle_id != circle_id
+        || outcome.close_id != reference.close_id
+        || outcome.outcome_hash() != reference.outcome_hash
         || reference.object != *object
         || reference.object.slot().logical_key() != expected
     {
@@ -3044,6 +3112,11 @@ pub(crate) enum RetainedAuthorityObjectDomain {
         circle_id: CircleId,
         reference: super::circle_control::CircleEpochCloseIntentRef,
     },
+    CircleEpochCloseOutcome {
+        family: CandidateFamilyId,
+        circle_id: CircleId,
+        reference: super::circle_control::CircleEpochCloseOutcomeRef,
+    },
 }
 
 fn validate_retained_authority_identity(
@@ -3216,6 +3289,16 @@ fn validate_retained_authority_identity(
             reference,
             ..
         } => validate_circle_epoch_close_intent_identity(
+            *circle_id,
+            reference,
+            canonical_semantic_bytes,
+            &identity.object,
+        )?,
+        RetainedAuthorityObjectDomain::CircleEpochCloseOutcome {
+            circle_id,
+            reference,
+            ..
+        } => validate_circle_epoch_close_outcome_identity(
             *circle_id,
             reference,
             canonical_semantic_bytes,

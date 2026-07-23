@@ -441,6 +441,20 @@ async fn run_single_sync_cycle_with_authorization(
             .map_err(|error| {
                 SyncCycleFailure::operation("publish Circle epoch-close responses", error)
             })?;
+        if let Some(routing_encryption) = routing_encryption {
+            authorization
+                .finalize_ready_circle_epoch_closes(
+                    device_id,
+                    &completed.sync_time,
+                    store_dir,
+                    routing_encryption,
+                    user_keypair,
+                )
+                .await
+                .map_err(|error| {
+                    SyncCycleFailure::operation("finalize Circle epoch closes", error)
+                })?;
+        }
         Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
         Box::pin(reclaim_cycle_packages(device_id, user_keypair, post_pull)).await?;
     }

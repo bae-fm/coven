@@ -84,11 +84,52 @@ impl StoreDatabase {
                         &circle_id,
                         &payload,
                     )?;
-                    if matches!(journal.state(), CircleOperationState::Pending) {
+                    if journal.is_publishable() {
                         return Ok(Some(journal));
                     }
                 }
                 Ok(None)
+            })
+            .await
+    }
+
+    pub(in crate::sync::store) async fn waiting_circle_operations(
+        &self,
+    ) -> Result<Vec<CircleOperationJournal>, DbError> {
+        self.database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT operation_id, circle_id, payload
+                         FROM circle_operations
+                         ORDER BY rowid",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                let mut waiting = Vec::new();
+                for row in rows {
+                    let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
+                    let journal = crate::database::parse_circle_operation_row(
+                        &operation_id,
+                        &circle_id,
+                        &payload,
+                    )?;
+                    if matches!(
+                        journal.state(),
+                        CircleOperationState::WaitingForCloseResponses
+                    ) {
+                        waiting.push(journal);
+                    }
+                }
+                Ok(waiting)
             })
             .await
     }
@@ -101,6 +142,54 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 update_circle_operation_on(&tx, journal)?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(in crate::sync::store) async fn begin_circle_operation_finalization(
+        &self,
+        journal: CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        if !matches!(journal.state(), CircleOperationState::Finalizing) {
+            return Err(DbError::Message(
+                "Circle finalization journal is not in finalizing state".to_string(),
+            ));
+        }
+        let remotes = journal
+            .closed_remote_objects()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let owner = journal.operation().commit_ref.clone();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let durable = load_circle_operation_on(&tx, journal.operation_id.as_str())?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "Circle operation {} disappeared before finalization",
+                            journal.operation_id
+                        ))
+                    })?;
+                if !matches!(
+                    durable.state(),
+                    CircleOperationState::WaitingForCloseResponses
+                ) || durable.circle_id != journal.circle_id
+                    || durable.intent != journal.intent
+                {
+                    return Err(DbError::Message(format!(
+                        "Circle operation {} changed before finalization",
+                        journal.operation_id
+                    )));
+                }
+                for remote in &remotes {
+                    persist_prepared_remote_object_on(
+                        &tx,
+                        remote,
+                        &owner,
+                        "Circle close-finalization candidate graph",
+                    )?;
+                }
+                persist_circle_operation_row_on(&tx, journal)?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -152,7 +241,7 @@ impl StoreDatabase {
                         journal.operation_id
                     )));
                 }
-                if !matches!(journal.state(), CircleOperationState::Pending) {
+                if !journal.is_publishable() {
                     return Err(DbError::Message(
                         "blocked circle operation cannot activate".to_string(),
                     ));
@@ -328,10 +417,12 @@ impl StoreDatabase {
                     &operation.commit_ref,
                     &[activation],
                 )?;
-                if matches!(
+                if !journal.is_finalizing()
+                    && matches!(
                     journal.intent,
                     crate::sync::store::circle_controls::CircleOperationIntent::RemoveMember { .. }
-                ) {
+                )
+                {
                     let mut waiting = journal;
                     waiting
                         .wait_for_close_responses()

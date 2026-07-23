@@ -70,6 +70,14 @@ rebuild the deleted choice.
   participants, and reserved response and outcome slots. Remaining devices
   publish device-signed applied frontiers to their exact create-once response
   slots after pull; the close blocks old-epoch authoring.
+- A complete response set produces an Owner-signed exact outcome whose cutoff
+  is the component-wise maximum of the provisional and device frontiers. The
+  outcome rotates the Circle key and epoch, removes the member, binds the
+  successor control to the exact close, and publishes one successor bootstrap
+  for every remaining Circle member.
+- Retained replay applies old-epoch Circle packages only through the accepted
+  exact cutoff. Activating the successor cutoff atomically rebuilds the live
+  projection, and a conflicting commit at an accepted coordinate fails loud.
 - Later-discovered old-epoch packages reopen their exact retained verified
   activation. Package decryption, key selection, and writer authority therefore
   remain available while the Circle's current state is closing.
@@ -103,8 +111,8 @@ rebuild the deleted choice.
 
 - use the authenticated routing boundary for Circle snapshot, bootstrap, and
   restore images;
-- complete Circle membership, access, epoch close, rotation, conflict
-  resolution, deletion, and durable restart;
+- complete Circle membership, access, close cancellation, device exclusion,
+  conflict resolution, deletion, and durable restart;
 - add Circle bootstrap, acknowledgement, snapshot, restore, and reclamation;
 - finish audience-aware blob movement and retention;
 - expose the application API and errors described here; and

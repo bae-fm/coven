@@ -549,12 +549,14 @@ fn install_test_circle_current_state(
         policy_objects,
         metadata: draft.metadata,
         close_intent: draft.close_intent,
+        close_outcome: None,
         access: draft.access,
         control: draft.control,
     };
     let objects = CircleActivationObjects {
         control: control_object,
         close_intent: None,
+        close_outcome: None,
         roster_entries,
         roster_heads,
         roster_resolutions: BTreeMap::new(),

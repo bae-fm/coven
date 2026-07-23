@@ -445,7 +445,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
 }
 
 #[tokio::test]
-async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
+async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses() {
     let db = open_circle_routing_test_db();
     let (store, signer, founder) = persist_merge_operation(&db, "circle-member-removal").await;
     let circle_id = founder.circle_id();
@@ -470,6 +470,23 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
     )
     .await
     .expect("invite Store member");
+    let remaining_member = UserKeypair::generate();
+    let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-removal-second-member".to_string()),
+        &remaining_member_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle removal Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite remaining Store member");
     let member_db = open_circle_routing_test_db();
     install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
@@ -503,13 +520,23 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         )
         .await
         .expect("add Circle member");
-    let prior_control = StoreDatabase::new(&db)
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            remaining_member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add remaining Circle member");
+    let prior = StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load pre-close Circle control")
-        .0
-        .control
-        .coord;
+        .0;
+    let prior_control = prior.control.coord.clone();
+    let prior_epoch = prior.control.value.epoch_id();
+    let prior_fingerprint = prior.control.value.key_fingerprint();
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
     let captured_write_id = write_id.clone();
@@ -560,7 +587,7 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
     assert_eq!(package_commit.circle_packages().len(), 1);
 
     let operation_id = components
-        .remove_circle_member(circle_id, member_pubkey)
+        .remove_circle_member(circle_id, member_pubkey.clone())
         .await
         .expect("activate Circle epoch close");
 
@@ -574,7 +601,7 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         operation.state(),
         CircleOperationState::WaitingForCloseResponses
     );
-    assert_eq!(activation_count(&db, circle_id).await, 3);
+    assert_eq!(activation_count(&db, circle_id).await, 4);
     assert!(StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
@@ -607,14 +634,6 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
     };
     assert_eq!(loaded_packages.len(), 1);
 
-    components
-        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
-        .await
-        .expect("publish local Circle epoch-close response");
-    components
-        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
-        .await
-        .expect("accept the exact existing Circle epoch-close response");
     let controls = StoreDatabase::new(&db)
         .closing_circle_controls()
         .await
@@ -637,20 +656,41 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         store.root.store_root_hash,
         ProtocolObjectDomain::CircleEpochCloseResponse,
     );
-    let (bytes, _) = store
-        .storage
-        .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
-        .await
-        .expect("read exact Circle epoch-close response");
     let registration = StoreDatabase::new(&db)
         .activated_store_device_registration(participant.registration.clone())
         .await
         .expect("load response author registration");
+    let authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize Circle close response");
+    authorized_store
+        .publish_circle_epoch_close_responses(&signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    let (bytes, response_object) = store
+        .storage
+        .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
+        .await
+        .expect("read exact Circle epoch-close response");
     let response =
         crate::sync::circle::CircleEpochCloseResponse::parse_for(&bytes, control, &registration)
             .expect("verify signed Circle epoch-close response");
-    assert_eq!(response.registration, participant.registration);
-
+    let response_ref =
+        crate::sync::circle::CircleEpochCloseResponseRef::from_response(&response, response_object)
+            .expect("bind exact Circle epoch-close response");
+    let response_storage_key = match participant.response_slot.physical() {
+        crate::storage::cloud::PhysicalObjectLocator::LogicalKey => {
+            participant.response_slot.logical_key().to_string()
+        }
+        crate::storage::cloud::PhysicalObjectLocator::Opaque(provider_id) => format!(
+            "{}#exact#{provider_id}",
+            participant.response_slot.logical_key()
+        ),
+    };
+    let correct_stored = store
+        .home
+        .get(&response_storage_key)
+        .expect("read stored Circle epoch-close response fixture");
     let malformed = store
         .storage
         .prepare_protocol_object(
@@ -664,14 +704,120 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         &participant.response_slot,
         malformed.stored_bytes().to_vec(),
     );
-    let error = components
-        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+    let error = authorized_store
+        .finalize_ready_circle_epoch_closes(
+            &participant.registration.device_id.to_string(),
+            "2026-07-23T00:00:01Z",
+            &store_dir,
+            &EncryptionService::from_key([42; 32]),
+            &signer,
+        )
         .await
-        .expect_err("malformed occupied response must fail the cycle");
+        .expect_err("malformed occupied response must prevent finalization");
     assert!(
-        error.to_string().contains("Circle epoch-close responses"),
+        error.to_string().contains("Circle epoch-close response"),
         "{error}"
     );
+    store
+        .home
+        .replace_exact_object(&participant.response_slot, correct_stored);
+
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("activate the exact Circle epoch-close outcome");
+    assert!(StoreDatabase::new(&db)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read finalized Circle removal operation")
+        .is_none());
+    assert!(StoreDatabase::new(&db)
+        .closing_circle_controls()
+        .await
+        .expect("read closing Circle controls after finalization")
+        .is_empty());
+    let successor = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .expect("load successor Circle authoring state")
+        .0;
+    assert_ne!(successor.control.value.epoch_id(), prior_epoch);
+    assert_ne!(successor.control.value.key_fingerprint(), prior_fingerprint);
+    assert!(!successor.roster.members().contains_key(&member_pubkey));
+    assert!(successor
+        .roster
+        .members()
+        .contains_key(&remaining_member_pubkey));
+    let crate::sync::circle::CircleControlState::ActiveEpoch(active) =
+        successor.control.value.state()
+    else {
+        panic!("finalized Circle control must be active");
+    };
+    let crate::sync::circle::CircleEpochOrigin::Closed {
+        closed_epoch_id,
+        close_control,
+        close_id,
+        outcome_hash,
+        cutoff,
+    } = &active.common.origin
+    else {
+        panic!("successor Circle epoch must name its exact close outcome");
+    };
+    assert_eq!(*closed_epoch_id, prior_epoch);
+    assert_eq!(close_control, &control.coord);
+    assert_eq!(*close_id, close.close_id);
+    assert!(cutoff.covers_commit(&package_commit_ref));
+
+    let activation = StoreDatabase::new(&db)
+        .verified_circle_activation(circle_id, successor.control.coord.clone())
+        .await
+        .expect("read successor Circle activation")
+        .expect("successor Circle activation is retained");
+    let outcome_ref = activation
+        .reference
+        .objects()
+        .close_outcome
+        .as_ref()
+        .expect("successor activation names its close outcome");
+    assert_eq!(
+        activation
+            .reference
+            .objects()
+            .access
+            .iter()
+            .filter(|access| access.bootstrap.is_some())
+            .count(),
+        2,
+        "each remaining Circle member receives a successor bootstrap"
+    );
+    assert_eq!(outcome_ref.outcome_hash, *outcome_hash);
+    let outcome_bytes = store
+        .storage
+        .read_protocol_object(
+            &ProtocolObjectContext::store_encrypted(
+                store.root.store_root_hash,
+                ProtocolObjectDomain::CircleEpochCloseOutcome,
+            ),
+            &outcome_ref.object,
+            &crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                circle_id,
+                close.close_id,
+            ),
+        )
+        .await
+        .expect("read exact Circle epoch-close outcome");
+    let outcome: crate::sync::circle::CircleEpochCloseOutcome =
+        serde_json::from_slice(&outcome_bytes).expect("parse Circle epoch-close outcome");
+    assert!(outcome.verify_for(
+        control,
+        operation
+            .operation()
+            .creation
+            .close_intent
+            .as_ref()
+            .expect("Circle removal retains its signed close intent"),
+        &[(response_ref, response)],
+    ));
 }
 
 #[tokio::test]

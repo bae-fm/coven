@@ -250,60 +250,60 @@ pub(super) async fn publish_circle_operation(
             Some((access, object, bootstrap))
         })
         .collect::<Vec<_>>();
-    match bootstrap_access.as_slice() {
-        [] => {
-            if journal
-                .operation()
-                .prepared_objects
-                .contains_key("bootstrap-image")
-            {
-                return Err(CircleOperationError::Journal(
-                    "Circle operation carries an unsigned bootstrap image".to_string(),
-                ));
-            }
-        }
-        [(access, object, bootstrap)] if object.bootstrap.as_ref() == Some(&bootstrap.image) => {
-            for blob in &bootstrap.blobs {
-                storage.verify_blob_object(blob).await.map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "verify Circle bootstrap blob {}: {error}",
-                        crate::sync::remote_object::remote_object_id(blob.object())
-                    ))
-                })?;
-            }
-            let prefix = crate::sync::store_commit::circle_bootstrap_image_semantic_prefix(
-                access.leaf.value.circle_id,
-                commit.candidate_family(),
-                &access.leaf.value.owner_pubkey,
-                access.leaf.value.epoch_id,
-                &access.leaf.value.recipient_slot,
-                bootstrap.image.image_hash,
-            );
-            append_hashed_step(
-                database,
-                storage,
-                &mut journal,
-                "bootstrap-image",
-                &ProtocolObjectContext::circle(
-                    store_root_hash,
-                    ProtocolObjectDomain::CircleBootstrapImage,
-                    circle_encryption.clone(),
-                ),
-                &prefix,
-                bootstrap.image.image_hash,
-            )
-            .await?;
-        }
-        [_] => {
+    for (access, object, bootstrap) in bootstrap_access {
+        if object.bootstrap.as_ref() != Some(&bootstrap.image) {
             return Err(CircleOperationError::Journal(
                 "Circle bootstrap access differs from its signed object graph".to_string(),
             ));
         }
-        _ => {
+        for blob in &bootstrap.blobs {
+            storage.verify_blob_object(blob).await.map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "verify Circle bootstrap blob {}: {error}",
+                    crate::sync::remote_object::remote_object_id(blob.object())
+                ))
+            })?;
+        }
+        let mut matching_steps = journal
+            .operation()
+            .prepared_objects
+            .iter()
+            .filter(|(_, prepared)| prepared.reference() == &bootstrap.image.object);
+        let step = matching_steps
+            .next()
+            .map(|(step, _)| step.clone())
+            .ok_or_else(|| {
+                CircleOperationError::Journal(
+                    "Circle bootstrap image lacks its prepared exact object".to_string(),
+                )
+            })?;
+        if matching_steps.next().is_some() {
             return Err(CircleOperationError::Journal(
-                "one Circle operation cannot activate multiple bootstrap images".to_string(),
+                "Circle bootstrap image has more than one upload step".to_string(),
             ));
         }
+        let prefix = crate::sync::store_commit::circle_bootstrap_image_semantic_prefix(
+            access.leaf.value.circle_id,
+            commit.candidate_family(),
+            &access.leaf.value.owner_pubkey,
+            access.leaf.value.epoch_id,
+            &access.leaf.value.recipient_slot,
+            bootstrap.image.image_hash,
+        );
+        append_hashed_step(
+            database,
+            storage,
+            &mut journal,
+            &step,
+            &ProtocolObjectContext::circle(
+                store_root_hash,
+                ProtocolObjectDomain::CircleBootstrapImage,
+                circle_encryption.clone(),
+            ),
+            &prefix,
+            bootstrap.image.image_hash,
+        )
+        .await?;
     }
     match (&creation.close_intent, &reference.objects().close_intent) {
         (Some(intent), Some(intent_ref))
@@ -334,6 +334,35 @@ pub(super) async fn publish_circle_operation(
         _ => {
             return Err(CircleOperationError::Journal(
                 "Circle epoch-close intent differs from its signed object graph".to_string(),
+            ));
+        }
+    }
+    match (&creation.close_outcome, &reference.objects().close_outcome) {
+        (Some(outcome), Some(outcome_ref))
+            if outcome.close_id == outcome_ref.close_id
+                && outcome.outcome_hash() == outcome_ref.outcome_hash =>
+        {
+            append_step(
+                database,
+                storage,
+                &mut journal,
+                "epoch-close-outcome",
+                &ProtocolObjectContext::store_encrypted(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseOutcome,
+                ),
+                &crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                    creation.circle_id,
+                    outcome.close_id,
+                ),
+                &outcome.to_bytes(),
+            )
+            .await?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CircleOperationError::Journal(
+                "Circle epoch-close outcome differs from its signed object graph".to_string(),
             ));
         }
     }

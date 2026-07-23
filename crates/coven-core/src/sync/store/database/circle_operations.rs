@@ -202,6 +202,43 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn circle_closing_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        identity_pubkey: &str,
+    ) -> Result<
+        (
+            crate::sync::store::circle_controls::activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.database
+            .call(move |conn| {
+                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no current state"))
+                })?;
+                let closing = state.closing_authoring_state().ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} is not closing"))
+                })?;
+                if closing.access.recipient_pubkey != identity_pubkey {
+                    return Err(DbError::Message(format!(
+                        "closing Circle {circle_id} belongs to another local identity"
+                    )));
+                }
+                let activated_commit =
+                    Self::circle_activation_commit_ref_on(conn, circle_id, &closing.control.coord)?
+                        .ok_or_else(|| {
+                            DbError::Message(format!(
+                                "Circle {circle_id} closing control has no materialized activation"
+                            ))
+                        })?;
+                Ok((closing, activated_commit))
+            })
+            .await
+    }
+
     pub(crate) async fn circle_publication_context(
         &self,
         circle_id: crate::sync::circle::CircleId,
@@ -241,6 +278,16 @@ impl StoreDatabase {
                     .package_access()
                     .map_err(|error| DbError::Message(error.to_string()))
             })
+            .await
+    }
+
+    pub(crate) async fn verified_circle_activation(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        control: crate::sync::circle::CircleControlCoord,
+    ) -> Result<Option<crate::sync::store::circle_controls::VerifiedCircleReference>, DbError> {
+        self.database
+            .call(move |conn| Self::verified_circle_activation_on(conn, circle_id, &control))
             .await
     }
 
@@ -287,7 +334,7 @@ impl StoreDatabase {
         Ok(Some(reference))
     }
 
-    fn verified_circle_activation_on(
+    pub(super) fn verified_circle_activation_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
         control: &crate::sync::circle::CircleControlCoord,

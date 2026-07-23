@@ -138,7 +138,8 @@ pub(crate) use registration_authority::{
     verify_merge_membership_state_ref,
 };
 use registration_validation::load_merge_commit_registrations;
-use replay::*;
+pub(crate) use replay::replay_retained_merge_projection_on;
+use replay::{replay_merge_device_history, verified_terminal_merge_retractions};
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store) use snapshot_authority::{
     verify_snapshot_for_acknowledgement, verify_snapshot_stability,

@@ -32,7 +32,132 @@ use crate::sync::store::database::candidate_records::{
     parse_prepared_merge_candidate_parts_on, validate_terminal_nonactivation_authority_on,
 };
 
+pub(crate) struct CircleReplayEpochIndex {
+    control_epochs: BTreeMap<
+        (
+            crate::sync::circle::CircleId,
+            crate::sync::circle::CircleControlCoord,
+        ),
+        crate::sync::circle::CircleEpochId,
+    >,
+    cutoffs: BTreeMap<
+        (
+            crate::sync::circle::CircleId,
+            crate::sync::circle::CircleEpochId,
+        ),
+        CommitFrontier,
+    >,
+}
+
+impl CircleReplayEpochIndex {
+    pub(crate) fn permits(
+        &self,
+        commit_ref: &StoreBatchCommitRef,
+        circle_id: crate::sync::circle::CircleId,
+        control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<bool, DbError> {
+        let epoch_id = self
+            .control_epochs
+            .get(&(circle_id, control.clone()))
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle package {} names an unretained control",
+                    circle_id
+                ))
+            })?;
+        let Some(cutoff) = self.cutoffs.get(&(circle_id, *epoch_id)) else {
+            return Ok(true);
+        };
+        if cutoff.covers_commit(commit_ref) {
+            Ok(true)
+        } else if cutoff
+            .0
+            .get(&commit_ref.coord.stream_id)
+            .is_some_and(|accepted| accepted.coord.sequence() == commit_ref.coord.sequence())
+        {
+            Err(DbError::Message(format!(
+                "Circle package {} conflicts with its accepted epoch cutoff",
+                circle_id
+            )))
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 impl StoreDatabase {
+    pub(crate) fn circle_replay_epoch_index_on(
+        conn: &Connection,
+    ) -> Result<CircleReplayEpochIndex, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT circle_id, control_coord
+                 FROM circle_control_activations
+                 ORDER BY circle_id, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut control_epochs = BTreeMap::new();
+        let mut cutoffs = BTreeMap::new();
+        for (encoded_circle_id, encoded_control) in rows {
+            let circle_id = encoded_circle_id.parse().map_err(|error| {
+                DbError::Message(format!(
+                    "parse Circle replay index id {encoded_circle_id}: {error}"
+                ))
+            })?;
+            let control = serde_json::from_str(&encoded_control).map_err(|error| {
+                DbError::Message(format!(
+                    "parse Circle replay index control for {circle_id}: {error}"
+                ))
+            })?;
+            let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle replay index activation for {circle_id} disappeared"
+                    ))
+                })?;
+            let epoch_id = activation.control.value.epoch_id();
+            if control_epochs
+                .insert((circle_id, control), epoch_id)
+                .is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "Circle replay index duplicates a control for {circle_id}"
+                )));
+            }
+            let crate::sync::circle::CircleEpochOrigin::Closed {
+                closed_epoch_id,
+                cutoff,
+                ..
+            } = &activation.control.value.active_common().origin
+            else {
+                continue;
+            };
+            match cutoffs.entry((circle_id, *closed_epoch_id)) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(cutoff.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == cutoff => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} has conflicting cutoffs for epoch {closed_epoch_id}"
+                    )));
+                }
+            }
+        }
+        Ok(CircleReplayEpochIndex {
+            control_epochs,
+            cutoffs,
+        })
+    }
+
     fn canonical_retained_merge_packages(
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -1758,6 +1883,102 @@ impl StoreDatabase {
             }
         }
         Ok(notifications)
+    }
+}
+
+#[cfg(test)]
+mod circle_epoch_cutoff_tests {
+    use super::*;
+    use crate::id_provider::SequentialIdProvider;
+    use crate::storage::cloud::ObjectSlot;
+    use crate::sync::causal_grants::AuthorStreamId;
+    use crate::sync::circle::{CircleControlCoord, CircleEpochId, CircleId};
+    use crate::sync::membership::MembershipGrantId;
+
+    fn commit_reference(
+        stream_id: AuthorStreamId,
+        sequence: u64,
+        label: &str,
+    ) -> StoreBatchCommitRef {
+        let bytes = format!("{label}-stored");
+        StoreBatchCommitRef {
+            coord: StoreCommitCoord {
+                stream_id,
+                sequence,
+            },
+            commit_hash: ObjectHash::digest(format!("{label}-semantic").as_bytes()),
+            object: crate::sync::storage::ExactObjectRef::new(
+                ObjectSlot::logical(format!("store-v1/commits/{label}.json"))
+                    .expect("valid commit slot"),
+                bytes.len() as u64,
+                ObjectHash::digest(bytes.as_bytes()),
+            ),
+        }
+    }
+
+    #[test]
+    fn circle_epoch_cutoff_accepts_exact_history_and_omits_later_packages() {
+        let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(b"cutoff stream"));
+        let accepted = commit_reference(stream_id, 2, "accepted");
+        let later = commit_reference(stream_id, 3, "later");
+        let circle_id = CircleId::from_bytes([7; 16]);
+        let control = CircleControlCoord {
+            device_id: "cutoff-device".to_string(),
+            stream_id: AuthorStreamId::from_digest(ObjectHash::digest(b"control stream")),
+            author_pubkey: "cutoff-author".to_string(),
+            author_owner_grant: MembershipGrantId(ObjectHash::digest(b"owner grant")),
+            seq: 1,
+            control_hash: ObjectHash::digest(b"control"),
+        };
+        let epoch_id = CircleEpochId::generate(&SequentialIdProvider::new("cutoff-epoch"));
+        let index = CircleReplayEpochIndex {
+            control_epochs: BTreeMap::from([((circle_id, control.clone()), epoch_id)]),
+            cutoffs: BTreeMap::from([(
+                (circle_id, epoch_id),
+                CommitFrontier(BTreeMap::from([(stream_id, accepted.clone())])),
+            )]),
+        };
+
+        assert!(index
+            .permits(&accepted, circle_id, &control)
+            .expect("accepted commit is valid"));
+        assert!(!index
+            .permits(&later, circle_id, &control)
+            .expect("later commit is excluded"));
+    }
+
+    #[test]
+    fn circle_epoch_cutoff_rejects_another_commit_at_the_accepted_coordinate() {
+        let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(b"collision stream"));
+        let accepted = commit_reference(stream_id, 2, "accepted-coordinate");
+        let collision = commit_reference(stream_id, 2, "conflicting-coordinate");
+        let circle_id = CircleId::from_bytes([8; 16]);
+        let control = CircleControlCoord {
+            device_id: "collision-device".to_string(),
+            stream_id: AuthorStreamId::from_digest(ObjectHash::digest(b"collision control")),
+            author_pubkey: "collision-author".to_string(),
+            author_owner_grant: MembershipGrantId(ObjectHash::digest(b"collision owner grant")),
+            seq: 1,
+            control_hash: ObjectHash::digest(b"collision control hash"),
+        };
+        let epoch_id = CircleEpochId::generate(&SequentialIdProvider::new("collision-epoch"));
+        let index = CircleReplayEpochIndex {
+            control_epochs: BTreeMap::from([((circle_id, control.clone()), epoch_id)]),
+            cutoffs: BTreeMap::from([(
+                (circle_id, epoch_id),
+                CommitFrontier(BTreeMap::from([(stream_id, accepted)])),
+            )]),
+        };
+
+        let error = index
+            .permits(&collision, circle_id, &control)
+            .expect_err("same coordinate with different exact commit must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with its accepted epoch cutoff"),
+            "{error}"
+        );
     }
 }
 

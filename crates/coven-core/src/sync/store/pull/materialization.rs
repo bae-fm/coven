@@ -1262,6 +1262,23 @@ async fn commit_candidate(
     let gates = db.gates();
     let synced_tables = db.synced_tables().to_vec();
     let routing_key = routing_key.cloned();
+    let activates_circle_epoch_cutoff =
+        materialization
+            .circle_activations
+            .circles()
+            .iter()
+            .any(|activation| {
+                activation
+                    .control
+                    .value
+                    .active_epoch()
+                    .is_some_and(|epoch| {
+                        matches!(
+                            &epoch.common.origin,
+                            crate::sync::circle::CircleEpochOrigin::Closed { .. }
+                        )
+                    })
+            });
     #[cfg(any(test, feature = "test-utils"))]
     let materialization_failure = db.merge_materialization_failure_injection();
     let applied = db
@@ -1317,7 +1334,10 @@ async fn commit_candidate(
                         ));
                     }
                 }
-                if requires_canonical_replay || !retracted.is_empty() {
+                if requires_canonical_replay
+                    || activates_circle_epoch_cutoff
+                    || !retracted.is_empty()
+                {
                     let replay = replay_retained_merge_projection_on(
                         &tx,
                         &blob_decls,
@@ -1325,6 +1345,8 @@ async fn commit_candidate(
                         &synced_tables,
                         routing_key.as_ref(),
                         &retracted,
+                        None,
+                        true,
                     )?;
                     let projection_changeset = super::retained_replay::replace_live_projection(
                         &tx,

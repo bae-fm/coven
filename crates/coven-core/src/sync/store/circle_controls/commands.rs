@@ -3,7 +3,7 @@ use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
 use crate::keys::{self, UserKeypair};
-use crate::sync::circle::{CircleId, CircleOperationState, CircleRole, CircleRosterChain};
+use crate::sync::circle::{CircleId, CircleRole, CircleRosterChain};
 use crate::sync::cloud_storage::BlobPathScheme;
 use crate::sync::store::Store;
 use crate::sync::store_commit::CircleControlRef;
@@ -173,7 +173,7 @@ impl Store {
                 ));
             }
         };
-        let roster_chain = super::activation::load_circle_authoring_roster_chain(
+        let roster_chain = super::activation::load_circle_control_roster_chain(
             database,
             storage,
             &root,
@@ -269,7 +269,7 @@ impl Store {
                 ));
             }
         };
-        let roster_chain = super::activation::load_circle_authoring_roster_chain(
+        let roster_chain = super::activation::load_circle_control_roster_chain(
             database,
             storage,
             &root,
@@ -319,7 +319,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
-            if !matches!(journal.state(), CircleOperationState::Pending) {
+            if !journal.is_publishable() {
                 return Err(CircleOperationError::Journal(format!(
                     "pending circle operation {} contains a blocked payload",
                     journal.circle_id()
@@ -367,6 +367,19 @@ pub(super) struct CircleRemoveMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
+pub(super) struct CircleFinalizeEpochCloseRequest {
+    pub(super) operation_id: crate::sync::circle::CircleOperationId,
+    pub(super) circle_id: CircleId,
+    pub(super) member_pubkey: String,
+    pub(super) metadata_stamp: String,
+    pub(super) current: CircleAuthoringState,
+    pub(super) previous_control: CircleControlRef,
+    pub(super) roster_chain: CircleRosterChain,
+    pub(super) intent: crate::sync::circle::CircleEpochCloseIntent,
+    pub(super) responses: Vec<crate::sync::circle::CircleEpochCloseResponseRef>,
+    pub(super) bootstrap: crate::sync::store::snapshot::SnapshotCut,
+}
+
 pub(super) enum CircleOperationRequest {
     Create {
         name: String,
@@ -375,6 +388,7 @@ pub(super) enum CircleOperationRequest {
     Rename(Box<CircleRenameRequest>),
     AddMember(Box<CircleAddMemberRequest>),
     RemoveMember(Box<CircleRemoveMemberRequest>),
+    FinalizeEpochClose(Box<CircleFinalizeEpochCloseRequest>),
 }
 
 impl CircleOperationRequest {
@@ -391,6 +405,9 @@ impl CircleOperationRequest {
             Self::RemoveMember(request) => CircleOperationIntent::RemoveMember {
                 member_pubkey: request.member_pubkey.clone(),
             },
+            Self::FinalizeEpochClose(request) => CircleOperationIntent::RemoveMember {
+                member_pubkey: request.member_pubkey.clone(),
+            },
         }
     }
 
@@ -405,6 +422,18 @@ impl CircleOperationRequest {
             }
             Self::RemoveMember(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
+            Self::FinalizeEpochClose(request) => {
+                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
+        }
+    }
+
+    pub(super) fn operation_id(&self) -> Option<&crate::sync::circle::CircleOperationId> {
+        match self {
+            Self::FinalizeEpochClose(request) => Some(&request.operation_id),
+            Self::Create { .. } | Self::Rename(_) | Self::AddMember(_) | Self::RemoveMember(_) => {
+                None
             }
         }
     }
