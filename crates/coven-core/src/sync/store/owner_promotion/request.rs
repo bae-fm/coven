@@ -120,7 +120,7 @@ pub async fn begin_owner_promotion(
     } else {
         (None, None)
     };
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or_else(|| OwnerPromotionError::Protocol("Store root is absent".to_string()))?;
@@ -128,7 +128,7 @@ pub async fn begin_owner_promotion(
         crate::sync::store_objects::load_registration_ref(storage, &root, &member_registration)
             .await
             .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-    let membership = load_current_merge_membership(db, storage, &root).await?;
+    let membership = load_current_merge_membership(database, storage, &root).await?;
     let plan = crate::sync::store::operations::prepare_plan(
         database,
         storage,

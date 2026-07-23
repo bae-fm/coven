@@ -189,12 +189,6 @@ pub(super) fn update_store_device_exclusion_on(
 }
 
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn lock_device_exclusion(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        self.database.lock_store_device_exclusion().await
-    }
-
     pub(in crate::sync::store) async fn begin_outbound_store_device_exclusion(
         &self,
         operation: DurableStoreDeviceExclusionOperation,

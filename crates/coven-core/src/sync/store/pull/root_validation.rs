@@ -6,10 +6,10 @@ pub(crate) enum ApplyOutcome {
 }
 
 pub(crate) async fn required_pull_root(
-    db: &Database,
+    database: &StoreDatabase,
     requested_hash: ObjectHash,
 ) -> Result<StoreRootRef, StorePullError> {
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(|error| StorePullError::Database(format!("load exact Store root: {error}")))?

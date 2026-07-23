@@ -29,7 +29,7 @@ use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
 use super::store::pull::HeldStorePosition;
-use super::store::{AuthorizedStore, Store};
+use super::store::{AuthorizedStore, Store, StoreDatabase};
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -622,7 +622,7 @@ async fn prepare_cycle_before_pull(
         read_protocol_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
             .await?
             .map(|time| time.with_timezone(&chrono::Utc));
-    let last_snapshot = db
+    let last_snapshot = database
         .latest_local_store_snapshot()
         .await
         .map_err(|error| format!("read latest exact Store snapshot: {error}"))?;
@@ -1099,7 +1099,7 @@ pub async fn init_sync_over_storage(
         } => super::store_protocol_root::open_store(db, &storage, &expected_store_root).await,
     }
     .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-    let store_root_ref = db
+    let store_root_ref = store_database
         .local_store_root_ref()
         .await
         .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?
@@ -1110,7 +1110,7 @@ pub async fn init_sync_over_storage(
         })?;
     ensure_owner_anchored_chain(
         &storage,
-        db,
+        store_database,
         &store_root_ref,
         &store_protocol_root,
         &user_keypair,
@@ -1183,7 +1183,7 @@ pub async fn init_sync_over_storage(
 
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &StoreDatabase,
     root: &super::store_commit::StoreRootRef,
     store_protocol_root: &super::store_commit::StoreProtocolRoot,
     owner_keypair: &UserKeypair,
@@ -1195,7 +1195,7 @@ pub async fn ensure_owner_anchored_chain(
         storage,
         root,
         &crate::keys::public_key_hex(owner_keypair),
-        db,
+        database,
     )
     .await
     .map_err(|error| error.to_string())?;

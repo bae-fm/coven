@@ -237,7 +237,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     )
     .await
     .expect("stage a valid non-initial Store acknowledgement");
-    let acknowledgement = db
+    let acknowledgement = crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read staged Store acknowledgement")

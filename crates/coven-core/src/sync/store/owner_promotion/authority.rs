@@ -1,6 +1,6 @@
-use crate::database::Database;
 use crate::sync::membership::{MembershipChain, MembershipGrantId, StoreMembershipRoleGrant};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{ObjectHash, StoreDeviceRegistrationRef, StoreRootRef};
 
 use super::OwnerPromotionError;
@@ -17,11 +17,12 @@ pub(super) fn target_key(
 }
 
 pub(super) async fn load_current_merge_membership(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<MembershipChain, OwnerPromotionError> {
-    let founder = db
+    let founder = database
+        .sqlite()
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or_else(|| OwnerPromotionError::Protocol("Store founder is absent".to_string()))?;
@@ -29,7 +30,7 @@ pub(super) async fn load_current_merge_membership(
         storage,
         root,
         Some(&founder),
-        Some(db),
+        Some(database),
     )
     .await
     .map_err(|error| OwnerPromotionError::Protocol(error.to_string()));

@@ -66,7 +66,7 @@ pub async fn publish_device_provider_challenge(
             let published = Box::pin(crate::sync::provider::publish_cross_principal_challenge(
                 storage,
                 exact,
-                db,
+                database,
                 &authorization,
                 challenge,
                 &context,
@@ -264,7 +264,7 @@ pub async fn close_device_provider_admission(
         )) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
         _ => {}
     }
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?
@@ -483,7 +483,7 @@ pub async fn authorize_device_provider_access(
     request: DeviceProviderAccessRequest,
 ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
     let db = database.sqlite();
-    let root_value = load_local_store_root(db, storage).await?;
+    let root_value = load_local_store_root(database, storage).await?;
     let owner = database
         .activated_store_device_registration(request.offer.owner_registration.clone())
         .await
@@ -640,7 +640,7 @@ pub async fn authorize_device_provider_access(
         DeviceProviderAdmissionChallenge::CrossPrincipal(
             crate::sync::provider::prepare_cross_principal_challenge(
                 exact,
-                db,
+                database,
                 probe_id,
                 &request.offer.provider,
                 &challenge_context,

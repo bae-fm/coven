@@ -11,13 +11,12 @@ impl StoreDatabase {
     pub(crate) async fn latest_local_store_device_registration(
         &self,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        self.database
-            .read_local_store_device_registration(
-                "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+        self.read_local_store_device_registration(
+            "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
                     initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
              FROM local_store_device_registration WHERE singleton = 1",
-            )
-            .await
+        )
+        .await
     }
 
     pub async fn export_activated_device_continuation(
@@ -34,7 +33,6 @@ impl StoreDatabase {
             ));
         };
         let root = self
-            .database
             .local_store_root_ref()
             .await?
             .ok_or_else(|| DbError::Message("local Store root hash is absent".into()))?;
@@ -57,7 +55,6 @@ impl StoreDatabase {
             .device_signer(identity_signer)
             .map_err(|error| DbError::Message(format!("local device signer: {error}")))?;
         let latest_ack = self
-            .database
             .latest_local_store_ack()
             .await?
             .ok_or_else(|| DbError::Message("local Store acknowledgement is absent".into()))?;
@@ -73,7 +70,6 @@ impl StoreDatabase {
             activation: authority,
             latest_ack: latest_ack.reference,
             latest_snapshot: self
-                .database
                 .latest_local_store_snapshot()
                 .await?
                 .map(|snapshot| snapshot.reference),
@@ -90,7 +86,6 @@ impl StoreDatabase {
         latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
     ) -> Result<(), DbError> {
         let root = self
-            .database
             .local_store_root_ref()
             .await?
             .ok_or_else(|| DbError::Message("local Store root hash is absent".into()))?;

@@ -1077,7 +1077,7 @@ mod tests {
             .expect("install bootstrap authority");
 
         assert_eq!(
-            installed
+            crate::sync::store::database::StoreDatabase::new(&installed)
                 .local_store_root_ref()
                 .await
                 .expect("read installed Store root"),

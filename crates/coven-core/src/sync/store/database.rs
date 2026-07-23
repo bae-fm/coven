@@ -5,6 +5,8 @@ mod circle_controls;
 mod circle_operations;
 mod device_continuation;
 mod device_exclusion;
+mod device_join_challenges;
+mod device_registration_journal;
 mod host_write_capture;
 mod materialization;
 pub(crate) mod materialization_models;
@@ -18,6 +20,10 @@ mod publication;
 pub(crate) mod publication_state;
 mod reclaim;
 mod retained_merge_replay;
+mod snapshot_publication;
+mod store_acknowledgements;
+mod store_authority;
+mod store_creation_attempts;
 mod store_device_state;
 mod write_lifecycle;
 
@@ -35,9 +41,28 @@ use crate::sync::storage::PreparedExactObject;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 
+#[derive(Clone, Default)]
+pub(crate) struct StoreDatabaseRuntime {
+    /// Serializes complete membership-chain loads that share this database, so a
+    /// load cannot return an older chain after another load commits a newer floor.
+    membership_load: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes construction and execution of the one local membership mutation
+    /// whose exact signed bytes are held in `outbound_membership_mutation`.
+    membership_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes publication and rollback of the one durable founder graph.
+    store_creation: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the exact local device-exclusion object and its Store-stream
+    /// activation candidate across every database-handle clone.
+    device_exclusion: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes staging and publication of the one exact snapshot generation
+    /// held in `outbound_store_snapshot`.
+    snapshot_publication: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
 #[derive(Clone)]
 pub struct StoreDatabase {
     database: Database,
+    runtime: StoreDatabaseRuntime,
 }
 
 pub(in crate::sync::store) struct StoreDatabaseTransaction<'transaction, 'connection> {
@@ -55,7 +80,8 @@ impl<'transaction, 'connection> StoreDatabaseTransaction<'transaction, 'connecti
 impl StoreDatabase {
     #[doc(hidden)]
     pub fn from_database(database: Database) -> Self {
-        Self { database }
+        let runtime = database.store_runtime();
+        Self { database, runtime }
     }
 
     pub(crate) fn new(database: &Database) -> Self {
@@ -65,6 +91,34 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub fn sqlite(&self) -> &Database {
         &self.database
+    }
+
+    pub(in crate::sync::store) async fn lock_membership_load(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.membership_load.clone().lock_owned().await
+    }
+
+    pub(in crate::sync::store) async fn lock_membership_mutation(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.membership_mutation.clone().lock_owned().await
+    }
+
+    pub(in crate::sync) async fn lock_store_creation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.store_creation.clone().lock_owned().await
+    }
+
+    pub(in crate::sync::store) async fn lock_device_exclusion(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.device_exclusion.clone().lock_owned().await
+    }
+
+    pub(in crate::sync::store) async fn lock_snapshot_publication(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.snapshot_publication.clone().lock_owned().await
     }
 
     #[cfg(test)]

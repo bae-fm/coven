@@ -201,7 +201,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     let exclusion = finalize_peer_exclusion(&owner_db, &store, &signer, &target).await;
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        &owner_db,
+        &crate::sync::store::database::StoreDatabase::new(&owner_db),
     ))
     .await
     .expect("load post-exclusion snapshot membership")
@@ -453,7 +453,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     )
     .await
     .expect("publish pre-exclusion snapshot");
-    let published_snapshot = owner_db
+    let published_snapshot = crate::sync::store::database::StoreDatabase::new(&owner_db)
         .latest_local_store_snapshot()
         .await
         .expect("read published pre-exclusion snapshot")
@@ -1041,7 +1041,7 @@ async fn materialize_surviving_owner_commit(
     .await;
     let owner_membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        owner_db,
+        &crate::sync::store::database::StoreDatabase::new(owner_db),
     ))
     .await
     .expect("load owner membership before surviving commit");
@@ -1070,7 +1070,7 @@ async fn materialize_surviving_owner_commit(
     .expect("publish surviving owner commit");
     let peer_membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        peer_db,
+        &crate::sync::store::database::StoreDatabase::new(peer_db),
     ))
     .await
     .expect("load peer membership before surviving pull");
@@ -1131,7 +1131,7 @@ async fn assert_terminal_merge_transaction_rollback(
     }
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        peer_db,
+        &crate::sync::store::database::StoreDatabase::new(peer_db),
     ))
     .await
     .expect("load excluded peer membership for injected failure");
@@ -1259,7 +1259,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     .await;
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        &peer_db,
+        &crate::sync::store::database::StoreDatabase::new(&peer_db),
     ))
     .await
     .expect("load excluded peer membership");
@@ -1422,7 +1422,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         store.home.fail_exact_delete_on_call(1);
         let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
             &store.storage,
-            &peer_db,
+            &crate::sync::store::database::StoreDatabase::new(&peer_db),
         ))
         .await
         .expect("reload excluded peer membership");
@@ -2511,7 +2511,7 @@ async fn pull_peer_exclusion(
 ) {
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        peer_db,
+        &crate::sync::store::database::StoreDatabase::new(peer_db),
     ))
     .await
     .expect("reload excluded peer membership");
@@ -2917,7 +2917,7 @@ async fn prepare_transfer_candidate(
     .await;
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         &store.storage,
-        peer_db,
+        &crate::sync::store::database::StoreDatabase::new(peer_db),
     ))
     .await
     .expect("load transfer candidate membership");
@@ -2982,9 +2982,12 @@ async fn stage_uploaded_proposal(
     storage: &CloudSyncStorage,
     signer: &UserKeypair,
 ) -> StoreDeviceExclusionProposalRef {
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
-        .await
-        .expect("load exclusion test membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        storage,
+        &crate::sync::store::database::StoreDatabase::new(db),
+    )
+    .await
+    .expect("load exclusion test membership");
     let device_id = local_device_id(db).await.expect("local device id");
     let plan = crate::sync::store::operations::prepare_plan(
         &store_database(db),

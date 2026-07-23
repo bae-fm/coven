@@ -21,6 +21,7 @@ use crate::sync::membership::{
 use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{GrantStreamAnchor, ResolvedStoreDeviceState, StoreRootRef};
 use crate::sync::store_objects::StoreObjectError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,8 +89,11 @@ pub(crate) fn require_resolved_membership(
     }
 }
 
-async fn required_store_root_ref(db: &Database) -> Result<StoreRootRef, MembershipOpsError> {
-    db.local_store_root_ref()
+async fn required_store_root_ref(
+    database: &StoreDatabase,
+) -> Result<StoreRootRef, MembershipOpsError> {
+    database
+        .local_store_root_ref()
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)

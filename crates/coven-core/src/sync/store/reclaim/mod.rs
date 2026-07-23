@@ -565,8 +565,7 @@ async fn reclaim_store_packages(
     store_root_hash: ObjectHash,
     membership: &MembershipChain,
 ) -> Result<StoreReclaimResult, StoreReclaimError> {
-    let db = database.sqlite();
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
@@ -823,7 +822,6 @@ async fn execute_reclaim_delete(
     storage: &dyn SyncStorage,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
-    let db = database.sqlite();
     let journal::DurableStoreReclaimOperation::Authorized {
         authorization,
         activation,
@@ -833,7 +831,7 @@ async fn execute_reclaim_delete(
             "only an authorized reclaim can delete its target".to_string(),
         ));
     };
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
@@ -1185,7 +1183,6 @@ async fn prepare_reclaim_receipt(
     membership: &MembershipChain,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
-    let db = database.sqlite();
     let journal::DurableStoreReclaimOperation::AbsentVerified {
         authorization,
         target,
@@ -1196,7 +1193,7 @@ async fn prepare_reclaim_receipt(
             "only an authorized reclaim can be executed".to_string(),
         ));
     };
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;

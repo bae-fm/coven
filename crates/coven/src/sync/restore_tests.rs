@@ -1567,12 +1567,14 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("add member");
-    let pre_removal_chain =
-        crate::sync::store::pull::load_cycle_membership(&storage.storage, &db_owner)
-            .await
-            .expect("load pre-removal membership")
-            .chain
-            .expect("pre-removal membership chain");
+    let pre_removal_chain = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
+    )
+    .await
+    .expect("load pre-removal membership")
+    .chain
+    .expect("pre-removal membership chain");
     let pre_removal_heads = pre_removal_chain.head_refs().to_vec();
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
@@ -1591,11 +1593,14 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("remove member");
-    let chain = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db_owner)
-        .await
-        .expect("load post-removal membership")
-        .chain
-        .expect("post-removal membership chain");
+    let chain = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
+    )
+    .await
+    .expect("load post-removal membership")
+    .chain
+    .expect("post-removal membership chain");
 
     // The restore code is minted right after the removal: its floor is the
     // current (post-removal) chain state.
@@ -1719,7 +1724,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     .expect("publish owner row and blob");
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
         components.storage().as_ref(),
-        &db_owner,
+        &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     ))
     .await
     .expect("load owner membership")

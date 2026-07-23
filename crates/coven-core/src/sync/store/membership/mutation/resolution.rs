@@ -363,7 +363,6 @@ async fn execute_resolution_mutation(
     successor.add_entry(plan.publication.entry.clone())?;
     let root = persistence
         .database
-        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| InviteError::InvalidDurableMutation("Store root is absent".to_string()))?;
@@ -522,7 +521,7 @@ pub async fn resolve_membership_conflict(
     created_at: &str,
     database: &StoreDatabase,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
-    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let _mutation = database.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;

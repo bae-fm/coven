@@ -51,7 +51,7 @@ async fn invite_merge_member_impl(
 
     // Download existing membership entries
     let db = database.sqlite();
-    let root_ref = required_store_root_ref(db).await?;
+    let root_ref = required_store_root_ref(database).await?;
     let store_root_hash = root_ref.store_root_hash;
 
     // The founder is written once, when a store is created and first connects
@@ -68,7 +68,7 @@ async fn invite_merge_member_impl(
         storage,
         &root_ref,
         Some(&pinned_owner),
-        Some(db),
+        Some(database),
     ))
     .await?;
     require_resolved_membership(&chain)?;
@@ -174,7 +174,7 @@ async fn remove_merge_member_impl(
     database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<String, MembershipOpsError> {
     let db = database.sqlite();
-    let root_ref = required_store_root_ref(db).await?;
+    let root_ref = required_store_root_ref(database).await?;
     let protocol_store_id = root_ref.store_root_id.to_string();
     // Download existing membership entries and build the chain.
     let store_root_hash = root_ref.store_root_hash;
@@ -185,7 +185,7 @@ async fn remove_merge_member_impl(
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoMembershipChain)?;
     let mut chain =
-        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(db)).await?;
+        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(database)).await?;
     require_resolved_membership(&chain)?;
 
     // Revoke the member and rotate the cloud key. On return the rotation is

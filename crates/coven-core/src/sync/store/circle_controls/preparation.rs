@@ -915,7 +915,7 @@ pub(super) async fn prepare_circle_operation_request(
     let name = request.name();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
         let current = crate::sync::store::membership::load_and_persist_owner_anchor(
-            storage, &root, &founder, db,
+            storage, &root, &founder, database,
         )
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

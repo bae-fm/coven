@@ -39,13 +39,14 @@ pub struct CycleMembership {
 /// transport errors retain their separate pinned/unpinned classification.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
-    db: &Database,
+    database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<CycleMembership, PullError> {
+    let db = database.sqlite();
     let pinned_owner = db
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(|error| PullError::Apply(format!("read Store root reference: {error}")))?
@@ -57,15 +58,16 @@ pub async fn load_cycle_membership(
     let owner = pinned_owner
         .clone()
         .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
-    let chain =
-        crate::sync::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, db)
-            .await
-            .map_err(|error| match error {
-                crate::sync::store::membership::AnchoredChainError::StorageUnavailable {
-                    ..
-                } => PullError::MembershipLoad(error),
-                _ => PullError::MembershipTampered(error.to_string()),
-            })?;
+    let chain = crate::sync::store::membership::load_and_persist_owner_anchor(
+        storage, &root, &owner, database,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::sync::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
+            PullError::MembershipLoad(error)
+        }
+        _ => PullError::MembershipTampered(error.to_string()),
+    })?;
     Ok(CycleMembership {
         chain: Some(chain),
         pinned_owner: Some(owner),

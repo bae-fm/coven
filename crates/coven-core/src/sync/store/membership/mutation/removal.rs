@@ -559,7 +559,6 @@ async fn execute_revoke_mutation(
     let publication = plan.publication.publication().clone();
     let root = persistence
         .database
-        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| {
@@ -987,7 +986,7 @@ pub(crate) async fn revoke_member_durable(
     pending_rotation: &cloud_storage::PendingRotation,
     database: &StoreDatabase,
 ) -> Result<EncryptionService, InviteError> {
-    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let _mutation = database.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;
@@ -1108,7 +1107,7 @@ pub(crate) async fn complete_revoke_rotation_adoption(
     pending_rotation: &cloud_storage::PendingRotation,
     adopted_generation: u64,
 ) -> Result<(), InviteError> {
-    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let _mutation = database.lock_membership_mutation().await;
     let row = database
         .outbound_membership_mutation()
         .await?

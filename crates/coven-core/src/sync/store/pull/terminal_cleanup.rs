@@ -6,7 +6,7 @@ pub(crate) async fn cleanup_merge_candidate(
     write_id: crate::WriteId,
 ) -> Result<(), StorePullError> {
     let db = database.sqlite();
-    let root = db.local_store_root_ref().await?.ok_or_else(|| {
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StorePullError::Database("Merge candidate cleanup has no Store root".to_string())
     })?;
     for verification in database

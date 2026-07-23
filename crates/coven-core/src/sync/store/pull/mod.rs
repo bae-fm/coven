@@ -220,7 +220,7 @@ pub(crate) fn pull_store_commits<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
         let db = database.sqlite();
-        let root = required_pull_root(db, store_root_hash).await?;
+        let root = required_pull_root(database, store_root_hash).await?;
         let verified_root = load_store_protocol_root(storage, &root).await?.value;
         resume_merge_retraction_cleanups(database, storage, &root).await?;
 

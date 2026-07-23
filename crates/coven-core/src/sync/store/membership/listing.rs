@@ -4,9 +4,9 @@ pub async fn current_membership_floor(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     pinned_owner: Option<&str>,
-    watermark_db: Option<&Database>,
+    watermark_database: Option<&StoreDatabase>,
 ) -> Result<Vec<MembershipHeadRef>, MembershipOpsError> {
-    let chain = load_current_exact_chain(storage, root, pinned_owner, watermark_db).await?;
+    let chain = load_current_exact_chain(storage, root, pinned_owner, watermark_database).await?;
     Ok(chain.head_refs().to_vec())
 }
 
@@ -14,23 +14,25 @@ pub async fn current_membership_floor(
 pub async fn get_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
-    get_merge_members(storage, user_pubkey, db).await
+    get_merge_members(storage, user_pubkey, database).await
 }
 
 async fn get_merge_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
-    let root_ref = required_store_root_ref(db).await?;
+    let db = database.sqlite();
+    let root_ref = required_store_root_ref(database).await?;
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let chain = load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(db)).await?;
+    let chain =
+        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(database)).await?;
     require_resolved_membership(&chain)?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 

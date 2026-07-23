@@ -65,11 +65,14 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load Merge membership")
-        .chain
-        .expect("Merge membership chain");
+    let membership = super::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load Merge membership")
+    .chain
+    .expect("Merge membership chain");
     let (_temp, store_dir) = temp_store_dir();
 
     for sequence in 1..=history_length {
@@ -145,11 +148,14 @@ async fn published_history(
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load Merge membership")
-        .chain
-        .expect("Merge membership chain");
+    let membership = super::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load Merge membership")
+    .chain
+    .expect("Merge membership chain");
     let (temp, store_dir) = temp_store_dir();
     for sequence in 1..=history_length {
         publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
@@ -303,7 +309,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .resolved_store_device_state(&retained[0].history_summary().post_state)
                 .await
                 .expect("load canonical retained state");
-            let root = db
+            let root = crate::sync::store::database::StoreDatabase::new(&db)
                 .local_store_root_ref()
                 .await
                 .expect("load Store root")
@@ -652,11 +658,14 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
 
 async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     let (db, store, _summary) = Box::pin(history_with_member_removal()).await;
-    let membership = super::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load snapshot membership")
-        .chain
-        .expect("Merge snapshot has membership");
+    let membership = super::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load snapshot membership")
+    .chain
+    .expect("Merge snapshot has membership");
     let directory = tempfile::tempdir().expect("create snapshot image directory");
     let snapshot_dir = directory.path().to_path_buf();
     let synced_tables = db.synced_tables().to_vec();
@@ -685,7 +694,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
     )
     .await
     .expect("publish checkpoint snapshot");
-    let published = db
+    let published = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load published snapshot")

@@ -213,7 +213,7 @@ pub async fn accept_device_registration_request(
     request: DeviceRegistrationRequest,
 ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
     let db = database.sqlite();
-    let root_value = load_local_store_root(db, storage).await?;
+    let root_value = load_local_store_root(database, storage).await?;
     request.verify()?;
     let offer = &request.approval.request.offer;
     let owner =
@@ -393,7 +393,7 @@ pub async fn cancel_device_join(
     if expected_attempt != &attempt_ref {
         return Err(DeviceJoinError::AttemptMismatch);
     }
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?
@@ -893,11 +893,10 @@ pub fn materialize_device_join_activation<'a>(
     Box<dyn std::future::Future<Output = Result<JoinedStore, DeviceJoinError>> + Send + 'a>,
 > {
     Box::pin(async move {
-        let db = database.sqlite();
         if !matches!(&activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let root = db
+        let root = database
             .local_store_root_ref()
             .await
             .map_err(database_error)?

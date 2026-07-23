@@ -88,8 +88,7 @@ pub fn finalize_owner_promotion<'a>(
     >,
 > {
     Box::pin(async move {
-        let db = database.sqlite();
-        let root = db
+        let root = database
             .local_store_root_ref()
             .await?
             .ok_or_else(|| OwnerPromotionError::Protocol("Store root is absent".to_string()))?;
@@ -242,7 +241,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         let db = database.sqlite();
         let promoter =
             load_owner_promotion_promoter(database, device_id, identity, root, &acceptance).await?;
-        let membership = Box::pin(load_current_merge_membership(db, storage, root)).await?;
+        let membership = Box::pin(load_current_merge_membership(database, storage, root)).await?;
         if let Some(winner) = membership.head_refs().iter().find(|head| {
             head.coord.author_pubkey == promoter.author_pubkey
                 && head.coord.author_owner_grant == acceptance.request.promoter_owner_grant
@@ -339,7 +338,6 @@ fn prepare_merge_store_candidate<'a>(
     >,
 > {
     Box::pin(async move {
-        let db = database.sqlite();
         crate::sync::store::membership::publish_prepared_merge_membership_authority(
             storage,
             root.store_root_hash,
@@ -348,7 +346,7 @@ fn prepare_merge_store_candidate<'a>(
         )
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let membership = Box::pin(load_current_merge_membership(db, storage, root)).await?;
+        let membership = Box::pin(load_current_merge_membership(database, storage, root)).await?;
         let plan = Box::pin(crate::sync::store::operations::prepare_plan(
             database,
             storage,

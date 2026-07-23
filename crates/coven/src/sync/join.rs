@@ -1142,7 +1142,7 @@ pub(crate) async fn open_db_and_pull(
     // truth. Load and anchor the membership chain first (join is a standalone,
     // non-cycle pull), against the owner pinned above. Restore has not pinned an
     // owner yet, so it anchors the chain at its signed founder below.
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, &db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, &database)
         .await
         .map_err(BootstrapError::Pull)?;
     let pull_result = Box::pin(crate::sync::store::pull_store_commits(

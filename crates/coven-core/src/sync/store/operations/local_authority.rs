@@ -13,8 +13,7 @@ pub(crate) async fn load_local_store_authority(
     ),
     StoreError,
 > {
-    let db = database.sqlite();
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or(StoreError::MissingState {

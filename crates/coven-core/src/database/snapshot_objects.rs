@@ -57,7 +57,7 @@ pub(super) fn validate_snapshot_object_owner_records_on(
     Ok(())
 }
 
-pub(super) fn validate_snapshot_blob_plan_on(
+pub(crate) fn validate_snapshot_blob_plan_on(
     conn: &Connection,
     gates: &Gates,
     synced_tables: &[SyncedTable],
@@ -133,7 +133,7 @@ pub(super) fn validate_snapshot_blob_plan_on(
     Ok(())
 }
 
-pub(super) fn install_snapshot_blob_plan_on(
+pub(crate) fn install_snapshot_blob_plan_on(
     conn: &Connection,
     blob: &PreparedSnapshotBlob,
 ) -> Result<(), DbError> {

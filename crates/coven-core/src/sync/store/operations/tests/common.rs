@@ -51,7 +51,8 @@ pub(super) async fn reinstall_exact_store_root(
     let verified = crate::sync::store_objects::load_store_protocol_root(storage, root)
         .await
         .expect("load exact Store root authority");
-    db.install_store_root_authority(root.clone(), verified.bytes)
+    crate::sync::store::database::StoreDatabase::new(db)
+        .install_store_root_authority(root.clone(), verified.bytes)
         .await
         .expect("reinstall exact Store root authority");
 }

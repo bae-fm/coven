@@ -131,9 +131,10 @@ pub(crate) async fn load_and_persist_owner_anchor(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     owner_pubkey: &str,
-    db: &Database,
+    database: &StoreDatabase,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let _membership_load = db.lock_membership_load().await;
+    let db = database.sqlite();
+    let _membership_load = database.lock_membership_load().await;
     let cursors = read_head_cursors(db)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
@@ -188,18 +189,19 @@ pub(crate) async fn load_and_persist_owner_anchor(
         &protocol_root.descriptor.founder_recovery,
     )
     .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    db.install_store_owner_anchor(
-        root.clone(),
-        founder_registration_ref,
-        founder_registration,
-        founder_registration_bytes,
-        founder_genesis,
-        owner_pubkey.to_string(),
-        crate::database::InitialStoreMembershipAuthority {
-            head_refs: chain.head_refs().to_vec(),
-        },
-    )
-    .await
-    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    database
+        .install_store_owner_anchor(
+            root.clone(),
+            founder_registration_ref,
+            founder_registration,
+            founder_registration_bytes,
+            founder_genesis,
+            owner_pubkey.to_string(),
+            crate::database::InitialStoreMembershipAuthority {
+                head_refs: chain.head_refs().to_vec(),
+            },
+        )
+        .await
+        .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
     Ok(chain)
 }

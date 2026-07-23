@@ -124,7 +124,8 @@ impl Store {
         storage: &'a dyn SyncStorage,
         db: &'a Database,
     ) -> Result<AuthorizedStore<'a>, SyncCycleFailure> {
-        let store_root = db
+        let database = StoreDatabase::new(db);
+        let store_root = database
             .local_store_root_ref()
             .await
             .map_err(|error| format!("read Store root reference: {error}"))?
@@ -138,7 +139,12 @@ impl Store {
                 .to_string()
                 .into());
         }
-        authorize_borrowed(db, storage, store_root).await
+        authorize(StoreAccess {
+            database,
+            storage,
+            store_root,
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -430,7 +436,7 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
     let crate::sync::store::pull::CycleMembership {
         chain,
         pinned_owner,
-    } = crate::sync::store::pull::load_cycle_membership(access.storage, access.database.sqlite())
+    } = crate::sync::store::pull::load_cycle_membership(access.storage, &access.database)
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
     let membership = match (pinned_owner, chain) {
@@ -447,18 +453,4 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
         }
     };
     Ok(AuthorizedStore { access, membership })
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn authorize_borrowed<'a>(
-    db: &'a Database,
-    storage: &'a dyn SyncStorage,
-    store_root: StoreRootRef,
-) -> Result<AuthorizedStore<'a>, SyncCycleFailure> {
-    authorize(StoreAccess {
-        database: StoreDatabase::new(db),
-        storage,
-        store_root,
-    })
-    .await
 }

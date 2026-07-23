@@ -690,7 +690,7 @@ impl StoreDatabase {
     pub(crate) async fn store_device_exclusion_freezes(
         &self,
     ) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
-        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading exclusion freezes".to_string())
         })?;
         self.database
@@ -705,7 +705,7 @@ impl StoreDatabase {
     pub(crate) async fn activated_store_device_registration_records(
         &self,
     ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, DbError> {
-        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading activated devices".to_string())
         })?;
         self.database.call(move |conn| {
@@ -774,7 +774,7 @@ impl StoreDatabase {
         &self,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
-        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.database
@@ -803,7 +803,7 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.database
@@ -839,7 +839,7 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        let root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.database

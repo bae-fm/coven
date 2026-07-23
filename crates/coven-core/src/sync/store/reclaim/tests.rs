@@ -37,9 +37,12 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .expect("publish first Store position");
     let StoreCommitCoord { stream_id, .. } = first_commit.coord;
     let first_coverage = CommitFrontier(BTreeMap::from([(stream_id, first_commit.clone())]));
-    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load Store membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load Store membership");
     let chain = membership
         .chain
         .as_ref()
@@ -63,7 +66,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
     )
     .await
     .expect("acknowledge stable snapshot");
-    let stable = db
+    let stable = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load stable snapshot")
@@ -412,9 +415,12 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .clone();
     let StoreCommitCoord { stream_id, .. } = target_activation.coord;
     let coverage = CommitFrontier(BTreeMap::from([(stream_id, target_activation.clone())]));
-    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load reclaim membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load reclaim membership");
     let chain = membership
         .chain
         .as_ref()
@@ -433,12 +439,12 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     crate::sync::test_helpers::publish_store_ack_fixture(&db, &store.storage, coverage, &signer)
         .await
         .expect("publish covering acknowledgement");
-    let snapshot = db
+    let snapshot = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load covering snapshot")
         .expect("covering snapshot exists");
-    let acknowledgement = db
+    let acknowledgement = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_ack()
         .await
         .expect("load covering acknowledgement")

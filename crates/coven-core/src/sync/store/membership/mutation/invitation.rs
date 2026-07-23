@@ -146,7 +146,6 @@ async fn execute_invite_mutation(
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let root = persistence
         .database
-        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or_else(|| {
@@ -260,7 +259,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
     timestamp: &str,
     database: &StoreDatabase,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
-    let _mutation = database.sqlite().lock_membership_mutation().await;
+    let _mutation = database.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
             let intent_hash = row.intent_hash;

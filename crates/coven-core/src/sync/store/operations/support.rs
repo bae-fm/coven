@@ -207,7 +207,6 @@ pub(crate) async fn required_store_root(
     database: &StoreDatabase,
 ) -> Result<StoreRootRef, StoreError> {
     database
-        .sqlite()
         .local_store_root_ref()
         .await?
         .ok_or(StoreError::MissingState {

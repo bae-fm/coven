@@ -33,9 +33,9 @@ pub(crate) async fn push_store_snapshot(
     database: &crate::sync::store::StoreDatabase,
 ) -> Result<SnapshotMeta, SnapshotError> {
     let db = database.sqlite();
-    let _publication = db.lock_snapshot_publication().await;
-    drain_snapshot_spool_cleanup(db).await?;
-    if let Some(pending) = db
+    let _publication = database.lock_snapshot_publication().await;
+    drain_snapshot_spool_cleanup(database).await?;
+    if let Some(pending) = database
         .outbound_snapshot_publication()
         .await
         .map_err(publication_error)?
@@ -94,7 +94,7 @@ pub(crate) async fn push_store_snapshot(
     )
     .await
     .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-    let previous = db
+    let previous = database
         .latest_local_store_snapshot()
         .await
         .map_err(publication_error)?;
@@ -205,16 +205,17 @@ pub(crate) async fn push_store_snapshot(
             meta.to_bytes(),
         )
         .map_err(SnapshotError::Bucket)?;
-    db.stage_snapshot_publication(
-        meta.clone(),
-        meta_prepared,
-        image_bytes,
-        image_prepared,
-        snapshot_blobs,
-    )
-    .await
-    .map_err(publication_error)?;
-    let pending = db
+    database
+        .stage_snapshot_publication(
+            meta.clone(),
+            meta_prepared,
+            image_bytes,
+            image_prepared,
+            snapshot_blobs,
+        )
+        .await
+        .map_err(publication_error)?;
+    let pending = database
         .outbound_snapshot_publication()
         .await
         .map_err(publication_error)?
@@ -417,10 +418,9 @@ pub(crate) async fn drain_outbound_store_snapshot(
     storage: &dyn SyncStorage,
     database: &crate::sync::store::StoreDatabase,
 ) -> Result<Option<SnapshotMeta>, SnapshotError> {
-    let db = database.sqlite();
-    let _publication = db.lock_snapshot_publication().await;
-    drain_snapshot_spool_cleanup(db).await?;
-    let Some(pending) = db
+    let _publication = database.lock_snapshot_publication().await;
+    drain_snapshot_spool_cleanup(database).await?;
+    let Some(pending) = database
         .outbound_snapshot_publication()
         .await
         .map_err(publication_error)?
@@ -437,7 +437,6 @@ async fn publish_durable_snapshot(
     database: &crate::sync::store::StoreDatabase,
     pending: crate::database::DurableSnapshotPublication,
 ) -> Result<SnapshotMeta, SnapshotError> {
-    let db = database.sqlite();
     let meta = &pending.meta.value;
     let device_id = meta.author_registration.device_id.to_string();
     let image_context = ProtocolObjectContext::store_encrypted(
@@ -502,15 +501,18 @@ async fn publish_durable_snapshot(
             "Store snapshot metadata exact readback differs from prepared bytes".to_string(),
         ));
     }
-    db.complete_snapshot_publication(pending.reference)
+    database
+        .complete_snapshot_publication(pending.reference)
         .await
         .map_err(publication_error)?;
-    drain_snapshot_spool_cleanup(db).await?;
+    drain_snapshot_spool_cleanup(database).await?;
     Ok(pending.meta.value)
 }
 
-async fn drain_snapshot_spool_cleanup(db: &crate::database::Database) -> Result<(), SnapshotError> {
-    for path in db
+async fn drain_snapshot_spool_cleanup(
+    database: &crate::sync::store::StoreDatabase,
+) -> Result<(), SnapshotError> {
+    for path in database
         .snapshot_blob_spool_cleanup_paths()
         .await
         .map_err(publication_error)?
@@ -518,7 +520,8 @@ async fn drain_snapshot_spool_cleanup(db: &crate::database::Database) -> Result<
         crate::local_blob::remove_file(&path)
             .await
             .map_err(SnapshotError::PublicationState)?;
-        db.complete_snapshot_blob_spool_cleanup(&path)
+        database
+            .complete_snapshot_blob_spool_cleanup(&path)
             .await
             .map_err(publication_error)?;
     }
@@ -905,6 +908,10 @@ mod tests {
         .0
     }
 
+    fn store_database(database: &Database) -> StoreDatabase {
+        StoreDatabase::new(database)
+    }
+
     fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
         CloudSyncStorage::new(
             Arc::new(home.clone()),
@@ -932,7 +939,7 @@ mod tests {
         crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), storage)
             .await
             .expect("activate snapshot test registration");
-        let root_ref = db
+        let root_ref = store_database(db)
             .local_store_root_ref()
             .await
             .expect("read snapshot test Store root")
@@ -941,11 +948,12 @@ mod tests {
             creation_id: root.descriptor.creation_id,
         };
         let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root_ref, &origin);
-        let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
-            .await
-            .expect("load snapshot test membership")
-            .chain
-            .expect("snapshot test membership exists");
+        let membership =
+            crate::sync::store::pull::load_cycle_membership(storage, &store_database(db))
+                .await
+                .expect("load snapshot test membership")
+                .chain
+                .expect("snapshot test membership exists");
         (root.object_hash(), device_id.to_string(), membership)
     }
 
@@ -1062,7 +1070,7 @@ mod tests {
         )
         .await
         .is_err());
-        let staged = db
+        let staged = store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read snapshot outbox")
@@ -1076,7 +1084,7 @@ mod tests {
             .expect("snapshot was pending");
         assert_eq!(published.snapshot_hash(), staged.reference.snapshot_hash);
         assert_eq!(published.image, staged.meta.value.image);
-        assert!(reopened
+        assert!(store_database(&reopened)
             .outbound_snapshot_publication()
             .await
             .expect("read drained snapshot outbox")
@@ -1107,7 +1115,7 @@ mod tests {
         )
         .await
         .expect("publish continued snapshot");
-        let root = db
+        let root = store_database(&db)
             .local_store_root_ref()
             .await
             .expect("load continued Store root")
@@ -1120,7 +1128,7 @@ mod tests {
             )
             .await
             .expect("load continued snapshot authority");
-        let published = db
+        let published = store_database(&db)
             .latest_local_store_snapshot()
             .await
             .expect("load continued snapshot journal")
@@ -1217,7 +1225,7 @@ mod tests {
             published.image.image_hash,
             ObjectHash::digest(b"lost response image")
         );
-        assert!(db
+        assert!(store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read completed snapshot outbox")
@@ -1244,7 +1252,7 @@ mod tests {
         )
         .await
         .is_err());
-        let pending = db
+        let pending = store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read retained snapshot outbox")
@@ -1282,7 +1290,7 @@ mod tests {
         )
         .await
         .is_err());
-        let pending = db
+        let pending = store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read snapshot outbox")
@@ -1302,12 +1310,12 @@ mod tests {
         assert!(home
             .get(pending.reference.object.slot().logical_key())
             .is_none());
-        assert!(db
+        assert!(store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read retained snapshot outbox")
             .is_some());
-        assert!(db
+        assert!(store_database(&db)
             .latest_local_store_snapshot()
             .await
             .expect("read unpublished snapshot state")
@@ -1358,7 +1366,7 @@ mod tests {
                     } if reference == &first.image
                 )
         ));
-        let first_published = db
+        let first_published = store_database(&db)
             .latest_local_store_snapshot()
             .await
             .expect("read first snapshot")
@@ -1375,7 +1383,7 @@ mod tests {
         )
         .await
         .is_err());
-        let second = db
+        let second = store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read second snapshot")

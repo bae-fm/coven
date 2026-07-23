@@ -93,9 +93,12 @@ async fn gc_tombstones_as(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    let membership = crate::sync::store::pull::load_cycle_membership(&storage.storage, db)
-        .await
-        .map_err(|e| e.to_string())?;
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(db),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let activated_uploaders = StoreDatabase::new(db)
         .activated_store_device_registration_records()
         .await
@@ -1810,7 +1813,7 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     {
         Ok(root) => crate::sync::cycle::ensure_owner_anchored_chain(
             &storage.storage,
-            &joining_db,
+            &crate::sync::store::database::StoreDatabase::new(&joining_db),
             &storage.root,
             &root,
             &real_owner,
@@ -1845,7 +1848,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     let storage = TestStore::create(&founder_db, "test-store", UserKeypair::generate())
         .await
         .expect("create exact Store before wiping its membership head");
-    let founder_graph = founder_db
+    let founder_graph = crate::sync::store::database::StoreDatabase::new(&founder_db)
         .local_store_founder_graph()
         .await
         .expect("load exact founder graph")
@@ -1879,7 +1882,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     {
         Ok(root) => crate::sync::cycle::ensure_owner_anchored_chain(
             &storage.storage,
-            &joining_db,
+            &crate::sync::store::database::StoreDatabase::new(&joining_db),
             &storage.root,
             &root,
             &real_owner,

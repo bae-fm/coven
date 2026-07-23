@@ -3,7 +3,6 @@ use super::{
     verify_prepared_objects_are_signed, CircleOperationError, CircleOperationJournal,
     CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
 };
-use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::UserKeypair;
 use crate::sync::circle::{
@@ -77,7 +76,7 @@ pub(super) async fn publish_circle_operation(
                 .to_string(),
         ));
     }
-    if !has_current_merge_authority(db, storage, &commit, &author).await? {
+    if !has_current_merge_authority(database, storage, &commit, &author).await? {
         let reason = "circle operation author is not a current Store writer under its exact grant"
             .to_string();
         database
@@ -90,7 +89,7 @@ pub(super) async fn publish_circle_operation(
             head,
             history_summary,
         } = &journal.operation().policy;
-        let root = db
+        let root = database
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
@@ -318,7 +317,7 @@ pub(super) async fn publish_circle_operation(
         )
         .await?;
     }
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;
@@ -423,16 +422,17 @@ fn expected_local_circle_activation(
 }
 
 async fn has_current_merge_authority(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
 ) -> Result<bool, CircleOperationError> {
+    let db = database.sqlite();
     let founder = db
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;
@@ -441,10 +441,11 @@ async fn has_current_merge_authority(
             "Circle commit names a different Store root".to_string(),
         ));
     }
-    let current =
-        crate::sync::store::membership::load_and_persist_owner_anchor(storage, &root, &founder, db)
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let current = crate::sync::store::membership::load_and_persist_owner_anchor(
+        storage, &root, &founder, database,
+    )
+    .await
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     Ok(commit
         .membership_authority
         .as_ref()

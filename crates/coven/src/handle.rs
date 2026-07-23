@@ -1363,7 +1363,7 @@ impl CovenHandle {
     ) -> Result<crate::sync::membership::MembershipChain, SyncError> {
         Ok(
             crate::sync::store::device_join::load_current_device_join_authorization(
-                self.db(),
+                &self.database,
                 storage,
             )
             .await?,

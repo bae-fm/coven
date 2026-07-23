@@ -78,7 +78,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         &store.storage,
         &store.root,
         Some(&keys::public_key_hex(&owner)),
-        Some(&db),
+        Some(&database),
     )
     .await
     .expect("load exact membership chain");

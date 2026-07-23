@@ -72,10 +72,12 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     .await
     .expect("promote first Owner");
 
-    let membership =
-        crate::sync::store::pull::load_cycle_membership(&store.storage, &second_owner_db)
-            .await
-            .expect("load second Owner membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&second_owner_db),
+    )
+    .await
+    .expect("load second Owner membership");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let pull = crate::sync::store::pull_store_commits(
         &second_owner_db,
@@ -104,9 +106,13 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     .await
     .expect("promote second Owner");
 
-    let membership = load_current_merge_membership(&founder_db, &store.storage, &store.root)
-        .await
-        .expect("load membership after successive promotions");
+    let membership = load_current_merge_membership(
+        &StoreDatabase::new(&founder_db),
+        &store.storage,
+        &store.root,
+    )
+    .await
+    .expect("load membership after successive promotions");
     assert!(membership.is_owner_now(&keys::public_key_hex(&first_owner)));
     assert!(membership.is_owner_now(&keys::public_key_hex(&second_owner)));
 }
@@ -183,9 +189,10 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         "the accepting candidate does not own the initiating Owner's target index"
     );
 
-    let membership = load_current_merge_membership(&owner_db, &store.storage, &store.root)
-        .await
-        .expect("load activated membership");
+    let membership =
+        load_current_merge_membership(&StoreDatabase::new(&owner_db), &store.storage, &store.root)
+            .await
+            .expect("load activated membership");
     assert!(membership.is_owner_now(&keys::public_key_hex(&member)));
     let promoted_head = membership
         .head_refs()

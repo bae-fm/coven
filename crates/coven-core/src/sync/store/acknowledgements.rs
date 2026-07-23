@@ -47,13 +47,12 @@ async fn stage_resolved_store_ack(
     storage: &dyn SyncStorage,
     plan: ResolvedStoreAckPlan,
 ) -> Result<StoreAck, StoreAckError> {
-    let db = database.sqlite();
-    if db.oldest_outbound_store_ack().await?.is_some() {
+    if database.oldest_outbound_store_ack().await?.is_some() {
         return Err(StoreAckError::InvalidOutbound(
             "a prior acknowledgement remains queued".to_string(),
         ));
     }
-    let previous = db.latest_local_store_ack().await?;
+    let previous = database.latest_local_store_ack().await?;
     let (sequence, predecessor, current_slot) = match previous {
         Some(previous) => (
             previous.reference.sequence.checked_add(1).ok_or_else(|| {
@@ -120,7 +119,8 @@ async fn stage_resolved_store_ack(
             acknowledgement.to_bytes(),
         )
         .map_err(StoreObjectError::from)?;
-    db.stage_store_ack(acknowledgement.clone(), prepared)
+    database
+        .stage_store_ack(acknowledgement.clone(), prepared)
         .await?;
     Ok(acknowledgement)
 }
@@ -132,7 +132,6 @@ async fn publish_acknowledgement_object(
     outbound: &crate::database::OutboundStoreAck,
     candidate: &operations::PreparedStoreOperationCommit,
 ) -> Result<bool, StoreAckError> {
-    let db = database.sqlite();
     let context = ProtocolObjectContext::signed_plaintext(
         outbound.ack.value.store_root_hash,
         ProtocolObjectDomain::StoreAck,
@@ -150,12 +149,13 @@ async fn publish_acknowledgement_object(
             )
             .await
             .map_err(StoreObjectError::from)?;
-        db.adopt_outbound_store_ack_slot_winner(
-            outbound.reference.clone(),
-            winner_bytes,
-            winner_prepared,
-        )
-        .await?;
+        database
+            .adopt_outbound_store_ack_slot_winner(
+                outbound.reference.clone(),
+                winner_bytes,
+                winner_prepared,
+            )
+            .await?;
         return Ok(false);
     }
     let opened = storage
@@ -353,14 +353,14 @@ impl AuthorizedStore<'_> {
                 crate::database::LOCAL_DEVICE_ID_STATE_KEY,
             ))?;
         let mut published = 0_u64;
-        while let Some(outbound) = self.db().oldest_outbound_store_ack().await? {
+        while let Some(outbound) = self.database().oldest_outbound_store_ack().await? {
             if let Some(activated) = self
-                .db()
+                .database()
                 .activated_store_ack(&outbound.reference.registration)
                 .await?
             {
                 if activated == outbound.reference {
-                    self.db()
+                    self.database()
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                     published = published.checked_add(1).ok_or_else(|| {
@@ -437,7 +437,7 @@ impl AuthorizedStore<'_> {
             .await?
             {
                 crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {
-                    self.db()
+                    self.database()
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                 }

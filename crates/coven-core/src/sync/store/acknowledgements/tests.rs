@@ -19,6 +19,10 @@ fn open(path: &Path, device_id: &str) -> Database {
     .0
 }
 
+fn store_database(database: &Database) -> StoreDatabase {
+    StoreDatabase::new(database)
+}
+
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
     CloudSyncStorage::new(
         Arc::new(home.clone()),
@@ -84,7 +88,7 @@ async fn persist_candidate(
     outbound: &crate::database::OutboundStoreAck,
 ) -> crate::sync::store::operations::PreparedStoreOperationCommit {
     let database = StoreDatabase::new(db);
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, &store_database(db))
         .await
         .expect("load acknowledgement test membership");
     let device_id = db
@@ -145,14 +149,15 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
     let database = StoreDatabase::new(&db);
     Box::pin(initialize(&db, &storage, &signer)).await;
     Box::pin(stage(&db, &storage, &signer)).await;
-    let outbound = db
+    let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
         .expect("staged acknowledgement exists");
     let losing = Box::pin(persist_candidate(&db, &storage, &signer, &outbound)).await;
     let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
-        &storage, &db,
+        &storage,
+        &store_database(&db),
     ))
     .await
     .expect("load acknowledgement test membership");
@@ -223,7 +228,7 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
     let storage = storage(&home, &signer);
     let db = open(&path, "ack-test-device");
     initialize(&db, &storage, &signer).await;
-    let founder_ack = db
+    let founder_ack = store_database(&db)
         .latest_local_store_ack()
         .await
         .expect("read founder acknowledgement")
@@ -234,7 +239,7 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
         ack.successor.predecessor,
         Some(founder_ack.reference.object)
     );
-    let staged = db
+    let staged = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read acknowledgement outbox")
@@ -249,14 +254,14 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
             .expect("resolve lost exact-create response"),
         1
     );
-    let published = reopened
+    let published = store_database(&reopened)
         .latest_local_store_ack()
         .await
         .expect("read published acknowledgement")
         .expect("published acknowledgement exists");
     assert_eq!(published.reference, staged.reference);
     assert_eq!(published.reference.ack_hash, ack.ack_hash());
-    assert!(reopened
+    assert!(store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
         .expect("read drained acknowledgement outbox")
@@ -271,13 +276,13 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "ack-test-device");
     initialize(&db, &storage, &signer).await;
-    let founder_ack = db
+    let founder_ack = store_database(&db)
         .latest_local_store_ack()
         .await
         .expect("read founder acknowledgement")
         .expect("Store creation publishes its founder acknowledgement");
     stage(&db, &storage, &signer).await;
-    let pending = db
+    let pending = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read acknowledgement outbox")
@@ -290,13 +295,14 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
         home.get(slot.logical_key()),
         Some(b"competing bytes".to_vec())
     );
-    assert!(db
+    assert!(store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read retained acknowledgement outbox")
         .is_some());
     assert_eq!(
-        db.latest_local_store_ack()
+        store_database(&db)
+            .latest_local_store_ack()
             .await
             .expect("read unchanged published acknowledgement state")
             .expect("founder acknowledgement remains published")
@@ -333,7 +339,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
 
     let winner_db = open(&winner_path, "ack-slot-race-device");
     stage_at(&winner_db, &storage, &signer, "2026-07-16T00:00:01Z").await;
-    let winner = winner_db
+    let winner = store_database(&winner_db)
         .oldest_outbound_store_ack()
         .await
         .expect("read winner acknowledgement")
@@ -345,7 +351,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
 
     let loser_db = open(&loser_path, "ack-slot-race-device");
     stage_at(&loser_db, &storage, &signer, "2026-07-16T00:00:02Z").await;
-    let loser = loser_db
+    let loser = store_database(&loser_db)
         .oldest_outbound_store_ack()
         .await
         .expect("read losing acknowledgement")
@@ -369,7 +375,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         1
     );
     assert_eq!(
-        loser_db
+        store_database(&loser_db)
             .latest_local_store_ack()
             .await
             .expect("read adopted acknowledgement")
@@ -377,7 +383,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .reference,
         winner.reference
     );
-    assert!(loser_db
+    assert!(store_database(&loser_db)
         .oldest_outbound_store_ack()
         .await
         .expect("read drained acknowledgement outbox")
@@ -420,13 +426,13 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
     drain(&db, &storage, &signer)
         .await
         .expect("publish first acknowledgement");
-    let first_published = db
+    let first_published = store_database(&db)
         .latest_local_store_ack()
         .await
         .expect("read first acknowledgement")
         .expect("first acknowledgement exists");
     let second = stage(&db, &storage, &signer).await;
-    let second_pending = db
+    let second_pending = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read second acknowledgement")
@@ -445,7 +451,8 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
         .await
         .expect("publish successor acknowledgement after an activated predecessor");
     assert_eq!(
-        db.latest_local_store_ack()
+        store_database(&db)
+            .latest_local_store_ack()
             .await
             .unwrap()
             .expect("successor acknowledgement exists")
@@ -464,7 +471,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     let db = open(&path, "ack-test-device");
     Box::pin(initialize(&db, &storage, &signer)).await;
     Box::pin(stage(&db, &storage, &signer)).await;
-    let outbound = db
+    let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -508,7 +515,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
             .unwrap(),
         activated_position
     );
-    assert!(reopened
+    assert!(store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -525,7 +532,7 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     let db = open(&path, "ack-test-device");
     initialize(&db, &storage, &signer).await;
     stage(&db, &storage, &signer).await;
-    let outbound = db
+    let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -535,7 +542,7 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     drop(db);
 
     let reopened = open(&path, "ack-test-device");
-    let resumed = reopened
+    let resumed = store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -563,7 +570,7 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
     let db = open(Path::new(":memory:"), "ack-nonactivation-device");
     initialize(&db, &storage, &signer).await;
     stage(&db, &storage, &signer).await;
-    let outbound = db
+    let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -624,9 +631,14 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .expect("settle losing acknowledgement activation"),
         1
     );
-    assert!(db.oldest_outbound_store_ack().await.unwrap().is_none());
+    assert!(store_database(&db)
+        .oldest_outbound_store_ack()
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
-        db.latest_local_store_ack()
+        store_database(&db)
+            .latest_local_store_ack()
             .await
             .unwrap()
             .expect("inert acknowledgement still advances its physical stream")
@@ -652,7 +664,8 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
         .get(losing.reference.object.slot().logical_key())
         .is_none());
     assert_ne!(
-        db.activated_store_ack(&outbound.reference.registration)
+        store_database(&db)
+            .activated_store_ack(&outbound.reference.registration)
             .await
             .unwrap(),
         Some(outbound.reference.clone())
@@ -675,7 +688,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
 
     assert!(drain(&db, &storage, &signer).await.is_err());
     assert!(matches!(
-        db.oldest_outbound_store_ack()
+        store_database(&db).oldest_outbound_store_ack()
             .await
             .unwrap()
             .expect("nonactivating acknowledgement remains durable")
@@ -692,7 +705,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
 
     let reopened = open(&path, "ack-loser-device");
     assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 1);
-    assert!(reopened
+    assert!(store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -788,7 +801,8 @@ async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()
 
     assert!(Box::pin(drain(&db, &storage, &signer)).await.is_err());
     assert_eq!(
-        db.oldest_outbound_store_ack()
+        store_database(&db)
+            .oldest_outbound_store_ack()
             .await
             .unwrap()
             .expect("mismatched proof keeps acknowledgement pending")
@@ -805,7 +819,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let db = open(Path::new(":memory:"), "ack-alternate-head-device");
     initialize(&db, &storage, &signer).await;
     stage(&db, &storage, &signer).await;
-    let outbound = db
+    let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
@@ -866,7 +880,8 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
 
     assert_eq!(drain(&db, &storage, &signer).await.unwrap(), 1);
     assert_eq!(
-        db.activated_store_ack(&outbound.reference.registration)
+        store_database(&db)
+            .activated_store_ack(&outbound.reference.registration)
             .await
             .unwrap(),
         Some(outbound.reference)

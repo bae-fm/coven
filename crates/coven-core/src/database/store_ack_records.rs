@@ -2,7 +2,7 @@ use crate::database::local_store_identity::local_store_authority_on;
 
 use super::*;
 
-pub(super) fn verify_next_local_store_ack_on(
+pub(crate) fn verify_next_local_store_ack_on(
     conn: &Connection,
     bytes: &[u8],
     prepared: &PreparedExactObject,
@@ -77,7 +77,7 @@ pub(super) fn store_ack_first_slot(
     }
 }
 
-pub(super) fn store_snapshot_first_slot(
+pub(crate) fn store_snapshot_first_slot(
     registration: &StoreDeviceRegistration,
 ) -> Result<&crate::storage::cloud::ObjectSlot, DbError> {
     match &registration.snapshots {
@@ -90,7 +90,7 @@ pub(super) fn store_snapshot_first_slot(
     }
 }
 
-pub(super) fn load_published_store_ack_on(
+pub(crate) fn load_published_store_ack_on(
     conn: &Connection,
 ) -> Result<Option<PublishedStoreAck>, DbError> {
     conn.query_row(

@@ -48,13 +48,12 @@ pub(crate) async fn rename_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let db = database.sqlite();
     crate::sync::store::ensure_active_registration(database, storage).await?;
     let identity_pubkey = keys::public_key_hex(signer);
     let (current, activation_commit_ref) = database
         .circle_authoring_context(circle_id, &identity_pubkey)
         .await?;
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;

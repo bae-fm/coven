@@ -40,7 +40,7 @@ async fn load_fixture(fixture: &MergeFixture) -> MembershipChain {
         &fixture.store.storage,
         &fixture.store.root,
         Some(&fixture.owner_pubkey),
-        Some(&fixture.db),
+        Some(&StoreDatabase::new(&fixture.db)),
     )
     .await
     .expect("load exact membership chain")
@@ -155,7 +155,7 @@ async fn current_floor_is_the_exact_signed_head_cut() {
         &fixture.store.storage,
         &fixture.store.root,
         Some(&fixture.owner_pubkey),
-        Some(&fixture.db),
+        Some(&StoreDatabase::new(&fixture.db)),
     )
     .await
     .expect("read exact membership floor");
@@ -186,7 +186,7 @@ async fn current_floor_requires_every_exact_entry() {
         &fixture.store.storage,
         &fixture.store.root,
         Some(&fixture.owner_pubkey),
-        Some(&fixture.db),
+        Some(&StoreDatabase::new(&fixture.db)),
     )
     .await
     .expect_err("a signed head whose exact entry is absent must fail");
@@ -218,7 +218,7 @@ async fn load_fixture_result(
         &fixture.store.storage,
         &fixture.store.root,
         Some(&fixture.owner_pubkey),
-        Some(&fixture.db),
+        Some(&StoreDatabase::new(&fixture.db)),
     )
     .await
 }
@@ -570,7 +570,12 @@ async fn store_root_state_failures_keep_membership_error_variants() {
     let db = open_test_db();
 
     assert!(matches!(
-        get_members(&store.storage, None, &db).await,
+        get_members(
+            &store.storage,
+            None,
+            &crate::sync::store::database::StoreDatabase::new(&db),
+        )
+        .await,
         Err(MembershipOpsError::NoFounderChain)
     ));
 }
@@ -789,7 +794,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         &fixture.store.storage,
         &fixture.store.root,
         &fixture.owner_pubkey,
-        &db,
+        &crate::sync::store::database::StoreDatabase::new(&db),
     )
     .await
     .is_err());

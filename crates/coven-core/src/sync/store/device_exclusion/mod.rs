@@ -640,7 +640,7 @@ async fn prepare_proposal(
     let device_id = local_device_id(db).await?;
     let authorization = Box::new(
         Box::pin(super::device_join::load_current_device_join_authorization(
-            db, storage,
+            database, storage,
         ))
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?,
@@ -843,11 +843,10 @@ fn publish_outcome<'a>(
     >,
 > {
     Box::pin(async move {
-        let db = database.sqlite();
         let _lock = database.lock_device_exclusion().await;
         reject_active_operation(database).await?;
         let authorization = Box::pin(super::device_join::load_current_device_join_authorization(
-            db, storage,
+            database, storage,
         ))
         .await
         .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
@@ -1237,9 +1236,10 @@ async fn prepare_replacement_candidate(
         ));
     };
     let device_id = local_device_id(db).await?;
-    let authorization = super::device_join::load_current_device_join_authorization(db, storage)
-        .await
-        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+    let authorization =
+        super::device_join::load_current_device_join_authorization(database, storage)
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
     let plan = super::operations::prepare_plan(
         database,
         storage,
@@ -1279,7 +1279,6 @@ async fn resolve_exclusion_object_collision(
     storage: &dyn SyncStorage,
     operation: DurableStoreDeviceExclusionOperation,
 ) -> Result<Option<DurableStoreDeviceExclusionOperation>, StoreDeviceExclusionError> {
-    let db = database.sqlite();
     let intended = operation.object();
     let (bytes, prepared) = storage
         .read_prepared_protocol_slot(
@@ -1305,7 +1304,7 @@ async fn resolve_exclusion_object_collision(
             "proposal hash slot contains different signed bytes".to_string(),
         ));
     };
-    let root = db.local_store_root_ref().await?.ok_or_else(|| {
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StoreDeviceExclusionError::InvalidState("local Store root is absent".to_string())
     })?;
     let proposal = crate::sync::store_objects::load_device_exclusion_proposal_ref(
@@ -1356,7 +1355,6 @@ async fn build_exclusion_proof(
     proposal_ref: &StoreDeviceExclusionProposalRef,
     proposal: &StoreDeviceExclusionProposal,
 ) -> Result<StoreDeviceExclusionProof, StoreDeviceExclusionError> {
-    let db = database.sqlite();
     let frozen = database
         .resolved_store_device_state(&proposal.frozen_device_state)
         .await?;
@@ -1368,7 +1366,7 @@ async fn build_exclusion_proof(
         {
             continue;
         }
-        let reference = db
+        let reference = database
             .activated_store_ack(&record.registration)
             .await?
             .ok_or_else(|| {

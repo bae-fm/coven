@@ -301,7 +301,6 @@ async fn excluded_candidate_nonactivation(
     storage: &dyn SyncStorage,
     candidate: &crate::database::BlockedMergeCandidate,
 ) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
-    let db = database.sqlite();
     let candidate_ref = candidate.head.value.commit.clone();
     let Some(locator) = database
         .author_exclusion_activation_for_candidate(
@@ -312,7 +311,7 @@ async fn excluded_candidate_nonactivation(
     else {
         return Ok(None);
     };
-    let root = db.local_store_root_ref().await?.ok_or_else(|| {
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StoreError::InvalidOutbound("blocked Merge candidate has no Store root".to_string())
     })?;
     let candidate_target = StoreBatchCommitDeletionTarget {

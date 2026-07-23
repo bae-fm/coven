@@ -42,7 +42,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
-        Some(&owner_db),
+        Some(&crate::sync::store::database::StoreDatabase::new(&owner_db)),
     )
     .await
     .expect("load membership at the writer's predecessor");
@@ -71,7 +71,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
-        Some(&owner_db),
+        Some(&crate::sync::store::database::StoreDatabase::new(&owner_db)),
     )
     .await
     .expect("load candidate membership after removal");
@@ -146,7 +146,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
-        Some(&owner_db),
+        Some(&crate::sync::store::database::StoreDatabase::new(&owner_db)),
     )
     .await
     .expect("load membership before direct removal");
@@ -172,7 +172,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         &store.storage,
         &store.root,
         Some(&pubkey_hex(&owner)),
-        Some(&owner_db),
+        Some(&crate::sync::store::database::StoreDatabase::new(&owner_db)),
     )
     .await
     .expect("load membership after direct removal");
@@ -253,7 +253,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         &store.storage,
         &store.root,
         &owner_pubkey,
-        &owner_db,
+        &crate::sync::store::database::StoreDatabase::new(&owner_db),
     )
     .await
     .expect("load predecessor membership");
@@ -310,7 +310,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         &store.storage,
         &store.root,
         Some(&owner_pubkey),
-        Some(&owner_db),
+        Some(&crate::sync::store::database::StoreDatabase::new(&owner_db)),
     )
     .await
     .expect("load candidate with new Direct membership");

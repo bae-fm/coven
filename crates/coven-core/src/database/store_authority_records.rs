@@ -23,7 +23,7 @@ pub(crate) struct DurableFounderMembership {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DurableFounderMembershipJournal {
+pub(crate) struct DurableFounderMembershipJournal {
     entry_ref: MembershipEntryRef,
     entry_bytes: Vec<u8>,
     entry_prepared: PreparedExactObject,
@@ -33,7 +33,7 @@ pub(super) struct DurableFounderMembershipJournal {
 }
 
 impl DurableFounderMembershipJournal {
-    pub(super) fn from_graph(graph: &DurableFounderMembership) -> Self {
+    pub(crate) fn from_graph(graph: &DurableFounderMembership) -> Self {
         Self {
             entry_ref: graph.entry_ref.clone(),
             entry_bytes: graph.entry.bytes.clone(),
@@ -76,7 +76,7 @@ pub(crate) struct FounderMembershipRefs {
     pub head: MembershipHeadRef,
 }
 
-pub(super) fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
+pub(crate) fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
     let membership = serde_json::to_vec(&(
         &graph.membership.entry_ref,
         &graph.membership.entry.bytes,
@@ -101,7 +101,7 @@ pub(super) fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash 
     )
 }
 
-pub(super) fn load_store_root_authority_on(
+pub(crate) fn load_store_root_authority_on(
     conn: &Connection,
 ) -> Result<Option<(crate::sync::store_commit::StoreRootRef, StoreProtocolRoot)>, DbError> {
     conn.query_row(
@@ -151,7 +151,7 @@ pub(crate) fn required_store_root_authority_on(
         .ok_or(DbError::StoreRootHashMissing)
 }
 
-pub(super) fn install_store_root_authority_on(
+pub(crate) fn install_store_root_authority_on(
     conn: &Connection,
     reference: &crate::sync::store_commit::StoreRootRef,
     bytes: &[u8],
@@ -342,7 +342,7 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
     Ok(Some(baseline))
 }
 
-pub(super) fn install_generation_zero_replay_baseline_on(
+pub(crate) fn install_generation_zero_replay_baseline_on(
     conn: &Connection,
     schema_version: u32,
     routing_hash: ObjectHash,
@@ -358,7 +358,7 @@ pub(super) fn install_generation_zero_replay_baseline_on(
     insert_retained_replay_baseline_on(conn, &baseline)
 }
 
-pub(super) fn install_snapshot_replay_baseline_on(
+pub(crate) fn install_snapshot_replay_baseline_on(
     conn: &Connection,
     schema_version: u32,
     routing_hash: ObjectHash,
@@ -410,7 +410,7 @@ pub(super) fn insert_retained_replay_baseline_on(
     Ok(())
 }
 
-pub(super) fn ensure_founder_replay_baseline_on(
+pub(crate) fn ensure_founder_replay_baseline_on(
     conn: &Connection,
     schema_version: u32,
     routing_hash: ObjectHash,
@@ -548,7 +548,7 @@ pub(crate) fn install_store_founder_state_on(
     Ok(())
 }
 
-pub(super) fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
+pub(crate) fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
     let root = StoreProtocolRoot::parse(&graph.root.bytes)
         .map_err(|error| DbError::Message(format!("founder Store root: {error}")))?;
     if root != graph.root.value
@@ -669,7 +669,7 @@ pub(super) fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn consume_store_creation_probes_on(
+pub(crate) fn consume_store_creation_probes_on(
     conn: &Connection,
     graph: &DurableFounderGraph,
 ) -> Result<(), DbError> {
@@ -771,7 +771,7 @@ pub(super) fn consume_store_creation_probes_on(
     Ok(())
 }
 
-pub(super) fn load_local_store_founder_graph_on(
+pub(crate) fn load_local_store_founder_graph_on(
     conn: &Connection,
 ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
     let owned_rows: i64 = conn

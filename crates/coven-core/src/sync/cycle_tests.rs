@@ -25,10 +25,15 @@ use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::SnapshotMeta;
 use crate::sync::test_helpers::*;
 
 const T0: &str = "2024-01-01T00:00:00Z";
+
+fn store_database(database: &Database) -> StoreDatabase {
+    StoreDatabase::new(database)
+}
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
@@ -135,7 +140,7 @@ async fn run_cycle_m_result(
     storage.open_into(db).await.expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        db,
+        &store_database(db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -206,7 +211,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     storage.open_into(&db).await.expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -322,7 +327,8 @@ async fn retain_store_packages_for_assertion(db: &Database, storage: &TestStore,
 }
 
 async fn latest_store_snapshot_meta(db: &Database) -> Option<SnapshotMeta> {
-    db.latest_local_store_snapshot()
+    store_database(db)
+        .latest_local_store_snapshot()
         .await
         .expect("read latest exact Store snapshot")
         .map(|snapshot| snapshot.meta)
@@ -2032,7 +2038,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let membership = storage.open_into(&db).await.expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -2081,7 +2087,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     assert_eq!(installed_bindings, 0);
     let rejected = cycle_storage.rejected_blobs();
     assert_eq!(rejected.len(), 1);
-    let pending = db
+    let pending = store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load retained snapshot publication")
@@ -2133,7 +2139,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     .await
     .expect("retry exact snapshot publication");
 
-    let published = db
+    let published = store_database(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load published snapshot")
@@ -2154,7 +2160,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .verify_blob_object(&rejected[0])
         .await
         .expect("retry publishes exact retained blob");
-    assert!(db
+    assert!(store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load completed snapshot publication")
@@ -2255,7 +2261,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     storage.open_into(&db).await.expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -2288,12 +2294,12 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         "unexpected snapshot preparation failure: {error}",
     );
     assert_eq!(interceptor.blob_write_calls(), (1, 1, 0));
-    assert!(db
+    assert!(store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load rejected snapshot publication")
         .is_none());
-    assert!(db
+    assert!(store_database(&db)
         .snapshot_blob_spool_cleanup_paths()
         .await
         .expect("load rejected snapshot cleanup")
@@ -2367,7 +2373,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     storage.open_into(&db).await.expect("open cleanup Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -2395,7 +2401,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     )
     .await
     .expect_err("retain cleanup spool after rejected blob create");
-    let pending = db
+    let pending = store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load cleanup snapshot")
@@ -2404,11 +2410,13 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         .spool_path
         .clone()
         .expect("cleanup snapshot has spool");
-    db.complete_snapshot_publication(pending.reference)
+    store_database(&db)
+        .complete_snapshot_publication(pending.reference)
         .await
         .expect("atomically complete snapshot and own spool cleanup");
     assert_eq!(
-        db.snapshot_blob_spool_cleanup_paths()
+        store_database(&db)
+            .snapshot_blob_spool_cleanup_paths()
             .await
             .expect("load durable cleanup"),
         vec![spool.clone()]
@@ -2424,7 +2432,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     .expect("drain cleanup after restart")
     .is_none());
     assert!(!spool.exists());
-    assert!(reopened
+    assert!(store_database(&reopened)
         .snapshot_blob_spool_cleanup_paths()
         .await
         .expect("load completed cleanup")
@@ -2475,7 +2483,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         .expect("open shared blob Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -2572,7 +2580,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     storage.open_into(&db).await.expect("open user blob Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -2610,17 +2618,17 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         ),
         "unexpected snapshot rejection: {error}"
     );
-    assert!(db
+    assert!(store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load rejected snapshot outbox")
         .is_none());
-    assert!(db
+    assert!(store_database(&db)
         .snapshot_blob_spool_cleanup_paths()
         .await
         .expect("load rejected snapshot cleanup")
         .is_empty());
-    assert!(db
+    assert!(store_database(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load rejected published snapshot")
@@ -2690,12 +2698,12 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let (_, prepare_calls, create_calls) = interceptor.blob_write_calls();
     assert_eq!((prepare_calls, create_calls), (0, 0));
     assert!(interceptor.rejected_blobs().is_empty());
-    assert!(db
+    assert!(store_database(&db)
         .outbound_snapshot_publication()
         .await
         .expect("load completed snapshot outbox")
         .is_none());
-    assert!(db
+    assert!(store_database(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load published user blob snapshot")
@@ -2725,7 +2733,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &owner,
@@ -2737,11 +2745,12 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         Some(owner_pk.clone()),
         "the owner is pinned in protocol_state",
     );
-    let membership = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db)
-        .await
-        .expect("load exact founder membership")
-        .chain
-        .expect("Store has membership");
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&storage.storage, &store_database(&db))
+            .await
+            .expect("load exact founder membership")
+            .chain
+            .expect("Store has membership");
     assert!(
         membership.is_founded_by(&owner_pk),
         "the persisted chain is founded by the owner",
@@ -2749,7 +2758,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &owner,
@@ -2757,7 +2766,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     .await
     .expect("re-connect anchors to the pinned owner");
     let owner_before = db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap();
-    let graph = db
+    let graph = store_database(&db)
         .local_store_founder_graph()
         .await
         .expect("read founder graph")
@@ -2771,7 +2780,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     assert!(
         ensure_owner_anchored_chain(
             &storage.storage,
-            &db,
+            &store_database(&db),
             &storage.root,
             storage.protocol_root(),
             &owner,
@@ -2808,7 +2817,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
 
     crate::sync::cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &opened_db,
+        &store_database(&opened_db),
         &storage.root,
         &root,
         &owner,
@@ -2847,7 +2856,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
         .expect("remove local owner pin");
     ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &owner,
@@ -2873,7 +2882,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     assert!(
         ensure_owner_anchored_chain(
             &seeded.storage,
-            &fresh_db,
+            &store_database(&fresh_db),
             &seeded.root,
             &foreign_root,
             &owner,
@@ -2924,7 +2933,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
     );
-    let root = db
+    let root = store_database(&db)
         .local_store_root_ref()
         .await
         .unwrap()
@@ -2934,12 +2943,14 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
             .await
             .expect("open exact Store root")
             .value;
-    let membership =
-        crate::sync::store::pull::load_cycle_membership(components.storage().as_ref(), &db)
-            .await
-            .expect("load exact founder membership")
-            .chain
-            .expect("Store has membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        components.storage().as_ref(),
+        &store_database(&db),
+    )
+    .await
+    .expect("load exact founder membership")
+    .chain
+    .expect("Store has membership");
     protocol_root
         .descriptor
         .validate_merge_founder_entry(
@@ -4856,12 +4867,12 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
 /// The acknowledgement the cycle writes records its completion time as an RFC
 /// 3339 wall-clock string, never the HLC string used to order row writes.
 async fn assert_latest_ack_timestamp_is_rfc3339(db: &Database, storage: &TestStore) {
-    let published = db
+    let published = store_database(db)
         .latest_local_store_ack()
         .await
         .expect("read latest exact Store acknowledgement")
         .expect("the cycle published an acknowledgement");
-    let root = db
+    let root = store_database(db)
         .local_store_root_ref()
         .await
         .expect("read exact Store root")
@@ -5086,7 +5097,8 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         .await;
 
         assert_eq!(
-            db.latest_local_store_snapshot()
+            store_database(&db)
+                .latest_local_store_snapshot()
                 .await
                 .expect("read latest Store snapshot")
                 .expect("count cadence publishes a Store snapshot")
@@ -5185,7 +5197,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     storage.open_into(&db).await.expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.storage,
-        &db,
+        &store_database(&db),
         &storage.root,
         storage.protocol_root(),
         &storage.protocol_founder_keypair(),
@@ -5441,7 +5453,7 @@ async fn run_cycle_m_storage(
         .expect("open exact test Store");
     cycle::ensure_owner_anchored_chain(
         &storage.inner.storage,
-        db,
+        &store_database(db),
         &storage.inner.root,
         storage.inner.protocol_root(),
         &storage.inner.protocol_founder_keypair(),
@@ -5534,13 +5546,13 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         crate::sync::store_commit::CommitFrontier(frontier)
             if frontier.get(&published_stream) == Some(&published)
     ));
-    let ack_ref = db_m
+    let ack_ref = store_database(&db_m)
         .latest_local_store_ack()
         .await
         .expect("read reclamation acknowledgement")
         .expect("the reclamation cycle publishes an acknowledgement")
         .reference;
-    let root = db_m
+    let root = store_database(&db_m)
         .local_store_root_ref()
         .await
         .expect("read reclamation Store root")

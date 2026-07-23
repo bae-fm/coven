@@ -10,26 +10,8 @@ impl Database {
         WriteId::from_generated(self.state.ids.new_id())
     }
 
-    /// Lock the complete membership load transaction for this database handle
-    /// and every clone that shares its state.
-    pub(crate) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.state.membership_load.clone().lock_owned().await
-    }
-
-    pub(crate) async fn lock_membership_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.state.membership_mutation.clone().lock_owned().await
-    }
-
-    pub(crate) async fn lock_store_creation(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.state.store_creation.clone().lock_owned().await
-    }
-
-    pub(crate) async fn lock_store_device_exclusion(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.state.store_device_exclusion.clone().lock_owned().await
-    }
-
-    pub(crate) async fn lock_snapshot_publication(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.state.snapshot_publication.clone().lock_owned().await
+    pub(crate) fn store_runtime(&self) -> crate::sync::store::database::StoreDatabaseRuntime {
+        self.state.store_runtime.clone()
     }
 
     pub(crate) async fn lock_local_blob_cleanup(&self) -> tokio::sync::OwnedMutexGuard<()> {

@@ -372,9 +372,12 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
     )
     .await;
-    let membership = crate::sync::store::pull::load_cycle_membership(&storage.storage, &member_db)
-        .await
-        .expect("load membership while member grant is active");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&member_db),
+    )
+    .await
+    .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
     assert!(
         crate::sync::store::preparation::prepare_store_write(

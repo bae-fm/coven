@@ -18,7 +18,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
 
     coven_core::sync::cycle::ensure_owner_anchored_chain(
         &store.storage,
-        &db,
+        &coven_core::sync::store::StoreDatabase::from_database(db.clone()),
         &store.root,
         &root,
         &founder,
@@ -42,7 +42,7 @@ async fn opened_store_persists_the_exact_root_needed_by_membership_pull() {
 
     coven_core::sync::cycle::ensure_owner_anchored_chain(
         &store.storage,
-        &opened_db,
+        &coven_core::sync::store::StoreDatabase::from_database(opened_db.clone()),
         &store.root,
         &root,
         &founder,

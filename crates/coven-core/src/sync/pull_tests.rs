@@ -398,7 +398,7 @@ impl TestStoreStorage for CloudSyncStorage {
         db: &crate::database::Database,
         keypair: &UserKeypair,
     ) -> Result<(), String> {
-        if db
+        if crate::sync::store::database::StoreDatabase::new(db)
             .local_store_root_ref()
             .await
             .map_err(|error| error.to_string())?
@@ -462,9 +462,12 @@ async fn sync_for_test<S: TestStoreStorage>(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let membership = crate::sync::store::pull::load_cycle_membership(storage.sync_storage(), db)
-        .await
-        .map_err(|error| error.to_string())?;
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        storage.sync_storage(),
+        &crate::sync::store::database::StoreDatabase::new(db),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let prepared = crate::sync::store::preparation::prepare_store_write(
         &store_database(db),
         storage.sync_storage(),
@@ -503,7 +506,7 @@ async fn pull_exact_store_into(
     std::collections::BTreeMap<String, u64>,
     crate::sync::store::pull::StorePullResult,
 ) {
-    let root = source
+    let root = crate::sync::store::database::StoreDatabase::new(source)
         .local_store_root_ref()
         .await
         .expect("read source Store root")
@@ -513,16 +516,19 @@ async fn pull_exact_store_into(
         .expect("open exact Store on destination");
     crate::sync::cycle::ensure_owner_anchored_chain(
         storage,
-        destination,
+        &crate::sync::store::database::StoreDatabase::new(destination),
         &root,
         &protocol_root,
         storage.user_keypair(),
     )
     .await
     .expect("anchor exact Store membership");
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, destination)
-        .await
-        .expect("load exact Store membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        storage,
+        &crate::sync::store::database::StoreDatabase::new(destination),
+    )
+    .await
+    .expect("load exact Store membership");
     let result = crate::sync::store::pull_store_commits(
         destination,
         destination.synced_tables(),
@@ -6272,7 +6278,11 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let result = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db2),
+    )
+    .await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a chain founded by a non-owner must be refused, got {:?}",
@@ -6310,7 +6320,11 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .expect("remove exact founder membership head");
 
-    let result = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db2),
+    )
+    .await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "an empty chain with a pinned owner must be refused, got {:?}",
@@ -6413,9 +6427,12 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
             .expect("clear persisted-cycle owner pin");
     }
 
-    let initial = crate::sync::store::pull::load_cycle_membership(&storage.storage, &db)
-        .await
-        .expect("accept and persist the complete multi-author chain");
+    let initial = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("accept and persist the complete multi-author chain");
     assert!(!initial
         .chain
         .expect("listed membership chain")
@@ -6434,10 +6451,12 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(true).await;
 
-    let recovered =
-        crate::sync::store::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
-            .await
-            .expect("empty LIST must use the persisted author floors");
+    let recovered = crate::sync::store::pull::load_cycle_membership(
+        &fixture.storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+    )
+    .await
+    .expect("empty LIST must use the persisted author floors");
 
     assert_eq!(
         recovered.pinned_owner.as_deref(),
@@ -6453,10 +6472,12 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(false).await;
 
-    let recovered =
-        crate::sync::store::pull::load_cycle_membership(&fixture.storage.storage, &fixture.db)
-            .await
-            .expect("an unpinned prior chain must not fall open on an empty LIST");
+    let recovered = crate::sync::store::pull::load_cycle_membership(
+        &fixture.storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+    )
+    .await
+    .expect("an unpinned prior chain must not fall open on an empty LIST");
 
     assert_eq!(
         recovered.pinned_owner.as_deref(),
@@ -6480,7 +6501,7 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
 
     let error = match crate::sync::store::pull::load_cycle_membership(
         &fixture.storage.storage,
-        &fixture.db,
+        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
     )
     .await
     {
@@ -6511,10 +6532,12 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .unwrap();
 
-    let cycle_membership =
-        crate::sync::store::pull::load_cycle_membership(&storage.storage, &target)
-            .await
-            .expect("load founder at cycle start");
+    let cycle_membership = crate::sync::store::pull::load_cycle_membership(
+        &storage.storage,
+        &crate::sync::store::database::StoreDatabase::new(&target),
+    )
+    .await
+    .expect("load founder at cycle start");
 
     let add_member = chain
         .signed_set_member_in_stream(
@@ -6611,7 +6634,11 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = FaultingStorage::membership(&storage.storage, 1);
-    let result = crate::sync::store::pull::load_cycle_membership(&failing, &db2).await;
+    let result = crate::sync::store::pull::load_cycle_membership(
+        &failing,
+        &crate::sync::store::database::StoreDatabase::new(&db2),
+    )
+    .await;
     assert!(
         matches!(result, Err(PullError::MembershipLoad(_))),
         "an exact membership read failure on an owner-pinned store must abort the cycle",

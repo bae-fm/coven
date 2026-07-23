@@ -36,7 +36,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
             &storage,
             &root,
             &crate::keys::public_key_hex(&keypair),
-            &db,
+            &crate::sync::store::database::StoreDatabase::new(&db),
         )
         .await
         .expect("load exact founder membership");
@@ -147,11 +147,14 @@ pub(super) async fn publish_competing_merge_head(
         .create_protocol_object(&package_prepared)
         .await
         .expect("publish competing package");
-    let membership = crate::sync::store::pull::load_cycle_membership(&fixture.storage, &fixture.db)
-        .await
-        .expect("load competing commit membership")
-        .chain
-        .expect("Merge test Store has membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &fixture.storage,
+        &crate::sync::store::database::StoreDatabase::new(&fixture.db),
+    )
+    .await
+    .expect("load competing commit membership")
+    .chain
+    .expect("Merge test Store has membership");
     let predecessor = membership
         .write_grant_authority(&registration.author_pubkey)
         .expect("Merge test author has an active write grant");

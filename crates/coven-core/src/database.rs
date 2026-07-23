@@ -37,7 +37,16 @@ pub(crate) use crate::database::remote_object_records::{
     RemoteStoredRepresentationRef,
 };
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
-pub(crate) use crate::database::store_ack_records::record_activated_store_ack_on;
+pub(crate) use crate::database::snapshot_objects::{
+    install_snapshot_blob_plan_on, validate_snapshot_blob_plan_on,
+};
+pub(crate) use crate::database::snapshot_records::{
+    load_outbound_store_snapshot_on, load_published_store_snapshot_on,
+};
+pub(crate) use crate::database::store_ack_records::{
+    finish_outbound_store_ack_on, load_outbound_store_ack_on, load_published_store_ack_on,
+    record_activated_store_ack_on, store_snapshot_first_slot, verify_next_local_store_ack_on,
+};
 pub(crate) use crate::database::store_authority_records::install_store_founder_state_on;
 pub(crate) use crate::database::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
@@ -79,18 +88,17 @@ use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::store::circle_controls::activation::VerifiedStreamActivations;
 use crate::sync::store::retained_replay::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+    RetainedReplaySnapshotAuthority,
 };
 use crate::sync::store::{
     DurableStoreReclaimOperation, ReclaimCommitActivation, ReclaimedStorePackage,
     StoreReclaimJournalError,
 };
 use crate::sync::store_commit::{
-    ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
-    ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta, StoreAck, StoreAckRef,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreSnapshotRef,
-    StreamActivationId,
+    ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
+    SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
+    StoreSnapshotRef, StreamActivationId,
 };
 use crate::write::{PendingWrite, WriteId, WriteStatus};
 
@@ -103,8 +111,6 @@ mod connection_io;
 pub(crate) use connection_io::{attach_session, capture_changeset};
 mod database_open;
 mod database_runtime;
-mod device_join_challenges;
-mod device_registration_journal;
 mod local_state;
 mod local_store_identity;
 mod make_remote;
@@ -114,14 +120,10 @@ mod provider_probes;
 mod remote_object_records;
 mod schema_contract;
 mod snapshot_objects;
-mod snapshot_publication;
 mod snapshot_records;
 mod store_ack_records;
-mod store_acknowledgements;
-mod store_authority;
 mod store_authority_records;
 mod store_coordinates;
-mod store_creation_attempts;
 mod store_reclaim_records;
 mod stream_activation_records;
 mod write_lifecycle;
@@ -141,12 +143,10 @@ pub(crate) use local_store_identity::local_merge_stream_id_on;
 pub(crate) use local_store_identity::{
     local_activated_registration_ref_on, local_store_authority_on,
 };
-pub(crate) use operation_models::LocalDeviceRegistrationJournalRow;
-use operation_models::PreparedLocalDeviceRegistrationRow;
 pub(crate) use operation_models::{
     DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
-    LocalDeviceRegistrationState, MembershipMutationActivation, PreparedSnapshotBlob,
-    PublishedStoreSnapshot,
+    LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState, MembershipMutationActivation,
+    PreparedLocalDeviceRegistrationRow, PreparedSnapshotBlob, PublishedStoreSnapshot,
 };
 #[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
@@ -158,9 +158,7 @@ pub(crate) use prepared_audience_objects::{
 use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
-pub(crate) use snapshot_records::load_published_store_snapshot_on;
-pub(crate) use store_ack_records::{finish_outbound_store_ack_on, load_outbound_store_ack_on};
-use store_authority_records::{
+pub(crate) use store_authority_records::{
     consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
     install_store_root_authority_on, load_local_store_founder_graph_on,
@@ -271,20 +269,7 @@ struct DatabaseState {
     /// drain and the pin loop (both hold `&Database`). Open-time host config carried
     /// here for the same single-owner reason as `blob_tombstone_grace`.
     transfer_limits: crate::blob::TransferLimits,
-    /// Serializes complete membership-chain loads that share this database, so a
-    /// load cannot return an older chain after another load commits a newer floor.
-    membership_load: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes construction and execution of the one local membership mutation
-    /// whose exact signed bytes are held in `outbound_membership_mutation`.
-    membership_mutation: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes publication and rollback of the one durable founder graph.
-    store_creation: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes the exact local device-exclusion object and its Store-stream
-    /// activation candidate across every database-handle clone.
-    store_device_exclusion: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes staging and publication of the one exact snapshot generation
-    /// held in `outbound_store_snapshot`.
-    snapshot_publication: Arc<tokio::sync::Mutex<()>>,
+    store_runtime: crate::sync::store::database::StoreDatabaseRuntime,
     /// Serializes the full durable-intent to filesystem-deletion to intent-removal
     /// operation across every clone of this database.
     local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,

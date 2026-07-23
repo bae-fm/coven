@@ -15,14 +15,14 @@ pub(crate) async fn load_current_exact_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     owner_pubkey: Option<&str>,
-    db: Option<&Database>,
+    database: Option<&StoreDatabase>,
 ) -> Result<MembershipChain, MembershipOpsError> {
-    let _membership_load = match db {
-        Some(db) => Some(db.lock_membership_load().await),
+    let _membership_load = match database {
+        Some(database) => Some(database.lock_membership_load().await),
         None => None,
     };
-    let cursors = match db {
-        Some(db) => read_head_cursors(db)
+    let cursors = match database {
+        Some(database) => read_head_cursors(database.sqlite())
             .await
             .map_err(MembershipOpsError::Database)?,
         None => Vec::new(),
@@ -34,8 +34,8 @@ pub(crate) async fn load_current_exact_chain(
         owner_pubkey,
     ))
     .await?;
-    if let Some(db) = db {
-        persist_head_cursors(db, chain.head_refs())
+    if let Some(database) = database {
+        persist_head_cursors(database.sqlite(), chain.head_refs())
             .await
             .map_err(MembershipOpsError::Database)?;
     }

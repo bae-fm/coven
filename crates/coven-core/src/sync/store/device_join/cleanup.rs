@@ -75,7 +75,7 @@ async fn prepare_device_join_cleanup_inner(
     if durable_cancellation != cancellation.as_ref() {
         return Err(DeviceJoinError::JournalConflict);
     }
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?
@@ -292,7 +292,7 @@ pub(super) async fn sign_device_join_producer_write_revocation(
     let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?
@@ -457,7 +457,7 @@ pub async fn activate_device_join_cleanup(
         identity_signer,
     )
     .await?;
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?

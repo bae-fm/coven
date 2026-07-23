@@ -17,6 +17,7 @@ pub(crate) async fn drain_store_writes(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreError> {
+    #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
     while let Some(batch) = database.oldest_prepared_store_write().await? {

@@ -18,20 +18,20 @@ pub(super) fn resolved_provider_admin(
 }
 
 pub async fn load_current_device_join_authorization(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<MembershipChain, DeviceJoinError> {
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, database)
         .await
         .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
     membership.chain.ok_or(DeviceJoinError::MembershipConflict)
 }
 
 pub(super) async fn load_local_store_root(
-    db: &Database,
+    database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, DeviceJoinError> {
-    let root = db
+    let root = database
         .local_store_root_ref()
         .await
         .map_err(database_error)?

@@ -145,7 +145,8 @@ async fn load_store(
     db: &Database,
     storage: Arc<CloudSyncStorage>,
 ) -> Result<Store, StoreLoadError> {
-    let store_root = db
+    let database = StoreDatabase::new(db);
+    let store_root = database
         .local_store_root_ref()
         .await
         .map_err(StoreLoadError::Database)?
@@ -154,8 +155,7 @@ async fn load_store(
         .await
         .map_err(StoreLoadError::Object)?
         .value;
-    Store::new(StoreDatabase::new(db), storage, store_root, &verified_root)
-        .map_err(StoreLoadError::Invalid)
+    Store::new(database, storage, store_root, &verified_root).map_err(StoreLoadError::Invalid)
 }
 
 #[cfg(any(test, feature = "test-utils"))]

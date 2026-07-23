@@ -451,7 +451,7 @@ impl SyncManager {
     async fn store_initialization(
         &self,
     ) -> Result<crate::sync::cycle::StoreInitialization, SyncError> {
-        let Some(expected_store_root) = self.db().local_store_root_ref().await? else {
+        let Some(expected_store_root) = self.database.local_store_root_ref().await? else {
             return Ok(crate::sync::cycle::StoreInitialization::CreateStore);
         };
         Ok(crate::sync::cycle::StoreInitialization::OpenStore {
@@ -645,7 +645,7 @@ impl SyncManager {
         crate::sync::store::membership::get_members(
             &*storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
-            self.db(),
+            &self.database,
         )
         .await
         .map_err(SyncError::from)
@@ -679,7 +679,7 @@ impl SyncManager {
             SyncError::from(crate::sync::store::membership::MembershipOpsError::NoFounderChain)
         })?;
         let store_root =
-            self.db().local_store_root_ref().await?.ok_or_else(|| {
+            self.database.local_store_root_ref().await?.ok_or_else(|| {
                 SyncError::Protocol("store protocol root hash is absent".to_string())
             })?;
         let membership_floor = crate::join_code::MembershipFloor(
@@ -687,7 +687,7 @@ impl SyncManager {
                 &*storage,
                 &store_root,
                 pinned_owner.as_deref(),
-                Some(self.db()),
+                Some(&self.database),
             )
             .await
             .map_err(SyncError::from)?,

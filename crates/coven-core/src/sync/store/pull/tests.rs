@@ -21,11 +21,14 @@ async fn one_retained_checkpoint() -> (
     .await
     .expect("create retained-checkpoint Store");
     let database = StoreDatabase::new(&db);
-    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &db)
-        .await
-        .expect("load checkpoint membership")
-        .chain
-        .expect("Merge Store has membership");
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&db),
+    )
+    .await
+    .expect("load checkpoint membership")
+    .chain
+    .expect("Merge Store has membership");
     crate::sync::test_helpers::host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -266,10 +269,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("promote candidate Owner");
-    let candidate_membership =
-        crate::sync::store::pull::load_cycle_membership(&store.storage, &candidate_db)
-            .await
-            .expect("load candidate Owner membership");
+    let candidate_membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(&candidate_db),
+    )
+    .await
+    .expect("load candidate Owner membership");
     let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let candidate_pull = Box::pin(crate::sync::store::pull_store_commits(
         &candidate_db,
@@ -292,12 +297,14 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let later_db = &founder_db;
     let later_owner = &founder;
 
-    let mut earlier_membership =
-        crate::sync::store::pull::load_cycle_membership(&store.storage, earlier_db)
-            .await
-            .expect("load earlier Owner membership")
-            .chain
-            .expect("initialized Store has membership");
+    let mut earlier_membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(earlier_db),
+    )
+    .await
+    .expect("load earlier Owner membership")
+    .chain
+    .expect("initialized Store has membership");
     let _rotated = crate::sync::store::membership::revoke_member_durable(
         &store.storage,
         store.home.as_ref(),
@@ -339,10 +346,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
-    let later_membership =
-        crate::sync::store::pull::load_cycle_membership(&store.storage, later_db)
-            .await
-            .expect("load membership containing the concurrent control");
+    let later_membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &crate::sync::store::database::StoreDatabase::new(later_db),
+    )
+    .await
+    .expect("load membership containing the concurrent control");
     let caller_membership = later_membership
         .chain
         .as_ref()

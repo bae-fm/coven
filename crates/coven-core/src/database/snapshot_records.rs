@@ -52,7 +52,7 @@ pub(crate) fn load_published_store_snapshot_on(
     .transpose()
 }
 
-pub(super) fn load_outbound_store_snapshot_on(
+pub(crate) fn load_outbound_store_snapshot_on(
     conn: &Connection,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
     conn.query_row(

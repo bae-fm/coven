@@ -1180,7 +1180,7 @@ pub async fn load_exact_materialized_commit(
     else {
         return Ok(None);
     };
-    let root = db
+    let root = store_database
         .local_store_root_ref()
         .await
         .map_err(|error| error.to_string())?
@@ -1234,7 +1234,8 @@ pub async fn create_exact_test_store(
     ))
     .await
     .map_err(|error| error.to_string())?;
-    db.local_store_root_ref()
+    crate::sync::store::database::StoreDatabase::new(db)
+        .local_store_root_ref()
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "created test Store has no exact root reference".to_string())
@@ -1252,14 +1253,21 @@ pub async fn initialize_store_fixture(
     ),
     String,
 > {
+    let database = crate::sync::store::database::StoreDatabase::new(db);
     let root = create_exact_test_store(db, storage, store_id, signer).await?;
     let protocol_root = crate::sync::store_objects::load_store_protocol_root(storage, &root)
         .await
         .map_err(|error| error.to_string())?
         .value;
-    crate::sync::cycle::ensure_owner_anchored_chain(storage, db, &root, &protocol_root, signer)
-        .await?;
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, db)
+    crate::sync::cycle::ensure_owner_anchored_chain(
+        storage,
+        &database,
+        &root,
+        &protocol_root,
+        signer,
+    )
+    .await?;
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, &database)
         .await
         .map_err(|error| error.to_string())?
         .chain
@@ -1328,13 +1336,14 @@ pub async fn run_cycle_fixture(
     storage: crate::sync::cloud_storage::CloudSyncStorage,
     store_dir: &StoreDir,
 ) -> Result<crate::sync::cycle::SyncComponents, String> {
-    let expected_store_root = db
+    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let expected_store_root = database
         .local_store_root_ref()
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
     let components = Box::pin(crate::sync::cycle::init_sync_over_storage(
-        &crate::sync::store::StoreDatabase::new(db),
+        &database,
         storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root,
@@ -1371,7 +1380,7 @@ pub fn install_active_device_fixture<'a>(
         let authorization = Box::new(
             Box::pin(
                 crate::sync::store::device_join::load_current_device_join_authorization(
-                    observer_db,
+                    &observer_database,
                     &store.storage,
                 ),
             )
@@ -1613,11 +1622,12 @@ pub async fn promote_active_member_fixture(
     )
     .await
     .map_err(|error| format!("finalize Owner promotion: {error}"))?;
-    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, member_db)
-        .await
-        .map_err(|error| error.to_string())?
-        .chain
-        .ok_or_else(|| "promoted member has no membership chain".to_string())?;
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &member_database)
+            .await
+            .map_err(|error| error.to_string())?
+            .chain
+            .ok_or_else(|| "promoted member has no membership chain".to_string())?;
     let (_temp, store_dir) = temp_store_dir();
     let pull = Box::pin(crate::sync::store::pull_store_commits(
         member_db,
@@ -2152,7 +2162,7 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &database)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
@@ -2241,17 +2251,18 @@ impl TestStore {
         &self,
         db: &Database,
     ) -> Result<crate::sync::membership::MembershipChain, String> {
+        let database = crate::sync::store::database::StoreDatabase::new(db);
         let open = crate::sync::store_protocol_root::open_store(db, &self.storage, &self.root);
         let root = open.await.map_err(|error| error.to_string())?;
         let ensure = crate::sync::cycle::ensure_owner_anchored_chain(
             &self.storage,
-            db,
+            &database,
             &self.root,
             &root,
             &self.signer,
         );
         ensure.await?;
-        let load = crate::sync::store::pull::load_cycle_membership(&self.storage, db);
+        let load = crate::sync::store::pull::load_cycle_membership(&self.storage, &database);
         load.await
             .map_err(|error| error.to_string())?
             .chain
@@ -2263,19 +2274,19 @@ impl TestStore {
         db: &Database,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
+        let database = crate::sync::store::database::StoreDatabase::new(db);
         let device_id = db
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, db)
+        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &database)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
             .chain
             .as_ref()
             .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let database = crate::sync::store::database::StoreDatabase::new(db);
         let prepared = crate::sync::store::preparation::prepare_store_write(
             &database,
             &self.storage,

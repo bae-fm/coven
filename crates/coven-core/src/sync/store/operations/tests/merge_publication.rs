@@ -916,7 +916,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             &storage,
             &root,
             &crate::keys::public_key_hex(&keypair),
-            &db,
+            &crate::sync::store::database::StoreDatabase::new(&db),
         )
         .await
         .expect("load exact founder membership");
@@ -1001,7 +1001,7 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
         &storage,
         &root,
         &crate::keys::public_key_hex(&keypair),
-        &db,
+        &crate::sync::store::database::StoreDatabase::new(&db),
     )
     .await
     .expect("load exact founder membership");
@@ -1128,7 +1128,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         &storage,
         &root,
         &crate::keys::public_key_hex(&keypair),
-        &db,
+        &crate::sync::store::database::StoreDatabase::new(&db),
     )
     .await
     .expect("load exact founder membership");

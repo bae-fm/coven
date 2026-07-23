@@ -2,6 +2,7 @@
 
 use crate::database::Database;
 use crate::keys::UserKeypair;
+use crate::sync::store::database::StoreDatabase;
 
 use super::membership::{AuthorHead, MembershipHeadRef};
 use super::storage::{ProtocolObjectDomain, SyncStorage};
@@ -204,7 +205,7 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 }
 
 async fn durable_descriptor_reservation(
-    db: &Database,
+    db: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
@@ -232,8 +233,8 @@ async fn durable_descriptor_reservation(
         access,
         founder_pubkey: crate::keys::public_key_hex(signer),
         founder_timestamp: founder_timestamp.to_string(),
-        schema_version: db.schema_version(),
-        sync_routing_hash: db.sync_routing_hash(),
+        schema_version: db.sqlite().schema_version(),
+        sync_routing_hash: db.sqlite().sync_routing_hash(),
     });
     let mut attempt = db
         .begin_store_creation_attempt(initialized)
@@ -243,8 +244,8 @@ async fn durable_descriptor_reservation(
     if authority.binding != binding
         || authority.founder_pubkey != crate::keys::public_key_hex(signer)
         || authority.founder_timestamp != founder_timestamp
-        || authority.schema_version != db.schema_version()
-        || authority.sync_routing_hash != db.sync_routing_hash()
+        || authority.schema_version != db.sqlite().schema_version()
+        || authority.sync_routing_hash != db.sqlite().sync_routing_hash()
     {
         return Err(StoreProtocolRootError::Database(
             "durable Store creation authority differs from this creation request".to_string(),
@@ -366,7 +367,7 @@ async fn durable_descriptor_reservation(
 }
 
 async fn durable_founder_graph_reservation(
-    db: &Database,
+    db: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     descriptor: &DescriptorReservation,
     root: &StoreRootRef,
@@ -531,7 +532,7 @@ async fn durable_founder_graph_reservation(
 }
 
 async fn prepare_founder_graph(
-    db: &Database,
+    db: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
@@ -543,7 +544,7 @@ async fn prepare_founder_graph(
     let exact_slots = super::provider::probe_exact_slots(
         first_exact,
         second_exact,
-        db,
+        db.sqlite(),
         authority.probes.exact_slots,
         &authority.binding,
     )
@@ -819,7 +820,7 @@ async fn rollback_founder_exact_objects(
 }
 
 async fn rollback_founder_publication(
-    db: &Database,
+    db: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     graph: &crate::database::DurableFounderGraph,
 ) -> Result<(), String> {
@@ -841,8 +842,9 @@ pub async fn create_store(
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
-    let _creation = db.lock_store_creation().await;
-    let mut graph = match db
+    let database = StoreDatabase::new(db);
+    let _creation = database.lock_store_creation().await;
+    let mut graph = match database
         .local_store_founder_graph()
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
@@ -850,16 +852,18 @@ pub async fn create_store(
         Some(graph) => graph,
         None => {
             let graph = Box::pin(prepare_founder_graph(
-                db,
+                &database,
                 storage,
                 founder_timestamp,
                 signer,
             ))
             .await?;
-            db.stage_store_founder_graph(graph)
+            database
+                .stage_store_founder_graph(graph)
                 .await
                 .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-            db.local_store_founder_graph()
+            database
+                .local_store_founder_graph()
                 .await
                 .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
                 .ok_or_else(|| {
@@ -875,14 +879,14 @@ pub async fn create_store(
         crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
     };
     if rollback_allowed {
-        Box::pin(rollback_founder_publication(db, storage, &graph))
+        Box::pin(rollback_founder_publication(&database, storage, &graph))
             .await
             .map_err(|rollback| {
                 StoreProtocolRootError::Database(format!(
                     "Store founder rollback before publication: {rollback}"
                 ))
             })?;
-        graph = db
+        graph = database
             .local_store_founder_graph()
             .await
             .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
@@ -893,7 +897,7 @@ pub async fn create_store(
             })?;
     }
     match Box::pin(publish_store_founder_graph(
-        db,
+        &database,
         storage,
         founder_timestamp,
         signer,
@@ -903,7 +907,7 @@ pub async fn create_store(
     {
         Ok(root) => Ok(root),
         Err(operation) if rollback_allowed => {
-            match Box::pin(rollback_founder_publication(db, storage, &graph)).await {
+            match Box::pin(rollback_founder_publication(&database, storage, &graph)).await {
                 Ok(()) => Err(operation),
                 Err(rollback) => Err(StoreProtocolRootError::Rollback {
                     operation: Box::new(operation),
@@ -916,7 +920,7 @@ pub async fn create_store(
 }
 
 async fn publish_store_founder_graph(
-    db: &Database,
+    db: &StoreDatabase,
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
@@ -932,18 +936,21 @@ async fn publish_store_founder_graph(
             "durable Store founder timestamp differs from this creation request".to_string(),
         ));
     }
-    let store_protocol_root =
-        StoreProtocolRoot::parse_expected(&graph.root.bytes, &root_ref, db.sync_routing_hash())
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    let store_protocol_root = StoreProtocolRoot::parse_expected(
+        &graph.root.bytes,
+        &root_ref,
+        db.sqlite().sync_routing_hash(),
+    )
+    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     if store_protocol_root.descriptor.founder_pubkey != crate::keys::public_key_hex(signer) {
         return Err(StoreProtocolRootError::Database(
             "durable Store founder differs from the creation signer".to_string(),
         ));
     }
-    if store_protocol_root.descriptor.schema_version > db.schema_version() {
+    if store_protocol_root.descriptor.schema_version > db.sqlite().schema_version() {
         return Err(StoreProtocolRootError::SchemaTooNew {
             root_schema: store_protocol_root.descriptor.schema_version,
-            local: db.schema_version(),
+            local: db.sqlite().schema_version(),
         });
     }
     let registration_ref = StoreDeviceRegistrationRef::from_registration(
@@ -1056,6 +1063,7 @@ pub async fn open_store(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
+    let database = StoreDatabase::new(db);
     let context = super::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
@@ -1079,7 +1087,7 @@ pub async fn open_store(
             "live provider namespace differs from the signed Store root".to_string(),
         ));
     }
-    if let Some(local) = crate::sync::store::database::StoreDatabase::new(db)
+    if let Some(local) = database
         .latest_local_store_device_registration()
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
@@ -1103,7 +1111,8 @@ pub async fn open_store(
             local: db.schema_version(),
         });
     }
-    db.install_store_root_authority(expected.clone(), bytes)
+    database
+        .install_store_root_authority(expected.clone(), bytes)
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     Ok(verified)
@@ -1117,6 +1126,10 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::test_helpers::{open_test_db, test_migrations, test_synced_tables};
+
+    fn store_database(database: &Database) -> StoreDatabase {
+        StoreDatabase::new(database)
+    }
 
     #[tokio::test]
     async fn created_merge_store_immediately_has_its_exact_founder_chain() {
@@ -1135,15 +1148,21 @@ mod tests {
         let root = create_store(&db, &storage, "0000000000001-0000-founder", &founder)
             .await
             .expect("create Store with founder graph");
-        let root_ref = db
+        let root_ref = store_database(&db)
             .local_store_root_ref()
             .await
             .expect("read exact Store root")
             .expect("created Store root exists");
 
-        super::super::cycle::ensure_owner_anchored_chain(&storage, &db, &root_ref, &root, &founder)
-            .await
-            .expect("created Store founder chain is immediately readable");
+        super::super::cycle::ensure_owner_anchored_chain(
+            &storage,
+            &store_database(&db),
+            &root_ref,
+            &root,
+            &founder,
+        )
+        .await
+        .expect("created Store founder chain is immediately readable");
     }
 
     #[tokio::test]
@@ -1161,10 +1180,11 @@ mod tests {
             .expect("construct founder rollback storage");
             let db = open_test_db();
             let timestamp = "0000000000001-0000-founder";
-            let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
                 .await
                 .expect("prepare exact founder graph");
-            db.stage_store_founder_graph(graph.clone())
+            store_database(&db)
+                .stage_store_founder_graph(graph.clone())
                 .await
                 .expect("stage exact founder graph");
             let mut exact_objects = vec![
@@ -1223,10 +1243,11 @@ mod tests {
         };
         let db = open();
         let timestamp = "0000000000001-0000-founder";
-        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+        let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect("prepare exact founder graph");
-        db.stage_store_founder_graph(graph.clone())
+        store_database(&db)
+            .stage_store_founder_graph(graph.clone())
             .await
             .expect("stage exact founder graph");
         home.fail_exact_create_before_call(3);
@@ -1260,10 +1281,11 @@ mod tests {
         );
         let db = open_test_db();
         let timestamp = "0000000000001-0000-founder";
-        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+        let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect("prepare exact founder graph");
-        db.stage_store_founder_graph(graph)
+        store_database(&db)
+            .stage_store_founder_graph(graph)
             .await
             .expect("stage exact founder graph");
         let deletes_before = home.deletes_seen();
@@ -1313,10 +1335,11 @@ mod tests {
         .expect("construct founder collision storage");
         let db = open_test_db();
         let timestamp = "0000000000001-0000-founder";
-        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+        let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
             .await
             .expect("prepare exact founder graph");
-        db.stage_store_founder_graph(graph.clone())
+        store_database(&db)
+            .stage_store_founder_graph(graph.clone())
             .await
             .expect("stage exact founder graph");
         let competing = b"different Store root occupant".to_vec();
@@ -1350,7 +1373,7 @@ mod tests {
         create_store(&db, &storage, "0000000000001-0000-opaque-founder", &founder)
             .await
             .expect("create opaque Store");
-        let root_ref = db
+        let root_ref = store_database(&db)
             .local_store_root_ref()
             .await
             .expect("read Store root reference")
