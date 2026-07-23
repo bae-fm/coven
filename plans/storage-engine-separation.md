@@ -104,11 +104,11 @@ This ownership work completes the Store foundation required by
   membership, and atomic snapshot-cut capture is owned by the authorized Store
   snapshot subsystem. Cycle invokes both operations without assembling their
   authority or reaching into Store database state.
-- Discovered: cycle and application command boundaries still construct
-  `StoreDatabase` from raw `Database`, and some Store modules retain raw
-  `StoreDatabase::sqlite()` access for closed SQL, schema models, test fault
-  injection, and host-facing reads. The final boundary audit must remove
-  operation-continuing raw access without wrapping those operations.
+- Complete: the final boundary audit found no production command that continues
+  a Store operation through raw database or storage access. Host-write capture,
+  pre-Store join/bootstrap, closed routing validation, schema reads, and fault
+  injection retain their purpose-specific database access without interpreting
+  remote Store authority.
 - Complete: abandonment, device exclusion, Owner promotion, package
   preparation, write preparation, and write publication implementation modules
   are private.
@@ -125,9 +125,9 @@ This ownership work completes the Store foundation required by
   when every distinct resolver selects it. Disagreement retires every contested
   assignment, while each resolver's prior Owner grant is retired and replaced
   by the signed resolution authority.
-- Remaining: route the remaining application commands through the concrete
-  Store owner, make the remaining Store implementation modules private, reduce
-  temporary visibility, and seal the boundary.
+- Complete: application and cycle commands enter the concrete Store owner,
+  implementation modules are private, and exposed Store-root values are closed
+  application or persistence results rather than workflow entry points.
 
 ## Final dependency direction
 
@@ -309,7 +309,7 @@ commits wholly or rolls back.
 - remove temporary visibility, duplicate algorithms, old aliases, stale
   comments, and superseded fixtures;
 - organize files by cohesive owner and invariant;
-- update `plans/circles.md` and `plans/store-commit-policies.md` to the one
+- update `plans/circles.md` and `plans/store-commit-protocol.md` to the one
   protocol before Circle implementation resumes.
 
 ## Remaining relocation sequence
@@ -326,15 +326,15 @@ commits wholly or rolls back.
    acknowledgement, and join transitions behind the Store database owner.
    Keep host-facing read models on `Database`; Store protocol progress and
    completion transitions live on `StoreDatabase`.
-1. **In progress.** Route the remaining cycle and application commands through
-   Store operations, remove raw Store workflow methods from `Database`, and
-   reduce widened helper visibility to the exact remaining callers. Store
-   implementation modules are private; per-cycle membership/key refresh,
-   atomic snapshot-cut capture, manual membership conflict resolution, and
-   Circle creation, rename, and restart enter their Store owners.
-1. Run the boundary searches, sabotage tests, focused failure-injection tests,
-   strict lint, repository hook, and manual rules review; then update the
-   dependent plans to the sealed one-protocol shape.
+1. **Complete.** Route cycle and application commands through Store operations,
+   remove raw Store workflow methods from `Database`, and reduce widened helper
+   visibility to the exact remaining callers. Store implementation modules are
+   private; per-cycle membership/key refresh, atomic snapshot-cut capture,
+   manual membership conflict resolution, and Circle creation, rename, and
+   restart enter their Store owners.
+1. **Complete.** Run boundary searches, focused failure-injection tests, strict
+   lint, repository hooks, and manual rules review; then update dependent plans
+   to the sealed one-protocol shape.
 
 ## Commit boundaries
 
@@ -381,3 +381,6 @@ wire values, database, runtime, tests, fixtures, plans, and documentation; every
 Store operation enters the Store owner and stays there through authority,
 remote effects, retries, cleanup, and durable completion; and all searches and
 verification gates support those statements.
+
+That boundary is now the implemented Store foundation. Remaining product work
+continues in `plans/circles.md`.

@@ -8040,7 +8040,7 @@ mod blob_path_traversal {
 /// The updater's commit captures the inserter's exact position. Reversed head discovery
 /// therefore holds the UPDATE until the INSERT is durable, independent of listing order.
 #[tokio::test]
-async fn update_applied_before_its_insert_diverges_notfound_omit() {
+async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     let keypair = UserKeypair::generate();
     let observer = open_test_db();
     let storage = TestStore::create(&observer, "test-lib", keypair.clone())
@@ -8129,7 +8129,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
     assert_eq!(
         query_text(&receiver, "SELECT title FROM notes WHERE id = 'n1'").await,
         "updated",
-        "the UPDATE applied before its INSERT must not be dropped as a local delete",
+        "the dependent UPDATE must wait for its exact INSERT dependency",
     );
 }
 
