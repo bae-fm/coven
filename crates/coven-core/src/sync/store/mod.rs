@@ -10,7 +10,7 @@ use super::cycle::SyncCycleFailure;
 use super::storage::SyncStorage;
 use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 
-pub(crate) mod abandonment;
+mod abandonment;
 mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
@@ -20,20 +20,20 @@ pub(crate) mod database;
 pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 #[doc(hidden)]
 pub use database::StoreDatabase;
-pub(crate) mod device_exclusion;
+mod device_exclusion;
 mod device_join;
 mod error;
 mod membership;
 pub(crate) mod operations;
 mod owner;
-pub mod owner_promotion;
-pub(crate) mod package_preparation;
-pub(crate) mod preparation;
+mod owner_promotion;
+mod package_preparation;
+mod preparation;
 #[cfg(not(any(test, feature = "test-utils")))]
 mod protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
 pub(in crate::sync) mod protocol_root;
-pub(crate) mod publication;
+mod publication;
 mod pull;
 mod reclaim;
 mod registration;
@@ -111,6 +111,8 @@ pub(crate) use owner::anchor_owner_membership;
 pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
 #[doc(hidden)]
 pub use owner::{Store, StoreRestoreMembership};
+#[doc(hidden)]
+pub use owner_promotion::OwnerPromotionError;
 pub(crate) use pull::VerifiedStoreSnapshotStability;
 #[cfg(test)]
 pub(crate) use pull::{

@@ -6095,14 +6095,14 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             .await
             .expect("load exact founder authority")
             .0;
-        let proposal = match crate::sync::store::device_exclusion::propose_device_exclusion(
-            &crate::sync::store::StoreDatabase::new(&excluding_db),
-            &storage.storage,
-            &excluding_owner,
-            &founder_registration,
-        )
-        .await
-        .expect("propose founder device exclusion")
+        let excluding_store = storage
+            .loaded_store(&excluding_db)
+            .await
+            .expect("load excluding Owner Store");
+        let proposal = match excluding_store
+            .propose_device_exclusion(&excluding_owner, &founder_registration)
+            .await
+            .expect("propose founder device exclusion")
         {
             crate::sync::store::StoreDeviceExclusionResult::ProposalActivated {
                 proposal, ..
@@ -6143,14 +6143,10 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         )
         .await
         .expect("publish exclusion acknowledgement");
-        match crate::sync::store::device_exclusion::finalize_device_exclusion(
-            &crate::sync::store::StoreDatabase::new(&excluding_db),
-            &storage.storage,
-            &excluding_owner,
-            &proposal,
-        )
-        .await
-        .expect("activate founder exclusion")
+        match excluding_store
+            .finalize_device_exclusion(&excluding_owner, &proposal)
+            .await
+            .expect("activate founder exclusion")
         {
             crate::sync::store::StoreDeviceExclusionResult::OutcomeActivated { .. } => {}
             result => panic!("unexpected exclusion outcome result: {result:?}"),

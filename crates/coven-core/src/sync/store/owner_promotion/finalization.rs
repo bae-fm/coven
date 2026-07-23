@@ -8,6 +8,7 @@ use crate::sync::store::membership::{PreparedMembershipPublication, PreparedMemb
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
+use crate::sync::store::Store;
 use crate::sync::store_commit::{
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionStaleReason,
     StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
@@ -73,21 +74,16 @@ fn prepare_promotion_wrap<'a>(
     })
 }
 
-pub fn finalize_owner_promotion<'a>(
-    database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    device_id: &'a str,
-    identity: &'a UserKeypair,
-    encryption: &'a EncryptionService,
-    acceptance: OwnerPromotionAcceptance,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<StoreMembershipStateRef, OwnerPromotionError>>
-            + Send
-            + 'a,
-    >,
-> {
-    Box::pin(async move {
+impl Store {
+    pub(crate) async fn finalize_owner_promotion(
+        &self,
+        device_id: &str,
+        identity: &UserKeypair,
+        encryption: &EncryptionService,
+        acceptance: OwnerPromotionAcceptance,
+    ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
+        let database = self.database();
+        let storage = &**self.storage();
         let root = database
             .local_store_root_ref()
             .await?
@@ -141,7 +137,7 @@ pub fn finalize_owner_promotion<'a>(
                 }
             }
         }
-    })
+    }
 }
 
 fn load_owner_promotion_promoter<'a>(

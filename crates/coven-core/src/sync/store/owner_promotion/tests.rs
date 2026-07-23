@@ -6,7 +6,6 @@ use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::ObjectHash;
 
 use super::authority::{load_current_merge_membership, target_key};
-use super::begin_owner_promotion;
 use super::journal::OwnerPromotionJournalState;
 
 #[tokio::test]
@@ -305,15 +304,13 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("load Member registration");
     store.home.fail_exact_create_before_call(1);
-    begin_owner_promotion(
-        &StoreDatabase::new(&owner_db),
-        &store.storage,
-        &owner_device_id,
-        &owner,
-        member_registration.clone(),
-    )
-    .await
-    .expect_err("interrupted publication retains RequestPrepared");
+    store
+        .loaded_store(&owner_db)
+        .await
+        .expect("load Owner Store")
+        .begin_owner_promotion(&owner_device_id, &owner, member_registration.clone())
+        .await
+        .expect_err("interrupted publication retains RequestPrepared");
     let journal = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await

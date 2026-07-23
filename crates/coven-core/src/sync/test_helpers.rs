@@ -1567,8 +1567,9 @@ pub async fn promote_active_member_fixture(
     member: &UserKeypair,
     encryption: &crate::encryption::EncryptionService,
 ) -> Result<crate::sync::circle_control::StoreMembershipStateRef, String> {
-    let owner_database = crate::sync::store::StoreDatabase::new(owner_db);
     let member_database = crate::sync::store::StoreDatabase::new(member_db);
+    let owner_store = store.loaded_store(owner_db).await?;
+    let member_store = store.loaded_store(member_db).await?;
     let owner_device_id = owner_db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1579,61 +1580,30 @@ pub async fn promote_active_member_fixture(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Member Store device id is absent".to_string())?;
-    let (_, member_registration, _, _) =
-        crate::sync::store::operations::load_local_store_authority(
-            &member_database,
-            &member_device_id,
-            member,
-        )
+    let (member_registration, _) = member_database
+        .local_blob_write_authority()
         .await
         .map_err(|error| error.to_string())?;
-    let request = Box::pin(crate::sync::store::owner_promotion::begin_owner_promotion(
-        &owner_database,
-        &store.storage,
-        &owner_device_id,
-        owner,
-        member_registration,
-    ))
-    .await
-    .map_err(|error| format!("begin Owner promotion: {error}"))?;
-    let acceptance = Box::pin(crate::sync::store::owner_promotion::accept_owner_promotion(
-        &member_database,
-        &store.storage,
-        &member_device_id,
-        member,
-        request,
-    ))
-    .await
-    .map_err(|error| format!("accept Owner promotion: {error}"))?;
-    let finalized = Box::pin(
-        crate::sync::store::owner_promotion::finalize_owner_promotion(
-            &owner_database,
-            &store.storage,
-            &owner_device_id,
-            owner,
-            encryption,
-            acceptance,
-        ),
-    )
-    .await
-    .map_err(|error| format!("finalize Owner promotion: {error}"))?;
-    let membership = crate::sync::store::load_cycle_membership(&store.storage, &member_database)
+    let request = owner_store
+        .begin_owner_promotion(&owner_device_id, owner, member_registration)
+        .await
+        .map_err(|error| format!("begin Owner promotion: {error}"))?;
+    let acceptance = member_store
+        .accept_owner_promotion(&member_device_id, member, request)
+        .await
+        .map_err(|error| format!("accept Owner promotion: {error}"))?;
+    let finalized = owner_store
+        .finalize_owner_promotion(&owner_device_id, owner, encryption, acceptance)
+        .await
+        .map_err(|error| format!("finalize Owner promotion: {error}"))?;
+    let (_temp, store_dir) = temp_store_dir();
+    let pull = member_store
+        .authorize()
         .await
         .map_err(|error| error.to_string())?
-        .chain
-        .ok_or_else(|| "promoted member has no membership chain".to_string())?;
-    let (_temp, store_dir) = temp_store_dir();
-    let pull = Box::pin(crate::sync::store::pull_store_commits(
-        &crate::sync::store::StoreDatabase::new(member_db),
-        member_db.synced_tables(),
-        &store.storage,
-        store.root.store_root_hash,
-        &store_dir,
-        &membership,
-        Some(member),
-    ))
-    .await
-    .map_err(|error| error.to_string())?;
+        .pull(&store_dir, member)
+        .await
+        .map_err(|error| error.to_string())?;
     if !pull.held_positions.is_empty() {
         return Err(format!(
             "Owner promotion pull held signed positions: {:?}",
@@ -1923,7 +1893,7 @@ pub async fn remove_store_member_for_test(
 
 pub struct TestStore {
     pub home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
-    pub storage: crate::sync::cloud_storage::CloudSyncStorage,
+    pub storage: std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     pub root: crate::sync::store_commit::StoreRootRef,
     pub protocol_root: crate::sync::store_commit::StoreProtocolRoot,
     pub signer: UserKeypair,
@@ -1993,16 +1963,18 @@ impl TestStore {
         signer: UserKeypair,
         home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Self, String> {
-        let storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-            home.clone(),
-            crate::sync::cloud_storage::CloudCipher::Encrypted(
-                crate::encryption::EncryptionService::from_key([42; 32]),
-            ),
-            crate::sync::cloud_storage::BlobPathScheme::Hashed,
-            store_id,
-            signer.clone(),
-        )
-        .map_err(|error| error.to_string())?;
+        let storage = std::sync::Arc::new(
+            crate::sync::cloud_storage::CloudSyncStorage::new(
+                home.clone(),
+                crate::sync::cloud_storage::CloudCipher::Encrypted(
+                    crate::encryption::EncryptionService::from_key([42; 32]),
+                ),
+                crate::sync::cloud_storage::BlobPathScheme::Hashed,
+                store_id,
+                signer.clone(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
         let root = Box::pin(create_exact_test_store(db, &storage, store_id, &signer)).await?;
         let protocol_root = Box::pin(crate::sync::store_objects::load_store_protocol_root(
             &storage, &root,
@@ -2069,6 +2041,15 @@ impl TestStore {
 
     pub fn protocol_founder_keypair(&self) -> UserKeypair {
         self.signer.clone()
+    }
+
+    pub async fn loaded_store(&self, db: &Database) -> Result<crate::sync::store::Store, String> {
+        crate::sync::store::Store::load(
+            crate::sync::store::StoreDatabase::new(db),
+            self.storage.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     pub async fn device_id(&self, name: &str) -> Result<String, String> {
@@ -2198,28 +2179,23 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let membership = crate::sync::store::load_cycle_membership(&self.storage, &database)
+        let authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, &db)
             .await
             .map_err(|error| error.to_string())?;
-        let membership = membership
-            .chain
-            .as_ref()
-            .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store::preparation::prepare_store_write(
-            &database,
-            &self.storage,
-            &device_id,
-            "2026-07-16T00:00:00Z",
-            &self.signer,
-            &store_dir,
-            membership,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let prepared = authorization
+            .prepare_pending_store_write(
+                &device_id,
+                "2026-07-16T00:00:00Z",
+                &self.signer,
+                &store_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         if !prepared {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        crate::sync::store::publication::drain_store_writes(&database, &self.storage)
+        authorization
+            .drain_store_writes()
             .await
             .map_err(|error| error.to_string())?;
         crate::sync::store::database::StoreDatabase::new(&db)
@@ -2311,34 +2287,27 @@ impl TestStore {
         db: &Database,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
-        let database = crate::sync::store::database::StoreDatabase::new(db);
         let device_id = db
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let membership = crate::sync::store::load_cycle_membership(&self.storage, &database)
+        let authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, db)
             .await
             .map_err(|error| error.to_string())?;
-        let membership = membership
-            .chain
-            .as_ref()
-            .ok_or_else(|| "Merge fixture has no membership chain".to_string())?;
-        let prepared = crate::sync::store::preparation::prepare_store_write(
-            &database,
-            &self.storage,
-            &device_id,
-            "2026-07-16T00:00:00Z",
-            &self.signer,
-            store_dir,
-            membership,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let published =
-            crate::sync::store::publication::drain_store_writes(&database, &self.storage)
-                .await
-                .map_err(|error| error.to_string())?;
+        let prepared = authorization
+            .prepare_pending_store_write(
+                &device_id,
+                "2026-07-16T00:00:00Z",
+                &self.signer,
+                store_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let published = authorization
+            .drain_store_writes()
+            .await
+            .map_err(|error| error.to_string())?;
         if published > 0 {
             crate::sync::cycle::drain_published_blob_drop_intents(db, store_dir, u64::MAX).await?;
             crate::blob::local_cleanup::drain(db, store_dir)

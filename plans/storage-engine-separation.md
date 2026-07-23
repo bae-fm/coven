@@ -60,8 +60,8 @@ This ownership work completes the Store foundation required by
   dependencies; the parent module only exposes the aggregate API.
 - Complete: Owner promotion request, acceptance, finalization, authority,
   status, journal validation, atomic database transitions, and tests live below
-  `sync::store`; the root workflow and raw `Database` command methods are
-  absent.
+  `sync::store`; request, acceptance, finalization, and status enter the loaded
+  Store, while the root workflow and raw `Database` command methods are absent.
 - Complete: Circle creation, rename, restart, preparation, publication,
   activation verification, journal validation, atomic database transitions,
   and tests live below `sync::store`; the root Circle workflow and verifier
@@ -74,7 +74,8 @@ This ownership work completes the Store foundation required by
 - Complete: production callers and test fixtures pass Store authority
   explicitly. Store tests that require private persistence algorithms live
   beside those algorithms rather than widening visibility or reaching through
-  the root database.
+  the root database. Shared sync fixtures prepare and publish writes, exclude
+  devices, promote Owners, and pull promotion history through Store operations.
 - Complete: Store creation and opening own protocol-root publication or
   verification, exact membership anchoring, founder-device installation, and
   construction of the runnable Store. Cycle receives the constructed Store and
@@ -107,6 +108,9 @@ This ownership work completes the Store foundation required by
   `StoreDatabase::sqlite()` access for closed SQL, schema models, test fault
   injection, and host-facing reads. The final boundary audit must remove
   operation-continuing raw access without wrapping those operations.
+- Complete: abandonment, device exclusion, Owner promotion, package
+  preparation, write preparation, and write publication implementation modules
+  are private.
 - Complete: revocation-cycle and concurrent-assignment membership conflicts are
   read and resolved through concrete Store and application operations.
   Applications receive opaque choices with member read models; exact heads and

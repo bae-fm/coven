@@ -466,35 +466,20 @@ async fn sync_for_test<S: TestStoreStorage>(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let membership = crate::sync::store::load_cycle_membership(
-        storage.sync_storage(),
-        &crate::sync::store::database::StoreDatabase::new(db),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let prepared = crate::sync::store::preparation::prepare_store_write(
-        &store_database(db),
-        storage.sync_storage(),
-        &device_id,
-        timestamp,
-        keypair,
-        store_dir,
-        membership
-            .chain
-            .as_ref()
-            .ok_or_else(|| "Merge pull fixture has no membership chain".to_string())?,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let authorization = crate::sync::store::Store::authorize_borrowed(storage.sync_storage(), db)
+        .await
+        .map_err(|error| error.to_string())?;
+    let prepared = authorization
+        .prepare_pending_store_write(&device_id, timestamp, keypair, store_dir)
+        .await
+        .map_err(|error| error.to_string())?;
     if !prepared {
         return Ok(None);
     }
-    crate::sync::store::publication::drain_store_writes(
-        &store_database(db),
-        storage.sync_storage(),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    authorization
+        .drain_store_writes()
+        .await
+        .map_err(|error| error.to_string())?;
     crate::sync::store::database::StoreDatabase::new(db)
         .latest_local_store_position()
         .await

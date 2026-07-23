@@ -372,36 +372,27 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
     )
     .await;
-    let membership = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::database::StoreDatabase::new(&member_db),
-    )
-    .await
-    .expect("load membership while member grant is active");
     let (_member_temp, member_store_dir) = temp_store_dir();
+    let authorization =
+        crate::sync::store::Store::authorize_borrowed(&*storage.storage, &member_db)
+            .await
+            .expect("authorize member while their grant is active");
     assert!(
-        crate::sync::store::preparation::prepare_store_write(
-            &crate::sync::store::StoreDatabase::new(&member_db),
-            &storage.storage,
-            &member_device_id,
-            "0000000003000-0000-member",
-            &member,
-            &member_store_dir,
-            membership
-                .chain
-                .as_ref()
-                .expect("active Merge membership chain"),
-        )
-        .await
-        .expect("prepare member commit while grant is active"),
+        authorization
+            .prepare_pending_store_write(
+                &member_device_id,
+                "0000000003000-0000-member",
+                &member,
+                &member_store_dir,
+            )
+            .await
+            .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    crate::sync::store::publication::drain_store_writes(
-        &crate::sync::store::StoreDatabase::new(&member_db),
-        &storage.storage,
-    )
-    .await
-    .expect("publish member commit while grant is active");
+    authorization
+        .drain_store_writes()
+        .await
+        .expect("publish member commit while grant is active");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);

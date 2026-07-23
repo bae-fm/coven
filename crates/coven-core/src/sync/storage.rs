@@ -1315,6 +1315,163 @@ pub trait SyncStorage: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+#[async_trait]
+impl<T> SyncStorage for std::sync::Arc<T>
+where
+    T: SyncStorage + ?Sized,
+{
+    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
+        (**self).store_blob_protection()
+    }
+
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError> {
+        (**self).provider_binding().await
+    }
+
+    async fn allocate_protocol_slot(
+        &self,
+        context: &ProtocolObjectContext,
+        semantic_prefix: &str,
+        extension: &str,
+    ) -> Result<ObjectSlot, StorageError> {
+        (**self)
+            .allocate_protocol_slot(context, semantic_prefix, extension)
+            .await
+    }
+
+    fn prepare_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: ObjectSlot,
+        semantic_prefix: &str,
+        data: Vec<u8>,
+    ) -> Result<PreparedExactObject, StorageError> {
+        (**self).prepare_protocol_object(context, slot, semantic_prefix, data)
+    }
+
+    async fn create_protocol_object(
+        &self,
+        prepared: &PreparedExactObject,
+    ) -> Result<(), StorageError> {
+        (**self).create_protocol_object(prepared).await
+    }
+
+    async fn read_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        (**self)
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
+    async fn read_protocol_slot(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
+        (**self)
+            .read_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn read_prepared_protocol_slot(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
+        (**self)
+            .read_prepared_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {
+        (**self).delete_protocol_object(object).await
+    }
+
+    async fn allocate_blob_slot(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+    ) -> Result<ObjectSlot, StorageError> {
+        (**self).allocate_blob_slot(locator, authority).await
+    }
+
+    async fn seal_blob_to_spool(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+        protection: BlobSpoolProtection,
+        plaintext_file: &Path,
+        spool_file: &Path,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
+            .await
+    }
+
+    async fn prepare_blob_object(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+        slot: ObjectSlot,
+        stored_file: &Path,
+    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
+        (**self)
+            .prepare_blob_object(locator, authority, slot, stored_file)
+            .await
+    }
+
+    async fn create_blob_object_from_file(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        authority: &BlobWriteAuthority<'_>,
+        stored_file: &Path,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .create_blob_object_from_file(blob, authority, stored_file, progress)
+            .await
+    }
+
+    async fn verify_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError> {
+        (**self).verify_blob_object(blob).await
+    }
+
+    async fn stage_exact_blob_download(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        dest: &Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+        (**self).stage_exact_blob_download(blob, dest).await
+    }
+
+    async fn stage_verified_blob_plaintext(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
+        dest: &Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+        (**self)
+            .stage_verified_blob_plaintext(blob, protection, dest)
+            .await
+    }
+
+    async fn delete_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError> {
+        (**self).delete_blob_object(blob).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,6 @@ async fn publish_note(
     db: &crate::database::Database,
     store: &TestStore,
     device_id: &str,
-    membership: &MembershipChain,
     store_dir: &crate::store_dir::StoreDir,
     sequence: u64,
 ) {
@@ -27,22 +26,24 @@ async fn publish_note(
         ),
     )
     .await;
-    assert!(
-        super::store::preparation::prepare_store_write(
-            &store_database(db),
-            &store.storage,
-            device_id,
-            "2026-07-21T00:00:00Z",
-            &store.signer,
-            store_dir,
-            membership,
-        )
+    let authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
         .await
-        .expect("prepare Merge Store write"),
+        .expect("authorize Merge Store write");
+    assert!(
+        authorization
+            .prepare_pending_store_write(
+                device_id,
+                "2026-07-21T00:00:00Z",
+                &store.signer,
+                store_dir,
+            )
+            .await
+            .expect("prepare Merge Store write"),
         "host write produces a prepared Store commit",
     );
     assert_eq!(
-        super::store::publication::drain_store_writes(&store_database(db), &store.storage)
+        authorization
+            .drain_store_writes()
             .await
             .expect("publish Merge Store write"),
         1,
@@ -65,18 +66,10 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::store::load_cycle_membership(
-        &store.storage,
-        &crate::sync::store::database::StoreDatabase::new(&db),
-    )
-    .await
-    .expect("load Merge membership")
-    .chain
-    .expect("Merge membership chain");
     let (_temp, store_dir) = temp_store_dir();
 
     for sequence in 1..=history_length {
-        publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
+        publish_note(&db, &store, &device_id, &store_dir, sequence).await;
     }
 
     let retained = store_database(&db)
@@ -105,15 +98,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .clone();
 
     store.home.clear_exact_reads();
-    publish_note(
-        &db,
-        &store,
-        &device_id,
-        &membership,
-        &store_dir,
-        history_length + 1,
-    )
-    .await;
+    publish_note(&db, &store, &device_id, &store_dir, history_length + 1).await;
 
     let reread = store
         .home
@@ -158,7 +143,7 @@ async fn published_history(
     .expect("Merge membership chain");
     let (temp, store_dir) = temp_store_dir();
     for sequence in 1..=history_length {
-        publish_note(&db, &store, &device_id, &membership, &store_dir, sequence).await;
+        publish_note(&db, &store, &device_id, &store_dir, sequence).await;
     }
     (db, store, device_id, membership, temp, store_dir)
 }
@@ -167,7 +152,6 @@ async fn prepare_sabotaged_successor(
     db: &crate::database::Database,
     store: &TestStore,
     device_id: &str,
-    membership: &MembershipChain,
     store_dir: &crate::store_dir::StoreDir,
 ) -> String {
     host_exec(
@@ -177,24 +161,19 @@ async fn prepare_sabotaged_successor(
                  '0000000002000-0000-history', '2026-07-21')",
     )
     .await;
-    match super::store::preparation::prepare_store_write(
-        &store_database(db),
-        &store.storage,
-        device_id,
-        "2026-07-21T00:00:01Z",
-        &store.signer,
-        store_dir,
-        membership,
-    )
-    .await
+    let authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
+        .await
+        .expect("authorize sabotaged successor");
+    match authorization
+        .prepare_pending_store_write(device_id, "2026-07-21T00:00:01Z", &store.signer, store_dir)
+        .await
     {
         Err(error) => error.to_string(),
-        Ok(true) => {
-            super::store::publication::drain_store_writes(&store_database(db), &store.storage)
-                .await
-                .expect_err("checkpoint sabotage must fail before remote publication")
-                .to_string()
-        }
+        Ok(true) => authorization
+            .drain_store_writes()
+            .await
+            .expect_err("checkpoint sabotage must fail before remote publication")
+            .to_string(),
         Ok(false) => panic!("sabotaged host write produced no pending Store write"),
     }
 }
@@ -244,7 +223,7 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
 
 #[tokio::test]
 async fn missing_frontier_retained_row_has_no_cloud_fallback() {
-    let (db, store, device_id, membership, _temp, store_dir) = published_history(1).await;
+    let (db, store, device_id, _membership, _temp, store_dir) = published_history(1).await;
     let retained = store_database(&db)
         .retained_merge_replay_inputs()
         .await
@@ -270,7 +249,7 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     .await
     .expect("remove retained frontier row");
 
-    let error = prepare_sabotaged_successor(&db, &store, &device_id, &membership, &store_dir).await;
+    let error = prepare_sabotaged_successor(&db, &store, &device_id, &store_dir).await;
     assert!(
         !error.is_empty(),
         "missing retained frontier returned an empty error"
@@ -280,7 +259,7 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
 #[tokio::test]
 async fn outbound_successor_rejects_missing_or_forged_device_state() {
     for delete_state in [true, false] {
-        let (db, store, device_id, membership, _temp, store_dir) = published_history(1).await;
+        let (db, store, device_id, _membership, _temp, store_dir) = published_history(1).await;
         let retained = store_database(&db)
             .retained_merge_replay_inputs()
             .await
@@ -349,8 +328,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             .await
             .expect("forge canonical checkpoint state");
         }
-        let error =
-            prepare_sabotaged_successor(&db, &store, &device_id, &membership, &store_dir).await;
+        let error = prepare_sabotaged_successor(&db, &store, &device_id, &store_dir).await;
         assert!(
             !error.is_empty(),
             "checkpoint-state sabotage returned an empty error"
