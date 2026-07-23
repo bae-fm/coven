@@ -2746,7 +2746,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         "the owner is pinned in protocol_state",
     );
     let membership =
-        crate::sync::store::pull::load_cycle_membership(&storage.storage, &store_database(&db))
+        crate::sync::store::load_cycle_membership(&storage.storage, &store_database(&db))
             .await
             .expect("load exact founder membership")
             .chain
@@ -2943,7 +2943,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
             .await
             .expect("open exact Store root")
             .value;
-    let membership = crate::sync::store::pull::load_cycle_membership(
+    let membership = crate::sync::store::load_cycle_membership(
         components.storage().as_ref(),
         &store_database(&db),
     )

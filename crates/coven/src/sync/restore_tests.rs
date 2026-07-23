@@ -1567,7 +1567,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("add member");
-    let pre_removal_chain = crate::sync::store::pull::load_cycle_membership(
+    let pre_removal_chain = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     )
@@ -1593,7 +1593,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("remove member");
-    let chain = crate::sync::store::pull::load_cycle_membership(
+    let chain = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     )
@@ -1722,7 +1722,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     ))
     .await
     .expect("publish owner row and blob");
-    let membership = Box::pin(crate::sync::store::pull::load_cycle_membership(
+    let membership = Box::pin(crate::sync::store::load_cycle_membership(
         components.storage().as_ref(),
         &crate::sync::store::StoreDatabase::from_database(db_owner.clone()),
     ))

@@ -31,8 +31,7 @@ pub mod owner_promotion;
 pub(crate) mod package_preparation;
 pub(crate) mod preparation;
 pub(crate) mod publication;
-#[doc(hidden)]
-pub mod pull;
+mod pull;
 mod reclaim;
 mod registration;
 pub(crate) mod retained_replay;
@@ -53,9 +52,21 @@ pub use device_exclusion::{
     StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
 };
 pub use error::StoreError;
-pub(crate) use owner::{AuthorizedStore, Store};
+pub(crate) use owner::AuthorizedStore;
+#[doc(hidden)]
+pub use owner::Store;
+pub(crate) use pull::VerifiedStoreSnapshotStability;
+#[cfg(test)]
+pub(crate) use pull::{
+    cleanup_merge_candidate, download_blobs, load_merge_conflict_resolution_authorization,
+    prepare_merge_abandonment_history_summary, retained_membership_floor_is_included, BlobDownload,
+};
+#[doc(hidden)]
+pub use pull::{load_cycle_membership, pull_store_commits, CycleMembership};
 pub use pull::{
-    StorePullError, StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
+    BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures, HeldStoreCoordinate,
+    HeldStorePosition, HeldStorePositionReason, PullError, StorePullError,
+    StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
 };
 pub(crate) use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
@@ -83,79 +94,10 @@ pub async fn ensure_active_registration_for_test(
     registration::ensure_active_registration(&StoreDatabase::new(db), storage).await
 }
 
-enum StoreLoadError {
-    Database(crate::database::DbError),
-    Object(super::store_objects::StoreObjectError),
-    MissingRoot,
-    Invalid(String),
-}
-
-impl From<StoreLoadError> for StoreError {
-    fn from(error: StoreLoadError) -> Self {
-        match error {
-            StoreLoadError::Database(error) => error.into(),
-            StoreLoadError::Object(error) => Self::Object(error),
-            StoreLoadError::MissingRoot => Self::MissingState {
-                key: operations::STORE_ROOT_AUTHORITY,
-            },
-            StoreLoadError::Invalid(reason) => Self::InvalidOutbound(reason),
-        }
-    }
-}
-
-#[doc(hidden)]
-pub async fn abandon_merge_candidate(
-    db: &Database,
-    storage: Arc<CloudSyncStorage>,
-    device_id: &str,
-    identity: &UserKeypair,
-    write_id: crate::WriteId,
-) -> Result<MergeCandidateAbandonment, StoreError> {
-    load_store(db, storage)
-        .await?
-        .abandon_candidate(device_id, identity, write_id)
-        .await
-}
-
-pub async fn retry_blocked_write(
-    db: &Database,
-    write_id: &crate::WriteId,
-) -> Result<Vec<crate::WriteId>, crate::database::DbError> {
-    database::StoreDatabase::new(db)
-        .retry_blocked_write(write_id)
-        .await
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockedWriteDiscard {
     Discarded(Vec<crate::WriteId>),
     RemoteResolutionRequired,
-}
-
-pub async fn discard_blocked_write(
-    db: &Database,
-    write_id: &crate::WriteId,
-) -> Result<BlockedWriteDiscard, crate::database::DbError> {
-    database::StoreDatabase::new(db)
-        .discard_blocked_write(write_id)
-        .await
-}
-
-async fn load_store(
-    db: &Database,
-    storage: Arc<CloudSyncStorage>,
-) -> Result<Store, StoreLoadError> {
-    let database = StoreDatabase::new(db);
-    let store_root = database
-        .local_store_root_ref()
-        .await
-        .map_err(StoreLoadError::Database)?
-        .ok_or(StoreLoadError::MissingRoot)?;
-    let verified_root = super::store_objects::load_store_protocol_root(&*storage, &store_root)
-        .await
-        .map_err(StoreLoadError::Object)?
-        .value;
-    Store::new(database, storage, store_root, &verified_root).map_err(StoreLoadError::Invalid)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -210,32 +152,6 @@ pub(crate) async fn verify_store_snapshot_for_acknowledgement_for_test(
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<(), pull::StorePullError> {
     pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
-}
-
-#[allow(clippy::too_many_arguments)]
-#[doc(hidden)]
-pub fn pull_store_commits<'a>(
-    db: &'a Database,
-    tables: &'a [super::session::SyncedTable],
-    storage: &'a dyn SyncStorage,
-    store_root_hash: super::store_commit::ObjectHash,
-    store_dir: &'a StoreDir,
-    membership: &'a super::membership::MembershipChain,
-    identity: Option<&'a UserKeypair>,
-) -> pull::StorePullFuture<'a, StorePullResult> {
-    Box::pin(async move {
-        let database = StoreDatabase::new(db);
-        pull::pull_store_commits(
-            &database,
-            tables,
-            storage,
-            store_root_hash,
-            store_dir,
-            membership,
-            identity,
-        )
-        .await
-    })
 }
 
 pub(crate) fn load_verified_device_join_attempt_ref<'a>(

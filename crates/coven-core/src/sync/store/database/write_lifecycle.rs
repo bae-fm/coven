@@ -227,10 +227,8 @@ impl StoreDatabase {
     /// Return one blocked write to publication. The next preparation attempt
     /// revalidates every captured fact; another semantic failure records a fresh
     /// `Blocked` status.
-    pub(in crate::sync::store) async fn retry_blocked_write(
-        &self,
-        write_id: &WriteId,
-    ) -> Result<Vec<WriteId>, DbError> {
+    #[doc(hidden)]
+    pub async fn retry_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
         let write_id = write_id.clone();
         let retried = self.database.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -313,7 +311,8 @@ impl StoreDatabase {
 
     /// Atomically reverse a blocked write and every later unpublished shared
     /// write whose working-row state depends on it.
-    pub(in crate::sync::store) async fn discard_blocked_write(
+    #[doc(hidden)]
+    pub async fn discard_blocked_write(
         &self,
         write_id: &WriteId,
     ) -> Result<super::super::BlockedWriteDiscard, DbError> {

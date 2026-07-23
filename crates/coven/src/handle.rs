@@ -329,7 +329,9 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let retried = coven_core::sync::store::retry_blocked_write(self.db(), write_id)
+        let retried = self
+            .database
+            .retry_blocked_write(write_id)
             .await
             .map_err(crate::CovenError::from)?;
         self.sync_now();
@@ -342,7 +344,9 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let outcome = coven_core::sync::store::discard_blocked_write(self.db(), write_id)
+        let outcome = self
+            .database
+            .discard_blocked_write(write_id)
             .await
             .map_err(crate::CovenError::from)?;
         if let coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) = outcome {
@@ -372,7 +376,9 @@ impl CovenHandle {
             }
         }
 
-        match coven_core::sync::store::discard_blocked_write(self.db(), write_id)
+        match self
+            .database
+            .discard_blocked_write(write_id)
             .await
             .map_err(crate::CovenError::from)?
         {

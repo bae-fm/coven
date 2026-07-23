@@ -93,7 +93,7 @@ async fn gc_tombstones_as(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    let membership = crate::sync::store::pull::load_cycle_membership(
+    let membership = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(db),
     )

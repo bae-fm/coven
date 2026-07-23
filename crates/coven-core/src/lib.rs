@@ -230,7 +230,7 @@ pub use storage::cloud::{
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
-pub use sync::store::pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
+pub use sync::store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 
 // Sync-status surface: the completed-cycle success payload, the per-cycle alert
 // bundle it carries, and the per-device activity a host renders "which devices

@@ -460,7 +460,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .expect("published pre-exclusion snapshot exists");
     let (_peer_pull_temp, peer_pull_dir) = crate::sync::test_helpers::temp_store_dir();
     let peer_pull = crate::sync::store::pull_store_commits(
-        &peer_db,
+        &store_database(&peer_db),
         peer_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,
@@ -1075,7 +1075,7 @@ async fn materialize_surviving_owner_commit(
     .await
     .expect("load peer membership before surviving pull");
     Box::pin(crate::sync::store::pull_store_commits(
-        peer_db,
+        &store_database(peer_db),
         peer_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,
@@ -1136,7 +1136,7 @@ async fn assert_terminal_merge_transaction_rollback(
     .await
     .expect("load excluded peer membership for injected failure");
     let error = Box::pin(crate::sync::store::pull_store_commits(
-        peer_db,
+        &store_database(peer_db),
         peer_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,
@@ -1427,7 +1427,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .await
         .expect("reload excluded peer membership");
         assert!(Box::pin(crate::sync::store::pull_store_commits(
-            &peer_db,
+            &store_database(&peer_db),
             peer_db.synced_tables(),
             &store.storage,
             store.root.store_root_hash,
@@ -2516,7 +2516,7 @@ async fn pull_peer_exclusion(
     .await
     .expect("reload excluded peer membership");
     let pull = Box::pin(crate::sync::store::pull_store_commits(
-        peer_db,
+        &store_database(peer_db),
         peer_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,

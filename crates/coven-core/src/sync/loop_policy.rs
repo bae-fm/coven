@@ -8,7 +8,7 @@ use crate::changeset::RowChange;
 use super::cloud_storage::RotationPending;
 use super::cycle::SyncCycleResult;
 use super::status::DeviceActivity;
-use super::store::pull::HeldStorePosition;
+use super::store::HeldStorePosition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopWait {
@@ -70,7 +70,7 @@ pub struct SyncLoopSuccess {
     /// can touch the same row, so a host re-reads affected rows by primary key
     /// rather than trusting it as exhaustive.
     ///
-    /// [`StorePullResult::row_changes`]: crate::sync::store::pull::StorePullResult::row_changes
+    /// [`StorePullResult::row_changes`]: crate::sync::store::StorePullResult::row_changes
     pub row_changes: Option<Vec<RowChange>>,
     pub alerts: SyncLoopAlerts,
 }
@@ -142,9 +142,7 @@ mod tests {
 
     use crate::sync::causal_grants::AuthorStreamId;
     use crate::sync::storage::ExactObjectRef;
-    use crate::sync::store::pull::{
-        HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
-    };
+    use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
     use crate::sync::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
 
     fn held(n: usize) -> Vec<HeldStorePosition> {

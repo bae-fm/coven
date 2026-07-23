@@ -372,7 +372,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
     )
     .await;
-    let membership = crate::sync::store::pull::load_cycle_membership(
+    let membership = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&member_db),
     )

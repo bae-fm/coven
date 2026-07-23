@@ -11,7 +11,8 @@ pub(in crate::sync::store) async fn prepare_acknowledgement_activation_for_test(
         .await
 }
 
-pub(crate) struct Store {
+#[doc(hidden)]
+pub struct Store {
     context: StoreContext,
 }
 
@@ -28,6 +29,26 @@ pub(crate) struct AuthorizedStore<'a> {
 }
 
 impl Store {
+    #[doc(hidden)]
+    pub async fn load(
+        database: StoreDatabase,
+        storage: Arc<CloudSyncStorage>,
+    ) -> Result<Self, StoreError> {
+        let store_root =
+            database
+                .local_store_root_ref()
+                .await?
+                .ok_or(StoreError::MissingState {
+                    key: operations::STORE_ROOT_AUTHORITY,
+                })?;
+        let verified_root =
+            crate::sync::store_objects::load_store_protocol_root(&*storage, &store_root)
+                .await?
+                .value;
+        Self::new(database, storage, store_root, &verified_root)
+            .map_err(StoreError::InvalidOutbound)
+    }
+
     pub(crate) fn new(
         database: StoreDatabase,
         storage: Arc<CloudSyncStorage>,
@@ -99,7 +120,8 @@ impl Store {
         .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }
 
-    pub(crate) async fn abandon_candidate(
+    #[doc(hidden)]
+    pub async fn abandon_candidate(
         &self,
         device_id: &str,
         identity: &UserKeypair,

@@ -3,7 +3,7 @@
 /// After each pull, the caller has the full list of `DeviceHead`s. This
 /// module provides a type to summarize that into a human-readable status
 /// for the UI: when we last synced, and what other devices are doing.
-use super::store::pull::VerifiedStoreDeviceHead;
+use super::store::VerifiedStoreDeviceHead;
 
 /// Activity summary for a single remote device.
 #[derive(Debug, Clone, PartialEq, Eq)]

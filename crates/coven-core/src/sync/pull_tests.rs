@@ -18,8 +18,8 @@ use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
-use crate::sync::store::pull::PullError;
-use crate::sync::store::pull::{
+use crate::sync::store::PullError;
+use crate::sync::store::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
 use crate::sync::store_commit::StoreDeviceHead;
@@ -462,7 +462,7 @@ async fn sync_for_test<S: TestStoreStorage>(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let membership = crate::sync::store::pull::load_cycle_membership(
+    let membership = crate::sync::store::load_cycle_membership(
         storage.sync_storage(),
         &crate::sync::store::database::StoreDatabase::new(db),
     )
@@ -504,7 +504,7 @@ async fn pull_exact_store_into(
     store_dir: &crate::store_dir::StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
-    crate::sync::store::pull::StorePullResult,
+    crate::sync::store::StorePullResult,
 ) {
     let root = crate::sync::store::database::StoreDatabase::new(source)
         .local_store_root_ref()
@@ -523,14 +523,14 @@ async fn pull_exact_store_into(
     )
     .await
     .expect("anchor exact Store membership");
-    let membership = crate::sync::store::pull::load_cycle_membership(
+    let membership = crate::sync::store::load_cycle_membership(
         storage,
         &crate::sync::store::database::StoreDatabase::new(destination),
     )
     .await
     .expect("load exact Store membership");
     let result = crate::sync::store::pull_store_commits(
-        destination,
+        &store_database(destination),
         destination.synced_tables(),
         storage,
         root.store_root_hash,
@@ -722,9 +722,7 @@ async fn materialized_sequences(db: &crate::database::Database) -> HashMap<Strin
         .collect()
 }
 
-fn constraint_conflicts(
-    result: &crate::sync::store::pull::StorePullResult,
-) -> Vec<&HeldStorePosition> {
+fn constraint_conflicts(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
     result
         .held_positions
         .iter()
@@ -732,9 +730,7 @@ fn constraint_conflicts(
         .collect()
 }
 
-fn newer_schema_positions(
-    result: &crate::sync::store::pull::StorePullResult,
-) -> Vec<&HeldStorePosition> {
+fn newer_schema_positions(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
     result
         .held_positions
         .iter()
@@ -742,9 +738,7 @@ fn newer_schema_positions(
         .collect()
 }
 
-fn unauthorized_positions(
-    result: &crate::sync::store::pull::StorePullResult,
-) -> Vec<&HeldStorePosition> {
+fn unauthorized_positions(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
     result
         .held_positions
         .iter()
@@ -753,7 +747,7 @@ fn unauthorized_positions(
 }
 
 fn invalid_changeset_positions(
-    result: &crate::sync::store::pull::StorePullResult,
+    result: &crate::sync::store::StorePullResult,
 ) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -1196,7 +1190,7 @@ async fn replace_exact_commit_bytes(
         .expect("load replacement candidate history summary");
     let reference =
         publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
-    let history_summary = crate::sync::store::pull::prepare_merge_abandonment_history_summary(
+    let history_summary = crate::sync::store::prepare_merge_abandonment_history_summary(
         &candidate_summary,
         &graph.reference,
         &graph.commit,
@@ -3939,7 +3933,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("open exact Store before failed lazy verification");
     let failing = FaultingStorage::blob(&storage.storage);
     let error = crate::sync::store::pull_store_commits(
-        &db2,
+        &store_database(&db2),
         db2.synced_tables(),
         &failing,
         storage.root.store_root_hash,
@@ -3950,10 +3944,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     .await
     .expect_err("lazy blob verification failure rejects the Store commit");
     assert!(
-        matches!(
-            &error,
-            crate::sync::store::pull::StorePullError::BlobDownloads(_)
-        ),
+        matches!(&error, crate::sync::store::StorePullError::BlobDownloads(_)),
         "unexpected lazy verification error: {error:?}"
     );
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -4073,7 +4064,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .expect("open scoped target Store");
     let (_target_temp, target_dir) = temp_store_dir();
     let result = crate::sync::store::pull_store_commits(
-        &target,
+        &store_database(&target),
         target.synced_tables(),
         &storage.storage,
         storage.root.store_root_hash,
@@ -4190,7 +4181,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("open Store before pulling Circle activation");
     crate::sync::store::pull_store_commits(
-        successor,
+        &store_database(successor),
         successor.synced_tables(),
         &storage.storage,
         storage.root.store_root_hash,
@@ -4223,7 +4214,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("open Store before ordered Circle pull");
     let result = crate::sync::store::pull_store_commits(
-        &receiver,
+        &store_database(&receiver),
         receiver.synced_tables(),
         &storage.storage,
         storage.root.store_root_hash,
@@ -6278,7 +6269,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let result = crate::sync::store::pull::load_cycle_membership(
+    let result = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&db2),
     )
@@ -6320,7 +6311,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .expect("remove exact founder membership head");
 
-    let result = crate::sync::store::pull::load_cycle_membership(
+    let result = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&db2),
     )
@@ -6427,7 +6418,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
             .expect("clear persisted-cycle owner pin");
     }
 
-    let initial = crate::sync::store::pull::load_cycle_membership(
+    let initial = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&db),
     )
@@ -6451,7 +6442,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(true).await;
 
-    let recovered = crate::sync::store::pull::load_cycle_membership(
+    let recovered = crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&fixture.db),
     )
@@ -6472,7 +6463,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(false).await;
 
-    let recovered = crate::sync::store::pull::load_cycle_membership(
+    let recovered = crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&fixture.db),
     )
@@ -6499,7 +6490,7 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
         .await
         .expect("delete exact persisted membership head");
 
-    let error = match crate::sync::store::pull::load_cycle_membership(
+    let error = match crate::sync::store::load_cycle_membership(
         &fixture.storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&fixture.db),
     )
@@ -6532,7 +6523,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .unwrap();
 
-    let cycle_membership = crate::sync::store::pull::load_cycle_membership(
+    let cycle_membership = crate::sync::store::load_cycle_membership(
         &storage.storage,
         &crate::sync::store::database::StoreDatabase::new(&target),
     )
@@ -6570,7 +6561,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
 
     let (_tmp, store_dir) = temp_store_dir();
     let result = crate::sync::store::pull_store_commits(
-        &target,
+        &store_database(&target),
         target.synced_tables(),
         &storage.storage,
         storage.store_root_hash(),
@@ -6634,7 +6625,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = FaultingStorage::membership(&storage.storage, 1);
-    let result = crate::sync::store::pull::load_cycle_membership(
+    let result = crate::sync::store::load_cycle_membership(
         &failing,
         &crate::sync::store::database::StoreDatabase::new(&db2),
     )
@@ -7317,7 +7308,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     pull_into_result(&member_db, &storage, &pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
-    crate::sync::store::pull::cleanup_merge_candidate(
+    crate::sync::store::cleanup_merge_candidate(
         &store_database(&member_db),
         &storage.storage,
         write_id.clone(),
@@ -7651,7 +7642,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
 
     let failing = FaultingStorage::membership(&storage.storage, 1);
     let result = crate::sync::store::pull_store_commits(
-        &db2,
+        &store_database(&db2),
         db2.synced_tables(),
         &failing,
         storage.root.store_root_hash,
@@ -8217,15 +8208,16 @@ async fn provider_blob_download_failure_remains_typed() {
     let failing = FaultingStorage::blob(&storage.storage);
     let (_temp, store_dir) = temp_store_dir();
 
-    let failures = crate::sync::store::pull::download_blobs(
-        &store_database(&db),
-        vec![crate::sync::store::pull::BlobDownload::from_row(remote)
-            .expect("build exact blob download")],
-        &failing,
-        &store_dir,
-    )
-    .await
-    .expect_err("provider download failure remains a typed batch failure");
+    let failures =
+        crate::sync::store::download_blobs(
+            &store_database(&db),
+            vec![crate::sync::store::BlobDownload::from_row(remote)
+                .expect("build exact blob download")],
+            &failing,
+            &store_dir,
+        )
+        .await
+        .expect_err("provider download failure remains a typed batch failure");
     assert_eq!(failures.failures().len(), 1);
     assert!(failures.has_transport_failure());
     assert!(

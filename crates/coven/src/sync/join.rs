@@ -23,8 +23,8 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::membership::{unwrap_store_keyring, InviteError};
-use crate::sync::store::pull::PullError;
 use crate::sync::store::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
+use crate::sync::store::PullError;
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -1142,11 +1142,11 @@ pub(crate) async fn open_db_and_pull(
     // truth. Load and anchor the membership chain first (join is a standalone,
     // non-cycle pull), against the owner pinned above. Restore has not pinned an
     // owner yet, so it anchors the chain at its signed founder below.
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, &database)
+    let membership = crate::sync::store::load_cycle_membership(storage, &database)
         .await
         .map_err(BootstrapError::Pull)?;
     let pull_result = Box::pin(crate::sync::store::pull_store_commits(
-        &db,
+        &database,
         db.synced_tables(),
         storage,
         store_root.store_root_hash,

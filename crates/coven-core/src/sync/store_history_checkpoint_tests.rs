@@ -65,7 +65,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::store::pull::load_cycle_membership(
+    let membership = super::store::load_cycle_membership(
         &store.storage,
         &crate::sync::store::database::StoreDatabase::new(&db),
     )
@@ -148,7 +148,7 @@ async fn published_history(
         .await
         .expect("load local Store device id")
         .expect("created Store has a local device id");
-    let membership = super::store::pull::load_cycle_membership(
+    let membership = super::store::load_cycle_membership(
         &store.storage,
         &crate::sync::store::database::StoreDatabase::new(&db),
     )
@@ -658,7 +658,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
 
 async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     let (db, store, _summary) = Box::pin(history_with_member_removal()).await;
-    let membership = super::store::pull::load_cycle_membership(
+    let membership = super::store::load_cycle_membership(
         &store.storage,
         &crate::sync::store::database::StoreDatabase::new(&db),
     )
@@ -825,7 +825,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         .expect("load local Store authority");
 
     store.home.clear_exact_reads();
-    crate::sync::store::pull::load_merge_conflict_resolution_authorization(
+    crate::sync::store::load_merge_conflict_resolution_authorization(
         &store_database(&db),
         &store.storage,
         &root,

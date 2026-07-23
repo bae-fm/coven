@@ -33,7 +33,7 @@ use crate::sync::cycle::{InitSyncError, SyncComponents};
 pub(crate) use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
-use crate::sync::store::StoreDatabase;
+use crate::sync::store::{Store, StoreDatabase};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 
 /// Supplies the host's current config for building the next connection. Starting
@@ -222,15 +222,12 @@ impl SyncManager {
             .ok_or_else(|| {
                 SyncError::Protocol("local Store device identity is absent".to_string())
             })?;
-        coven_core::sync::store::abandon_merge_candidate(
-            self.db(),
-            Arc::clone(loop_handle.storage()),
-            &device_id,
-            &identity,
-            write_id,
-        )
-        .await
-        .map_err(|error| SyncError::Protocol(error.to_string()))
+        Store::load(self.database.clone(), Arc::clone(loop_handle.storage()))
+            .await
+            .map_err(|error| SyncError::Protocol(error.to_string()))?
+            .abandon_candidate(&device_id, &identity, write_id)
+            .await
+            .map_err(|error| SyncError::Protocol(error.to_string()))
     }
 
     // =========================================================================

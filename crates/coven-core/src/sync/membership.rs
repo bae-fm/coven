@@ -5388,7 +5388,7 @@ mod tests {
             resolutions: resumed.resolution_refs().to_vec(),
         };
         assert!(
-            !crate::sync::store::pull::retained_membership_floor_is_included(
+            !crate::sync::store::retained_membership_floor_is_included(
                 &checkpoint_floor,
                 &resumed,
             ),

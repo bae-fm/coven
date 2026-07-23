@@ -277,7 +277,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     .expect("load candidate Owner membership");
     let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let candidate_pull = Box::pin(crate::sync::store::pull_store_commits(
-        &candidate_db,
+        &StoreDatabase::new(&candidate_db),
         candidate_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,

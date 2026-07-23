@@ -209,7 +209,8 @@ impl AuthorizedStore<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn pull_store_commits<'a>(
+#[doc(hidden)]
+pub fn pull_store_commits<'a>(
     database: &'a StoreDatabase,
     tables: &'a [crate::sync::session::SyncedTable],
     storage: &'a dyn SyncStorage,

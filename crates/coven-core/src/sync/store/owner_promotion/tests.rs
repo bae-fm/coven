@@ -80,7 +80,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     .expect("load second Owner membership");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let pull = crate::sync::store::pull_store_commits(
-        &second_owner_db,
+        &StoreDatabase::new(&second_owner_db),
         second_owner_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,

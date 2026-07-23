@@ -1267,7 +1267,7 @@ pub async fn initialize_store_fixture(
         signer,
     )
     .await?;
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, &database)
+    let membership = crate::sync::store::load_cycle_membership(storage, &database)
         .await
         .map_err(|error| error.to_string())?
         .chain
@@ -1499,7 +1499,7 @@ pub fn install_active_device_fixture<'a>(
         let membership = Box::pin(store.open_into(local_db)).await?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let bootstrap_pull = Box::pin(crate::sync::store::pull_store_commits(
-            local_db,
+            &crate::sync::store::StoreDatabase::new(local_db),
             local_db.synced_tables(),
             &store.storage,
             store.root.store_root_hash,
@@ -1622,15 +1622,14 @@ pub async fn promote_active_member_fixture(
     )
     .await
     .map_err(|error| format!("finalize Owner promotion: {error}"))?;
-    let membership =
-        crate::sync::store::pull::load_cycle_membership(&store.storage, &member_database)
-            .await
-            .map_err(|error| error.to_string())?
-            .chain
-            .ok_or_else(|| "promoted member has no membership chain".to_string())?;
+    let membership = crate::sync::store::load_cycle_membership(&store.storage, &member_database)
+        .await
+        .map_err(|error| error.to_string())?
+        .chain
+        .ok_or_else(|| "promoted member has no membership chain".to_string())?;
     let (_temp, store_dir) = temp_store_dir();
     let pull = Box::pin(crate::sync::store::pull_store_commits(
-        member_db,
+        &crate::sync::store::StoreDatabase::new(member_db),
         member_db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,
@@ -2162,7 +2161,7 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &database)
+        let membership = crate::sync::store::load_cycle_membership(&self.storage, &database)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
@@ -2262,7 +2261,7 @@ impl TestStore {
             &self.signer,
         );
         ensure.await?;
-        let load = crate::sync::store::pull::load_cycle_membership(&self.storage, &database);
+        let load = crate::sync::store::load_cycle_membership(&self.storage, &database);
         load.await
             .map_err(|error| error.to_string())?
             .chain
@@ -2280,7 +2279,7 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let membership = crate::sync::store::pull::load_cycle_membership(&self.storage, &database)
+        let membership = crate::sync::store::load_cycle_membership(&self.storage, &database)
             .await
             .map_err(|error| error.to_string())?;
         let membership = membership
@@ -2319,17 +2318,17 @@ pub async fn pull_into_result(
 ) -> Result<
     (
         std::collections::BTreeMap<String, u64>,
-        crate::sync::store::pull::StorePullResult,
+        crate::sync::store::StorePullResult,
     ),
-    crate::sync::store::pull::StorePullError,
+    crate::sync::store::StorePullError,
 > {
     let membership = Box::new(Box::pin(store.open_into(db)).await.map_err(|error| {
-        crate::sync::store::pull::StorePullError::Membership(
-            crate::sync::store::pull::StorePullMembershipError::Message(error),
+        crate::sync::store::StorePullError::Membership(
+            crate::sync::store::StorePullMembershipError::Message(error),
         )
     })?);
     let result = Box::pin(crate::sync::store::pull_store_commits(
-        db,
+        &crate::sync::store::StoreDatabase::new(db),
         db.synced_tables(),
         &store.storage,
         store.root.store_root_hash,
@@ -2352,7 +2351,7 @@ pub async fn pull_into(
     store_dir: &StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
-    crate::sync::store::pull::StorePullResult,
+    crate::sync::store::StorePullResult,
 ) {
     pull_into_result(db, store, store_dir)
         .await
