@@ -168,6 +168,113 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
     assert!(insert_latest_acknowledgement(&mut merged, device_id, forged_higher_fork,).is_err());
 }
 
+#[tokio::test]
+async fn progressive_discovery_replays_same_history_in_canonical_order() {
+    let founder = crate::sync::test_helpers::open_test_db();
+    let identity = crate::keys::UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &founder,
+        "progressive-canonical-replay",
+        identity.clone(),
+    )
+    .await
+    .expect("create canonical replay Store");
+    crate::sync::test_helpers::host_exec(
+        &founder,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+         VALUES ('canonical-row', 'c0', 'b0', 1,
+                 '0000000001000-0000-base', '2026-07-21')",
+    )
+    .await;
+    let (_founder_temp, founder_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    assert!(store
+        .publish_pending(&founder, &founder_store_dir)
+        .await
+        .expect("publish canonical replay base"));
+
+    let writer = crate::sync::test_helpers::open_test_db();
+    crate::sync::test_helpers::install_active_device_fixture(
+        &store,
+        &founder,
+        &writer,
+        &identity,
+        "2026-07-21T00:00:00Z",
+    )
+    .await
+    .expect("activate concurrent writer");
+    let mut producers = Vec::new();
+    for (name, database) in [("founder", founder.clone()), ("writer", writer)] {
+        let device_id = database
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .unwrap_or_else(|error| panic!("load {name} device id: {error}"))
+            .unwrap_or_else(|| panic!("{name} device id exists"));
+        let (_, registration, _, _) = crate::sync::store::load_local_store_authority_for_test(
+            &StoreDatabase::new(&database),
+            &device_id,
+            &identity,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("load {name} authority: {error}"));
+        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+            store.root.store_root_hash,
+            &registration,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
+        producers.push((stream_id, database));
+    }
+    producers.sort_by_key(|producer| producer.0);
+
+    let progressive = crate::sync::test_helpers::open_test_db();
+    let canonical = crate::sync::test_helpers::open_test_db();
+    let (_progressive_temp, progressive_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_canonical_temp, canonical_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    crate::sync::test_helpers::pull_into(&progressive, &store, &progressive_store_dir).await;
+    crate::sync::test_helpers::pull_into(&canonical, &store, &canonical_store_dir).await;
+
+    let x2_producer = &producers[0].1;
+    let chain_producer = &producers[1].1;
+    for update in [
+        "UPDATE notes SET title = 'c1', _updated_at = '0000000003000-0000-x1'
+         WHERE id = 'canonical-row'",
+        "UPDATE notes SET body = 'bM', _updated_at = '0000000009000-0000-m'
+         WHERE id = 'canonical-row'",
+    ] {
+        crate::sync::test_helpers::host_exec(chain_producer, update).await;
+        let (_producer_temp, producer_store_dir) = crate::sync::test_helpers::temp_store_dir();
+        assert!(store
+            .publish_pending(chain_producer, &producer_store_dir)
+            .await
+            .unwrap_or_else(|error| panic!("publish chained concurrent update: {error}")));
+        crate::sync::test_helpers::pull_into(&progressive, &store, &progressive_store_dir).await;
+    }
+    crate::sync::test_helpers::host_exec(
+        x2_producer,
+        "UPDATE notes SET title = 'c2', _updated_at = '0000000004000-0000-x2'
+         WHERE id = 'canonical-row'",
+    )
+    .await;
+    let (_x2_temp, x2_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    assert!(store
+        .publish_pending(x2_producer, &x2_store_dir)
+        .await
+        .unwrap_or_else(|error| panic!("publish independent concurrent update: {error}")));
+    crate::sync::test_helpers::pull_into(&progressive, &store, &progressive_store_dir).await;
+    crate::sync::test_helpers::pull_into(&canonical, &store, &canonical_store_dir).await;
+
+    let progressive_title = crate::sync::test_helpers::query_text(
+        &progressive,
+        "SELECT title FROM notes WHERE id = 'canonical-row'",
+    )
+    .await;
+    let canonical_title = crate::sync::test_helpers::query_text(
+        &canonical,
+        "SELECT title FROM notes WHERE id = 'canonical-row'",
+    )
+    .await;
+    assert_eq!(progressive_title, canonical_title);
+}
+
 #[test]
 fn recovery_cursor_requires_the_exact_origin_activation_pair() {
     let recovery_id = crate::sync::store_commit::DeviceRecoveryId::from_hash(ObjectHash::digest(

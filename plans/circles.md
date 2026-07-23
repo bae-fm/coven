@@ -50,7 +50,8 @@ rebuild the deleted choice.
   boundary audit found no production command that continues a Store operation
   through raw database or storage access.
 - Store commits use immutable per-device streams, explicit dependencies,
-  deterministic ordering, retained replay, and cumulative summaries.
+  cumulative summaries, and atomic retained replay when late concurrent
+  discovery would otherwise violate canonical order.
 - Founder Circle creation and rename have durable operations and Store-commit
   activation.
 - The signed schema-routing contract records each descendant's explicitly
@@ -703,6 +704,8 @@ The Store protocol preserves causality and converges deterministically:
 
 - explicit dependencies apply before dependent commits;
 - independent commits use the canonical total order where an order is needed;
+- a late concurrent commit atomically replays retained accepted history before
+  frontier advancement;
 - different-column updates to one row are three-way merged;
 - same-column conflicts use `_updated_at` ordering;
 - deletes win over concurrent edits;

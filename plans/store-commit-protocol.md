@@ -168,11 +168,17 @@ One incoming commit applies in one SQLite transaction:
 Any failure rolls back rows, controls, blobs, ownership, status, and frontier.
 Retry reuses the same exact inputs.
 
+When a ready commit's predecessor cut does not cover the receiver's current
+frontier, the same transaction replays retained accepted history in canonical
+dependency order and replaces the live projection before advancing the
+frontier. Causally current commits append without replay.
+
 ## Row convergence
 
 - Explicit dependencies apply before dependent commits.
 - Independent ready commits use the protocol's canonical total stamp order
   where an order is required.
+- Late concurrent discovery replays the retained projection in that order.
 - Different-column concurrent updates are three-way merged.
 - Same-column concurrent updates use `_updated_at`.
 - Deletes win over concurrent edits.

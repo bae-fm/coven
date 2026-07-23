@@ -832,35 +832,13 @@ pub(crate) async fn verified_merge_membership_objects(
     )
     .map_err(|error| StorePullError::Database(error.to_string()))?;
     let family = commit.candidate_family();
-    let mut remote_objects = vec![activate_pulled_merge_membership_authority(
-        super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
-            family,
-            transition.body.entry.clone(),
-            entry.bytes.clone(),
-            entry.bytes,
-            commit_ref.clone(),
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?,
-        commit_ref,
-    )?];
-    remote_objects.push(activate_pulled_merge_membership_authority(
-        super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
-            family,
-            head_ref.clone(),
-            head_bytes.clone(),
-            head_bytes,
-            commit_ref.clone(),
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?,
-        commit_ref,
-    )?);
     let resolution = match &entry.value.change {
         super::membership::MembershipChange::ResolutionActivation { resolution } => {
             Some(resolution.clone())
         }
         _ => None,
     };
-    let resolution_value = if let Some(resolution) = &resolution {
+    let resolution_loaded = if let Some(resolution) = &resolution {
         let loaded = super::store_objects::load_membership_resolution_ref(
             storage,
             root.store_root_hash,
@@ -868,20 +846,22 @@ pub(crate) async fn verified_merge_membership_objects(
         )
         .await
         .map_err(StorePullError::Object)?;
-        remote_objects.push(activate_pulled_merge_membership_authority(
-            super::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
-                resolution.clone(),
-                loaded.bytes.clone(),
-                loaded.bytes,
-                commit_ref.clone(),
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
-            commit_ref,
-        )?);
-        Some(loaded.value)
+        Some((loaded.bytes, loaded.value))
     } else {
         None
     };
+    let remote_objects = activated_merge_membership_remote_objects(
+        family,
+        &objects,
+        MembershipAuthorityBytes::identical(entry.bytes),
+        MembershipAuthorityBytes::identical(head_bytes),
+        resolution_loaded
+            .as_ref()
+            .map(|(bytes, _)| MembershipAuthorityBytes::identical(bytes.clone())),
+        commit_ref,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let resolution_value = resolution_loaded.map(|(_, value)| value);
     let proof = super::store_commit::RetainedMergeMembershipProof {
         commit: commit_ref.clone(),
         commit_value: commit.clone(),
@@ -906,16 +886,82 @@ pub(crate) struct VerifiedMergeMembershipClosure {
     pub(crate) proof: super::store_commit::RetainedMergeMembershipProof,
 }
 
-fn activate_pulled_merge_membership_authority(
+pub(super) struct MembershipAuthorityBytes {
+    canonical: Vec<u8>,
+    stored: Vec<u8>,
+}
+
+impl MembershipAuthorityBytes {
+    fn identical(bytes: Vec<u8>) -> Self {
+        Self {
+            canonical: bytes.clone(),
+            stored: bytes,
+        }
+    }
+
+    pub(super) fn new(canonical: Vec<u8>, stored: Vec<u8>) -> Self {
+        Self { canonical, stored }
+    }
+}
+
+pub(super) fn activated_merge_membership_remote_objects(
+    family: super::store_commit::CandidateFamilyId,
+    objects: &crate::database::VerifiedMergeMembershipObjects,
+    entry_bytes: MembershipAuthorityBytes,
+    head_bytes: MembershipAuthorityBytes,
+    resolution_bytes: Option<MembershipAuthorityBytes>,
+    commit_ref: &StoreBatchCommitRef,
+) -> Result<
+    Vec<super::remote_object::RemoteObjectRecord>,
+    super::remote_object::RemoteObjectRecordError,
+> {
+    let mut remotes = vec![
+        activate_merge_membership_authority(
+            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+                family,
+                objects.entry().clone(),
+                entry_bytes.canonical,
+                entry_bytes.stored,
+                commit_ref.clone(),
+            )?,
+            commit_ref,
+        )?,
+        activate_merge_membership_authority(
+            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+                family,
+                objects.head().clone(),
+                head_bytes.canonical,
+                head_bytes.stored,
+                commit_ref.clone(),
+            )?,
+            commit_ref,
+        )?,
+    ];
+    if let Some(resolution) = objects.resolution() {
+        let bytes = resolution_bytes
+            .ok_or(super::remote_object::RemoteObjectRecordError::StoredReferenceMismatch)?;
+        remotes.push(activate_merge_membership_authority(
+            super::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
+                resolution.clone(),
+                bytes.canonical,
+                bytes.stored,
+                commit_ref.clone(),
+            )?,
+            commit_ref,
+        )?);
+    } else if resolution_bytes.is_some() {
+        return Err(super::remote_object::RemoteObjectRecordError::StoredReferenceMismatch);
+    }
+    Ok(remotes)
+}
+
+fn activate_merge_membership_authority(
     mut remote: super::remote_object::RemoteObjectRecord,
     commit_ref: &StoreBatchCommitRef,
-) -> Result<super::remote_object::RemoteObjectRecord, StorePullError> {
-    remote
-        .mark_uploaded_verified()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    remote
-        .into_activated(commit_ref)
-        .map_err(|error| StorePullError::Database(error.to_string()))
+) -> Result<super::remote_object::RemoteObjectRecord, super::remote_object::RemoteObjectRecordError>
+{
+    remote.mark_uploaded_verified()?;
+    remote.into_activated(commit_ref)
 }
 
 async fn commit_candidate(
@@ -1072,6 +1118,18 @@ async fn commit_candidate(
     let applied = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let materialized_frontier = CommitFrontier::from_refs(
+                crate::sync::store::database::StoreDatabase::materialized_frontier_on(&tx, None)?,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            let candidate_predecessors = materialization
+                .commit
+                .order
+                .predecessor_cut()
+                .map_err(|error| DbError::Message(error.to_string()))?
+                .frontier();
+            let requires_canonical_replay =
+                !candidate_predecessors.covers(&materialized_frontier);
             let mut applied = apply_prepared_merge_materialization_on(
                 &tx,
                 &blob_decls,
@@ -1090,15 +1148,15 @@ async fn commit_candidate(
                         "injected failure after Merge summary materialization".to_string(),
                     ));
                 }
+                let retracted = retractions
+                    .iter()
+                    .map(|retraction| {
+                        retraction
+                            .candidate_reference()
+                            .map_err(|error| DbError::Message(error.to_string()))
+                    })
+                    .collect::<Result<BTreeSet<_>, _>>()?;
                 if !retractions.is_empty() {
-                    let retracted = retractions
-                        .iter()
-                        .map(|retraction| {
-                            retraction
-                                .candidate_reference()
-                                .map_err(|error| DbError::Message(error.to_string()))
-                        })
-                        .collect::<Result<BTreeSet<_>, _>>()?;
                     applied.write_status_notifications =
                         crate::sync::store::database::StoreDatabase::retract_verified_merge_materializations_on(&tx, retractions)?;
                     #[cfg(any(test, feature = "test-utils"))]
@@ -1109,6 +1167,8 @@ async fn commit_candidate(
                             "injected failure after Merge retraction deletion".to_string(),
                         ));
                     }
+                }
+                if requires_canonical_replay || !retracted.is_empty() {
                     let replay = replay_retained_merge_projection_on(
                         &tx,
                         &blob_decls,
@@ -1140,7 +1200,11 @@ async fn commit_candidate(
                         local_blob_cleanup_intents(&blob_decls, &old_projection, &new_projection)
                             .map_err(|error| DbError::Message(error.to_string()))?
                     {
-                        local_cleanup::record_obsolete_copy_intents_on(&tx, &blob_decls, &intent)?;
+                        local_cleanup::record_obsolete_copy_intents_on(
+                            &tx,
+                            &blob_decls,
+                            &intent,
+                        )?;
                     }
                     if let ApplyOutcome::Applied(rows) = &mut applied.outcome {
                         rows.extend(new_projection);

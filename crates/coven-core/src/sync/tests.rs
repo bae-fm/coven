@@ -387,21 +387,14 @@ async fn update_from_base(base: &str, update: &str) -> Vec<u8> {
 /// Three writers contend on one column while a fourth wins the row on a *different*
 /// column, and the final value of the contended column depends on apply order.
 ///
-/// This is a deliberate, documented property of the convergence model, not a bug:
-/// the schema carries a single per-row `_updated_at`, not a per-column stamp, so
-/// the column-level premerge can only fold a losing writer's column in while the
-/// local column still equals that writer's base. Once the row winner (or the other
-/// contender) has moved the column off its base, a later losing writer to the same
-/// column is dropped. Both orders therefore land a value from the contending set,
-/// stamped at the row winner's time, with no reconciling event — resolved only by
-/// the next edit to that column. The row winner's own column converges regardless
-/// of order; only the contended column diverges, and only among 3+ same-column
-/// writers interleaved with a row winner.
+/// Raw changeset application is order-dependent because the schema carries one
+/// per-row `_updated_at`, not a per-column stamp. The Store protocol compensates
+/// by replaying late concurrent accepted history in its canonical order. This
+/// test pins the lower-level behavior that makes that replay necessary.
 ///
-/// Pinned deliberately: if this assertion fails, same-column convergence semantics
-/// changed — confirm the change is intentional before updating the test.
+/// If this assertion fails, re-evaluate whether Store replay is still required.
 #[tokio::test]
-async fn three_writer_same_column_contention_is_order_dependent() {
+async fn raw_three_writer_same_column_contention_is_order_dependent() {
     // base c0; X1 and X2 both edit `title` away from c0 concurrently; M wins the
     // row on `body` with the highest stamp (9000 > both 3000 and 4000).
     let base = "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -456,9 +449,8 @@ async fn three_writer_same_column_contention_is_order_dependent() {
     assert_eq!(title_b, "c2");
     assert_ne!(
         title_a, title_b,
-        "3-writer same-column contention is a deliberately order-dependent property \
-         of the single-per-row-stamp model; if these now converge, the convergence \
-         semantics changed — confirm that is intentional before updating this test"
+        "raw 3-writer same-column application must remain the order-dependent case \
+         covered by Store canonical replay"
     );
 }
 
