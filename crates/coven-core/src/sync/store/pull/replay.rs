@@ -363,11 +363,7 @@ pub(super) fn replay_retained_merge_projection_on(
                                     "retained Merge replay changeset: {error}"
                                 ))
                             })?;
-                    Ok(PreparedMergeMaterializationPackage {
-                        package,
-                        changeset,
-                        cleanup: Vec::new(),
-                    })
+                    Ok(PreparedMergeMaterializationPackage { package, changeset })
                 })
                 .collect::<Result<Vec<_>, DbError>>()?;
             let membership_remote_objects =

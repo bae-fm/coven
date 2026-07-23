@@ -70,11 +70,12 @@ mod model;
 mod outbound;
 
 pub(crate) use audience::{
-    active_circle_control, capture_routing_changes, filter_inbound_circle_changeset,
-    is_routing_table, live_row_audience, normalize_inbound_private_routes, partition_outbound,
-    prune_ineligible_scoped_rows, prune_private_routes_without_rows,
+    active_circle_control, align_inbound_scoped_root_audiences, capture_routing_changes,
+    filter_inbound_circle_changeset, filter_inbound_store_rows, is_routing_table,
+    live_row_audience, normalize_inbound_store_changeset, partition_outbound,
+    prune_ineligible_scoped_rows, prune_private_routes_without_rows, store_audience_transitions,
     validate_scoped_foreign_key_audiences, validate_store_snapshot_routing_state,
-    AudiencePartition, CirclePartitionControl, RoutingChanges,
+    AudiencePartition, CirclePartitionControl, RoutingChanges, StoreAudienceTransitions,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;

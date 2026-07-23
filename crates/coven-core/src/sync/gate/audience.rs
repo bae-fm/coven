@@ -59,6 +59,17 @@ pub(crate) struct RoutingChanges {
     deleted_rows: BTreeMap<(String, String), Audience>,
 }
 
+#[derive(Default)]
+pub(crate) struct StoreAudienceTransitions {
+    by_routing_id: HashMap<String, (Audience, String)>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InboundStoreChangesets {
+    pub(crate) mirror: Vec<u8>,
+    pub(crate) rows: Vec<u8>,
+}
+
 impl RoutingChanges {
     pub(crate) fn empty() -> Self {
         Self {
@@ -87,40 +98,102 @@ pub(crate) fn filter_inbound_circle_changeset(
     conn: &Connection,
     changeset: &[u8],
     circle_id: CircleId,
+    store_transitions: &StoreAudienceTransitions,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<Vec<u8>, GateError> {
-    unsafe { filter_inbound_circle_changeset_raw(conn, changeset, circle_id, gates, routing_key) }
+    unsafe {
+        filter_inbound_circle_changeset_raw(
+            conn,
+            changeset,
+            circle_id,
+            store_transitions,
+            gates,
+            routing_key,
+        )
+    }
 }
 
 unsafe fn filter_inbound_circle_changeset_raw(
     conn: &Connection,
     changeset: &[u8],
     circle_id: CircleId,
+    store_transitions: &StoreAudienceTransitions,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<Vec<u8>, GateError> {
-    let (normalized, package_routes) =
-        normalize_inbound_private_routes_raw(conn, changeset, gates, routing_key)?;
-    for_each_change(&normalized, |_iter, row| {
+    let package_audience = Audience::Circle(circle_id);
+    let (normalized, _) = normalize_inbound_private_routes_raw(
+        conn,
+        changeset,
+        &package_audience,
+        store_transitions,
+        gates,
+        routing_key,
+    )?;
+    filter_inbound_audience_rows_raw(conn, &normalized, &package_audience, gates, routing_key)
+}
+
+pub(crate) fn filter_inbound_store_rows(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<Vec<u8>, GateError> {
+    unsafe {
+        filter_inbound_audience_rows_raw(conn, changeset, &Audience::Store, gates, routing_key)
+    }
+}
+
+unsafe fn filter_inbound_audience_rows_raw(
+    conn: &Connection,
+    changeset: &[u8],
+    package_audience: &Audience,
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<Vec<u8>, GateError> {
+    let allow_unscoped = package_audience == &Audience::Store;
+    for_each_change(changeset, |_iter, row| {
         if row.table == "_coven_audience" {
             return Err(GateError::InvalidInboundAudiencePackage(
-                "Circle package contains the Store audience mirror".to_string(),
+                "audience row package contains the Store audience mirror".to_string(),
             ));
         }
-        if row.table != "_coven_row_routes" && !gates.table_is_scoped(&row.table) {
+        if row.table != "_coven_row_routes" && !gates.table_is_scoped(&row.table) && !allow_unscoped
+        {
             return Err(GateError::InvalidInboundAudiencePackage(format!(
                 "Circle package contains unscoped table {}",
                 row.table
             )));
+        }
+        if row.op != ffi::SQLITE_DELETE {
+            if let Some(TableGate::ScopedRoot { audience_col }) = gates.tables.get(&row.table) {
+                if let Some(value) = row.new_value(audience_col.index) {
+                    let row_audience = Audience::from_column(value).map_err(|error| {
+                        GateError::InvalidInboundAudiencePackage(format!(
+                            "scoped row {} has an invalid audience: {error}",
+                            row.table
+                        ))
+                    })?;
+                    if &row_audience != package_audience {
+                        return Err(GateError::InvalidInboundAudiencePackage(format!(
+                            "scoped row {} is packaged for a different audience than its row value",
+                            row.table
+                        )));
+                    }
+                }
+            }
         }
         Ok(())
     })?;
 
     let group = Changegroup::new()?;
     group.set_schema(conn.handle())?;
-    let expected_circle = circle_id.to_string();
-    for_each_change(&normalized, |iter, row| {
+    for_each_change(changeset, |iter, row| {
+        if row.table != "_coven_row_routes" && !gates.table_is_scoped(&row.table) {
+            group.add_change(iter)?;
+            return Ok(());
+        }
         let routing_id = if row.table == "_coven_row_routes" {
             row.pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?
@@ -129,32 +202,10 @@ unsafe fn filter_inbound_circle_changeset_raw(
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            if let Some((routing_id, _)) =
-                package_routes.get(&(row.table.clone(), row_id.to_string()))
-            {
-                routing_id.clone()
-            } else {
-                query_row_optional(
-                    conn,
-                    "SELECT routing_id FROM _coven_row_routes
-                     WHERE table_name = ?1 AND row_id = ?2",
-                    (&row.table, row_id),
-                    |record| record.get::<_, String>(0),
-                )?
-                .ok_or_else(|| GateError::MissingAudienceRow {
-                    table: row.table.clone(),
-                    row_id: row_id.to_string(),
-                })?
-            }
+            row_routing_id(routing_key, &row.table, row_id).to_string()
         };
-        let winning_circle = query_row_optional(
-            conn,
-            "SELECT circle_id FROM _coven_audience WHERE routing_id = ?1",
-            [&routing_id],
-            |record| record.get::<_, Option<String>>(0),
-        )?
-        .flatten();
-        if winning_circle.as_deref() == Some(expected_circle.as_str()) {
+        let winning_audience = winning_store_audience(conn, &routing_id)?;
+        if winning_audience.as_ref() == Some(package_audience) {
             group.add_change(iter)?;
         }
         Ok(())
@@ -162,15 +213,112 @@ unsafe fn filter_inbound_circle_changeset_raw(
     group.output()
 }
 
-pub(crate) fn normalize_inbound_private_routes(
+pub(crate) fn align_inbound_scoped_root_audiences(
+    conn: &Connection,
+    changeset: &[u8],
+    package_audience: &Audience,
+    gates: &Gates,
+    routing_key: &RowRoutingKey,
+) -> Result<(), GateError> {
+    unsafe {
+        for_each_change(changeset, |_iter, row| {
+            if row.op == ffi::SQLITE_DELETE {
+                return Ok(());
+            }
+            let Some(TableGate::ScopedRoot { audience_col }) = gates.tables.get(&row.table) else {
+                return Ok(());
+            };
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let routing_id = row_routing_id(routing_key, &row.table, row_id).to_string();
+            let winning_audience = winning_store_audience(conn, &routing_id)?;
+            if winning_audience.as_ref() != Some(package_audience) {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "eligible {}.{row_id} package no longer matches its winning Store audience",
+                    row.table
+                )));
+            }
+            let updated = conn
+                .execute(
+                    &format!(
+                        "UPDATE {} SET {} = ?1 WHERE id = ?2",
+                        quote_ident(&row.table),
+                        quote_ident(&audience_col.name),
+                    ),
+                    rusqlite::params![package_audience.column_value(), row_id],
+                )
+                .map_err(|source| {
+                    GateError::Sql(
+                        format!("align inbound audience for {}.{row_id}", row.table),
+                        source,
+                    )
+                })?;
+            if updated != 1 {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "eligible {}.{row_id} did not materialize exactly one scoped root",
+                    row.table
+                )));
+            }
+            Ok(())
+        })
+    }
+}
+
+fn winning_store_audience(
+    conn: &Connection,
+    routing_id: &str,
+) -> Result<Option<Audience>, GateError> {
+    query_row_optional(
+        conn,
+        "SELECT circle_id FROM _coven_audience WHERE routing_id = ?1",
+        [routing_id],
+        |record| record.get::<_, Option<String>>(0),
+    )?
+    .map(|circle_id| {
+        Audience::from_column(circle_id.as_deref()).map_err(|error| {
+            GateError::InvalidInboundAudiencePackage(format!(
+                "winning Store audience for {routing_id} is invalid: {error}"
+            ))
+        })
+    })
+    .transpose()
+}
+
+pub(crate) fn normalize_inbound_store_changeset(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
     routing_key: &RowRoutingKey,
-) -> Result<Vec<u8>, GateError> {
+) -> Result<InboundStoreChangesets, GateError> {
+    let store_transitions = store_audience_transitions(changeset)?;
+    let normalized = unsafe {
+        normalize_inbound_private_routes_raw(
+            conn,
+            changeset,
+            &Audience::Store,
+            &store_transitions,
+            gates,
+            routing_key,
+        )
+        .map(|(normalized, _)| normalized)?
+    };
     unsafe {
-        normalize_inbound_private_routes_raw(conn, changeset, gates, routing_key)
-            .map(|(normalized, _)| normalized)
+        let mirror = Changegroup::new()?;
+        mirror.set_schema(conn.handle())?;
+        let rows = Changegroup::new()?;
+        rows.set_schema(conn.handle())?;
+        for_each_change(&normalized, |iter, row| {
+            if row.table == "_coven_audience" {
+                mirror.add_change(iter)
+            } else {
+                rows.add_change(iter)
+            }
+        })?;
+        Ok(InboundStoreChangesets {
+            mirror: mirror.output()?,
+            rows: rows.output()?,
+        })
     }
 }
 
@@ -179,10 +327,19 @@ type PackageRoutes = HashMap<(String, String), (String, String)>;
 unsafe fn normalize_inbound_private_routes_raw(
     conn: &Connection,
     changeset: &[u8],
+    package_audience: &Audience,
+    store_transitions: &StoreAudienceTransitions,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<(Vec<u8>, PackageRoutes), GateError> {
-    let package_routes = validate_inbound_private_routes_raw(conn, changeset, gates, routing_key)?;
+    let package_routes = validate_inbound_private_routes_raw(
+        conn,
+        changeset,
+        package_audience,
+        store_transitions,
+        gates,
+        routing_key,
+    )?;
     let group = Changegroup::new()?;
     group.set_schema(conn.handle())?;
     for_each_change(changeset, |iter, row| {
@@ -211,25 +368,15 @@ unsafe fn normalize_inbound_private_routes_raw(
 unsafe fn validate_inbound_private_routes_raw(
     conn: &Connection,
     changeset: &[u8],
+    package_audience: &Audience,
+    store_transitions: &StoreAudienceTransitions,
     gates: &Gates,
     routing_key: &RowRoutingKey,
 ) -> Result<PackageRoutes, GateError> {
     let mut package_routes = PackageRoutes::new();
     let mut package_row_inserts = HashSet::<(String, String)>::new();
-    let mut package_audience_stamps = HashMap::<String, String>::new();
     for_each_change(changeset, |_iter, row| {
         if row.table == "_coven_audience" {
-            if row.op == ffi::SQLITE_INSERT || row.op == ffi::SQLITE_UPDATE {
-                let routing_id = row
-                    .pk()
-                    .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-                let stamp = row.new_value(2).flatten().ok_or_else(|| {
-                    GateError::InvalidInboundAudiencePackage(format!(
-                        "Store audience transition {routing_id} has no _updated_at"
-                    ))
-                })?;
-                package_audience_stamps.insert(routing_id.to_string(), stamp.to_string());
-            }
             return Ok(());
         }
         if row.table != "_coven_row_routes" {
@@ -314,22 +461,22 @@ unsafe fn validate_inbound_private_routes_raw(
                 row.0, row.1
             )));
         }
-        let audience_stamp = match package_audience_stamps.get(routing_id) {
-            Some(stamp) => Some(stamp.clone()),
-            None => query_row_optional(
-                conn,
-                "SELECT _updated_at FROM _coven_audience WHERE routing_id = ?1",
-                [routing_id],
-                |record| record.get::<_, String>(0),
-            )?,
-        }
-        .ok_or_else(|| {
-            GateError::InvalidInboundAudiencePackage(format!(
-                "private route for {}.{} has no Store audience transition",
+        let (transition_audience, audience_stamp) = store_transitions
+            .by_routing_id
+            .get(routing_id)
+            .ok_or_else(|| {
+                GateError::InvalidInboundAudiencePackage(format!(
+                    "private route for {}.{} has no Store audience transition",
+                    row.0, row.1
+                ))
+            })?;
+        if transition_audience != package_audience {
+            return Err(GateError::InvalidInboundAudiencePackage(format!(
+                "private route for {}.{} is packaged for a different audience than its Store transition",
                 row.0, row.1
-            ))
-        })?;
-        if route_stamp != &audience_stamp {
+            )));
+        }
+        if route_stamp != audience_stamp {
             return Err(GateError::InvalidInboundAudiencePackage(format!(
                 "private route for {}.{} has a different _updated_at than its Store audience transition",
                 row.0, row.1
@@ -362,6 +509,55 @@ unsafe fn validate_inbound_private_routes_raw(
         }
     }
     Ok(package_routes)
+}
+
+pub(crate) fn store_audience_transitions(
+    changeset: &[u8],
+) -> Result<StoreAudienceTransitions, GateError> {
+    let mut transitions = StoreAudienceTransitions::default();
+    unsafe {
+        for_each_change(changeset, |_iter, row| {
+            if row.table != "_coven_audience"
+                || (row.op != ffi::SQLITE_INSERT && row.op != ffi::SQLITE_UPDATE)
+            {
+                return Ok(());
+            }
+            let routing_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let circle_id = row.new_value(1).ok_or_else(|| {
+                GateError::InvalidInboundAudiencePackage(format!(
+                    "Store audience transition {routing_id} has no audience"
+                ))
+            })?;
+            let audience = Audience::from_column(circle_id).map_err(|error| {
+                GateError::InvalidInboundAudiencePackage(format!(
+                    "Store audience transition {routing_id} has an invalid audience: {error}"
+                ))
+            })?;
+            if audience == Audience::Local {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "Store audience transition {routing_id} has a Local audience"
+                )));
+            }
+            let stamp = row.new_value(2).flatten().ok_or_else(|| {
+                GateError::InvalidInboundAudiencePackage(format!(
+                    "Store audience transition {routing_id} has no _updated_at"
+                ))
+            })?;
+            if transitions
+                .by_routing_id
+                .insert(routing_id.to_string(), (audience, stamp.to_string()))
+                .is_some()
+            {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "Store package contains duplicate audience transitions for {routing_id}"
+                )));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(transitions)
 }
 
 pub(crate) fn validate_store_snapshot_routing_state(
@@ -425,15 +621,12 @@ pub(crate) fn validate_store_snapshot_routing_state(
             ))
         })?;
         let sql = format!(
-            "SELECT {id}, {stamp} FROM {table} ORDER BY {id}",
+            "SELECT {id} FROM {table} ORDER BY {id}",
             id = quote_ident("id"),
-            stamp = quote_ident("_updated_at"),
             table = quote_ident(&table),
         );
-        let rows = query_mapped_rows(conn, &sql, [], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for (row_id, row_stamp) in rows {
+        let rows = query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))?;
+        for row_id in rows {
             crate::sync::session::validate_row_identity(&table, identity, &row_id).map_err(
                 |error| {
                     GateError::InvalidMaterializedRouting(format!(
@@ -460,12 +653,6 @@ pub(crate) fn validate_store_snapshot_routing_state(
                     "private route id does not authenticate {table}.{row_id}"
                 )));
             }
-            if route_stamp != row_stamp {
-                return Err(GateError::InvalidMaterializedRouting(format!(
-                    "private route for {table}.{row_id} has a different _updated_at than its row"
-                )));
-            }
-
             let mirror = audience_mirrors.get(&routing_id);
             let audience = live_row_audience(conn, gates, &table, &row_id)?;
             match audience {
@@ -490,9 +677,9 @@ pub(crate) fn validate_store_snapshot_routing_state(
                             "Store audience mirror for {table}.{row_id} differs from its row"
                         )));
                     }
-                    if mirror_stamp != &row_stamp {
+                    if mirror_stamp != &route_stamp {
                         return Err(GateError::InvalidMaterializedRouting(format!(
-                            "Store audience mirror for {table}.{row_id} has a different _updated_at than its row"
+                            "Store audience mirror for {table}.{row_id} has a different _updated_at than its private route"
                         )));
                     }
                 }
@@ -1813,6 +2000,17 @@ mod tests {
         .expect("derive test row-routing key")
     }
 
+    fn store_transitions(
+        transitions: impl IntoIterator<Item = (String, Audience, String)>,
+    ) -> StoreAudienceTransitions {
+        StoreAudienceTransitions {
+            by_routing_id: transitions
+                .into_iter()
+                .map(|(routing_id, audience, stamp)| (routing_id, (audience, stamp)))
+                .collect(),
+        }
+    }
+
     #[test]
     fn inbound_circle_filter_keeps_only_rows_owned_by_its_winning_mirror() {
         let source = Connection::open_in_memory().expect("open source");
@@ -1835,7 +2033,7 @@ mod tests {
         source
             .execute(
                 "INSERT INTO notes VALUES (?1, ?2, 'second', '1')",
-                ("second", second.to_string()),
+                ("second", first.to_string()),
             )
             .expect("insert second note");
         source
@@ -1865,14 +2063,32 @@ mod tests {
             .expect("install first mirror");
         target
             .execute(
-                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '2')",
                 (&second_route, second.to_string()),
             )
             .expect("install second mirror");
 
-        let filtered =
-            filter_inbound_circle_changeset(&target, &changeset, first, &note_gates(&target), &key)
-                .expect("filter first Circle package");
+        let transitions = store_transitions([
+            (
+                first_route.clone(),
+                Audience::Circle(first),
+                "1".to_string(),
+            ),
+            (
+                second_route.clone(),
+                Audience::Circle(first),
+                "1".to_string(),
+            ),
+        ]);
+        let filtered = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            first,
+            &transitions,
+            &note_gates(&target),
+            &key,
+        )
+        .expect("filter first Circle package");
         let rows = crate::changeset::walk(&filtered).expect("walk filtered changeset");
         assert_eq!(rows.len(), 2);
         assert!(rows
@@ -1908,6 +2124,7 @@ mod tests {
             &target,
             &changeset,
             CircleId::from_bytes([1; 16]),
+            &StoreAudienceTransitions::default(),
             &note_gates(&target),
             &routing_key(),
         )
@@ -1947,6 +2164,7 @@ mod tests {
             &target,
             &changeset,
             circle,
+            &StoreAudienceTransitions::default(),
             &note_gates(&target),
             &routing_key(),
         )
@@ -2019,9 +2237,15 @@ mod tests {
         )
         .expect("build scoped gates");
 
-        let error =
-            filter_inbound_circle_changeset(&target, &changeset, circle, &gates, &routing_key())
-                .expect_err("private routes must be complete INSERT images");
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            circle,
+            &StoreAudienceTransitions::default(),
+            &gates,
+            &routing_key(),
+        )
+        .expect_err("private routes must be complete INSERT images");
         assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
     }
 
@@ -2049,7 +2273,7 @@ mod tests {
 
         let target = Connection::open_in_memory().expect("open target");
         routing_schema(&target);
-        let error = normalize_inbound_private_routes(
+        let error = normalize_inbound_store_changeset(
             &target,
             &changeset,
             &note_gates(&target),
@@ -2085,7 +2309,7 @@ mod tests {
         let target = Connection::open_in_memory().expect("open target");
         routing_schema(&target);
         let error =
-            normalize_inbound_private_routes(&target, &changeset, &note_gates(&target), &key)
+            normalize_inbound_store_changeset(&target, &changeset, &note_gates(&target), &key)
                 .expect_err("orphan private route must be rejected");
         assert!(error.to_string().contains("has no complete row INSERT"));
     }
@@ -2131,6 +2355,7 @@ mod tests {
             &target,
             &changeset,
             circle,
+            &store_transitions([(routing_id, Audience::Circle(circle), "2".to_string())]),
             &note_gates(&target),
             &key,
         )
@@ -2141,6 +2366,208 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn inbound_circle_filter_omits_an_authenticated_route_after_a_newer_move() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let old_circle = CircleId::from_bytes([1; 16]);
+        let new_circle = CircleId::from_bytes([2; 16]);
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'old move', '1')",
+                [old_circle.to_string()],
+            )
+            .expect("insert old destination row");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+                [&routing_id],
+            )
+            .expect("insert old destination route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract old Circle package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '2')",
+                (&routing_id, new_circle.to_string()),
+            )
+            .expect("install newer winning move");
+        let filtered = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            old_circle,
+            &store_transitions([(routing_id, Audience::Circle(old_circle), "1".to_string())]),
+            &note_gates(&target),
+            &key,
+        )
+        .expect("authenticate the old package before omitting it");
+
+        assert!(crate::changeset::walk(&filtered)
+            .expect("walk omitted package")
+            .is_empty());
+    }
+
+    #[test]
+    fn inbound_store_filter_omits_a_stale_edit_after_a_circle_move() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        source
+            .execute("INSERT INTO notes VALUES ('row', NULL, 'base', '1')", [])
+            .expect("insert source Store row");
+        let mut session = Session::new(&source).expect("create source session");
+        session.attach(Some("notes")).expect("attach source row");
+        source
+            .execute(
+                "UPDATE notes SET body = 'stale edit', _updated_at = '2' WHERE id = 'row'",
+                [],
+            )
+            .expect("edit source Store row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract Store edit");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '3')",
+                (&routing_id, CircleId::from_bytes([1; 16]).to_string()),
+            )
+            .expect("install winning Circle move");
+        let filtered = filter_inbound_store_rows(&target, &changeset, &note_gates(&target), &key)
+            .expect("filter stale Store edit");
+
+        assert!(crate::changeset::walk(&filtered)
+            .expect("walk omitted Store edit")
+            .is_empty());
+    }
+
+    #[test]
+    fn inbound_private_route_must_match_its_store_transition_audience() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let package_circle = CircleId::from_bytes([1; 16]);
+        let transition_circle = CircleId::from_bytes([2; 16]);
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+                [package_circle.to_string()],
+            )
+            .expect("insert packaged Circle row");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+                [&routing_id],
+            )
+            .expect("insert packaged private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract Circle package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                (&routing_id, package_circle.to_string()),
+            )
+            .expect("install package Circle as the current winner");
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            package_circle,
+            &store_transitions([(
+                routing_id,
+                Audience::Circle(transition_circle),
+                "1".to_string(),
+            )]),
+            &note_gates(&target),
+            &key,
+        )
+        .expect_err("a package must match its own Store transition audience");
+
+        assert!(error
+            .to_string()
+            .contains("packaged for a different audience"));
+    }
+
+    #[test]
+    fn inbound_scoped_row_must_match_its_package_audience() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        let package_circle = CircleId::from_bytes([1; 16]);
+        let row_circle = CircleId::from_bytes([2; 16]);
+        let mut session = Session::new(&source).expect("create source session");
+        for table in ["notes", "_coven_row_routes"] {
+            session.attach(Some(table)).expect("attach source table");
+        }
+        source
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+                [row_circle.to_string()],
+            )
+            .expect("insert row for a different Circle");
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+                [&routing_id],
+            )
+            .expect("insert private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract malformed Circle package");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                (&routing_id, package_circle.to_string()),
+            )
+            .expect("install package Circle as the current winner");
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            package_circle,
+            &store_transitions([(
+                routing_id,
+                Audience::Circle(package_circle),
+                "1".to_string(),
+            )]),
+            &note_gates(&target),
+            &key,
+        )
+        .expect_err("a scoped row value must match its package audience");
+
+        assert!(error
+            .to_string()
+            .contains("different audience than its row value"));
     }
 
     #[test]
@@ -2160,13 +2587,18 @@ mod tests {
                      row_id,
                      _updated_at,
                      UNIQUE(table_name, row_id)
+                 );
+                 CREATE TABLE _coven_audience (
+                     routing_id TEXT PRIMARY KEY,
+                     circle_id TEXT,
+                     _updated_at TEXT NOT NULL
                  );",
             )
             .expect("create source schema with untyped private routes");
         let key = routing_key();
         let routing_id = row_routing_id(&key, "notes", "row").to_string();
         let mut session = Session::new(&source).expect("create source session");
-        for table in ["notes", "_coven_row_routes"] {
+        for table in ["notes", "_coven_audience", "_coven_row_routes"] {
             session.attach(Some(table)).expect("attach source table");
         }
         source
@@ -2183,6 +2615,12 @@ mod tests {
                 ),
             )
             .expect("insert byte-valued private route");
+        source
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
+                [&routing_id],
+            )
+            .expect("insert Store audience transition");
         let mut changeset = Vec::new();
         session
             .changeset_strm(&mut changeset)
@@ -2190,22 +2628,18 @@ mod tests {
 
         let target = Connection::open_in_memory().expect("open target");
         routing_schema(&target);
-        target
-            .execute(
-                "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
-                [&routing_id],
-            )
-            .expect("install winning audience transition");
         let normalized =
-            normalize_inbound_private_routes(&target, &changeset, &note_gates(&target), &key)
+            normalize_inbound_store_changeset(&target, &changeset, &note_gates(&target), &key)
                 .expect("normalize authenticated private route");
-        target
-            .apply_strm(
-                &mut &normalized[..],
-                None::<fn(&str) -> bool>,
-                |_conflict, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
-            )
-            .expect("apply normalized package");
+        for part in [normalized.mirror, normalized.rows] {
+            target
+                .apply_strm(
+                    &mut &part[..],
+                    None::<fn(&str) -> bool>,
+                    |_conflict, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+                )
+                .expect("apply normalized package");
+        }
         let types = target
             .query_row(
                 "SELECT typeof(routing_id), typeof(table_name), typeof(row_id), typeof(_updated_at)
@@ -2248,7 +2682,7 @@ mod tests {
 
         let target = Connection::open_in_memory().expect("open target");
         routing_schema(&target);
-        let error = normalize_inbound_private_routes(
+        let error = normalize_inbound_store_changeset(
             &target,
             &changeset,
             &note_gates(&target),
@@ -2256,6 +2690,29 @@ mod tests {
         )
         .expect_err("unbound scoped row must be rejected");
         assert!(error.to_string().contains("has no private route"));
+    }
+
+    #[test]
+    fn store_snapshot_routing_stamp_is_independent_from_content_stamp() {
+        let conn = Connection::open_in_memory().expect("open snapshot");
+        routing_schema(&conn);
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        conn.execute("INSERT INTO notes VALUES ('row', NULL, 'edited', '2')", [])
+            .expect("insert content-edited Store row");
+        conn.execute(
+            "INSERT INTO _coven_row_routes VALUES (?1, 'notes', 'row', '1')",
+            [&routing_id],
+        )
+        .expect("insert private route at the audience-transition stamp");
+        conn.execute(
+            "INSERT INTO _coven_audience VALUES (?1, NULL, '1')",
+            [&routing_id],
+        )
+        .expect("insert Store mirror at the audience-transition stamp");
+
+        validate_store_snapshot_routing_state(&conn, &note_gates(&conn), &key)
+            .expect("content-only edits must not invalidate unchanged routing");
     }
 
     #[test]

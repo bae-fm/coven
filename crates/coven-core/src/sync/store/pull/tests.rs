@@ -5,6 +5,7 @@ use crate::sync::store::pull::{
     VerifiedMergePrefixHeadStatus,
 };
 use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
+use rusqlite::OptionalExtension;
 
 async fn one_retained_checkpoint() -> (
     Database,
@@ -168,6 +169,30 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
     assert!(insert_latest_acknowledgement(&mut merged, device_id, forged_higher_fork,).is_err());
 }
 
+async fn local_store_stream_id(
+    database: &Database,
+    store: &crate::sync::test_helpers::TestStore,
+    identity: &crate::keys::UserKeypair,
+) -> crate::sync::membership::AuthorStreamId {
+    let device_id = database
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("load local Store device id")
+        .expect("local Store device id exists");
+    let (_, registration, _, _) = crate::sync::store::load_local_store_authority_for_test(
+        &StoreDatabase::new(database),
+        &device_id,
+        identity,
+    )
+    .await
+    .expect("load local Store authority");
+    crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+        store.root.store_root_hash,
+        &registration,
+        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    )
+}
+
 #[tokio::test]
 async fn progressive_discovery_replays_same_history_in_canonical_order() {
     let founder = crate::sync::test_helpers::open_test_db();
@@ -203,24 +228,8 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
     .await
     .expect("activate concurrent writer");
     let mut producers = Vec::new();
-    for (name, database) in [("founder", founder.clone()), ("writer", writer)] {
-        let device_id = database
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap_or_else(|error| panic!("load {name} device id: {error}"))
-            .unwrap_or_else(|| panic!("{name} device id exists"));
-        let (_, registration, _, _) = crate::sync::store::load_local_store_authority_for_test(
-            &StoreDatabase::new(&database),
-            &device_id,
-            &identity,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("load {name} authority: {error}"));
-        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-            store.root.store_root_hash,
-            &registration,
-            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        );
+    for database in [founder.clone(), writer] {
+        let stream_id = local_store_stream_id(&database, &store, &identity).await;
         producers.push((stream_id, database));
     }
     producers.sort_by_key(|producer| producer.0);
@@ -273,6 +282,376 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
     )
     .await;
     assert_eq!(progressive_title, canonical_title);
+}
+
+fn open_scoped_replay_database() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "notes",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")],
+        vec![crate::migration::Migration::sql(
+            1,
+            "scoped replay schema",
+            "CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
+async fn scoped_host_exec(database: &Database, sql: String) {
+    let tables = database.synced_tables().to_vec();
+    let gates = database.gates();
+    let blob_decls = database.blob_decls();
+    let write_id = database.new_write_id();
+    database
+        .call(move |connection| {
+            let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+            StoreDatabase::run_store_write_transaction_on(
+                connection,
+                &tables,
+                &gates,
+                &blob_decls,
+                Some(&routing),
+                write_id,
+                |transaction| {
+                    transaction
+                        .execute_batch(&sql)
+                        .map_err(crate::database::DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("commit scoped host write");
+}
+
+async fn pull_scoped(
+    database: &Database,
+    store: &crate::sync::test_helpers::TestStore,
+    identity: &crate::keys::UserKeypair,
+    store_dir: &crate::store_dir::StoreDir,
+) -> StorePullResult {
+    let membership = store
+        .open_into(database)
+        .await
+        .expect("open scoped replay Store");
+    let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+    crate::sync::store::pull_store_commits(
+        &StoreDatabase::new(database),
+        database.synced_tables(),
+        &store.storage,
+        store.root.store_root_hash,
+        store_dir,
+        &membership,
+        Some(identity),
+        Some(&routing),
+    )
+    .await
+    .expect("pull scoped replay Store")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ScopedRoutingState {
+    row: Option<(Option<String>, String, String)>,
+    route: Option<(String, String)>,
+    mirror: Option<(Option<String>, String)>,
+}
+
+async fn scoped_routing_state(database: &Database, row_id: &str) -> ScopedRoutingState {
+    let row_id = row_id.to_string();
+    database
+        .call(move |connection| {
+            let routing_id = crate::sync::test_helpers::test_row_routing_id(
+                connection, [42; 32], "notes", &row_id,
+            )
+            .to_string();
+            let row = connection
+                .query_row(
+                    "SELECT audience, body, _updated_at FROM notes WHERE id = ?1",
+                    [&row_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let route = connection
+                .query_row(
+                    "SELECT routing_id, _updated_at
+                     FROM _coven_row_routes
+                     WHERE table_name = 'notes' AND row_id = ?1",
+                    [&row_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let mirror = connection
+                .query_row(
+                    "SELECT circle_id, _updated_at
+                     FROM _coven_audience
+                     WHERE routing_id = ?1",
+                    [&routing_id],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            Ok(ScopedRoutingState { row, route, mirror })
+        })
+        .await
+        .expect("read scoped routing state")
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RoutingConflict {
+    MoveMove,
+    MoveEdit,
+    DeleteMove,
+    MoveLocal,
+}
+
+impl RoutingConflict {
+    fn store_id(self) -> &'static str {
+        match self {
+            Self::MoveMove => "routing-replay-move-move",
+            Self::MoveEdit => "routing-replay-move-edit",
+            Self::DeleteMove => "routing-replay-delete-move",
+            Self::MoveLocal => "routing-replay-move-local",
+        }
+    }
+}
+
+#[tokio::test]
+async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
+    const ROW_ID: &str = "01890a5d-ac96-774b-bcce-b302099c3f74";
+
+    for conflict in [
+        RoutingConflict::MoveMove,
+        RoutingConflict::MoveEdit,
+        RoutingConflict::DeleteMove,
+        RoutingConflict::MoveLocal,
+    ] {
+        let founder = open_scoped_replay_database();
+        let identity = crate::keys::UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &founder,
+            conflict.store_id(),
+            identity.clone(),
+        )
+        .await
+        .expect("create scoped replay Store");
+        store.home.sort_listings();
+        store
+            .open_into(&founder)
+            .await
+            .expect("open founder scoped replay Store");
+        let founder_device = founder
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load scoped replay founder device")
+            .expect("scoped replay founder device exists");
+        let loaded = store
+            .loaded_store(&founder)
+            .await
+            .expect("load founder Store operations");
+        let first_circle = loaded
+            .create_circle(
+                &founder_device,
+                "0000000001000-0000-owner",
+                "First",
+                &identity,
+            )
+            .await
+            .expect("create first routing-conflict Circle");
+        let second_circle = loaded
+            .create_circle(
+                &founder_device,
+                "0000000001001-0000-owner",
+                "Second",
+                &identity,
+            )
+            .await
+            .expect("create second routing-conflict Circle");
+        scoped_host_exec(
+            &founder,
+            format!(
+                "INSERT INTO notes VALUES (
+                     '{ROW_ID}', NULL, 'base', '0000000002000-0000-base'
+                 );"
+            ),
+        )
+        .await;
+        let (_founder_temp, founder_dir) = crate::sync::test_helpers::temp_store_dir();
+        assert!(store
+            .publish_pending(&founder, &founder_dir)
+            .await
+            .expect("publish scoped replay base"));
+
+        let first_writer = open_scoped_replay_database();
+        let second_writer = open_scoped_replay_database();
+        let progressive = open_scoped_replay_database();
+        let complete = open_scoped_replay_database();
+        for participant in [&first_writer, &second_writer, &progressive, &complete] {
+            crate::sync::test_helpers::install_active_device_fixture(
+                &store,
+                &founder,
+                participant,
+                &identity,
+                "2026-07-22T00:00:00Z",
+            )
+            .await
+            .expect("activate scoped replay device");
+        }
+        let (_first_temp, first_dir) = crate::sync::test_helpers::temp_store_dir();
+        let (_second_temp, second_dir) = crate::sync::test_helpers::temp_store_dir();
+        let (_progressive_temp, progressive_dir) = crate::sync::test_helpers::temp_store_dir();
+        let (_complete_temp, complete_dir) = crate::sync::test_helpers::temp_store_dir();
+        for (participant, directory) in [
+            (&first_writer, &first_dir),
+            (&second_writer, &second_dir),
+            (&progressive, &progressive_dir),
+            (&complete, &complete_dir),
+        ] {
+            let pulled = pull_scoped(participant, &store, &identity, directory).await;
+            assert!(pulled.held_positions.is_empty(), "{conflict:?}: {pulled:?}");
+        }
+
+        let mut writers = [
+            (
+                local_store_stream_id(&first_writer, &store, &identity).await,
+                &first_writer,
+                &first_dir,
+            ),
+            (
+                local_store_stream_id(&second_writer, &store, &identity).await,
+                &second_writer,
+                &second_dir,
+            ),
+        ];
+        writers.sort_by_key(|writer| writer.0);
+        let (_, canonical_earlier, canonical_earlier_dir) = writers[0];
+        let (_, canonical_later, canonical_later_dir) = writers[1];
+
+        let (canonical_later_sql, canonical_earlier_sql) = match conflict {
+            RoutingConflict::MoveMove => (
+                format!(
+                    "UPDATE notes
+                     SET audience = '{first_circle}', body = 'first move',
+                         _updated_at = '0000000003000-0000-first'
+                     WHERE id = '{ROW_ID}';"
+                ),
+                format!(
+                    "UPDATE notes
+                     SET audience = '{second_circle}', body = 'second move',
+                         _updated_at = '0000000004000-0000-second'
+                     WHERE id = '{ROW_ID}';"
+                ),
+            ),
+            RoutingConflict::MoveEdit => (
+                format!(
+                    "UPDATE notes
+                     SET audience = '{first_circle}', body = 'moved',
+                         _updated_at = '0000000003000-0000-move'
+                     WHERE id = '{ROW_ID}';"
+                ),
+                format!(
+                    "UPDATE notes
+                     SET body = 'edited', _updated_at = '0000000004000-0000-edit'
+                     WHERE id = '{ROW_ID}';"
+                ),
+            ),
+            RoutingConflict::DeleteMove => (
+                format!(
+                    "UPDATE notes
+                     SET audience = '{first_circle}', body = 'moved',
+                         _updated_at = '0000000003000-0000-move'
+                     WHERE id = '{ROW_ID}';"
+                ),
+                format!("DELETE FROM notes WHERE id = '{ROW_ID}';"),
+            ),
+            RoutingConflict::MoveLocal => (
+                format!(
+                    "UPDATE notes
+                     SET audience = '{first_circle}', body = 'moved',
+                         _updated_at = '0000000003000-0000-move'
+                     WHERE id = '{ROW_ID}';"
+                ),
+                format!(
+                    "UPDATE notes
+                     SET audience = 'local', body = 'local',
+                         _updated_at = '0000000004000-0000-local'
+                     WHERE id = '{ROW_ID}';"
+                ),
+            ),
+        };
+
+        scoped_host_exec(canonical_later, canonical_later_sql).await;
+        assert!(store
+            .publish_pending(canonical_later, canonical_later_dir)
+            .await
+            .expect("publish canonical-later routing conflict"));
+        let first_pull = pull_scoped(&progressive, &store, &identity, &progressive_dir).await;
+        assert!(
+            first_pull.held_positions.is_empty(),
+            "{conflict:?}: {first_pull:?}"
+        );
+
+        scoped_host_exec(canonical_earlier, canonical_earlier_sql).await;
+        assert!(store
+            .publish_pending(canonical_earlier, canonical_earlier_dir)
+            .await
+            .expect("publish canonical-earlier routing conflict"));
+        let progressive_pull = pull_scoped(&progressive, &store, &identity, &progressive_dir).await;
+        let complete_pull = pull_scoped(&complete, &store, &identity, &complete_dir).await;
+        assert!(
+            progressive_pull.held_positions.is_empty(),
+            "{conflict:?}: {progressive_pull:?}"
+        );
+        assert!(
+            complete_pull.held_positions.is_empty(),
+            "{conflict:?}: {complete_pull:?}"
+        );
+
+        let progressive_state = scoped_routing_state(&progressive, ROW_ID).await;
+        let complete_state = scoped_routing_state(&complete, ROW_ID).await;
+        assert_eq!(
+            progressive_state, complete_state,
+            "{conflict:?} must converge regardless of discovery grouping"
+        );
+        match conflict {
+            RoutingConflict::MoveMove => {
+                assert_eq!(
+                    progressive_state.row.as_ref().map(|row| row.0.clone()),
+                    Some(Some(second_circle.to_string()))
+                );
+            }
+            RoutingConflict::MoveEdit => {
+                assert_eq!(
+                    progressive_state.row.as_ref().map(|row| row.0.clone()),
+                    Some(Some(first_circle.to_string()))
+                );
+            }
+            RoutingConflict::DeleteMove | RoutingConflict::MoveLocal => {
+                assert_eq!(
+                    progressive_state,
+                    ScopedRoutingState {
+                        row: None,
+                        route: None,
+                        mirror: None,
+                    },
+                    "{conflict:?} must remove every remote routing representation"
+                );
+            }
+        }
+    }
 }
 
 #[test]

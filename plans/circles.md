@@ -62,6 +62,14 @@ rebuild the deleted choice.
   images; pull recomputes every private routing identifier before application.
 - Audience moves publish the Store mirror and destination image without a
   source package.
+- Store and Circle row packages are filtered against the winning Store mirror.
+  A private route is authenticated against the audience and stamp of its exact
+  companion Store transition before the current winner is considered.
+- Routing audience and ordinary row content resolve independently. An eligible
+  destination image sets the root audience selected by the mirror while normal
+  merge rules retain newer concurrent content.
+- Move/move, move/edit, delete/move, and move/Local converge after progressive
+  or complete concurrent discovery.
 - Host commit and remote materialization validate every scoped row's final
   synchronized foreign keys, including unchanged descendants.
 - Store snapshots contain only Store rows and their authenticated private
@@ -76,8 +84,6 @@ rebuild the deleted choice.
 
 - use the authenticated routing boundary for Circle snapshot, bootstrap, and
   restore images;
-- finish adversarial arrival-order coverage for routing moves, deletes, and
-  concurrent edits;
 - complete Circle membership, access, epoch close, rotation, conflict
   resolution, deletion, and durable restart;
 - add Circle bootstrap, acknowledgement, snapshot, restore, and reclamation;
@@ -92,8 +98,9 @@ rebuild the deleted choice.
 1. **In progress.** Schema contracts, row identity, host and pull routing
    authentication, destination-only moves, and final-component validation are
    implemented. Store snapshot creation, bootstrap, and restore installation
-   use the same authenticated routing boundary. Circle images and adversarial
-   arrival-order coverage must use and verify it.
+   use the same authenticated routing boundary. Adversarial routing arrival
+   orders converge through independent audience and content resolution. Circle
+   images must use and verify the same boundary.
 1. Finish Circle authority, roster, metadata, access, epoch, and lifecycle
    operations.
 1. Finish Circle packages, pull, bootstrap, acknowledgement, snapshots,
@@ -331,10 +338,12 @@ For each accepted Store commit:
 
 1. apply its Store routing mirror changes;
 1. determine the winning audience for every referenced `RowRoutingId`;
-1. decode and authenticate private route rows;
+1. decode private route rows and authenticate each against the audience and
+   stamp of its exact companion Store transition;
 1. omit row operations whose package audience does not match the winning
    mirror;
-1. apply eligible Store and Circle rows with deterministic merge semantics;
+1. apply eligible Store and Circle rows with deterministic content merge
+   semantics, then set scoped root audiences from the winning mirror;
 1. prune locally materialized roots whose mirror names another audience or no
    audience;
 1. validate the final foreign-key component and blob references; and
@@ -716,6 +725,8 @@ The Store protocol preserves causality and converges deterministically:
   frontier advancement;
 - different-column updates to one row are three-way merged;
 - same-column conflicts use `_updated_at` ordering;
+- audience transitions resolve through the Store mirror independently from
+  ordinary row-content conflicts;
 - deletes win over concurrent edits;
 - foreign-key-dependent changes wait for their exact parent history; and
 - non-foreign-key uniqueness or check-constraint conflicts reject the incoming

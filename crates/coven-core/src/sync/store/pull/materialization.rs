@@ -449,7 +449,6 @@ pub(super) async fn apply_candidate(
 pub(crate) struct PreparedMergeMaterializationPackage {
     pub(crate) package: AudiencePackage,
     pub(crate) changeset: ValidatedChangeset<Vec<u8>>,
-    pub(crate) cleanup: Vec<LocalBlobCleanupIntent>,
 }
 
 async fn prepare_merge_candidate_package(
@@ -508,18 +507,14 @@ async fn prepare_merge_candidate_package(
         }
         return Ok(Err(HeldStorePositionReason::BlobDownloadFailed));
     }
-    let cleanup = match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
-        Ok(cleanup) => cleanup,
-        Err(error) => {
-            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
-                error.to_string(),
-            )))
-        }
-    };
+    if let Err(error) = local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
+        return Ok(Err(HeldStorePositionReason::InvalidChangeset(
+            error.to_string(),
+        )));
+    }
     Ok(Ok(PreparedMergeMaterializationPackage {
         package,
         changeset,
-        cleanup,
     }))
 }
 
@@ -543,6 +538,206 @@ pub(crate) struct AppliedMergeMaterialization {
     pub(crate) outcome: ApplyOutcome,
     pub(crate) max_updated_at: Option<super::hlc::Timestamp>,
     pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
+}
+
+enum MergeSubsetOutcome {
+    Applied(Vec<crate::sync::apply::WinningRow>),
+    ConstraintConflict(Vec<String>),
+}
+
+impl MergeSubsetOutcome {
+    fn extend_winning_rows(
+        self,
+        winning_rows: &mut Vec<crate::sync::apply::WinningRow>,
+    ) -> Result<(), Vec<String>> {
+        match self {
+            Self::Applied(rows) => {
+                winning_rows.extend(rows);
+                Ok(())
+            }
+            Self::ConstraintConflict(tables) => Err(tables),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_merge_subset_on(
+    conn: &rusqlite::Transaction<'_>,
+    blob_decls: &BlobDecls,
+    gates: &super::gate::Gates,
+    routing_key: Option<&super::circle::RowRoutingKey>,
+    source: &ValidatedChangeset<Vec<u8>>,
+    bytes: Vec<u8>,
+    package_audience: Option<&super::circle::Audience>,
+    timestamp_policy: IncomingTimestampPolicy,
+    changeset_max: &mut Option<super::hlc::Timestamp>,
+    returned_changes: &mut Vec<RowChange>,
+    package_reported_fk_violation: &mut bool,
+) -> Result<MergeSubsetOutcome, DbError> {
+    let applied_changeset = source
+        .validate_subset(bytes.clone())
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    let actual_changes = crate::changeset::walk(&bytes).map_err(DbError::Message)?;
+    if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
+        advance_max_updated_at(
+            changeset_max,
+            &actual_changes,
+            source.schema(),
+            receiver_wall_ms,
+        );
+    }
+    returned_changes.extend(
+        actual_changes
+            .iter()
+            .filter(|change| !super::gate::is_routing_table(&change.table))
+            .cloned(),
+    );
+    let apply =
+        resolve_and_apply_changeset_with_policy_on(conn, applied_changeset, timestamp_policy)?;
+    if !apply.constraint_conflict_tables.is_empty() {
+        return Ok(MergeSubsetOutcome::ConstraintConflict(
+            apply.constraint_conflict_tables,
+        ));
+    }
+    *package_reported_fk_violation |= apply.had_fk_violations;
+    if let Some(package_audience) = package_audience {
+        super::gate::align_inbound_scoped_root_audiences(
+            conn,
+            &bytes,
+            package_audience,
+            gates,
+            routing_key.ok_or_else(|| {
+                DbError::Message(
+                    "scoped audience application requires a row-routing key".to_string(),
+                )
+            })?,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    }
+    let winning_rows =
+        crate::sync::apply::current_winning_rows_with_schema(conn, source.schema(), &bytes)?;
+    let old_changes = crate::changeset::walk_old(&bytes).map_err(DbError::Message)?;
+    let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    for intent in cleanup {
+        local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
+    }
+    Ok(MergeSubsetOutcome::Applied(winning_rows))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_merge_package_on(
+    conn: &rusqlite::Transaction<'_>,
+    blob_decls: &BlobDecls,
+    gates: &super::gate::Gates,
+    routing_key: Option<&super::circle::RowRoutingKey>,
+    package: &AudiencePackage,
+    changeset: &ValidatedChangeset<Vec<u8>>,
+    store_audience_transitions: &super::gate::StoreAudienceTransitions,
+    timestamp_policy: IncomingTimestampPolicy,
+    changeset_max: &mut Option<super::hlc::Timestamp>,
+    returned_changes: &mut Vec<RowChange>,
+    package_reported_fk_violation: &mut bool,
+) -> Result<MergeSubsetOutcome, DbError> {
+    let mut winning_rows = Vec::new();
+    match package.audience() {
+        PackageAudience::Store if gates.has_scoped_graph() => {
+            let routing_key = routing_key.ok_or_else(|| {
+                DbError::Message(
+                    "scoped Store package application requires a row-routing key".to_string(),
+                )
+            })?;
+            let inbound = super::gate::normalize_inbound_store_changeset(
+                conn,
+                package.changeset(),
+                gates,
+                routing_key,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            if let Err(tables) = apply_merge_subset_on(
+                conn,
+                blob_decls,
+                gates,
+                Some(routing_key),
+                changeset,
+                inbound.mirror,
+                None,
+                timestamp_policy,
+                changeset_max,
+                returned_changes,
+                package_reported_fk_violation,
+            )?
+            .extend_winning_rows(&mut winning_rows)
+            {
+                return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+            }
+            let rows =
+                super::gate::filter_inbound_store_rows(conn, &inbound.rows, gates, routing_key)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+            if let Err(tables) = apply_merge_subset_on(
+                conn,
+                blob_decls,
+                gates,
+                Some(routing_key),
+                changeset,
+                rows,
+                Some(&super::circle::Audience::Store),
+                timestamp_policy,
+                changeset_max,
+                returned_changes,
+                package_reported_fk_violation,
+            )?
+            .extend_winning_rows(&mut winning_rows)
+            {
+                return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+            }
+        }
+        PackageAudience::Store => {
+            return apply_merge_subset_on(
+                conn,
+                blob_decls,
+                gates,
+                None,
+                changeset,
+                package.changeset().to_vec(),
+                None,
+                timestamp_policy,
+                changeset_max,
+                returned_changes,
+                package_reported_fk_violation,
+            );
+        }
+        PackageAudience::Circle { circle_id, .. } => {
+            let routing_key = routing_key.ok_or_else(|| {
+                DbError::Message(
+                    "Circle package application requires a row-routing key".to_string(),
+                )
+            })?;
+            let rows = super::gate::filter_inbound_circle_changeset(
+                conn,
+                package.changeset(),
+                *circle_id,
+                store_audience_transitions,
+                gates,
+                routing_key,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            return apply_merge_subset_on(
+                conn,
+                blob_decls,
+                gates,
+                Some(routing_key),
+                changeset,
+                rows,
+                Some(&super::circle::Audience::Circle(*circle_id)),
+                timestamp_policy,
+                changeset_max,
+                returned_changes,
+                package_reported_fk_violation,
+            );
+        }
+    }
+    Ok(MergeSubsetOutcome::Applied(winning_rows))
 }
 
 pub(crate) fn apply_prepared_merge_materialization_on(
@@ -598,84 +793,39 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         .iter()
         .map(|prepared| prepared.package.clone())
         .collect::<Vec<_>>();
+    let store_audience_transitions = packages
+        .iter()
+        .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
+        .map(|prepared| super::gate::store_audience_transitions(prepared.package.changeset()))
+        .transpose()
+        .map_err(|error| DbError::Message(error.to_string()))?
+        .unwrap_or_default();
     for prepared in packages {
-        let PreparedMergeMaterializationPackage {
-            package,
-            changeset,
-            cleanup,
-        } = prepared;
-        let applied_bytes = match package.audience() {
-            PackageAudience::Store => {
-                if gates.has_scoped_graph() {
-                    super::gate::normalize_inbound_private_routes(
-                        conn,
-                        package.changeset(),
-                        gates,
-                        routing_key.ok_or_else(|| {
-                            DbError::Message(
-                                "scoped Store package application requires a row-routing key"
-                                    .to_string(),
-                            )
-                        })?,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                } else {
-                    package.changeset().to_vec()
-                }
-            }
-            PackageAudience::Circle { circle_id, .. } => {
-                super::gate::filter_inbound_circle_changeset(
-                    conn,
-                    package.changeset(),
-                    *circle_id,
-                    gates,
-                    routing_key.ok_or_else(|| {
-                        DbError::Message(
-                            "Circle package application requires a row-routing key".to_string(),
-                        )
-                    })?,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?
+        let PreparedMergeMaterializationPackage { package, changeset } = prepared;
+        let winning_rows = match apply_merge_package_on(
+            conn,
+            blob_decls,
+            gates,
+            routing_key,
+            &package,
+            &changeset,
+            &store_audience_transitions,
+            timestamp_policy,
+            &mut changeset_max,
+            &mut returned_changes,
+            &mut package_reported_fk_violation,
+        )? {
+            MergeSubsetOutcome::Applied(rows) => rows,
+            MergeSubsetOutcome::ConstraintConflict(tables) => {
+                return Ok(AppliedMergeMaterialization {
+                    outcome: ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(
+                        tables,
+                    )),
+                    max_updated_at: None,
+                    write_status_notifications: Vec::new(),
+                });
             }
         };
-        let applied_changeset = changeset
-            .validate_subset(applied_bytes.clone())
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let actual_changes = crate::changeset::walk(&applied_bytes).map_err(DbError::Message)?;
-        if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
-            advance_max_updated_at(
-                &mut changeset_max,
-                &actual_changes,
-                changeset.schema(),
-                receiver_wall_ms,
-            );
-        }
-        returned_changes.extend(
-            actual_changes
-                .iter()
-                .filter(|change| !super::gate::is_routing_table(&change.table))
-                .cloned(),
-        );
-        let apply =
-            resolve_and_apply_changeset_with_policy_on(conn, applied_changeset, timestamp_policy)?;
-        if !apply.constraint_conflict_tables.is_empty() {
-            return Ok(AppliedMergeMaterialization {
-                outcome: ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(
-                    apply.constraint_conflict_tables,
-                )),
-                max_updated_at: None,
-                write_status_notifications: Vec::new(),
-            });
-        }
-        package_reported_fk_violation |= apply.had_fk_violations;
-        let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
-            conn,
-            changeset.schema(),
-            &applied_bytes,
-        )?;
-        for intent in cleanup {
-            local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
-        }
         let retained = crate::sync::store::database::StoreDatabase::retained_audience_package(
             &commit,
             &commit_ref,
@@ -716,9 +866,10 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         .map_err(DbError::from)?;
     drop(removal_session);
     let removed = crate::changeset::walk_old(&removal_changeset).map_err(DbError::Message)?;
-    let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &[])
+    let removal_changes = crate::changeset::walk(&removal_changeset).map_err(DbError::Message)?;
+    let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &removal_changes)
         .map_err(|error| DbError::Message(error.to_string()))?;
-    returned_changes.extend(crate::changeset::walk(&removal_changeset).map_err(DbError::Message)?);
+    returned_changes.extend(removal_changes);
     for intent in removal_cleanup {
         local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
     }

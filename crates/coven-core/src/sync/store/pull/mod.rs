@@ -11,7 +11,7 @@ use super::membership as membership_ops;
 use super::reclaim as store_reclaim;
 use super::*;
 use crate::blob::decl::BlobDecls;
-use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
+use crate::blob::local_cleanup;
 use crate::changeset::RowChange;
 use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
