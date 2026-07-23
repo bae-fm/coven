@@ -119,7 +119,7 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                consume_store_creation_probes_on(&tx, &graph)?;
+                super::store_creation_attempts::consume_store_creation_probes_on(&tx, &graph)?;
                 tx.execute(
                     "INSERT INTO local_store_protocol_root \
                  (singleton, store_root_hash, store_protocol_root_bytes, prepared_object) \

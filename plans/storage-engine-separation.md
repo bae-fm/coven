@@ -80,6 +80,10 @@ This ownership work completes the Store foundation required by
   construction of the runnable Store. Cycle receives the constructed Store and
   local device identity as one result rather than assembling Store authority
   from raw database and protocol-root operations.
+- Complete: protocol-root creation, opening, rollback, provider probes, and the
+  durable creation-attempt journal live below Store ownership. Typed probe
+  consumption moved from the raw database layer to `StoreDatabase`, and the
+  former root `sync::store_protocol_root` module is absent.
 - Complete: Store creation, device registration, join challenges,
   acknowledgements, snapshot publication, and their durable transitions live
   on `StoreDatabase`; the former root `Database` workflow modules are absent.
@@ -109,9 +113,8 @@ This ownership work completes the Store foundation required by
   assignment, while each resolver's prior Owner grant is retired and replaced
   by the signed resolution authority.
 - Remaining: route the remaining application commands through the concrete
-  Store owner, move protocol-root implementation below Store ownership, make
-  Store implementation modules private, reduce temporary visibility, and seal
-  the boundary.
+  Store owner, make the remaining Store implementation modules private, reduce
+  temporary visibility, and seal the boundary.
 
 ## Final dependency direction
 

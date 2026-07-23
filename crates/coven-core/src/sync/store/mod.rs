@@ -29,6 +29,10 @@ mod owner;
 pub mod owner_promotion;
 pub(crate) mod package_preparation;
 pub(crate) mod preparation;
+#[cfg(not(any(test, feature = "test-utils")))]
+mod protocol_root;
+#[cfg(any(test, feature = "test-utils"))]
+pub(in crate::sync) mod protocol_root;
 pub(crate) mod publication;
 mod pull;
 mod reclaim;

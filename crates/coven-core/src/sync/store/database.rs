@@ -105,7 +105,9 @@ impl StoreDatabase {
         self.runtime.membership_mutation.clone().lock_owned().await
     }
 
-    pub(in crate::sync) async fn lock_store_creation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(in crate::sync::store) async fn lock_store_creation(
+        &self,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.store_creation.clone().lock_owned().await
     }
 

@@ -2964,7 +2964,7 @@ async fn create_exclusion_test_store(
     storage: &CloudSyncStorage,
     signer: &UserKeypair,
 ) {
-    Box::pin(crate::sync::store_protocol_root::create_store(
+    Box::pin(crate::sync::store::protocol_root::create_store(
         &store_database(db),
         storage,
         "device-exclusion-store",

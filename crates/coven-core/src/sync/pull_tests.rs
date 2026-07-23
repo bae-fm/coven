@@ -403,7 +403,7 @@ impl TestStoreStorage for CloudSyncStorage {
             .map_err(|error| error.to_string())?
             .is_none()
         {
-            crate::sync::store_protocol_root::create_store(
+            crate::sync::store::protocol_root::create_store(
                 &crate::sync::store::database::StoreDatabase::new(db),
                 self,
                 self.store_id(),
@@ -517,7 +517,7 @@ async fn pull_exact_store_into(
         .expect("source Store has exact root authority");
     let destination_store = crate::sync::store::database::StoreDatabase::new(destination);
     let protocol_root =
-        crate::sync::store_protocol_root::open_store(&destination_store, storage, &root)
+        crate::sync::store::protocol_root::open_store(&destination_store, storage, &root)
             .await
             .expect("open exact Store on destination");
     crate::sync::store::anchor_owner_membership(

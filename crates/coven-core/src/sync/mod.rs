@@ -42,7 +42,6 @@ pub mod store_commit;
 #[cfg(test)]
 mod store_history_checkpoint_tests;
 pub mod store_objects;
-pub mod store_protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_helpers;
 #[cfg(test)]

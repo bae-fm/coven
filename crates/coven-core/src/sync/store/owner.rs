@@ -55,7 +55,7 @@ impl Store {
         founder_timestamp: &str,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        let protocol_root = crate::sync::store_protocol_root::create_store(
+        let protocol_root = crate::sync::store::protocol_root::create_store(
             &database,
             &storage,
             founder_timestamp,
@@ -73,7 +73,7 @@ impl Store {
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
         let protocol_root =
-            crate::sync::store_protocol_root::open_store(&database, &*storage, expected_root)
+            crate::sync::store::protocol_root::open_store(&database, &*storage, expected_root)
                 .await
                 .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         Self::finish_initialization(database, storage, protocol_root, identity).await

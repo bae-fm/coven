@@ -3,40 +3,41 @@
 use crate::keys::UserKeypair;
 use crate::sync::store::database::StoreDatabase;
 
-use super::membership::{AuthorHead, MembershipHeadRef};
-use super::storage::{ProtocolObjectDomain, SyncStorage};
-use super::store_commit::{
+use crate::sync::membership::{AuthorHead, MembershipHeadRef};
+use crate::sync::storage::{ProtocolObjectDomain, SyncStorage};
+use crate::sync::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
     StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
     StoreRootRef, SuccessorLink,
 };
-use super::store_objects::StoreObjectError;
+use crate::sync::store_objects::StoreObjectError;
 
-pub(crate) const STORE_CREATION_ATTEMPT_STATE_KEY: &str = "store_creation_attempt_v1";
+pub(in crate::sync::store) const STORE_CREATION_ATTEMPT_STATE_KEY: &str =
+    "store_creation_attempt_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreCreationProbeIds {
-    exact_slots: super::provider::ProviderProbeId,
+pub(in crate::sync::store) struct StoreCreationProbeIds {
+    exact_slots: crate::sync::provider::ProviderProbeId,
 }
 
 impl StoreCreationProbeIds {
-    pub(crate) fn exact_slots(&self) -> super::provider::ProviderProbeId {
+    pub(in crate::sync::store) fn exact_slots(&self) -> crate::sync::provider::ProviderProbeId {
         self.exact_slots
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreCreationAuthority {
+pub(in crate::sync::store) struct StoreCreationAuthority {
     pub creation_id: StoreCreationId,
-    pub founder_grant: super::membership::MembershipGrantId,
-    pub provider_admin_grant: super::provider::ProviderAdminGrantId,
+    pub founder_grant: crate::sync::membership::MembershipGrantId,
+    pub provider_admin_grant: crate::sync::provider::ProviderAdminGrantId,
     pub probes: StoreCreationProbeIds,
-    pub binding: super::storage::ResolvedProviderBinding,
-    pub access: super::provider::ProviderAccessLocator,
+    pub binding: crate::sync::storage::ResolvedProviderBinding,
+    pub access: crate::sync::provider::ProviderAccessLocator,
     pub founder_pubkey: String,
     pub founder_timestamp: String,
     pub schema_version: u32,
@@ -45,41 +46,41 @@ pub(crate) struct StoreCreationAuthority {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreRootReservation {
+pub(in crate::sync::store) struct StoreRootReservation {
     pub authority: StoreCreationAuthority,
     pub root_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderRegistrationReservation {
+pub(in crate::sync::store) struct FounderRegistrationReservation {
     pub root: StoreRootReservation,
     pub registration_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipReservation {
+pub(in crate::sync::store) struct MembershipReservation {
     pub founder: FounderRegistrationReservation,
     pub first_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DescriptorReservation {
+pub(in crate::sync::store) struct DescriptorReservation {
     pub membership: MembershipReservation,
     pub recovery_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderMembershipPublicationReservation {
+pub(in crate::sync::store) struct FounderMembershipPublicationReservation {
     pub next_head_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderGraphReservation {
+pub(in crate::sync::store) struct FounderGraphReservation {
     pub descriptor: DescriptorReservation,
     pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
@@ -90,35 +91,35 @@ pub(crate) struct FounderGraphReservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderStoreCommitsReservation {
+pub(in crate::sync::store) struct FounderStoreCommitsReservation {
     pub descriptor: DescriptorReservation,
     pub store_commits: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderAcknowledgementsReservation {
+pub(in crate::sync::store) struct FounderAcknowledgementsReservation {
     pub store_commits: FounderStoreCommitsReservation,
     pub acknowledgements: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderSnapshotsReservation {
+pub(in crate::sync::store) struct FounderSnapshotsReservation {
     pub acknowledgements: FounderAcknowledgementsReservation,
     pub snapshots: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FounderNextAckReservation {
+pub(in crate::sync::store) struct FounderNextAckReservation {
     pub snapshots: FounderSnapshotsReservation,
     pub next_ack_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum StoreCreationAttempt {
+pub(in crate::sync::store) enum StoreCreationAttempt {
     Initialized(StoreCreationAuthority),
     RootReserved(StoreRootReservation),
     FounderRegistrationReserved(FounderRegistrationReservation),
@@ -132,7 +133,7 @@ pub(crate) enum StoreCreationAttempt {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StoreProtocolRootError {
+pub(in crate::sync) enum StoreProtocolRootError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
     #[error("Store protocol root database state: {0}")]
@@ -205,26 +206,26 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 
 async fn durable_descriptor_reservation(
     db: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<DescriptorReservation, StoreProtocolRootError> {
-    let binding = super::storage::SyncStorage::provider_binding(storage)
+    let binding = crate::sync::storage::SyncStorage::provider_binding(storage)
         .await
         .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
     let probes = StoreCreationProbeIds {
-        exact_slots: super::provider::ProviderProbeId::from_bytes(
+        exact_slots: crate::sync::provider::ProviderProbeId::from_bytes(
             crate::encryption::generate_random_key(),
         ),
     };
-    let access = super::provider::ProviderAccessLocator::for_current_administrator(&binding)
+    let access = crate::sync::provider::ProviderAccessLocator::for_current_administrator(&binding)
         .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
     let initialized = StoreCreationAttempt::Initialized(StoreCreationAuthority {
         creation_id: StoreCreationId::from_random_bytes(crate::encryption::generate_random_key()),
-        founder_grant: super::membership::MembershipGrantId(ObjectHash::from_digest(
+        founder_grant: crate::sync::membership::MembershipGrantId(ObjectHash::from_digest(
             crate::encryption::generate_random_key(),
         )),
-        provider_admin_grant: super::provider::ProviderAdminGrantId::from_random_bytes(
+        provider_admin_grant: crate::sync::provider::ProviderAdminGrantId::from_random_bytes(
             crate::encryption::generate_random_key(),
         ),
         probes,
@@ -250,7 +251,7 @@ async fn durable_descriptor_reservation(
             "durable Store creation authority differs from this creation request".to_string(),
         ));
     }
-    let allocation_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let allocation_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(authority.creation_id.to_string().as_bytes()),
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -258,7 +259,7 @@ async fn durable_descriptor_reservation(
         let root_slot = storage
             .allocate_protocol_slot(
                 &allocation_context,
-                super::store_commit::store_protocol_root_logical_key(),
+                crate::sync::store_commit::store_protocol_root_logical_key(),
                 ".json",
             )
             .await
@@ -273,9 +274,10 @@ async fn durable_descriptor_reservation(
         attempt = next;
     }
     if let StoreCreationAttempt::RootReserved(root) = &attempt {
-        let prefix =
-            super::store_commit::founder_registration_semantic_prefix(root.authority.creation_id);
-        let context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let prefix = crate::sync::store_commit::founder_registration_semantic_prefix(
+            root.authority.creation_id,
+        );
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             allocation_context.store_root_hash(),
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
@@ -294,12 +296,12 @@ async fn durable_descriptor_reservation(
         attempt = next;
     }
     if let StoreCreationAttempt::FounderRegistrationReserved(founder) = &attempt {
-        let prefix = super::store_commit::founder_membership_head_semantic_prefix(
+        let prefix = crate::sync::store_commit::founder_membership_head_semantic_prefix(
             founder.root.authority.creation_id,
         );
-        let context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             allocation_context.store_root_hash(),
-            super::storage::ProtocolObjectDomain::StoreMembershipHead,
+            crate::sync::storage::ProtocolObjectDomain::StoreMembershipHead,
         );
         let first_slot = storage
             .allocate_protocol_slot(&context, &prefix, ".json")
@@ -322,7 +324,7 @@ async fn durable_descriptor_reservation(
             authority.founder_grant.clone(),
             1,
         );
-        let context = super::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             allocation_context.store_root_hash(),
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
@@ -367,7 +369,7 @@ async fn durable_descriptor_reservation(
 
 async fn durable_founder_graph_reservation(
     db: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     descriptor: &DescriptorReservation,
     root: &StoreRootRef,
 ) -> Result<FounderGraphReservation, StoreProtocolRootError> {
@@ -387,8 +389,8 @@ async fn durable_founder_graph_reservation(
     let origin = StoreDeviceRegistrationOrigin::Founder {
         creation_id: authority.creation_id,
     };
-    let device = super::store_commit::StoreDeviceId::derive(root, &origin).to_string();
-    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let device = crate::sync::store_commit::StoreDeviceId::derive(root, &origin).to_string();
+    let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreAck,
     );
@@ -402,11 +404,11 @@ async fn durable_founder_graph_reservation(
         let store_commits = DeviceStreamAnchor::StoreAnnouncements {
             first_slot: storage
                 .allocate_protocol_slot(
-                    &super::storage::ProtocolObjectContext::signed_plaintext(
+                    &crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                         root.store_root_hash,
                         ProtocolObjectDomain::StoreHead,
                     ),
-                    &super::store_commit::head_slot_prefix(&device, 1),
+                    &crate::sync::store_commit::head_slot_prefix(&device, 1),
                     ".json",
                 )
                 .await
@@ -445,11 +447,11 @@ async fn durable_founder_graph_reservation(
             snapshots: DeviceStreamAnchor::StoreSnapshots {
                 first_slot: storage
                     .allocate_protocol_slot(
-                        &super::storage::ProtocolObjectContext::signed_plaintext(
+                        &crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
                             ProtocolObjectDomain::StoreSnapshotMeta,
                         ),
-                        &super::store_commit::snapshot_slot_prefix(&device, 0),
+                        &crate::sync::store_commit::snapshot_slot_prefix(&device, 0),
                         ".json",
                     )
                     .await
@@ -475,7 +477,7 @@ async fn durable_founder_graph_reservation(
         attempt = next;
     }
     if let StoreCreationAttempt::FounderNextAckReserved(current) = &attempt {
-        let founder_stream = super::membership::derive_founder_stream_id(
+        let founder_stream = crate::sync::membership::derive_founder_stream_id(
             &root.store_root_id.to_string(),
             &authority.founder_pubkey,
         );
@@ -488,9 +490,9 @@ async fn durable_founder_graph_reservation(
         let membership = FounderMembershipPublicationReservation {
             next_head_slot: storage
                 .allocate_protocol_slot(
-                    &super::storage::ProtocolObjectContext::signed_plaintext(
+                    &crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                         root.store_root_hash,
-                        super::storage::ProtocolObjectDomain::StoreMembershipHead,
+                        crate::sync::storage::ProtocolObjectDomain::StoreMembershipHead,
                     ),
                     &prefix,
                     ".json",
@@ -532,7 +534,7 @@ async fn durable_founder_graph_reservation(
 
 async fn prepare_founder_graph(
     db: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<Box<crate::database::DurableFounderGraph>, StoreProtocolRootError> {
@@ -540,7 +542,7 @@ async fn prepare_founder_graph(
         durable_descriptor_reservation(db, storage, founder_timestamp, signer).await?;
     let authority = &reservation.membership.founder.root.authority;
     let (first_exact, second_exact) = storage.exact_slot_probe_clients();
-    let exact_slots = super::provider::probe_exact_slots(
+    let exact_slots = crate::sync::provider::probe_exact_slots(
         first_exact,
         second_exact,
         db.sqlite(),
@@ -549,11 +551,11 @@ async fn prepare_founder_graph(
     )
     .await
     .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
-    let provider_admin = super::provider::FounderProviderAdminGrant {
+    let provider_admin = crate::sync::provider::FounderProviderAdminGrant {
         grant_id: authority.provider_admin_grant.clone(),
         provider: authority.binding.device.clone(),
         access: authority.access.clone(),
-        capability: super::provider::ProviderCapabilityProof { exact_slots },
+        capability: crate::sync::provider::ProviderCapabilityProof { exact_slots },
     };
     let founder_anchor = GrantStreamAnchor::StoreMembership {
         first_slot: reservation.membership.first_slot.clone(),
@@ -561,8 +563,8 @@ async fn prepare_founder_graph(
     let founder_recovery = GrantStreamAnchor::OwnerRecovery {
         first_slot: reservation.recovery_slot.clone(),
     };
-    let descriptor = super::store_commit::StoreCreationDescriptor {
-        version: super::store_commit::STORE_PROTOCOL_VERSION,
+    let descriptor = crate::sync::store_commit::StoreCreationDescriptor {
+        version: crate::sync::store_commit::STORE_PROTOCOL_VERSION,
         creation_id: authority.creation_id,
         provider: authority.binding.store.clone(),
         schema_version: authority.schema_version,
@@ -579,8 +581,8 @@ async fn prepare_founder_graph(
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     let root_id = root_value.descriptor.store_root_id();
     let root_hash = root_value.object_hash();
-    let root_prefix = super::store_commit::store_protocol_root_logical_key();
-    let root_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let root_prefix = crate::sync::store_commit::store_protocol_root_logical_key();
+    let root_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -604,7 +606,7 @@ async fn prepare_founder_graph(
         creation_id: authority.creation_id,
     };
     let (registration_value, registration_prepared) =
-        super::store::prepare_registration_for_origin(
+        crate::sync::store::prepare_registration_for_origin(
             storage,
             signer,
             root_ref.clone(),
@@ -632,7 +634,7 @@ async fn prepare_founder_graph(
             "founder registration has no acknowledgement anchor".to_string(),
         ));
     };
-    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root_hash,
         ProtocolObjectDomain::StoreAck,
     );
@@ -691,7 +693,7 @@ async fn prepare_founder_graph(
     let membership = {
         let founder_head_slot = reservation.membership.first_slot.clone();
         let founder_grant = authority.founder_grant.clone();
-        let founder = super::membership::founder_entry_for_creation(
+        let founder = crate::sync::membership::founder_entry_for_creation(
             &root_id.to_string(),
             root_value.descriptor.creation_id,
             signer,
@@ -701,21 +703,22 @@ async fn prepare_founder_graph(
             provider_admin,
         );
         let (entry_prepared, entry_ref) =
-            super::store_objects::prepare_membership_entry(storage, root_hash, &founder).await?;
-        let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
+            crate::sync::store_objects::prepare_membership_entry(storage, root_hash, &founder)
+                .await?;
+        let head_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root_hash,
-            super::storage::ProtocolObjectDomain::StoreMembershipHead,
+            crate::sync::storage::ProtocolObjectDomain::StoreMembershipHead,
         );
         let next_head_slot = &graph_reservation.membership.next_head_slot;
         let head_value = AuthorHead::signed(
             root_id.to_string(),
-            super::membership::MembershipHeadBody {
+            crate::sync::membership::MembershipHeadBody {
                 author_registration: registration_ref.clone(),
                 entry: entry_ref.clone(),
                 predecessor: None,
                 resolutions: Vec::new(),
                 successor: SuccessorLink {
-                    activation: super::store_commit::StreamActivation::grant_authorized(
+                    activation: crate::sync::store_commit::StreamActivation::grant_authorized(
                         root_ref.store_root_hash,
                         registration_ref.clone(),
                         founder_grant.clone(),
@@ -726,13 +729,15 @@ async fn prepare_founder_graph(
                     next_slot: next_head_slot.clone(),
                 },
             },
-            super::membership::MembershipHeadActivation::Direct,
+            crate::sync::membership::MembershipHeadActivation::Direct,
             &device_signer,
         );
         let head_bytes = serde_json::to_vec(&head_value)
             .expect("founder membership head serialization cannot fail");
         let founder_head_prefix =
-            super::store_commit::founder_membership_head_semantic_prefix(authority.creation_id);
+            crate::sync::store_commit::founder_membership_head_semantic_prefix(
+                authority.creation_id,
+            );
         let head_prepared = storage
             .prepare_protocol_object(
                 &head_context,
@@ -805,9 +810,11 @@ async fn rollback_founder_exact_objects(
     ]);
     let mut failures = Vec::new();
     for object in objects {
-        match super::store_objects::delete_exact_object(storage, &object).await {
+        match crate::sync::store_objects::delete_exact_object(storage, &object).await {
             Ok(())
-            | Err(StoreObjectError::Storage(super::storage::StorageError::SlotCollision(_))) => {}
+            | Err(StoreObjectError::Storage(crate::sync::storage::StorageError::SlotCollision(
+                _,
+            ))) => {}
             Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
         }
     }
@@ -820,7 +827,7 @@ async fn rollback_founder_exact_objects(
 
 async fn rollback_founder_publication(
     db: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     graph: &crate::database::DurableFounderGraph,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
@@ -835,9 +842,9 @@ async fn rollback_founder_publication(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn create_store(
+pub(in crate::sync) async fn create_store(
     database: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
@@ -919,7 +926,7 @@ pub(crate) async fn create_store(
 
 async fn publish_store_founder_graph(
     db: &StoreDatabase,
-    storage: &super::cloud_storage::CloudSyncStorage,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
     graph: &crate::database::DurableFounderGraph,
@@ -959,7 +966,7 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&graph.root.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let opened_root = super::store_objects::load_store_protocol_root(storage, &root_ref)
+    let opened_root = crate::sync::store_objects::load_store_protocol_root(storage, &root_ref)
         .await?
         .value;
     if opened_root != store_protocol_root {
@@ -970,7 +977,7 @@ async fn publish_store_founder_graph(
         .await
         .map_err(StoreObjectError::from)?;
     let registration =
-        super::store_objects::load_registration_ref(storage, &root_ref, &registration_ref)
+        crate::sync::store_objects::load_registration_ref(storage, &root_ref, &registration_ref)
             .await?
             .value;
     if registration != graph.registration.value {
@@ -982,7 +989,7 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&graph.initial_ack.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let initial_ack = super::store_objects::load_store_ack_ref(
+    let initial_ack = crate::sync::store_objects::load_store_ack_ref(
         storage,
         &root_ref,
         &graph.initial_ack_ref,
@@ -1012,7 +1019,7 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&membership.entry.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let loaded_entry = super::store_objects::load_membership_entry_ref(
+    let loaded_entry = crate::sync::store_objects::load_membership_entry_ref(
         storage,
         root_ref.store_root_hash,
         &membership.entry_ref,
@@ -1028,7 +1035,7 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&membership.head.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let loaded_head = super::store_objects::load_membership_head_ref(
+    let loaded_head = crate::sync::store_objects::load_membership_head_ref(
         storage,
         root_ref.store_root_hash,
         &membership.head_ref,
@@ -1056,13 +1063,13 @@ async fn publish_store_founder_graph(
     Ok(store_protocol_root)
 }
 
-pub(crate) async fn open_store(
+pub(in crate::sync) async fn open_store(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
     let db = database.sqlite();
-    let context = super::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -1070,7 +1077,7 @@ pub(crate) async fn open_store(
         .read_protocol_object(
             &context,
             &expected.object,
-            super::store_commit::store_protocol_root_logical_key(),
+            crate::sync::store_commit::store_protocol_root_logical_key(),
         )
         .await
         .map_err(StoreObjectError::from)?;
@@ -1091,7 +1098,7 @@ pub(crate) async fn open_store(
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
         .filter(|registration| registration.is_activated())
     {
-        let registration = super::store_commit::StoreDeviceRegistration::parse_at(
+        let registration = crate::sync::store_commit::StoreDeviceRegistration::parse_at(
             &local.registration_bytes,
             expected,
             local.device_id,
@@ -1399,11 +1406,11 @@ mod tests {
             .await
             .expect("read Store root reference")
             .expect("Store root exists");
-        let root = super::super::store_objects::load_store_protocol_root(&storage, &root_ref)
+        let root = crate::sync::store_objects::load_store_protocol_root(&storage, &root_ref)
             .await
             .expect("open exact opaque root");
         let registration =
-            super::super::store_objects::load_founder_registration(&storage, &root_ref)
+            crate::sync::store_objects::load_founder_registration(&storage, &root_ref)
                 .await
                 .expect("open exact opaque founder registration");
         let durable = crate::sync::store::database::StoreDatabase::new(&db)
@@ -1411,7 +1418,7 @@ mod tests {
             .await
             .expect("read durable founder registration")
             .expect("founder registration exists");
-        let ack = super::super::store_objects::load_store_ack_ref(
+        let ack = crate::sync::store_objects::load_store_ack_ref(
             &storage,
             &root_ref,
             &durable.initial_ack_ref,

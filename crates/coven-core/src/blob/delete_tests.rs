@@ -1808,26 +1808,13 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // Opening this exact Store under the established owner refuses the forged root
     // before a cycle can load membership or run GC.
     let joining_db = open_test_db();
-    let joining_store = crate::sync::store::database::StoreDatabase::new(&joining_db);
-    let result = match crate::sync::store_protocol_root::open_store(
-        &joining_store,
+    let result = crate::sync::test_helpers::open_exact_test_store_as(
+        &joining_db,
         &storage.storage,
         &storage.root,
+        &real_owner,
     )
-    .await
-    {
-        Ok(root) => crate::sync::store::anchor_owner_membership(
-            &storage.storage,
-            &joining_store,
-            &storage.root,
-            &root,
-            &real_owner,
-        )
-        .await
-        .map(|_| root)
-        .map_err(|error| error.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
+    .await;
     assert!(
         result.is_err(),
         "loading a chain refounded under a non-owner key refuses the cycle before \
@@ -1878,26 +1865,13 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     plant_tombstone(storage.home.as_ref(), &tombstone).await;
 
     let joining_db = open_test_db();
-    let joining_store = crate::sync::store::database::StoreDatabase::new(&joining_db);
-    let result = match crate::sync::store_protocol_root::open_store(
-        &joining_store,
+    let result = crate::sync::test_helpers::open_exact_test_store_as(
+        &joining_db,
         &storage.storage,
         &storage.root,
+        &real_owner,
     )
-    .await
-    {
-        Ok(root) => crate::sync::store::anchor_owner_membership(
-            &storage.storage,
-            &joining_store,
-            &storage.root,
-            &root,
-            &real_owner,
-        )
-        .await
-        .map(|_| root)
-        .map_err(|error| error.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
+    .await;
     assert!(
         result.is_err(),
         "an empty (wiped) chain under a pinned owner refuses the cycle at load, \

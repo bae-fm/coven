@@ -2722,7 +2722,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
         .await
         .expect("create exact Store");
     let opened_db = open_test_db();
-    let root = crate::sync::store_protocol_root::open_store(
+    let root = crate::sync::store::protocol_root::open_store(
         &store_database(&opened_db),
         &storage.storage,
         &storage.root,
@@ -2797,7 +2797,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
         .await
         .expect("create foreign exact Store");
     let fresh_db = open_test_db();
-    let foreign_root = crate::sync::store_protocol_root::open_store(
+    let foreign_root = crate::sync::store::protocol_root::open_store(
         &store_database(&fresh_db),
         &seeded.storage,
         &seeded.root,

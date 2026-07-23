@@ -1230,7 +1230,7 @@ pub async fn create_exact_test_store(
     signer: &UserKeypair,
 ) -> Result<crate::sync::store_commit::StoreRootRef, String> {
     let database = crate::sync::store::database::StoreDatabase::new(db);
-    Box::pin(crate::sync::store_protocol_root::create_store(
+    Box::pin(crate::sync::store::protocol_root::create_store(
         &database, storage, store_id, signer,
     ))
     .await
@@ -1240,6 +1240,20 @@ pub async fn create_exact_test_store(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "created test Store has no exact root reference".to_string())
+}
+
+pub async fn open_exact_test_store_as(
+    db: &Database,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    identity: &UserKeypair,
+) -> Result<(), String> {
+    let database = crate::sync::store::database::StoreDatabase::new(db);
+    let protocol_root = crate::sync::store::protocol_root::open_store(&database, storage, root)
+        .await
+        .map_err(|error| error.to_string())?;
+    crate::sync::store::anchor_owner_membership(storage, &database, root, &protocol_root, identity)
+        .await
 }
 
 pub async fn initialize_store_fixture(
@@ -2275,7 +2289,7 @@ impl TestStore {
     ) -> Result<crate::sync::membership::MembershipChain, String> {
         let database = crate::sync::store::database::StoreDatabase::new(db);
         let open =
-            crate::sync::store_protocol_root::open_store(&database, &self.storage, &self.root);
+            crate::sync::store::protocol_root::open_store(&database, &self.storage, &self.root);
         let root = open.await.map_err(|error| error.to_string())?;
         let ensure = crate::sync::store::anchor_owner_membership(
             &self.storage,

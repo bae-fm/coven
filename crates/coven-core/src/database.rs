@@ -159,7 +159,7 @@ use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
 pub(crate) use store_authority_records::{
-    consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,
+    ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
     install_store_root_authority_on, load_local_store_founder_graph_on,
     load_store_root_authority_on, validate_founder_graph, DurableFounderMembershipJournal,

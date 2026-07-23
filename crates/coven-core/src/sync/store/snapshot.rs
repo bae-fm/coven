@@ -928,7 +928,7 @@ mod tests {
         storage: &CloudSyncStorage,
         signer: &UserKeypair,
     ) -> (ObjectHash, String, MembershipChain) {
-        let root = crate::sync::store_protocol_root::create_store(
+        let root = crate::sync::store::protocol_root::create_store(
             &store_database(db),
             storage,
             "snapshot-exact-store",

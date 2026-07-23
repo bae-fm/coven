@@ -35,7 +35,7 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
 }
 
 async fn initialize(db: &Database, storage: &CloudSyncStorage, signer: &UserKeypair) {
-    crate::sync::store_protocol_root::create_store(
+    crate::sync::store::protocol_root::create_store(
         &store_database(db),
         storage,
         "ack-exact-store",
