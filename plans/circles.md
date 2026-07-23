@@ -443,16 +443,30 @@ activation before using it.
 
 ### Control state
 
-Circle control is a closed value:
+Circle control state is a closed value:
 
 ```rust
-enum CircleControl {
+enum CircleControlState {
     ActiveEpoch(ActiveCircleEpoch),
     EpochClose(EpochClose),
-    EpochCloseOutcome(EpochCloseOutcome),
     Deleted(DeletedCircle),
 }
+
+enum CircleEpochOrigin {
+    Founder,
+    Closed {
+        closed_epoch_id: CircleEpochId,
+        close_control: CircleControlCoord,
+        close_id: CircleEpochCloseId,
+        outcome_hash: ObjectHash,
+        cutoff: CommitFrontier,
+    },
+}
 ```
+
+The close outcome is an exact Owner-signed object at the close's reserved
+outcome slot. The successor `ActiveEpoch` names it through
+`CircleEpochOrigin::Closed`; it is not a parallel control-state variant.
 
 Derived local state is:
 
@@ -524,9 +538,14 @@ enum CircleOperationIntent {
 enum CircleOperationProgress {
     Ready(PreparedCircleTransition),
     WaitingForCloseResponses(EpochCloseProgress),
+    Finalizing(PreparedCircleTransition),
     Blocked(CircleOperationBlock),
 }
 ```
+
+`Finalizing` replaces the waiting payload atomically with the exact successor
+commit, outcome, bootstraps, and remote object ownership before publication.
+Its derived write identity is stable across restart.
 
 The prepared transition owns every exact immutable object it creates. Remote
 publication is idempotent. Local completion records activated state and clears
