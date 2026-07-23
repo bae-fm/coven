@@ -75,8 +75,8 @@ pub(crate) use audience::{
     live_row_audience, normalize_inbound_store_changeset, partition_outbound,
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
     store_audience_transitions, validate_scoped_foreign_key_audiences,
-    validate_snapshot_routing_state, AudiencePartition, CirclePartitionControl, RoutingChanges,
-    StoreAudienceTransitions,
+    validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
+    PartitionedAudienceWrite, RoutingChanges, StoreAudienceTransitions,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;

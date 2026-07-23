@@ -79,6 +79,12 @@ pub(crate) async fn prepare_store_payload(
 ) -> Result<PreparedStorePayload, SyncCycleError> {
     let mut drops = std::collections::BTreeMap::new();
     for fact in &blob_facts.blobs {
+        if matches!(
+            fact.audience_move,
+            Some(crate::database::StoreWriteBlobMoveDestination::Local)
+        ) {
+            continue;
+        }
         if fact.blob.provenance != crate::blob::Provenance::HostProvided {
             continue;
         }

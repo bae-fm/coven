@@ -1,4 +1,5 @@
 mod acknowledgements;
+mod audience_blob_staging;
 mod candidate_lifecycle;
 pub(super) mod candidate_records;
 mod circle_controls;
@@ -40,6 +41,8 @@ use crate::sync::remote_object::{
 use crate::sync::storage::PreparedExactObject;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
+
+pub use audience_blob_staging::HostWriteBlobStaging;
 
 #[derive(Clone, Default)]
 pub(crate) struct StoreDatabaseRuntime {

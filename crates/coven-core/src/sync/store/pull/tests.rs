@@ -318,6 +318,7 @@ async fn scoped_host_exec(database: &Database, sql: String) {
                 &gates,
                 &blob_decls,
                 Some(&routing),
+                None,
                 write_id,
                 |transaction| {
                     transaction

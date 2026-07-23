@@ -61,6 +61,7 @@ pub(crate) struct StoreWriteBlobFact {
     pub plaintext_hash: ObjectHash,
     pub external_path: Option<PathBuf>,
     pub previous: Option<StoreWriteRemoteBlob>,
+    pub audience_move: Option<StoreWriteBlobMoveDestination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -68,6 +69,17 @@ pub(crate) struct StoreWriteBlobFact {
 pub(crate) struct StoreWriteRemoteBlob {
     pub authority: crate::sync::audience_package::PackageAudience,
     pub stored: StoredBlobRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum StoreWriteBlobMoveDestination {
+    Local,
+    Remote {
+        audience: crate::blob::locator::RemoteAudience,
+        locator: crate::blob::locator::BlobLocator,
+        spool_path: PathBuf,
+    },
 }
 
 impl StoreWriteBlobFact {

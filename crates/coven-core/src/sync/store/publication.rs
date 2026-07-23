@@ -20,6 +20,7 @@ pub(crate) async fn drain_store_writes(
     #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
+    database.retire_uploaded_blob_spools().await?;
     while let Some(batch) = database.oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();
         database
@@ -40,6 +41,7 @@ pub(crate) async fn drain_store_writes(
             ) {
                 publish_prepared_remote_objects(database, storage, &write_id, store_root_hash)
                     .await?;
+                database.retire_uploaded_blob_spools().await?;
             }
             let head = &batch.head.value;
             let stream_id = head.commit.coord.stream_id.to_string();

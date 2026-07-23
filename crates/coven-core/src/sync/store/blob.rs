@@ -11,29 +11,32 @@ use crate::sync::storage::{BlobSpoolProtection, StorageError, SyncStorage};
 
 use super::StoreDatabase;
 
+enum BlobOpeningAuthority<'a> {
+    Store,
+    Circle {
+        circle_id: CircleId,
+        control: &'a crate::sync::circle::CircleControlCoord,
+        key_fingerprint: KeyFingerprint,
+    },
+}
+
 pub(crate) async fn opening_protection(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authority: &RowBlobAuthority,
     stored: &crate::blob::locator::StoredBlobRef,
 ) -> Result<BlobSpoolProtection, BlobCacheError> {
-    match authority {
-        RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
-            Err(BlobCacheError::LocalityUnresolved {
-                id: stored.locator().blob_id().to_string(),
-            })
-        }
-        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Store) => storage
+    match blob_opening_authority(authority, stored)? {
+        BlobOpeningAuthority::Store => storage
             .store_blob_protection()
             .map_err(BlobCacheError::Storage),
-        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Circle {
+        BlobOpeningAuthority::Circle {
             circle_id,
             control,
             key_fingerprint,
-        }) => {
-            validate_circle_blob_locator(*circle_id, *key_fingerprint, stored)?;
+        } => {
             let encryption = database
-                .circle_blob_opening_key(*circle_id, control.clone(), *key_fingerprint)
+                .circle_blob_opening_key(circle_id, control.clone(), key_fingerprint)
                 .await
                 .map_err(BlobCacheError::Metadata)?;
             Ok(BlobSpoolProtection::Opaque(encryption))
@@ -41,21 +44,68 @@ pub(crate) async fn opening_protection(
     }
 }
 
-fn validate_circle_blob_locator(
-    circle_id: CircleId,
-    key_fingerprint: KeyFingerprint,
+fn blob_opening_authority<'a>(
+    authority: &'a RowBlobAuthority,
     stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<(), BlobCacheError> {
-    if stored.locator().audience() != crate::blob::locator::RemoteAudience::Circle(circle_id)
-        || stored.locator().key_fingerprint() != Some(key_fingerprint)
-    {
-        return Err(BlobCacheError::Storage(StorageError::InvalidContent(
-            format!(
-                "Circle {circle_id} blob locator audience or key differs from its exact activated authority"
-            ),
-        )));
+) -> Result<BlobOpeningAuthority<'a>, BlobCacheError> {
+    match authority {
+        RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
+            Err(BlobCacheError::LocalityUnresolved {
+                id: stored.locator().blob_id().to_string(),
+            })
+        }
+        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Store) => {
+            Ok(BlobOpeningAuthority::Store)
+        }
+        RowBlobAuthority::Remote(crate::sync::audience_package::PackageAudience::Circle {
+            circle_id,
+            control,
+            key_fingerprint,
+        }) => {
+            if stored.locator().audience()
+                != crate::blob::locator::RemoteAudience::Circle(*circle_id)
+                || stored.locator().key_fingerprint() != Some(*key_fingerprint)
+            {
+                return Err(BlobCacheError::Storage(StorageError::InvalidContent(
+                    format!(
+                        "Circle {circle_id} blob locator audience or key differs from its exact activated authority"
+                    ),
+                )));
+            }
+            Ok(BlobOpeningAuthority::Circle {
+                circle_id: *circle_id,
+                control,
+                key_fingerprint: *key_fingerprint,
+            })
+        }
     }
-    Ok(())
+}
+
+pub(crate) fn opening_protection_on(
+    conn: &rusqlite::Connection,
+    storage: &dyn SyncStorage,
+    authority: &RowBlobAuthority,
+    stored: &crate::blob::locator::StoredBlobRef,
+) -> Result<BlobSpoolProtection, BlobCacheError> {
+    match blob_opening_authority(authority, stored)? {
+        BlobOpeningAuthority::Store => storage
+            .store_blob_protection()
+            .map_err(BlobCacheError::Storage),
+        BlobOpeningAuthority::Circle {
+            circle_id,
+            control,
+            key_fingerprint,
+        } => {
+            let encryption = StoreDatabase::circle_blob_opening_key_on(
+                conn,
+                circle_id,
+                control,
+                key_fingerprint,
+            )
+            .map_err(BlobCacheError::Metadata)?;
+            Ok(BlobSpoolProtection::Opaque(encryption))
+        }
+    }
 }
 
 async fn remote_access<'a>(

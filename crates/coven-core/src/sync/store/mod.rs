@@ -19,7 +19,7 @@ mod database;
 #[cfg(test)]
 pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 #[doc(hidden)]
-pub use database::StoreDatabase;
+pub use database::{HostWriteBlobStaging, StoreDatabase};
 mod device_exclusion;
 mod device_join;
 mod error;

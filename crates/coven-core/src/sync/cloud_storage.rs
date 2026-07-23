@@ -1851,7 +1851,7 @@ impl SyncStorage for CloudSyncStorage {
         protection: crate::sync::storage::BlobSpoolProtection,
         plaintext_file: &Path,
         spool_file: &Path,
-    ) -> Result<(), StorageError> {
+    ) -> Result<crate::sync::storage::BlobSpoolWrite, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -1897,7 +1897,7 @@ impl SyncStorage for CloudSyncStorage {
                         break;
                     }
                 }
-                return Ok(());
+                return Ok(crate::sync::storage::BlobSpoolWrite::Reused);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -1972,7 +1972,7 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         match staged.commit_new().await {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(crate::sync::storage::BlobSpoolWrite::Created),
             Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
                 let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(spool_file)
                     .await
@@ -2000,7 +2000,7 @@ impl SyncStorage for CloudSyncStorage {
                         break;
                     }
                 }
-                Ok(())
+                Ok(crate::sync::storage::BlobSpoolWrite::Reused)
             }
             Err(error) => Err(StorageError::LocalFilesystem(error.to_string())),
         }

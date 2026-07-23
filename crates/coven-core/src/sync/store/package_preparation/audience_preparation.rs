@@ -213,6 +213,65 @@ pub(crate) async fn prepare_partition_blob(
     StoreError,
 > {
     let locator = prepare_partition_blob_locator(fact, audience.clone(), &protection, authority)?;
+    if let Some(audience_move) = &fact.audience_move {
+        let crate::database::StoreWriteBlobMoveDestination::Remote {
+            audience: staged_audience,
+            locator: staged_locator,
+            spool_path,
+        } = audience_move
+        else {
+            return Err(StoreError::InvalidOutbound(format!(
+                "Local audience-move blob {}/{}/{} reached remote package preparation",
+                fact.table, fact.row_id, fact.column
+            )));
+        };
+        if staged_audience != &audience || staged_locator != &locator {
+            return Err(StoreError::InvalidOutbound(format!(
+                "audience-move blob {}/{}/{} destination differs from its durable spool",
+                fact.table, fact.row_id, fact.column
+            )));
+        }
+        let expected_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
+        if spool_path != &expected_path {
+            return Err(StoreError::InvalidOutbound(format!(
+                "audience-move blob {}/{}/{} durable spool has the wrong path",
+                fact.table, fact.row_id, fact.column
+            )));
+        }
+        let slot = storage
+            .allocate_blob_slot(&locator, authority)
+            .await
+            .map_err(|source| StoreError::BlobStorage {
+                namespace: fact.blob.namespace.clone(),
+                id: fact.blob.id.clone(),
+                source,
+            })?;
+        let stored = storage
+            .prepare_blob_object(&locator, authority, slot, spool_path)
+            .await
+            .map_err(|source| StoreError::BlobStorage {
+                namespace: fact.blob.namespace.clone(),
+                id: fact.blob.id.clone(),
+                source,
+            })?;
+        let binding = super::audience_package::RowBlobLocatorBinding::new(
+            fact.table.clone(),
+            fact.row_id.clone(),
+            fact.row_stamp.clone(),
+            fact.column.clone(),
+            stored.clone(),
+        )
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        return Ok((
+            binding,
+            PreparedPartitionBlob {
+                audience,
+                stored,
+                spool_path: Some(spool_path.clone()),
+                uploaded_verified: false,
+            },
+        ));
+    }
     let spool_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
     if let Some(previous) = &fact.previous {
         if previous.stored.locator() == &locator {
@@ -284,23 +343,25 @@ pub(crate) async fn prepare_partition_blob(
         materialize_previous_blob(database, storage, fact, store_dir, locator.locator_hash())
             .await?
     };
-    if let Err(error) = storage
+    let spool_write = match storage
         .seal_blob_to_spool(&locator, authority, protection, &source_path, &spool_path)
         .await
         .map_err(|source| StoreError::BlobStorage {
             namespace: fact.blob.namespace.clone(),
             id: fact.blob.id.clone(),
             source,
-        })
-    {
-        return Err(cleanup_failed_partition_blob(
-            &spool_path,
-            temporary_plaintext.then_some(source_path.as_path()),
-            false,
-            error,
-        )
-        .await);
-    }
+        }) {
+        Ok(spool_write) => spool_write,
+        Err(error) => {
+            return Err(cleanup_failed_partition_blob(
+                &spool_path,
+                temporary_plaintext.then_some(source_path.as_path()),
+                false,
+                error,
+            )
+            .await);
+        }
+    };
     let prepared = async {
         if temporary_plaintext {
             tokio::fs::remove_file(&source_path)
@@ -348,7 +409,7 @@ pub(crate) async fn prepare_partition_blob(
             return Err(cleanup_failed_partition_blob(
                 &spool_path,
                 temporary_plaintext.then_some(source_path.as_path()),
-                true,
+                spool_write == crate::sync::storage::BlobSpoolWrite::Created,
                 error,
             )
             .await);
@@ -368,7 +429,7 @@ pub(crate) async fn prepare_partition_blob(
 async fn cleanup_failed_partition_blob(
     spool_path: &std::path::Path,
     temporary_plaintext: Option<&std::path::Path>,
-    spool_expected: bool,
+    spool_created_by_attempt: bool,
     error: StoreError,
 ) -> StoreError {
     let mut failures = Vec::new();
@@ -390,17 +451,25 @@ async fn cleanup_failed_partition_blob(
             )),
         }
     }
-    match crate::local_blob::remove_file(spool_path).await {
-        Ok(true) => {}
-        Ok(false) if !spool_expected => {}
-        Ok(false) => failures.push(format!(
-            "prepared blob spool {} is absent",
-            spool_path.display()
-        )),
-        Err(cleanup_error) => failures.push(format!(
-            "remove prepared blob spool {}: {cleanup_error}",
-            spool_path.display()
-        )),
+    if spool_created_by_attempt {
+        match crate::local_blob::remove_file(spool_path).await {
+            Ok(true) => {
+                if let Err(sync_error) = crate::local_blob::sync_parent_dir(spool_path).await {
+                    failures.push(format!(
+                        "sync removed prepared blob spool {}: {sync_error}",
+                        spool_path.display()
+                    ));
+                }
+            }
+            Ok(false) => failures.push(format!(
+                "prepared blob spool {} is absent",
+                spool_path.display()
+            )),
+            Err(cleanup_error) => failures.push(format!(
+                "remove prepared blob spool {}: {cleanup_error}",
+                spool_path.display()
+            )),
+        }
     }
     if failures.is_empty() {
         error

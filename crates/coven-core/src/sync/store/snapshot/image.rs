@@ -499,6 +499,7 @@ fn snapshot_blob_facts(
                 plaintext_hash,
                 external_path,
                 previous,
+                audience_move: None,
             },
             audience,
             store_dir: crate::store_dir::StoreDir::new(store_path),
@@ -1150,6 +1151,7 @@ mod tests {
                     &gates,
                     &blob_decls,
                     Some(&routing),
+                    None,
                     write_id,
                     |transaction| {
                         transaction.execute(
@@ -1605,6 +1607,7 @@ mod tests {
                     &gates,
                     &blob_decls,
                     Some(&routing),
+                    None,
                     write_id,
                     |transaction| {
                         transaction.execute(
@@ -1807,6 +1810,7 @@ mod tests {
                     &gates,
                     &blob_decls,
                     Some(&routing),
+                    None,
                     write_id,
                     |transaction| {
                         transaction

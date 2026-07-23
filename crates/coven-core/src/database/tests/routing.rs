@@ -106,6 +106,7 @@ async fn capture_scoped_write_then_reopen(
             &gates,
             &blob_decls,
             Some(&routing),
+            None,
             write_id,
             |tx| {
                 tx.execute(
@@ -257,6 +258,7 @@ async fn assert_local_only_scoped_write(name: &str) {
                 &gates,
                 &blob_decls,
                 Some(&routing),
+                None,
                 write_id,
                 |tx| {
                     tx.execute(
@@ -369,6 +371,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
             &gates,
             &blob_decls,
             Some(&routing),
+            None,
             insert_id,
             |tx| {
                 tx.execute(
@@ -394,6 +397,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
             &gates,
             &blob_decls,
             Some(&routing),
+            None,
             move_id,
             |tx| {
                 tx.execute(
@@ -532,6 +536,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
             &gates,
             &blob_decls,
             Some(&routing),
+            None,
             insert_id,
             |tx| {
                 tx.execute(
@@ -566,6 +571,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
                 &gates,
                 &blob_decls,
                 Some(&routing),
+                None,
                 move_id,
                 |tx| {
                     tx.execute(

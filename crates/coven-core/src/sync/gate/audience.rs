@@ -28,6 +28,19 @@ pub(crate) struct AudiencePartition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudienceMove {
+    pub(crate) source: Audience,
+    pub(crate) destination: Audience,
+    pub(crate) rows: BTreeSet<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartitionedAudienceWrite {
+    pub(crate) partitions: Vec<AudiencePartition>,
+    pub(crate) moves: Vec<AudienceMove>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CirclePartitionControl {
     coordinate: CircleControlCoord,
     stored_json: String,
@@ -90,7 +103,7 @@ pub(crate) fn partition_outbound(
     changeset: &[u8],
     routing: &RoutingChanges,
     gates: &Gates,
-) -> Result<Vec<AudiencePartition>, GateError> {
+) -> Result<PartitionedAudienceWrite, GateError> {
     unsafe { partition_outbound_raw(conn, changeset, routing, gates) }
 }
 
@@ -1065,7 +1078,7 @@ unsafe fn partition_outbound_raw(
     changeset: &[u8],
     routing: &RoutingChanges,
     gates: &Gates,
-) -> Result<Vec<AudiencePartition>, GateError> {
+) -> Result<PartitionedAudienceWrite, GateError> {
     let mut groups = BTreeMap::<Audience, PartitionGroup>::new();
     let mut moves = Vec::new();
     let mut ancestor_inserts = HashSet::new();
@@ -1141,6 +1154,7 @@ unsafe fn partition_outbound_raw(
             ancestor_deletes.insert((table, id));
         }
     }
+    let mut audience_moves = Vec::with_capacity(moves.len());
     for (source, destination, seed) in moves {
         let component = scoped_materialization_rows(conn, gates, seed)?;
         let ancestors = required_store_ancestors(conn, gates, &component)?;
@@ -1159,9 +1173,14 @@ unsafe fn partition_outbound_raw(
                 gates,
                 &component,
                 FullStateDirection::Inserts,
-                partition_group(conn, &mut groups, destination)?,
+                partition_group(conn, &mut groups, destination.clone())?,
             )?;
         }
+        audience_moves.push(AudienceMove {
+            source,
+            destination,
+            rows: component.into_iter().collect(),
+        });
     }
     if !ancestor_inserts.is_empty() {
         add_materialization(
@@ -1206,7 +1225,7 @@ unsafe fn partition_outbound_raw(
             Ok(())
         })?;
     }
-    groups
+    let partitions = groups
         .into_iter()
         .map(|(audience, group)| {
             Ok(AudiencePartition {
@@ -1215,7 +1234,11 @@ unsafe fn partition_outbound_raw(
                 changeset: group.group.output()?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, GateError>>()?;
+    Ok(PartitionedAudienceWrite {
+        partitions,
+        moves: audience_moves,
+    })
 }
 
 pub(crate) fn validate_scoped_foreign_key_audiences(

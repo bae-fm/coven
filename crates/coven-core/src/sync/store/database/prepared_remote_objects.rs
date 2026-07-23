@@ -8,12 +8,18 @@ use crate::sync::session::SyncedTable;
 use crate::sync::storage::ExactObjectRef;
 use crate::sync::store_commit::{ObjectHash, StoreBatchCommit, StoreBatchCommitRef};
 use crate::write::WriteId;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 
 use super::candidate_records::parse_prepared_merge_candidate_on;
 use super::publication_state::PreparedStoreWriteState;
 use super::*;
+
+struct UploadedBlobSpool {
+    write_id: WriteId,
+    remote_object_id: ObjectHash,
+    path: PathBuf,
+}
 
 impl StoreDatabase {
     pub(crate) fn persist_prepared_audience_objects_on(
@@ -230,6 +236,19 @@ impl StoreDatabase {
         commit_ref
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
+        let remaining_spools: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM store_write_blobs
+                 WHERE write_id = ?1 AND spool_path IS NOT NULL",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if remaining_spools != 0 {
+            return Err(DbError::Message(format!(
+                "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
+            )));
+        }
         let audiences = load_prepared_audience_objects_on(conn, write_id)?;
         let retained_packages = audiences
             .packages
@@ -460,6 +479,118 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn retire_uploaded_blob_spools(&self) -> Result<(), DbError> {
+        let spools = self
+            .database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT write_id, remote_object_id, spool_path
+                         FROM store_write_blobs
+                         WHERE spool_path IS NOT NULL
+                         ORDER BY write_id, audience, remote_object_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                let rows = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
+                drop(statement);
+                let mut spools = Vec::new();
+                for (write_id, remote_object_id, path) in rows {
+                    let remote_object_id = remote_object_id.parse().map_err(|error| {
+                        DbError::Message(format!("prepared blob remote object id: {error}"))
+                    })?;
+                    let remote = load_remote_object_on(conn, remote_object_id)?;
+                    if remote_object_is_uploaded(&remote) {
+                        spools.push(UploadedBlobSpool {
+                            write_id: WriteId::from_generated(write_id),
+                            remote_object_id,
+                            path: PathBuf::from(path),
+                        });
+                    }
+                }
+                Ok(spools)
+            })
+            .await?;
+
+        for spool in spools {
+            match crate::local_blob::remove_file(&spool.path).await {
+                Ok(_) => crate::local_blob::sync_parent_dir(&spool.path)
+                    .await
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "sync retired prepared blob spool {}: {error}",
+                            spool.path.display()
+                        ))
+                    })?,
+                Err(error) => {
+                    return Err(DbError::Message(format!(
+                        "remove uploaded prepared blob spool {}: {error}",
+                        spool.path.display()
+                    )));
+                }
+            }
+            self.clear_uploaded_blob_spool(spool).await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_uploaded_blob_spool(&self, spool: UploadedBlobSpool) -> Result<(), DbError> {
+        self.database
+            .call(move |conn| {
+                let remote = load_remote_object_on(conn, spool.remote_object_id)?;
+                if !remote_object_is_uploaded(&remote) {
+                    return Err(DbError::Message(format!(
+                        "prepared blob {} lost uploaded state before spool retirement",
+                        spool.remote_object_id
+                    )));
+                }
+                let path = spool.path.to_str().ok_or_else(|| {
+                    DbError::Message("prepared blob spool path is not UTF-8".to_string())
+                })?;
+                let cleared = conn
+                    .execute(
+                        "UPDATE store_write_blobs SET spool_path = NULL
+                         WHERE write_id = ?1 AND remote_object_id = ?2 AND spool_path = ?3",
+                        rusqlite::params![
+                            spool.write_id.as_str(),
+                            spool.remote_object_id.to_string(),
+                            path,
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                if cleared != 1 {
+                    let current = conn
+                        .query_row(
+                            "SELECT spool_path FROM store_write_blobs
+                             WHERE write_id = ?1 AND remote_object_id = ?2",
+                            rusqlite::params![
+                                spool.write_id.as_str(),
+                                spool.remote_object_id.to_string(),
+                            ],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    if current.flatten().is_some() {
+                        return Err(DbError::Message(format!(
+                            "prepared blob {} spool changed during retirement",
+                            spool.remote_object_id
+                        )));
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
+
     pub(crate) async fn mark_reusable_retained_authority_uploaded(
         &self,
         expected: RemoteObjectRecord,
@@ -555,5 +686,26 @@ impl StoreDatabase {
                 Ok(())
             })
             .await
+    }
+}
+
+fn remote_object_is_uploaded(remote: &RemoteObjectRecord) -> bool {
+    match remote {
+        RemoteObjectRecord::CandidateCommit(record) => matches!(
+            &record.state,
+            crate::sync::remote_object::CandidateCommitState::UploadedVerified
+        ),
+        RemoteObjectRecord::CandidateExclusive(record) => matches!(
+            &record.state,
+            crate::sync::remote_object::CandidateObjectState::UploadedVerified { .. }
+        ),
+        RemoteObjectRecord::RetainedAuthority(record) => matches!(
+            &record.state,
+            crate::sync::remote_object::RetainedAuthorityObjectState::UploadedVerified { .. }
+        ),
+        RemoteObjectRecord::SharedLiveSet(record) => matches!(
+            &record.state,
+            crate::sync::remote_object::OwnedObjectState::UploadedVerified { .. }
+        ),
     }
 }

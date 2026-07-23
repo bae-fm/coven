@@ -733,6 +733,12 @@ pub enum BlobSpoolProtection {
     Browsable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobSpoolWrite {
+    Created,
+    Reused,
+}
+
 #[derive(Clone, Copy)]
 pub struct BlobWriteAuthority<'a> {
     pub reference: &'a crate::sync::store_commit::StoreDeviceRegistrationRef,
@@ -1307,7 +1313,7 @@ pub trait SyncStorage: Send + Sync {
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
         spool_file: &Path,
-    ) -> Result<(), StorageError>;
+    ) -> Result<BlobSpoolWrite, StorageError>;
 
     /// Derive an exact reference from an immutable stored blob file.
     async fn prepare_blob_object(
@@ -1452,7 +1458,7 @@ where
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
         spool_file: &Path,
-    ) -> Result<(), StorageError> {
+    ) -> Result<BlobSpoolWrite, StorageError> {
         (**self)
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
             .await

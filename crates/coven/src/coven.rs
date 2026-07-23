@@ -562,6 +562,11 @@ impl CovenHandle {
             .has_scoped_graph()
             .then(|| self.routing_encryption())
             .transpose()?;
+        let blob_staging = crate::sync::store::HostWriteBlobStaging::new(
+            tokio::runtime::Handle::current(),
+            self.blob_storage().await.map_err(|error| error.to_string()),
+            self.store_dir(),
+        );
         let write_id = self.db().new_write_id();
         let outcome = self
             .db()
@@ -573,6 +578,7 @@ impl CovenHandle {
                         &gates,
                         &blob_decls,
                         routing_encryption.as_ref(),
+                        Some(&blob_staging),
                         write_id,
                         |tx| f(SqlContext::new(tx, stamper)),
                     ),
@@ -637,6 +643,11 @@ impl CovenHandle {
             .has_scoped_graph()
             .then(|| self.routing_encryption())
             .transpose()?;
+        let blob_staging = crate::sync::store::HostWriteBlobStaging::new(
+            tokio::runtime::Handle::current(),
+            self.blob_storage().await.map_err(|error| error.to_string()),
+            self.store_dir(),
+        );
         let write_id = self.db().new_write_id();
         let deleted = batch.deleted_blobs;
         let store_dir = self.store_dir();
@@ -652,6 +663,7 @@ impl CovenHandle {
                     gates,
                     blob_decls,
                     routing_encryption,
+                    blob_staging,
                     write_id,
                     sql,
                 ))
@@ -859,6 +871,7 @@ fn run_write_batch_on_connection<R>(
     gates: Arc<crate::sync::gate::Gates>,
     decls: Arc<crate::blob::decl::BlobDecls>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
+    blob_staging: crate::sync::store::HostWriteBlobStaging,
     write_id: WriteId,
     sql: WriteSql<R>,
 ) -> CovenResult<WriteReceipt<R>> {
@@ -869,6 +882,7 @@ fn run_write_batch_on_connection<R>(
         &gates,
         &decls,
         routing_encryption.as_ref(),
+        Some(&blob_staging),
         write_id,
         |tx| -> CovenResult<R> {
             let cleanup_intents = deleted
@@ -1045,6 +1059,12 @@ mod tests {
             .carries_blob(media_files_decl())
     }
 
+    fn scoped_files_table() -> SyncedTable {
+        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
+            .scoped_by("audience")
+            .carries_blob(media_files_decl())
+    }
+
     fn files_migration() -> Migration {
         Migration::sql(
             1,
@@ -1054,6 +1074,21 @@ mod tests {
                 blob_id TEXT,
                 size INTEGER NOT NULL,
                 hash TEXT,
+                _updated_at TEXT NOT NULL
+            ) STRICT;",
+        )
+    }
+
+    fn scoped_files_migration() -> Migration {
+        Migration::sql(
+            1,
+            "scoped-files",
+            "CREATE TABLE files (
+                id TEXT PRIMARY KEY,
+                blob_id TEXT,
+                size INTEGER NOT NULL,
+                hash TEXT,
+                audience TEXT,
                 _updated_at TEXT NOT NULL
             ) STRICT;",
         )
@@ -2138,6 +2173,518 @@ mod tests {
             range,
             &expected[offset as usize..(offset + len) as usize],
             "open_blob_stream returns the requested slice of the staged bytes",
+        );
+    }
+
+    struct RemoteOnlyStoreBlob {
+        _tmp: tempfile::TempDir,
+        dir: StoreDir,
+        handle: CovenHandle,
+        store: TestStore,
+        encryption: coven_core::EncryptionService,
+        destination_circle: crate::CircleId,
+        source_object: ObjectSlot,
+    }
+
+    async fn remote_only_store_blob() -> RemoteOnlyStoreBlob {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = StoreDir::new(tmp.path());
+        let signer = crate::keys::UserKeypair::generate();
+        let encryption = coven_core::EncryptionService::from_key([42; 32]);
+        let handle = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![scoped_files_table()])
+            .migrations(vec![scoped_files_migration()])
+            .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
+            .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
+            .open()
+            .expect("open scoped blob store");
+        let store = TestStore::create(handle.db(), "lib-test", signer)
+            .await
+            .expect("create exact test Store");
+        let authority =
+            rusqlite::Connection::open(dir.db_path()).expect("open Circle authority database");
+        let (destination_circle, _) =
+            coven_core::sync::test_helpers::install_test_active_circle(&authority, "blob-circle");
+        drop(authority);
+
+        let bytes = b"remote-only-circle-blob".to_vec();
+        let hash = crate::blob::content_hash(&bytes);
+        handle
+            .write(
+                {
+                    let bytes = bytes.clone();
+                    move |batch| {
+                        batch.put_blob("media-files", "circleblob", bytes);
+                        Ok(())
+                    }
+                },
+                move |sql| {
+                    sql.execute(
+                        "INSERT INTO files
+                         (id, blob_id, size, hash, audience, _updated_at)
+                         VALUES ('circle-file', 'circleblob', ?1, ?2, ?3, ?4)",
+                        params![
+                            bytes.len() as i64,
+                            hash,
+                            Option::<String>::None,
+                            sql.stamp()
+                        ],
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("write Store blob");
+        store
+            .publish_pending(handle.db(), &dir)
+            .await
+            .expect("publish Store blob");
+        let source_object = handle
+            .row_blob_ref("files", "circle-file")
+            .await
+            .expect("capture published Store blob")
+            .stored()
+            .expect("published Store blob has exact storage")
+            .object()
+            .slot()
+            .clone();
+        std::fs::remove_file(
+            dir.local_blob_path("media-files", "circleblob")
+                .expect("local blob path"),
+        )
+        .expect("remove local plaintext to leave a remote-only source");
+
+        RemoteOnlyStoreBlob {
+            _tmp: tmp,
+            dir,
+            handle,
+            store,
+            encryption,
+            destination_circle,
+            source_object,
+        }
+    }
+
+    fn outbound_blob_spools(dir: &StoreDir) -> std::collections::BTreeSet<PathBuf> {
+        let path = dir.storage_dir().join("outbound-blobs");
+        match std::fs::read_dir(path) {
+            Ok(entries) => entries
+                .map(|entry| entry.expect("read outbound blob spool entry").path())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::collections::BTreeSet::new()
+            }
+            Err(error) => panic!("read outbound blob spools: {error}"),
+        }
+    }
+
+    async fn run_scoped_file_write(
+        handle: &CovenHandle,
+        blob_staging: Option<coven_core::sync::store::HostWriteBlobStaging>,
+        sql: String,
+    ) -> Result<WriteReceipt<()>, coven_core::DbError> {
+        let tables = handle.db().synced_tables().to_vec();
+        let gates = handle.db().gates();
+        let blob_decls = handle.db().blob_decls();
+        let routing_encryption = handle
+            .routing_encryption()
+            .expect("resolve routing encryption");
+        let write_id = handle.db().new_write_id();
+        handle
+            .db()
+            .call(move |conn| {
+                coven_core::sync::store::StoreDatabase::run_store_write_transaction_on(
+                    conn,
+                    &tables,
+                    &gates,
+                    &blob_decls,
+                    Some(&routing_encryption),
+                    blob_staging.as_ref(),
+                    write_id,
+                    |tx| {
+                        tx.execute_batch(&sql)?;
+                        Ok::<_, coven_core::DbError>(())
+                    },
+                )
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn audience_move_requires_remote_only_blob_before_committing_sql() {
+        let fixture = remote_only_store_blob().await;
+        ExactSlotStorage::delete_at(fixture.store.home.as_ref(), &fixture.source_object)
+            .await
+            .expect("remove the only remote source");
+        fixture
+            .handle
+            .connect_sync_with_test_home(
+                fixture.store.home.clone(),
+                CloudCipher::Encrypted(fixture.encryption.clone()),
+            )
+            .await
+            .expect("connect the exact test Store");
+
+        let destination_circle_value = fixture.destination_circle.to_string();
+        let result = fixture
+            .handle
+            .sql(move |sql| {
+                sql.execute(
+                    "UPDATE files SET audience = ?1, _updated_at = ?2
+                     WHERE id = 'circle-file'",
+                    params![destination_circle_value, sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a missing source blob must abort the audience move before SQLite commit",
+        );
+        let audience = fixture
+            .handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read rolled-back audience");
+        assert_eq!(audience, None);
+    }
+
+    #[tokio::test]
+    async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
+        let fixture = remote_only_store_blob().await;
+        let destination_circle_value = fixture.destination_circle.to_string();
+        let result = run_scoped_file_write(
+            &fixture.handle,
+            None,
+            format!(
+                "UPDATE files SET audience = '{destination_circle_value}',
+                 _updated_at = '0000000009000-0000-device-test'
+                 WHERE id = 'circle-file'"
+            ),
+        )
+        .await;
+
+        let error = result.expect_err("a blob audience move cannot omit materialization");
+        assert!(
+            error
+                .to_string()
+                .contains("BlobMoveRequiresMaterialization"),
+            "{error}",
+        );
+        let audience = fixture
+            .handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read rolled-back audience");
+        assert_eq!(audience, None);
+    }
+
+    #[tokio::test]
+    async fn blob_storage_adapter_error_only_blocks_a_move_that_needs_storage() {
+        let fixture = remote_only_store_blob().await;
+        let adapter_error = || {
+            coven_core::sync::store::HostWriteBlobStaging::new(
+                tokio::runtime::Handle::current(),
+                Err("injected blob storage adapter construction failure".to_string()),
+                fixture.dir.clone(),
+            )
+        };
+
+        run_scoped_file_write(
+            &fixture.handle,
+            Some(adapter_error()),
+            "UPDATE files SET _updated_at = '0000000009000-0000-device-test'
+             WHERE id = 'circle-file'"
+                .to_string(),
+        )
+        .await
+        .expect("an unused adapter error does not block ordinary SQL");
+
+        let destination_circle_value = fixture.destination_circle.to_string();
+        let error = run_scoped_file_write(
+            &fixture.handle,
+            Some(adapter_error()),
+            format!(
+                "UPDATE files SET audience = '{destination_circle_value}',
+                 _updated_at = '0000000010000-0000-device-test'
+                 WHERE id = 'circle-file'"
+            ),
+        )
+        .await
+        .expect_err("a remote-only move must surface its adapter error");
+        assert!(
+            error
+                .to_string()
+                .contains("injected blob storage adapter construction failure"),
+            "{error}",
+        );
+        let audience = fixture
+            .handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read audience after adapter failure");
+        assert_eq!(audience, None);
+    }
+
+    #[tokio::test]
+    async fn journal_failure_removes_only_the_audience_move_spool_and_rolls_back_sql() {
+        let fixture = remote_only_store_blob().await;
+        fixture
+            .handle
+            .connect_sync_with_test_home(
+                fixture.store.home.clone(),
+                CloudCipher::Encrypted(fixture.encryption.clone()),
+            )
+            .await
+            .expect("connect the exact test Store");
+        let before = outbound_blob_spools(&fixture.dir);
+        rusqlite::Connection::open(fixture.dir.db_path())
+            .expect("open database for journal fault")
+            .execute_batch(
+                "CREATE TRIGGER fail_audience_move_journal
+                 BEFORE INSERT ON store_writes
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Store write journal failure');
+                 END;",
+            )
+            .expect("install Store write journal fault");
+
+        let destination_circle_value = fixture.destination_circle.to_string();
+        let result = fixture
+            .handle
+            .sql(move |sql| {
+                sql.execute(
+                    "UPDATE files SET audience = ?1, _updated_at = ?2
+                     WHERE id = 'circle-file'",
+                    params![destination_circle_value, sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await;
+
+        assert!(result.is_err(), "the injected journal failure must surface");
+        assert_eq!(
+            outbound_blob_spools(&fixture.dir),
+            before,
+            "rollback removes the destination spool created by this attempt",
+        );
+        let audience = fixture
+            .handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read rolled-back audience");
+        assert_eq!(audience, None);
+    }
+
+    #[tokio::test]
+    async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() {
+        let fixture = remote_only_store_blob().await;
+        fixture
+            .handle
+            .connect_sync_with_test_home(
+                fixture.store.home.clone(),
+                CloudCipher::Encrypted(fixture.encryption.clone()),
+            )
+            .await
+            .expect("connect the exact test Store");
+        let destination = fixture
+            .dir
+            .local_blob_path("media-files", "circleblob")
+            .expect("resolve Local destination");
+        let sibling = destination
+            .parent()
+            .expect("Local destination has a parent")
+            .join("unrelated");
+        std::fs::create_dir_all(sibling.parent().expect("sibling has a parent"))
+            .expect("create Local blob directory");
+        std::fs::write(&sibling, b"unrelated").expect("write unrelated Local file");
+        rusqlite::Connection::open(fixture.dir.db_path())
+            .expect("open database for Local journal fault")
+            .execute_batch(
+                "CREATE TRIGGER fail_local_audience_move_journal
+                 BEFORE INSERT ON store_writes
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Local Store write journal failure');
+                 END;",
+            )
+            .expect("install Local Store write journal fault");
+
+        let result = fixture
+            .handle
+            .sql(|sql| {
+                sql.execute(
+                    "UPDATE files SET audience = 'local', _updated_at = ?1
+                     WHERE id = 'circle-file'",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err(), "the injected journal failure must surface");
+        assert!(
+            !destination.exists(),
+            "rollback removes the Local file created by this attempt",
+        );
+        assert_eq!(
+            std::fs::read(&sibling).expect("read unrelated Local file"),
+            b"unrelated",
+        );
+        let audience = fixture
+            .handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read rolled-back Local audience");
+        assert_eq!(audience, None);
+        assert!(matches!(
+            fixture
+                .handle
+                .row_blob_ref("files", "circle-file")
+                .await
+                .expect("load blob after failed Local move")
+                .authority(),
+            coven_core::blob::RowBlobAuthority::Remote(_)
+        ));
+
+        rusqlite::Connection::open(fixture.dir.db_path())
+            .expect("open database to remove Local journal fault")
+            .execute_batch("DROP TRIGGER fail_local_audience_move_journal")
+            .expect("remove Local Store write journal fault");
+        std::fs::write(&destination, b"remote-only-circle-blob")
+            .expect("model an exact file left by failed cleanup");
+        fixture
+            .handle
+            .sql(|sql| {
+                sql.execute(
+                    "UPDATE files SET audience = 'local', _updated_at = ?1
+                     WHERE id = 'circle-file'",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("retry accepts the exact already-materialized Local file");
+        assert_eq!(
+            std::fs::read(&destination).expect("read retried Local destination"),
+            b"remote-only-circle-blob",
+        );
+        assert_eq!(
+            std::fs::read(&sibling).expect("read unrelated file after retry"),
+            b"unrelated",
+        );
+    }
+
+    #[tokio::test]
+    async fn audience_move_publishes_from_precommit_spool_after_source_disappears() {
+        let fixture = remote_only_store_blob().await;
+        fixture
+            .handle
+            .connect_sync_with_test_home(
+                fixture.store.home.clone(),
+                CloudCipher::Encrypted(fixture.encryption.clone()),
+            )
+            .await
+            .expect("connect the exact test Store");
+
+        let destination_circle_value = fixture.destination_circle.to_string();
+        let receipt = fixture
+            .handle
+            .sql(move |sql| {
+                sql.execute(
+                    "UPDATE files SET audience = ?1, _updated_at = ?2
+                     WHERE id = 'circle-file'",
+                    params![destination_circle_value, sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("commit audience move after staging its destination blob");
+        let write_id = receipt.write_id.to_string();
+        let blob_facts = fixture
+            .handle
+            .sql_read(move |conn| {
+                conn.query_row(
+                    "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
+                    [write_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read durable move blob facts");
+        let blob_facts: serde_json::Value =
+            serde_json::from_str(&blob_facts).expect("decode move blob facts");
+        let spool_path = blob_facts["blobs"][0]["audience_move"]["remote"]["spool_path"]
+            .as_str()
+            .expect("move fact records its exact destination spool");
+        assert!(
+            std::path::Path::new(spool_path).is_file(),
+            "the destination spool is durable before the SQL write returns",
+        );
+
+        ExactSlotStorage::delete_at(fixture.store.home.as_ref(), &fixture.source_object)
+            .await
+            .expect("remove source after the move commits");
+        fixture
+            .store
+            .publish_pending(fixture.handle.db(), &fixture.dir)
+            .await
+            .expect("publish the move from its durable destination spool");
+        assert!(
+            !std::path::Path::new(spool_path).exists(),
+            "prepared-object completion retires the durable precommit spool",
+        );
+        assert!(
+            !fixture
+                .store
+                .publish_pending(fixture.handle.db(), &fixture.dir)
+                .await
+                .expect("retry completed move publication"),
+            "a completed move has nothing left to publish",
+        );
+        let published = fixture
+            .handle
+            .row_blob_ref("files", "circle-file")
+            .await
+            .expect("capture published destination Circle blob");
+        assert_eq!(
+            published.authority().audience(),
+            crate::Audience::Circle(fixture.destination_circle),
         );
     }
 

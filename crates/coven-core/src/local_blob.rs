@@ -188,6 +188,7 @@ impl AtomicStagedFile {
         }
         self.armed = false;
         if let Err(operation) = sync_committed_parent(&self.destination).await {
+            rollback_new_destination(&self.destination, &operation).await?;
             return Err(CommitNewFileError::Filesystem(operation));
         }
         Ok(())
@@ -1160,7 +1161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_new_file_preserves_destination_when_final_directory_sync_fails() {
+    async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
         let staged = stage_atomic_destination(&destination)
@@ -1192,10 +1193,7 @@ mod tests {
             CommitNewFileError::Filesystem("injected final directory sync failure".to_string())
         );
         assert_eq!(sync_count.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            read(&destination).await.expect("read destination"),
-            b"downloaded"
-        );
+        assert!(!destination.exists());
         assert!(!staged_path.exists());
     }
 

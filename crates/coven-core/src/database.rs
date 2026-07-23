@@ -175,8 +175,8 @@ pub(crate) use write_models::{
     MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
     PreparedMergeAbandonmentCandidates, PreparedProtocolObject, PreparedStoreWrite,
     PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase,
-    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteRemoteBlob, StoreWriteRouting,
-    TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
+    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob,
+    StoreWriteRouting, TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";

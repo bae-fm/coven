@@ -3470,7 +3470,7 @@ impl SyncStorage for CycleStorageInterceptor {
         protection: crate::sync::storage::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool_file: &std::path::Path,
-    ) -> Result<(), StorageError> {
+    ) -> Result<crate::sync::storage::BlobSpoolWrite, StorageError> {
         self.inner
             .storage
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)

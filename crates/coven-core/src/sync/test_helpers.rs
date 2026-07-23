@@ -1045,7 +1045,7 @@ pub async fn host_exec(db: &Database, sql: &str) {
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
     db.call(move |conn| {
-        crate::sync::store::StoreDatabase::run_internal_store_write_transaction_on(
+        crate::sync::store::StoreDatabase::run_prepared_blob_transition_transaction_on(
             conn,
             &tables,
             None,

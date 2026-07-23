@@ -246,20 +246,25 @@ impl StoreDatabase {
     ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
         self.database
             .call(move |conn| {
-                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
-                    DbError::Message(format!("Circle {circle_id} has no current state"))
-                })?;
-                let access = state
-                    .package_access(&expected_control)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "Circle {circle_id} has no active publication key"
-                        ))
-                    })?;
-                Ok((access.encryption, access.key_fingerprint))
+                Self::circle_publication_context_on(conn, circle_id, &expected_control)
             })
             .await
+    }
+
+    pub(crate) fn circle_publication_context_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        let state = Self::circle_current_state_on(conn, circle_id)?
+            .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
+        let access = state
+            .package_access(expected_control)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .ok_or_else(|| {
+                DbError::Message(format!("Circle {circle_id} has no active publication key"))
+            })?;
+        Ok((access.encryption, access.key_fingerprint))
     }
 
     pub(crate) async fn circle_package_access(

@@ -772,7 +772,7 @@ impl CovenHandle {
     /// from with no separate hook. A manager connected but not yet running its loop
     /// still wraps the manager's stored home; only a home-less store builds from
     /// config when a provider is configured.
-    async fn blob_storage(
+    pub(crate) async fn blob_storage(
         &self,
     ) -> Result<Option<Arc<dyn SyncStorage>>, crate::storage::cloud::setup::StorageSetupError> {
         if let Some(manager) = self.sync_manager() {

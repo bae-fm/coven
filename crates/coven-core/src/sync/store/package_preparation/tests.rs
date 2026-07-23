@@ -124,3 +124,125 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
     .expect_err("one exact prepared object cannot own two spools");
     assert!(conflict.to_string().contains("conflicting spool paths"));
 }
+
+#[tokio::test]
+async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
+    let database = crate::sync::test_helpers::open_test_db();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &database,
+        "shared-spool-test",
+        crate::keys::UserKeypair::generate(),
+    )
+    .await
+    .expect("create exact test Store");
+    let (uploader, registration, _) = store
+        .founder_device_authority()
+        .await
+        .expect("load exact blob write authority");
+    let authority = BlobWriteAuthority::new(&uploader, &registration)
+        .expect("validate exact blob write authority");
+    let protection = store
+        .storage
+        .store_blob_protection()
+        .expect("load Store blob protection");
+    let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let source = temp.path().join("source");
+    let plaintext = b"spool owned by another pending write";
+    crate::local_blob::write_atomic(&source, plaintext)
+        .await
+        .expect("write blob plaintext");
+    let fact = StoreWriteBlobFact {
+        table: String::new(),
+        row_id: "photo-1".to_string(),
+        row_stamp: "0000000001000-0000-A".to_string(),
+        column: "id".to_string(),
+        blob: crate::blob::BlobRef {
+            namespace: "photos".to_string(),
+            id: "photo-1".to_string(),
+            scope: crate::blob::BlobScope::Master,
+            cloud_path: None,
+            provenance: crate::blob::Provenance::UserProvided,
+            fill: crate::blob::CacheFill::CacheLazy,
+        },
+        plaintext_size: plaintext.len() as u64,
+        plaintext_hash: ObjectHash::digest(plaintext),
+        external_path: Some(source),
+        previous: None,
+        audience_move: None,
+    };
+    let audience = crate::blob::locator::RemoteAudience::Store;
+    let locator = prepare_partition_blob_locator(&fact, audience.clone(), &protection, &authority)
+        .expect("prepare exact blob locator");
+    let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
+    assert_eq!(
+        store
+            .storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                protection.clone(),
+                fact.external_path.as_ref().expect("external source"),
+                &spool,
+            )
+            .await
+            .expect("seed exact spool"),
+        crate::sync::storage::BlobSpoolWrite::Created
+    );
+    let expected_spool = tokio::fs::read(&spool)
+        .await
+        .expect("read seeded exact spool");
+
+    let error = match prepare_partition_blob(
+        &StoreDatabase::new(&database),
+        store.storage.as_ref(),
+        &fact,
+        audience,
+        protection,
+        &authority,
+        &store_dir,
+    )
+    .await
+    {
+        Ok(_) => panic!("invalid binding must fail after reusing the exact spool"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        tokio::fs::read(&spool)
+            .await
+            .expect("shared exact spool remains"),
+        expected_spool
+    );
+    assert!(error.to_string().contains("table"));
+
+    assert!(crate::local_blob::remove_file(&spool)
+        .await
+        .expect("remove shared exact spool"));
+    crate::local_blob::sync_parent_dir(&spool)
+        .await
+        .expect("sync removed shared exact spool");
+
+    let error = match prepare_partition_blob(
+        &StoreDatabase::new(&database),
+        store.storage.as_ref(),
+        &fact,
+        crate::blob::locator::RemoteAudience::Store,
+        store
+            .storage
+            .store_blob_protection()
+            .expect("reload Store blob protection"),
+        &authority,
+        &store_dir,
+    )
+    .await
+    {
+        Ok(_) => panic!("invalid binding must fail after creating an exact spool"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("table"));
+    assert!(
+        !spool.exists(),
+        "failed preparation removes the exact spool it created"
+    );
+}

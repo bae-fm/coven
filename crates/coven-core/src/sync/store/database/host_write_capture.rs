@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
+use crate::blob::decl::PublicationBlob;
 use crate::database::{
     attach_session, authorize_host_sql, capture_changeset, local_merge_stream_id_on, *,
 };
@@ -13,6 +14,11 @@ use crate::sync::gate::{self, Gates};
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
 
 use super::*;
+
+enum AudienceBlobMoveMaterialization<'a> {
+    Host(&'a super::audience_blob_staging::HostWriteBlobStaging),
+    PreparedTransition,
+}
 
 impl StoreDatabase {
     fn start_host_change_journal_on<'c>(
@@ -92,54 +98,7 @@ impl StoreDatabase {
             else {
                 continue;
             };
-            let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
-                DbError::Message(format!(
-                    "capture Store write blob {}/{} plaintext hash: {error}",
-                    publication.blob.namespace, publication.blob.id
-                ))
-            })?;
-            let external_path = if publication.blob.provenance == Provenance::UserProvided {
-                tx.query_row(
-                    "SELECT path FROM local_blob_refs
-                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-                       AND row_stamp = ?4 AND namespace = ?5 AND blob_id = ?6",
-                    rusqlite::params![
-                        publication.table,
-                        publication.row_id,
-                        publication.column,
-                        publication.row_stamp,
-                        publication.blob.namespace,
-                        publication.blob.id,
-                    ],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(PathBuf::from)
-            } else {
-                None
-            };
-            let previous = previous_row_blob_for_write_on(
-                tx,
-                &publication.table,
-                &publication.row_id,
-                &publication.row_stamp,
-                &publication.column,
-                &publication.blob,
-                publication.plaintext_size,
-                plaintext_hash,
-            )?;
-            let fact = StoreWriteBlobFact {
-                table: publication.table,
-                row_id: publication.row_id,
-                row_stamp: publication.row_stamp,
-                column: publication.column,
-                blob: publication.blob,
-                plaintext_size: publication.plaintext_size,
-                plaintext_hash,
-                external_path,
-                previous,
-            };
+            let fact = Self::capture_store_write_blob_fact_on(tx, publication)?;
             let key = fact.identity_key();
             if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
                 if prior != fact {
@@ -147,6 +106,103 @@ impl StoreDatabase {
                         "Store write gives row {}/{}/{} at {} conflicting blob facts",
                         key.0, key.1, key.2, key.3
                     )));
+                }
+            }
+        }
+        Ok(StoreWriteBlobFacts {
+            blobs: facts.into_values().collect(),
+        })
+    }
+
+    fn capture_store_write_blob_fact_on(
+        tx: &rusqlite::Transaction<'_>,
+        publication: PublicationBlob,
+    ) -> Result<StoreWriteBlobFact, DbError> {
+        let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
+            DbError::Message(format!(
+                "capture Store write blob {}/{} plaintext hash: {error}",
+                publication.blob.namespace, publication.blob.id
+            ))
+        })?;
+        let external_path = if publication.blob.provenance == Provenance::UserProvided {
+            tx.query_row(
+                "SELECT path FROM local_blob_refs
+                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                       AND row_stamp = ?4 AND namespace = ?5 AND blob_id = ?6",
+                rusqlite::params![
+                    publication.table,
+                    publication.row_id,
+                    publication.column,
+                    publication.row_stamp,
+                    publication.blob.namespace,
+                    publication.blob.id,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(PathBuf::from)
+        } else {
+            None
+        };
+        let previous = previous_row_blob_for_write_on(
+            tx,
+            &publication.table,
+            &publication.row_id,
+            &publication.row_stamp,
+            &publication.column,
+            &publication.blob,
+            publication.plaintext_size,
+            plaintext_hash,
+        )?;
+        Ok(StoreWriteBlobFact {
+            table: publication.table,
+            row_id: publication.row_id,
+            row_stamp: publication.row_stamp,
+            column: publication.column,
+            blob: publication.blob,
+            plaintext_size: publication.plaintext_size,
+            plaintext_hash,
+            external_path,
+            previous,
+            audience_move: None,
+        })
+    }
+
+    fn capture_audience_move_blob_facts_on(
+        tx: &rusqlite::Transaction<'_>,
+        moves: &[gate::AudienceMove],
+        blob_decls: &BlobDecls,
+        captured: StoreWriteBlobFacts,
+    ) -> Result<StoreWriteBlobFacts, DbError> {
+        let mut facts = captured
+            .blobs
+            .into_iter()
+            .map(|fact| (fact.identity_key(), fact))
+            .collect::<BTreeMap<_, _>>();
+        for audience_move in moves {
+            for (table, row_id) in &audience_move.rows {
+                let Some(publication) = blob_decls
+                    .publication_blob_for_row(tx, table, row_id)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "capture audience-move blob {table}/{row_id}: {error}"
+                        ))
+                    })?
+                else {
+                    continue;
+                };
+                let fact = Self::capture_store_write_blob_fact_on(tx, publication)?;
+                let key = fact.identity_key();
+                if let Some(prior) = facts.get(&key) {
+                    if prior != &fact {
+                        return Err(DbError::Message(format!(
+                            "audience move gives row {}/{}/{} at {} conflicting blob facts",
+                            key.0, key.1, key.2, key.3
+                        )));
+                    }
+                } else {
+                    facts.insert(key, fact);
                 }
             }
         }
@@ -189,7 +245,7 @@ impl StoreDatabase {
         captured: &[u8],
         gates: &Gates,
         routing: StoreWriteRouting<'_>,
-    ) -> Result<Vec<gate::AudiencePartition>, DbError> {
+    ) -> Result<gate::PartitionedAudienceWrite, DbError> {
         match routing {
             StoreWriteRouting::MergeScoped(encryption) => {
                 let store_root_hash = required_store_root_authority_on(tx)?.store_root_hash;
@@ -376,6 +432,32 @@ impl StoreDatabase {
         gates: &Gates,
         blob_decls: &BlobDecls,
         routing_encryption: Option<&EncryptionService>,
+        blob_staging: Option<&super::audience_blob_staging::HostWriteBlobStaging>,
+        write_id: WriteId,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<WriteReceipt<R>, E>
+    where
+        E: From<DbError>,
+    {
+        Self::run_store_write_transaction_with_blob_materialization_on(
+            conn,
+            synced_tables,
+            gates,
+            blob_decls,
+            routing_encryption,
+            blob_staging.map(AudienceBlobMoveMaterialization::Host),
+            write_id,
+            f,
+        )
+    }
+
+    fn run_store_write_transaction_with_blob_materialization_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        gates: &Gates,
+        blob_decls: &BlobDecls,
+        routing_encryption: Option<&EncryptionService>,
+        blob_materialization: Option<AudienceBlobMoveMaterialization<'_>>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -393,28 +475,84 @@ impl StoreDatabase {
             gate::validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(|error| DbError::Message(error.to_string()))
                 .map_err(E::from)?;
-            let partitions = Self::partition_captured_write_on(&tx, &captured, gates, routing)
+            let partitioned = Self::partition_captured_write_on(&tx, &captured, gates, routing)
                 .map_err(E::from)?;
-            let blob_facts = Self::capture_partition_blob_facts_on(&tx, &partitions, blob_decls)
-                .map_err(E::from)?;
-            let rows_changed = conn.total_changes().saturating_sub(changes_before);
-            let local_stream_id = local_merge_stream_id_on(&tx).map_err(E::from)?;
-            let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
-            let base = StoreWriteBase {
-                dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())
-                    .map_err(E::from)?,
-            };
-            let status = Self::insert_store_write_on(
+            let mut blob_facts =
+                Self::capture_partition_blob_facts_on(&tx, &partitioned.partitions, blob_decls)
+                    .map_err(E::from)?;
+            blob_facts = Self::capture_audience_move_blob_facts_on(
                 &tx,
-                &write_id,
-                &partitions,
-                &inverse_changeset,
-                &base,
-                &blob_facts,
-                rows_changed,
+                &partitioned.moves,
+                blob_decls,
+                blob_facts,
             )
             .map_err(E::from)?;
-            tx.commit().map_err(DbError::from).map_err(E::from)?;
+            let moved_blob_exists = blob_facts.blobs.iter().any(|fact| {
+                partitioned.moves.iter().any(|audience_move| {
+                    audience_move
+                        .rows
+                        .contains(&(fact.table.clone(), fact.row_id.clone()))
+                })
+            });
+            let staged_files = match (moved_blob_exists, &blob_materialization) {
+                (false, _) => None,
+                (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => Some(
+                    Self::stage_audience_move_blobs_on(
+                        &tx,
+                        &mut blob_facts,
+                        &partitioned.moves,
+                        &partitioned.partitions,
+                        staging,
+                    )
+                    .map_err(E::from)?,
+                ),
+                (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
+                    Self::record_prepared_transition_local_blob_moves(
+                        &mut blob_facts,
+                        &partitioned.moves,
+                    )
+                    .map_err(E::from)?;
+                    None
+                }
+                (true, None) => {
+                    return Err(E::from(DbError::Message(
+                        "BlobMoveRequiresMaterialization: audience move staging is unavailable"
+                            .to_string(),
+                    )));
+                }
+            };
+            let committed = (|| {
+                let rows_changed = conn.total_changes().saturating_sub(changes_before);
+                let local_stream_id = local_merge_stream_id_on(&tx)?;
+                let inverse_changeset = Self::invert_changeset(&captured)?;
+                let base = StoreWriteBase {
+                    dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())?,
+                };
+                let status = Self::insert_store_write_on(
+                    &tx,
+                    &write_id,
+                    &partitioned.partitions,
+                    &inverse_changeset,
+                    &base,
+                    &blob_facts,
+                    rows_changed,
+                )?;
+                tx.commit().map_err(DbError::from)?;
+                Ok::<_, DbError>(status)
+            })();
+            let status = match committed {
+                Ok(status) => status,
+                Err(error) => {
+                    let error = match (&blob_materialization, staged_files) {
+                        (Some(AudienceBlobMoveMaterialization::Host(staging)), Some(files)) => {
+                            Self::rollback_staged_audience_blobs(staging, files, error)
+                        }
+                        (_, None) => error,
+                        (_, Some(_)) => unreachable!("staged files require host staging"),
+                    };
+                    return Err(E::from(error));
+                }
+            };
             Ok(WriteReceipt {
                 value,
                 write_id,
@@ -433,18 +571,60 @@ impl StoreDatabase {
     where
         E: From<DbError>,
     {
+        Self::run_coven_store_write_transaction_on(
+            conn,
+            synced_tables,
+            routing_encryption,
+            None,
+            write_id,
+            f,
+        )
+    }
+
+    pub(crate) fn run_prepared_blob_transition_transaction_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        routing_encryption: Option<&EncryptionService>,
+        write_id: WriteId,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<DbError>,
+    {
+        Self::run_coven_store_write_transaction_on(
+            conn,
+            synced_tables,
+            routing_encryption,
+            Some(AudienceBlobMoveMaterialization::PreparedTransition),
+            write_id,
+            f,
+        )
+    }
+
+    fn run_coven_store_write_transaction_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        routing_encryption: Option<&EncryptionService>,
+        blob_materialization: Option<AudienceBlobMoveMaterialization<'_>>,
+        write_id: WriteId,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<DbError>,
+    {
         let gates = Gates::from_tables(conn, synced_tables)
             .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
         let blob_decls = BlobDecls::from_tables(conn, synced_tables)
             .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
-        Self::run_store_write_transaction_on(
+        Self::run_store_write_transaction_with_blob_materialization_on(
             conn,
             synced_tables,
             &gates,
             &blob_decls,
             routing_encryption,
+            blob_materialization,
             write_id,
             f,
         )

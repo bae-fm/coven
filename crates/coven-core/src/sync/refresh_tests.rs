@@ -411,7 +411,7 @@ impl SyncStorage for MembershipReadCounter<'_> {
         protection: crate::sync::storage::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool_file: &std::path::Path,
-    ) -> Result<(), crate::sync::storage::StorageError> {
+    ) -> Result<crate::sync::storage::BlobSpoolWrite, crate::sync::storage::StorageError> {
         self.inner
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
             .await

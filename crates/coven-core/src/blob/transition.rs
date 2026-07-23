@@ -467,7 +467,7 @@ pub(crate) async fn finalize_created_upload(
             ))
         })?;
         let publication_write_id = write_id.clone();
-        StoreDatabase::run_internal_store_write_transaction_on(
+        StoreDatabase::run_prepared_blob_transition_transaction_on(
             conn,
             &tables,
             routing_encryption.as_ref(),
@@ -657,7 +657,7 @@ pub async fn make_local(
     let write_id = db.new_write_id();
     let gates = db.gates();
     db.call(move |conn| {
-        StoreDatabase::run_internal_store_write_transaction_on(
+        StoreDatabase::run_prepared_blob_transition_transaction_on(
             conn,
             &tables,
             routing_encryption.as_ref(),

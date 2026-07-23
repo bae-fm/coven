@@ -557,32 +557,34 @@ impl BlobDecls {
                 table: change.table.clone(),
                 primary_key: pk.to_string(),
             })?;
-        let blob = tb.ref_from_row(&change.table, row)?.ok_or_else(|| {
-            BlobDeclError::MissingPublicationBlob {
-                table: change.table.clone(),
-                primary_key: pk.to_string(),
-            }
-        })?;
+        let publication = publication_blob_from_row(&change.table, tb, row)?;
+        let blob = &publication.blob;
         if blob.id != changed_blob.id {
             return Err(BlobDeclError::PublicationBlobMismatch {
                 table: change.table.clone(),
                 primary_key: pk.to_string(),
                 changed_blob_id: changed_blob.id,
-                row_blob_id: blob.id,
+                row_blob_id: blob.id.clone(),
             });
         }
-        let size = tb.size_from_row(&change.table, row)?;
-        let plaintext_hash = tb.hash_from_row(row)?;
-        let row_stamp = row.get::<_, String>("_updated_at")?;
-        Ok(Some(PublicationBlob {
-            table: change.table.clone(),
-            row_id: pk.to_string(),
-            row_stamp,
-            column: tb.id_col_name.clone(),
-            blob,
-            plaintext_size: size,
-            plaintext_hash,
-        }))
+        Ok(Some(publication))
+    }
+
+    pub(crate) fn publication_blob_for_row(
+        &self,
+        conn: &Connection,
+        table: &str,
+        row_id: &str,
+    ) -> Result<Option<PublicationBlob>, BlobDeclError> {
+        let Some(blob) = self.tables.get(table) else {
+            return Ok(None);
+        };
+        let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(table));
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query([row_id])?;
+        rows.next()?
+            .map(|row| publication_blob_from_row(table, blob, row))
+            .transpose()
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap
@@ -917,6 +919,29 @@ impl BlobDecls {
         };
         column_on_row::<String>(conn, table, &tb.hash_col_name, pk)
     }
+}
+
+fn publication_blob_from_row(
+    table: &str,
+    blob: &TableBlob,
+    row: &rusqlite::Row<'_>,
+) -> Result<PublicationBlob, BlobDeclError> {
+    let row_id = row.get::<_, String>("id")?;
+    let reference =
+        blob.ref_from_row(table, row)?
+            .ok_or_else(|| BlobDeclError::MissingPublicationBlob {
+                table: table.to_string(),
+                primary_key: row_id.clone(),
+            })?;
+    Ok(PublicationBlob {
+        table: table.to_string(),
+        row_id,
+        row_stamp: row.get("_updated_at")?,
+        column: blob.id_col_name.clone(),
+        blob: reference,
+        plaintext_size: blob.size_from_row(table, row)?,
+        plaintext_hash: blob.hash_from_row(row)?,
+    })
 }
 
 /// The primary key (`id`) of the row in `table` whose declared blob-id column equals
