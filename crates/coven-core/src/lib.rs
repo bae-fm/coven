@@ -173,7 +173,9 @@ pub use sync::circle::{
     CircleOperationKind, CircleOperationState, CircleRole,
 };
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
-pub use sync::membership::{MemberInfo, MemberRole};
+pub use sync::membership::{
+    MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo,
+};
 pub use sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,

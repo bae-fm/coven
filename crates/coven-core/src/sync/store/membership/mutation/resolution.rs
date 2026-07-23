@@ -1,7 +1,5 @@
 use crate::keys::{self, UserKeypair};
-use crate::sync::membership::{
-    self, MembershipChain, MembershipChange, MembershipError, MembershipHeadRef,
-};
+use crate::sync::membership::{self, MembershipChain, MembershipChange, MembershipError};
 use crate::sync::remote_object;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::store::database::StoreDatabase;
@@ -79,7 +77,7 @@ async fn build_resolution_mutation(
     signer: &UserKeypair,
     device_id: &str,
     conflict_hash: store_commit::ObjectHash,
-    resolver_branch_heads: Vec<MembershipHeadRef>,
+    selection: membership::MembershipConflictSelection,
     created_at: &str,
 ) -> Result<ResolveMutationPlan, InviteError> {
     let base = operations::prepare_merge_conflict_resolution_commit(
@@ -92,19 +90,14 @@ async fn build_resolution_mutation(
     .await
     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     let chain = base.membership();
-    let membership::MembershipStatus::Conflict(membership::MembershipConflict::RevocationCycle {
-        conflict_hash: current,
-        maximal_valid_branches,
-        ..
-    }) = chain.status()
-    else {
+    let membership::MembershipStatus::Conflict(conflict) = chain.status() else {
         return Err(MembershipError::Conflict.into());
     };
-    if *current != conflict_hash
-        || !maximal_valid_branches
-            .iter()
-            .any(|branch| branch.heads == resolver_branch_heads)
-    {
+    let current = match conflict {
+        membership::MembershipConflict::ConcurrentMemberAssignments { conflict_hash, .. }
+        | membership::MembershipConflict::RevocationCycle { conflict_hash, .. } => *conflict_hash,
+    };
+    if current != conflict_hash {
         return Err(MembershipError::InvalidConflictResolution.into());
     }
     let resolver_pubkey = keys::public_key_hex(signer);
@@ -159,9 +152,9 @@ async fn build_resolution_mutation(
         signer,
     )
     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let resolution = chain.signed_cycle_resolution(
+    let resolution = chain.signed_conflict_resolution(
         base.root().store_root_hash,
-        resolver_branch_heads,
+        selection,
         membership,
         acceptance,
         signer,
@@ -511,13 +504,13 @@ async fn execute_resolution_mutation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn resolve_membership_conflict(
+pub(crate) async fn resolve_membership_conflict(
     storage: &dyn SyncStorage,
     chain: &mut MembershipChain,
     signer: &UserKeypair,
     device_id: &str,
     conflict_hash: store_commit::ObjectHash,
-    resolver_branch_heads: Vec<MembershipHeadRef>,
+    selection: membership::MembershipConflictSelection,
     created_at: &str,
     database: &StoreDatabase,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
@@ -533,7 +526,7 @@ pub async fn resolve_membership_conflict(
             };
             if plan.resolution.conflict_hash != conflict_hash
                 || plan.resolution.resolver_pubkey != keys::public_key_hex(signer)
-                || plan.resolution.resolver_branch_heads != resolver_branch_heads
+                || plan.resolution.selection != selection
             {
                 return Err(InviteError::PendingMutation(
                     "the pending resolution has different immutable inputs".to_string(),
@@ -549,7 +542,7 @@ pub async fn resolve_membership_conflict(
                 signer,
                 device_id,
                 conflict_hash,
-                resolver_branch_heads,
+                selection,
                 created_at,
             )
             .await?;

@@ -16,14 +16,110 @@ pub(crate) async fn get_members(
     user_pubkey: Option<&[u8]>,
     database: &StoreDatabase,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
-    get_merge_members(storage, user_pubkey, database).await
+    let chain = load_current_membership_chain(storage, database).await?;
+    require_resolved_membership(&chain)?;
+    Ok(member_info(chain.current_members(), user_pubkey))
 }
 
-async fn get_merge_members(
+pub(crate) async fn get_membership_conflict(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
     database: &StoreDatabase,
-) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+) -> Result<Option<crate::sync::membership::MembershipConflictInfo>, MembershipOpsError> {
+    let chain = load_current_membership_chain(storage, database).await?;
+    let conflict = match chain.status() {
+        crate::sync::membership::MembershipStatus::Resolved(_) => None,
+        crate::sync::membership::MembershipStatus::Conflict(
+            MembershipConflict::ConcurrentMemberAssignments {
+                conflict_hash,
+                member_pubkey,
+                conflicting_grants,
+                grants,
+                ..
+            },
+        ) => Some(
+            crate::sync::membership::MembershipConflictInfo::ConcurrentMemberAssignments {
+                id: conflict_hash.to_string(),
+                member_pubkey: member_pubkey.clone(),
+                choices: conflicting_grants
+                    .iter()
+                    .map(|(selected_grant, selected_record)| {
+                        let selection =
+                            crate::sync::membership::MembershipConflictSelection::MemberAssignment {
+                                grant: selected_grant.clone(),
+                            };
+                        let members = member_info(
+                            grants
+                                .iter()
+                                .filter_map(|(grant, state)| {
+                                    (!conflicting_grants.contains_key(grant))
+                                        .then(|| state.active())
+                                        .flatten()
+                                        .map(|record| {
+                                            (record.member_pubkey.clone(), record.role.role())
+                                        })
+                                })
+                                .chain(std::iter::once((
+                                    selected_record.member_pubkey.clone(),
+                                    selected_record.role.role(),
+                                )))
+                                .collect(),
+                            user_pubkey,
+                        );
+                        crate::sync::membership::MembershipConflictChoice::new(
+                            membership_conflict_choice_id(&selection),
+                            members,
+                            *conflict_hash,
+                            selection,
+                        )
+                    })
+                    .collect(),
+            },
+        ),
+        crate::sync::membership::MembershipStatus::Conflict(
+            MembershipConflict::RevocationCycle {
+                conflict_hash,
+                maximal_valid_branches,
+                ..
+            },
+        ) => Some(
+            crate::sync::membership::MembershipConflictInfo::RevocationCycle {
+                id: conflict_hash.to_string(),
+                choices: maximal_valid_branches
+                    .iter()
+                    .map(|branch| {
+                        let heads = branch.heads.clone();
+                        let selection =
+                            crate::sync::membership::MembershipConflictSelection::RevocationBranch {
+                                heads,
+                            };
+                        let members = member_info(
+                            branch
+                                .active_grants()
+                                .map(|(_, record)| {
+                                    (record.member_pubkey.clone(), record.role.role())
+                                })
+                                .collect(),
+                            user_pubkey,
+                        );
+                        crate::sync::membership::MembershipConflictChoice::new(
+                            membership_conflict_choice_id(&selection),
+                            members,
+                            *conflict_hash,
+                            selection,
+                        )
+                    })
+                    .collect(),
+            },
+        ),
+    };
+    Ok(conflict)
+}
+
+pub(crate) async fn load_current_membership_chain(
+    storage: &dyn SyncStorage,
+    database: &StoreDatabase,
+) -> Result<MembershipChain, MembershipOpsError> {
     let db = database.sqlite();
     let root_ref = required_store_root_ref(database).await?;
     let pinned_owner = db
@@ -33,11 +129,24 @@ async fn get_merge_members(
         .ok_or(MembershipOpsError::NoFounderChain)?;
     let chain =
         load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(database)).await?;
-    require_resolved_membership(&chain)?;
-    let user_pubkey_hex = user_pubkey.map(hex::encode);
+    Ok(chain)
+}
 
-    let current = chain.current_members();
-    let members = current
+fn membership_conflict_choice_id(
+    selection: &crate::sync::membership::MembershipConflictSelection,
+) -> String {
+    let selection_bytes =
+        serde_json::to_vec(selection).expect("membership conflict selections always serialize");
+    let mut bytes = b"coven.membership-conflict-choice.v1\0".to_vec();
+    bytes.extend(selection_bytes);
+    crate::sync::store_commit::ObjectHash::digest(&bytes).to_string()
+}
+
+fn member_info(current: Vec<(String, MemberRole)>, user_pubkey: Option<&[u8]>) -> Vec<MemberInfo> {
+    let user_pubkey_hex = user_pubkey.map(hex::encode);
+    current
+        .into_iter()
+        .collect::<BTreeMap<_, _>>()
         .into_iter()
         .map(|(pubkey, role)| {
             let is_self = user_pubkey_hex.as_deref() == Some(&pubkey);
@@ -47,7 +156,5 @@ async fn get_merge_members(
                 is_self,
             }
         })
-        .collect();
-
-    Ok(members)
+        .collect()
 }

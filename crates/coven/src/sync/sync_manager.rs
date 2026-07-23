@@ -648,6 +648,28 @@ impl SyncManager {
             .map_err(SyncError::from)
     }
 
+    pub(crate) async fn membership_conflict(
+        &self,
+    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
+        let active_loop = self.sync_loop_handle();
+        let config = active_loop
+            .as_ref()
+            .map(|handle| handle.config().clone())
+            .unwrap_or_else(|| (self.config_provider)());
+        if active_loop.is_none() && config.cloud_home.provider.is_none() {
+            return Err(SyncError::NotConfigured);
+        }
+        let storage = self
+            .storage_for_command(&config, active_loop.as_ref())
+            .await?;
+        let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
+        Store::load(self.database.clone(), storage)
+            .await?
+            .membership_conflict(user_pubkey.as_ref().map(|key| key.as_slice()))
+            .await
+            .map_err(SyncError::from)
+    }
+
     /// Build a restore code for this store: fetch the current membership-head
     /// floor from the cloud and mint the code from it, so the restorer can seed
     /// its watermark from mint-time
@@ -762,6 +784,18 @@ impl SyncManager {
             let fingerprint = outcome.map_err(SyncError::from)?;
             Ok(fingerprint)
         })
+    }
+
+    pub(crate) async fn resolve_membership_conflict(
+        &self,
+        choice: &crate::MembershipConflictChoice,
+    ) -> Result<(), SyncError> {
+        let _member_ops = self.member_ops_lock.lock().await;
+        let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        sync_loop
+            .resolve_membership_conflict(choice)
+            .await
+            .map_err(SyncError::from)
     }
 
     pub(crate) async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {

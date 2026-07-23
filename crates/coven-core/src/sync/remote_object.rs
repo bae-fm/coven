@@ -3771,7 +3771,9 @@ mod tests {
             retired_owner_grants: BTreeSet::new(),
             retirement_barriers: BTreeMap::new(),
             resolver_pubkey: resolver_pubkey.clone(),
-            resolver_branch_heads: Vec::new(),
+            selection: super::super::membership::MembershipConflictSelection::RevocationBranch {
+                heads: Vec::new(),
+            },
             replacement_grant: replacement_grant.clone(),
             replacement_membership: membership.clone(),
             replacement_acceptance: super::super::store_commit::OwnerConflictResolutionAcceptance {

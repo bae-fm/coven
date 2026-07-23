@@ -689,7 +689,7 @@ pub use coven_core::{
     Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationId, CircleOperationInfo,
     CircleOperationKind, CircleOperationState, CircleRole,
 };
-pub use coven_core::{MemberInfo, MemberRole};
+pub use coven_core::{MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo};
 
 // Clock / id abstractions the host injects, plus the deterministic test fakes.
 pub use coven_core::{Clock, ClockRef, IdProvider, IdRef, SystemClock, UuidProvider};

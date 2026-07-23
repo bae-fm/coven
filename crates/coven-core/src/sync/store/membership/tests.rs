@@ -8,7 +8,7 @@ use crate::sync::test_helpers::{
     install_active_device_fixture, open_test_db, promote_active_member_fixture, pubkey_hex,
     TestCustody, TestStore,
 };
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
     store: TestStore,
@@ -361,6 +361,67 @@ async fn complete_chain_still_validates() {
     assert!(load_fixture(&fixture)
         .await
         .can_write_now(&pubkey_hex(&member)));
+}
+
+#[tokio::test]
+async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomically() {
+    let fixture = merge_fixture("store-membership-conflict-boundary").await;
+    let storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            fixture.store.home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            fixture.store.storage.store_id(),
+            fixture.owner.clone(),
+        )
+        .expect("open a Store-owned storage session"),
+    );
+    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
+        .await
+        .expect("load Store owner");
+    assert!(store
+        .membership_conflict(Some(&fixture.owner.public_key()))
+        .await
+        .expect("read membership conflict")
+        .is_none());
+
+    let chain = load_fixture(&fixture).await;
+    let choice = crate::sync::membership::MembershipConflictChoice::new(
+        "foreign-choice".to_string(),
+        Vec::new(),
+        crate::sync::store_commit::ObjectHash::digest(b"foreign conflict"),
+        crate::sync::membership::MembershipConflictSelection::RevocationBranch {
+            heads: vec![chain
+                .head_refs()
+                .first()
+                .expect("founder membership head")
+                .clone()],
+        },
+    );
+    let result = store
+        .resolve_membership_conflict(
+            &fixture.owner,
+            "owner-device",
+            &choice,
+            "2026-07-22T00:00:00Z",
+        )
+        .await;
+
+    assert!(
+        matches!(
+            &result,
+            Err(MembershipOpsError::Invite(InviteError::Membership(
+                crate::sync::membership::MembershipError::InvalidConflictResolution
+            )))
+        ),
+        "foreign conflict choice returned {result:?}"
+    );
+    assert!(fixture
+        .database
+        .outbound_membership_mutation()
+        .await
+        .expect("read membership mutation journal")
+        .is_none());
 }
 
 #[tokio::test]

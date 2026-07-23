@@ -94,10 +94,15 @@ This ownership work completes the Store foundation required by
   `StoreDatabase::sqlite()` access for closed SQL, schema models, test fault
   injection, and host-facing reads. The final boundary audit must remove
   operation-continuing raw access without wrapping those operations.
-- Discovered: manual membership-conflict resolution is exposed as a Store-root
-  function that accepts a mutable membership chain. It must become a concrete
-  Store operation with a closed result or be removed if no application command
-  can invoke it.
+- Complete: revocation-cycle and concurrent-assignment membership conflicts are
+  read and resolved through concrete Store and application operations.
+  Applications receive opaque choices with member read models; exact heads and
+  grant identifiers remain private, and Store rejects stale or foreign choices
+  before operation planning.
+- Complete: concurrent assignment resolutions preserve a contested grant only
+  when every distinct resolver selects it. Disagreement retires every contested
+  assignment, while each resolver's prior Owner grant is retired and replaced
+  by the signed resolution authority.
 - Remaining: route cycle and application commands through the concrete Store
   owner, make Store implementation modules private, reduce temporary
   visibility, and seal the boundary.

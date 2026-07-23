@@ -1056,6 +1056,13 @@ impl CovenHandle {
         manager.get_members().await
     }
 
+    pub async fn membership_conflict(
+        &self,
+    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.membership_conflict().await
+    }
+
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
@@ -1284,6 +1291,14 @@ impl CovenHandle {
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.remove_member(public_key_hex).await
+    }
+
+    pub async fn resolve_membership_conflict(
+        &self,
+        choice: &crate::MembershipConflictChoice,
+    ) -> Result<(), SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.resolve_membership_conflict(choice).await
     }
 
     /// Create and activate a circle whose founder is this Store identity.

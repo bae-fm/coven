@@ -153,6 +153,78 @@ impl Store {
     }
 
     #[doc(hidden)]
+    pub async fn membership_conflict(
+        &self,
+        user_pubkey: Option<&[u8]>,
+    ) -> Result<
+        Option<crate::sync::membership::MembershipConflictInfo>,
+        membership::MembershipOpsError,
+    > {
+        membership::get_membership_conflict(self.storage().as_ref(), user_pubkey, self.database())
+            .await
+    }
+
+    pub(crate) async fn resolve_membership_conflict(
+        &self,
+        identity: &UserKeypair,
+        device_id: &str,
+        choice: &crate::sync::membership::MembershipConflictChoice,
+        created_at: &str,
+    ) -> Result<
+        crate::sync::membership::StoreMembershipConflictResolutionRef,
+        membership::MembershipOpsError,
+    > {
+        let mut chain =
+            membership::load_current_membership_chain(&**self.storage(), self.database()).await?;
+        let valid_choice = match (chain.status(), choice.selection()) {
+            (
+                crate::sync::membership::MembershipStatus::Conflict(
+                    crate::sync::membership::MembershipConflict::ConcurrentMemberAssignments {
+                        conflict_hash,
+                        conflicting_grants,
+                        ..
+                    },
+                ),
+                crate::sync::membership::MembershipConflictSelection::MemberAssignment { grant },
+            ) => conflict_hash == &choice.conflict_hash() && conflicting_grants.contains_key(grant),
+            (
+                crate::sync::membership::MembershipStatus::Conflict(
+                    crate::sync::membership::MembershipConflict::RevocationCycle {
+                        conflict_hash,
+                        maximal_valid_branches,
+                        ..
+                    },
+                ),
+                crate::sync::membership::MembershipConflictSelection::RevocationBranch { heads },
+            ) => {
+                conflict_hash == &choice.conflict_hash()
+                    && maximal_valid_branches
+                        .iter()
+                        .any(|branch| branch.heads == *heads)
+            }
+            _ => false,
+        };
+        if !valid_choice {
+            return Err(membership::InviteError::Membership(
+                crate::sync::membership::MembershipError::InvalidConflictResolution,
+            )
+            .into());
+        }
+        let result = membership::resolve_membership_conflict(
+            &**self.storage(),
+            &mut chain,
+            identity,
+            device_id,
+            choice.conflict_hash(),
+            choice.selection().clone(),
+            created_at,
+            self.database(),
+        )
+        .await?;
+        Ok(result)
+    }
+
+    #[doc(hidden)]
     pub async fn restore_membership(
         &self,
     ) -> Result<StoreRestoreMembership, membership::MembershipOpsError> {

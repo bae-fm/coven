@@ -453,6 +453,16 @@ impl SyncLoopHandle {
             .await
     }
 
+    pub(crate) async fn resolve_membership_conflict(
+        &self,
+        choice: &crate::MembershipConflictChoice,
+    ) -> Result<(), super::store::MembershipOpsError> {
+        self.inner
+            .components
+            .resolve_membership_conflict(choice)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) fn adopt_key_rotation_for_test(
         &self,

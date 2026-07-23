@@ -10,7 +10,6 @@ mod resolution;
 
 pub use error::InviteError;
 pub use keyring::unwrap_store_keyring;
-pub use resolution::resolve_membership_conflict;
 
 pub(crate) use invitation::create_invitation_with_encryption_durable;
 #[cfg(test)]
@@ -25,6 +24,7 @@ pub(crate) use publication::{
     validate_prepared_publication, validate_prepared_transition,
 };
 pub(crate) use removal::{complete_revoke_rotation_adoption, revoke_member_durable};
+pub(crate) use resolution::resolve_membership_conflict;
 
 use journal::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,

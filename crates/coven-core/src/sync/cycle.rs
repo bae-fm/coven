@@ -1322,6 +1322,21 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn resolve_membership_conflict(
+        &self,
+        choice: &super::membership::MembershipConflictChoice,
+    ) -> Result<(), super::store::MembershipOpsError> {
+        self.store
+            .resolve_membership_conflict(
+                &self.user_keypair,
+                &self.device_id,
+                choice,
+                &self.hlc.now().to_string(),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub fn adopt_key_rotation(
         &self,
         encryption: crate::encryption::EncryptionService,

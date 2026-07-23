@@ -128,9 +128,11 @@ mod mutation;
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
 pub(crate) use key_rotation::apply_key_rotation;
-pub(crate) use listing::{current_membership_floor, get_members};
+pub(crate) use listing::{
+    current_membership_floor, get_members, get_membership_conflict, load_current_membership_chain,
+};
 pub(crate) use merge::{invite_member, remove_member};
-pub use mutation::{resolve_membership_conflict, unwrap_store_keyring, InviteError};
+pub use mutation::{unwrap_store_keyring, InviteError};
 
 #[cfg(test)]
 pub(crate) use mutation::signed_wrapped_keyring_for_test;
@@ -138,9 +140,10 @@ pub(crate) use mutation::{
     complete_revoke_rotation_adoption, create_invitation_with_encryption_durable,
     ed25519_hex_to_x25519, finish_membership_transition, load_authorized_owner_keyring,
     prepare_membership_transition, publish_prepared_merge_membership_activation,
-    publish_prepared_merge_membership_authority, revoke_member_durable, signed_wrapped_key,
-    unwrap_store_keyring_for_refs, validate_prepared_publication, validate_prepared_transition,
-    PreparedMembershipPublication, PreparedMembershipTransition,
+    publish_prepared_merge_membership_authority, resolve_membership_conflict,
+    revoke_member_durable, signed_wrapped_key, unwrap_store_keyring_for_refs,
+    validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
+    PreparedMembershipTransition,
 };
 
 pub(crate) use cursors::{load_and_persist_owner_anchor, upsert_head_cursor_on};

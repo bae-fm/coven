@@ -99,12 +99,9 @@ pub(crate) use membership::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use membership::{invite_member, remove_member};
-pub use membership::{
-    resolve_membership_conflict, AnchoredChainError, InviteError, MembershipOpsError,
-    OWNER_PUBKEY_STATE_KEY,
-};
 #[doc(hidden)]
 pub use membership::{seed_head_watermark, unwrap_store_keyring};
+pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
 pub(crate) use owner::AuthorizedStore;
 #[doc(hidden)]
 pub use owner::{Store, StoreRestoreMembership};
