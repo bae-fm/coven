@@ -1,6 +1,7 @@
 //! Durable creation and activation of circles through the Store commit stream.
 
 pub(crate) mod activation;
+mod close_responses;
 mod commands;
 mod error;
 mod journal;

@@ -524,6 +524,72 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .is_err());
+
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish local Circle epoch-close response");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("accept the exact existing Circle epoch-close response");
+    let controls = StoreDatabase::new(&db)
+        .closing_circle_controls()
+        .await
+        .expect("load closing Circle controls");
+    let [control] = controls.as_slice() else {
+        panic!("member removal must leave one closing Circle");
+    };
+    let crate::sync::circle::CircleControlState::EpochClose(close) = control.value.state() else {
+        panic!("closing Circle must contain an epoch close");
+    };
+    let [participant] = close.participants.as_slice() else {
+        panic!("removed member must leave the owner device as the sole participant");
+    };
+    let prefix = crate::sync::circle::circle_epoch_close_response_semantic_prefix(
+        circle_id,
+        close.close_id,
+        participant.registration.device_id,
+    );
+    let response_context = ProtocolObjectContext::store_encrypted(
+        store.root.store_root_hash,
+        ProtocolObjectDomain::CircleEpochCloseResponse,
+    );
+    let (bytes, _) = store
+        .storage
+        .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
+        .await
+        .expect("read exact Circle epoch-close response");
+    let registration = StoreDatabase::new(&db)
+        .activated_store_device_registration(participant.registration.clone())
+        .await
+        .expect("load response author registration");
+    let response =
+        crate::sync::circle::CircleEpochCloseResponse::parse_for(&bytes, control, &registration)
+            .expect("verify signed Circle epoch-close response");
+    assert_eq!(response.registration, participant.registration);
+
+    let malformed = store
+        .storage
+        .prepare_protocol_object(
+            &response_context,
+            participant.response_slot.clone(),
+            &prefix,
+            b"{}".to_vec(),
+        )
+        .expect("seal malformed response fixture");
+    store.home.replace_exact_object(
+        &participant.response_slot,
+        malformed.stored_bytes().to_vec(),
+    );
+    let error = components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect_err("malformed occupied response must fail the cycle");
+    assert!(
+        error.to_string().contains("Circle epoch-close responses"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

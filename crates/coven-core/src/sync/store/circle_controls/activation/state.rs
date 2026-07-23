@@ -654,6 +654,13 @@ impl CircleCurrentState {
             Self::ControlConflict { .. } => None,
         }
     }
+
+    pub(crate) fn closing_control(&self) -> Option<&PreparedCircleControl> {
+        match self {
+            Self::Closing(closing) => Some(&closing.current.control),
+            Self::Active(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+        }
+    }
 }
 
 fn verify_accessible_state(state: &CircleAccessibleState) -> bool {

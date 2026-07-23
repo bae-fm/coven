@@ -65,6 +65,11 @@ rebuild the deleted choice.
 - Circle images contain application rows and authenticated routing state, not
   source-device transport or ownership tables. Exact blob references are
   extracted before that state is removed and are signed outside the image.
+- Circle member removal activates an exact frozen epoch close with a
+  Circle-encrypted signed intent, frozen device state, canonical remaining
+  participants, and reserved response and outcome slots. Remaining devices
+  publish device-signed applied frontiers to their exact create-once response
+  slots after pull; the close blocks old-epoch authoring.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host

@@ -864,6 +864,123 @@ impl CircleEpochClose {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseResponse {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub close_control: CircleControlCoord,
+    pub registration: StoreDeviceRegistrationRef,
+    pub frontier: CommitFrontier,
+    pub signature: String,
+}
+
+impl CircleEpochCloseResponse {
+    pub(crate) fn signed(
+        control: &PreparedCircleControl,
+        registration: StoreDeviceRegistrationRef,
+        frontier: CommitFrontier,
+        author: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        };
+        let mut response = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: control.value.store_root_hash,
+            circle_id: control.value.circle_id,
+            close_id: close.close_id,
+            close_control: control.coord.clone(),
+            registration,
+            frontier,
+            signature: String::new(),
+        };
+        response.signature = keys::sign_hex(signer, &response.canonical_bytes()).1;
+        if !response.verify_for(control, author) {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(response)
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            circle_id: CircleId,
+            close_id: CircleEpochCloseId,
+            close_control: &'a CircleControlCoord,
+            registration: &'a StoreDeviceRegistrationRef,
+            frontier: &'a CommitFrontier,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.circle-epoch-close-response.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            circle_id: self.circle_id,
+            close_id: self.close_id,
+            close_control: &self.close_control,
+            registration: &self.registration,
+            frontier: &self.frontier,
+        })
+        .expect("Circle epoch-close response serialization cannot fail")
+    }
+
+    pub(crate) fn verify_for(
+        &self,
+        control: &PreparedCircleControl,
+        author: &StoreDeviceRegistration,
+    ) -> bool {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return false;
+        };
+        self.version == STORE_PROTOCOL_VERSION
+            && control.verify()
+            && self.store_root_hash == control.value.store_root_hash
+            && self.circle_id == control.value.circle_id
+            && self.close_id == close.close_id
+            && self.close_control == control.coord
+            && super::store_commit::validate_commit_frontier(&self.frontier).is_ok()
+            && self.frontier.covers(&close.provisional_frontier)
+            && self.registration.verify_registration(author).is_ok()
+            && author.store_root.store_root_hash == self.store_root_hash
+            && close
+                .participants
+                .iter()
+                .any(|participant| participant.registration == self.registration)
+            && keys::verify_signature_hex(
+                &author.device_signing_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
+    }
+
+    pub(crate) fn parse_for(
+        bytes: &[u8],
+        control: &PreparedCircleControl,
+        author: &StoreDeviceRegistration,
+    ) -> Result<Self, CircleTransitionError> {
+        let response: Self = serde_json::from_slice(bytes)
+            .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
+        if serde_json::to_vec(&response)
+            .expect("Circle epoch-close response serialization cannot fail")
+            != bytes
+            || !response.verify_for(control, author)
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(response)
+    }
+
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Circle epoch-close response serialization cannot fail")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleControlState {
     ActiveEpoch(MergeActiveCircleEpoch),

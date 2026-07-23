@@ -435,6 +435,12 @@ async fn run_single_sync_cycle_with_authorization(
     ))
     .await?;
     if completed.rotation_pending.is_none() {
+        authorization
+            .publish_circle_epoch_close_responses(user_keypair)
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("publish Circle epoch-close responses", error)
+            })?;
         Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
         Box::pin(reclaim_cycle_packages(device_id, user_keypair, post_pull)).await?;
     }

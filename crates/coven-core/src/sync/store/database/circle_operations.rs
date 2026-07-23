@@ -225,6 +225,36 @@ impl StoreDatabase {
         .await
     }
 
+    pub(crate) async fn closing_circle_controls(
+        &self,
+    ) -> Result<Vec<crate::sync::circle::PreparedCircleControl>, DbError> {
+        self.database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT circle_id, state
+                         FROM circle_current_state
+                         ORDER BY circle_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(DbError::from)?;
+                let mut controls = Vec::new();
+                for row in rows {
+                    let (circle_id, payload) = row.map_err(DbError::from)?;
+                    let state = Self::parse_circle_current_state(&circle_id, &payload)?;
+                    if let Some(control) = state.closing_control() {
+                        controls.push(control.clone());
+                    }
+                }
+                Ok(controls)
+            })
+            .await
+    }
+
     pub(crate) async fn circle_publication_context(
         &self,
         circle_id: crate::sync::circle::CircleId,
