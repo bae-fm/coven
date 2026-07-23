@@ -1,5 +1,5 @@
 use super::abandonment::read_occupied_merge_head;
-use super::database::StoreDatabase;
+use super::database::{StoreDatabase, StoreDatabaseTransaction};
 use super::device_join;
 use super::membership as invite;
 use super::owner_promotion;
@@ -74,7 +74,7 @@ pub(crate) async fn prepare_plan(
 ) -> Result<StoreOperationCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
-    let previous = db.latest_local_store_position().await?;
+    let previous = StoreDatabase::new(db).latest_local_store_position().await?;
     let dependencies =
         crate::sync::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
             .map(|frontier| frontier.commits().clone())
@@ -396,7 +396,8 @@ pub(crate) fn publish<'a>(
         let has_tracked_remote_objects =
             !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
         if has_tracked_remote_objects {
-            db.mark_candidate_commit_uploaded(reference.clone())
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_candidate_commit_uploaded(reference.clone())
                 .await
                 .map_err(|error| {
                     StoreError::InvalidOutbound(format!("record uploaded Store candidate: {error}"))
@@ -441,7 +442,8 @@ pub(crate) fn publish<'a>(
             object: prepared_head.reference().clone(),
         };
         let operation_object_ids = if has_tracked_remote_objects {
-            db.mark_store_head_uploaded(activation_head.clone())
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_store_head_uploaded(activation_head.clone())
                 .await
                 .map_err(|error| {
                     StoreError::InvalidOutbound(format!("record uploaded Store head: {error}"))
@@ -496,12 +498,10 @@ pub(crate) fn publish<'a>(
             let tx = connection
                 .unchecked_transaction()
                 .map_err(crate::database::DbError::from)?;
+            let store_transaction = StoreDatabaseTransaction::new(&tx);
             if let Some(object_ids) = operation_object_ids {
-                Database::activate_store_operation_remote_objects_on(
-                    &tx,
-                    &recorded_ref,
-                    &object_ids,
-                )?;
+                store_transaction
+                    .activate_store_operation_remote_objects(&recorded_ref, &object_ids)?;
             }
             if !registrations.is_empty() {
                 Database::record_activated_store_device_registrations_on(
@@ -533,13 +533,13 @@ pub(crate) fn publish<'a>(
                         ))
                     })?;
             }
-            Database::record_verified_merge_materialization_on(&tx, materialization).map_err(
-                |error| {
+            store_transaction
+                .record_verified_merge_materialization(materialization)
+                .map_err(|error| {
                     crate::database::DbError::Message(format!(
                         "record exact Merge materialization: {error}"
                     ))
-                },
-            )?;
+                })?;
             tx.commit().map_err(crate::database::DbError::from)
         })
         .await?;

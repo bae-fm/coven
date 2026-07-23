@@ -7,6 +7,23 @@ pub(crate) struct DurablePreparedProtocolObject {
     pub(super) prepared: PreparedExactObject,
 }
 
+impl DurablePreparedProtocolObject {
+    pub(crate) fn new(semantic_bytes: Vec<u8>, prepared: PreparedExactObject) -> Self {
+        Self {
+            semantic_bytes,
+            prepared,
+        }
+    }
+
+    pub(crate) fn semantic_bytes(&self) -> &[u8] {
+        &self.semantic_bytes
+    }
+
+    pub(crate) fn prepared(&self) -> &PreparedExactObject {
+        &self.prepared
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreBatchLocalCleanup {

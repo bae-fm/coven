@@ -1346,7 +1346,8 @@ pub async fn run_cycle_fixture(
 pub async fn latest_local_store_position_fixture(
     db: &Database,
 ) -> Result<Option<crate::sync::store_commit::StoreBatchCommitRef>, String> {
-    db.latest_local_store_position()
+    crate::sync::store::database::StoreDatabase::new(db)
+        .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())
 }
@@ -2027,7 +2028,8 @@ impl TestStore {
                 .db
                 .clone()
         };
-        db.latest_local_store_position()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
             .map_or(Ok(1), |reference| {
@@ -2120,7 +2122,7 @@ impl TestStore {
                 db.schema_version()
             ));
         }
-        let before = db
+        let before = crate::sync::store::database::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?;
@@ -2132,7 +2134,8 @@ impl TestStore {
                 "test producer {name:?} expected sequence {expected}, got {sequence}"
             ));
         }
-        db.enqueue_store_changeset_for_test(changeset.to_vec())
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .enqueue_store_changeset_for_test(changeset.to_vec())
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
@@ -2160,7 +2163,8 @@ impl TestStore {
         crate::sync::store::publication::drain_store_writes(&db, &self.storage)
             .await
             .map_err(|error| error.to_string())?;
-        db.latest_local_store_position()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "published test changeset has no Store position".to_string())

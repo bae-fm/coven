@@ -35,7 +35,7 @@ pub(super) fn load_store_device_snapshot_on(
     Ok(state)
 }
 
-pub(super) fn store_device_state_for_history_cut_on(
+pub(crate) fn store_device_state_for_history_cut_on(
     conn: &Connection,
     cut: &crate::sync::store_commit::StoreHistoryCut,
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
@@ -57,7 +57,7 @@ pub(super) fn store_device_state_for_history_cut_on(
     Ok((reference, state))
 }
 
-pub(super) fn load_declared_store_device_state_on(
+pub(crate) fn load_declared_store_device_state_on(
     conn: &Connection,
     reference: &StoreDeviceStateRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
@@ -146,7 +146,7 @@ pub(super) fn load_store_device_exclusion_freezes_on(
     Ok(existing)
 }
 
-pub(super) fn apply_store_device_exclusion_freezes_on(
+pub(crate) fn apply_store_device_exclusion_freezes_on(
     conn: &Connection,
     root: &crate::sync::store_commit::StoreRootRef,
     state: &ResolvedStoreDeviceState,

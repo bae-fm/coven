@@ -1,20 +1,21 @@
-use crate::database::blob_records::load_prepared_audience_objects_on;
-use crate::database::blob_records::remote_audience_to_db;
-use crate::database::cloud_outbox_records::consume_created_upload_handoff_on;
-use crate::database::remote_object_records::candidate_graph_exact_objects;
-use crate::database::remote_object_records::load_remote_object_on;
-use crate::database::remote_object_records::mark_remote_object_uploaded_on;
-use crate::database::remote_object_records::mark_reusable_retained_authority_uploaded_on;
-use crate::database::remote_object_records::merge_prepared_remote_object;
-use crate::database::remote_object_records::persist_exact_remote_object_on;
-use crate::database::remote_object_records::validate_prepared_blob_on;
-use crate::database::remote_object_records::validate_prepared_package_on;
-use crate::database::remote_object_records::validate_remote_object_on;
-use crate::database::remote_object_records::RemoteStoredRepresentationRef;
+use crate::database::*;
+use crate::sync::audience_package::AudiencePackage;
+use crate::sync::circle::Audience;
+use crate::sync::gate::Gates;
+use crate::sync::remote_object::{remote_object_id, RemoteObjectRecord};
+use crate::sync::session::SyncedTable;
+#[cfg(test)]
+use crate::sync::storage::ExactObjectRef;
+use crate::sync::store_commit::{ObjectHash, StoreBatchCommit, StoreBatchCommitRef};
+use crate::write::WriteId;
+use rusqlite::{Connection, OptionalExtension};
+use std::path::PathBuf;
 
+use super::candidate_records::parse_prepared_merge_candidate_on;
+use super::publication_state::PreparedStoreWriteState;
 use super::*;
 
-impl Database {
+impl StoreDatabase<'_> {
     pub(crate) fn persist_prepared_audience_objects_on(
         conn: &Connection,
         write_id: &WriteId,
@@ -104,7 +105,7 @@ impl Database {
         Ok(())
     }
 
-    pub(super) fn persist_closed_write_objects_on(
+    pub(crate) fn persist_closed_write_objects_on(
         conn: &Connection,
         write_id: &WriteId,
         store_root_hash: ObjectHash,
@@ -243,16 +244,14 @@ impl Database {
 
     pub(crate) fn activate_prepared_write_on(
         conn: &rusqlite::Transaction<'_>,
-        root: &crate::sync::store_commit::StoreRootRef,
         gates: &Gates,
         synced_tables: &[SyncedTable],
         write_id: &WriteId,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
-        materialization: PreparedWriteMaterialization<'_>,
         local_cleanup: StoreBatchLocalCleanup,
         additional_object_ids: &[ObjectHash],
-    ) -> Result<(), DbError> {
+    ) -> Result<Vec<AudiencePackage>, DbError> {
         commit_ref
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -315,7 +314,7 @@ impl Database {
                 &apply_schema,
                 package.package().changeset(),
             )?;
-            Self::install_winning_blob_bindings_on(
+            Database::install_winning_blob_bindings_on(
                 conn,
                 gates,
                 synced_tables,
@@ -329,7 +328,7 @@ impl Database {
                 }
             }
         }
-        match Self::make_remote_publication_root_on(conn, write_id)? {
+        match Database::make_remote_publication_root_on(conn, write_id)? {
             Some((root_table, root_id)) => {
                 if consumed_uploads == 0 {
                     return Err(DbError::Message(format!(
@@ -349,7 +348,7 @@ impl Database {
                         "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
                     )));
                 }
-                Self::complete_make_remote_publication_on(conn, write_id)?;
+                Database::complete_make_remote_publication_on(conn, write_id)?;
             }
             None if consumed_uploads != 0 => {
                 return Err(DbError::Message(format!(
@@ -358,18 +357,6 @@ impl Database {
             }
             None => {}
         }
-        Self::record_materialized_merge_commit_on(
-            conn,
-            root,
-            commit,
-            commit_ref,
-            &[],
-            materialization.head,
-            materialization.head_object,
-            materialization.history_summary,
-            &retained_packages,
-            (!retained_packages.is_empty()).then_some(RetainedPackageApplication::LocallyAuthored),
-        )?;
         for drop in local_cleanup.drops {
             conn.execute(
                 "INSERT INTO published_blob_drop_intents
@@ -377,7 +364,7 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
                 rusqlite::params![
-                    Self::sequence_to_sqlite(
+                    Database::sequence_to_sqlite(
                         &commit_ref.coord.stream_id.to_string(),
                         commit_ref.coord.sequence(),
                     )?,
@@ -408,7 +395,7 @@ impl Database {
             [write_id.as_str()],
         )
         .map_err(DbError::from)?;
-        Ok(())
+        Ok(retained_packages)
     }
 
     #[cfg(test)]
@@ -418,6 +405,7 @@ impl Database {
     ) -> Result<PreparedAudienceObjects, DbError> {
         let write_id = write_id.clone();
         let loaded = self
+            .database
             .call(move |conn| load_prepared_audience_objects_on(conn, &write_id))
             .await?;
 
@@ -441,57 +429,59 @@ impl Database {
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let write_id = write_id.clone();
-        self.call(move |conn| {
-            let raw_prepared: String = conn
-                .query_row(
-                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::Message(format!("prepared remote graph: {error}")))?;
-            let commit = parse_prepared_merge_candidate_on(conn, &prepared)?.commit;
-            let mut ids = candidate_graph_exact_objects(&commit)?
-                .iter()
-                .map(|object| (remote_object_id(object).to_string(), None))
-                .collect::<Vec<_>>();
-            let mut statement = conn
-                .prepare(
-                    "SELECT remote_object_id, spool_path
+        self.database
+            .call(move |conn| {
+                let raw_prepared: String = conn
+                    .query_row(
+                        "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                        [write_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| DbError::Message(format!("prepared remote graph: {error}")))?;
+                let commit = parse_prepared_merge_candidate_on(conn, &prepared)?.commit;
+                let mut ids = candidate_graph_exact_objects(&commit)?
+                    .iter()
+                    .map(|object| (remote_object_id(object).to_string(), None))
+                    .collect::<Vec<_>>();
+                let mut statement = conn
+                    .prepare(
+                        "SELECT remote_object_id, spool_path
                      FROM store_write_blobs WHERE write_id = ?1
                      ORDER BY remote_object_id",
-                )
-                .map_err(DbError::from)?;
-            let blobs = statement
-                .query_map([write_id.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            ids.extend(blobs);
-            ids.sort_by(|left, right| left.0.cmp(&right.0));
-            ids.into_iter()
-                .map(|(encoded, spool_path)| {
-                    let id = encoded.parse().map_err(|error| {
-                        DbError::Message(format!("prepared remote object id: {error}"))
-                    })?;
-                    Ok(PreparedRemoteObject {
-                        record: load_remote_object_on(conn, id)?,
-                        spool_path: spool_path.map(PathBuf::from),
+                    )
+                    .map_err(DbError::from)?;
+                let blobs = statement
+                    .query_map([write_id.as_str()], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                     })
-                })
-                .collect()
-        })
-        .await
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                ids.extend(blobs);
+                ids.sort_by(|left, right| left.0.cmp(&right.0));
+                ids.into_iter()
+                    .map(|(encoded, spool_path)| {
+                        let id = encoded.parse().map_err(|error| {
+                            DbError::Message(format!("prepared remote object id: {error}"))
+                        })?;
+                        Ok(PreparedRemoteObject {
+                            record: load_remote_object_on(conn, id)?,
+                            spool_path: spool_path.map(PathBuf::from),
+                        })
+                    })
+                    .collect()
+            })
+            .await
     }
 
     pub(crate) async fn mark_remote_object_uploaded(
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        self.call(move |conn| mark_remote_object_uploaded_on(conn, expected))
+        self.database
+            .call(move |conn| mark_remote_object_uploaded_on(conn, expected))
             .await
     }
 
@@ -499,7 +489,8 @@ impl Database {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        self.call(move |conn| mark_reusable_retained_authority_uploaded_on(conn, expected))
+        self.database
+            .call(move |conn| mark_reusable_retained_authority_uploaded_on(conn, expected))
             .await
     }
 
@@ -508,29 +499,30 @@ impl Database {
         &self,
         object: ExactObjectRef,
     ) -> Result<Option<crate::sync::remote_object::ProtocolInertObject>, DbError> {
-        self.call(move |conn| {
-            let object_id = remote_object_id(&object);
-            let exists: bool = conn
-                .query_row(
-                    "SELECT EXISTS(
+        self.database
+            .call(move |conn| {
+                let object_id = remote_object_id(&object);
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(
                          SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
                      )",
-                    [object_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            exists
-                .then(|| load_protocol_inert_object_on(conn, object_id))
-                .transpose()
-        })
-        .await
+                        [object_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                exists
+                    .then(|| load_protocol_inert_object_on(conn, object_id))
+                    .transpose()
+            })
+            .await
     }
 
     pub(crate) async fn mark_candidate_commit_uploaded(
         &self,
         commit: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        self.call(move |conn| {
+        self.database.call(move |conn| {
             let object_id = remote_object_id(&commit.object);
             let current = load_remote_object_on(conn, object_id)?;
             if matches!(
@@ -566,26 +558,27 @@ impl Database {
         &self,
         head: crate::sync::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let object_id = remote_object_id(&head.object);
-            let current = load_remote_object_on(conn, object_id)?;
-            if !matches!(
-                &current,
-                RemoteObjectRecord::RetainedAuthority(record)
-                    if matches!(
-                        &record.identity.domain,
-                        crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                            reference
-                        } if reference == &head
-                    )
-            ) {
-                return Err(DbError::Message(format!(
-                    "remote object {object_id} is not the exact prepared Store head"
-                )));
-            }
-            mark_remote_object_uploaded_on(conn, current)?;
-            Ok(())
-        })
-        .await
+        self.database
+            .call(move |conn| {
+                let object_id = remote_object_id(&head.object);
+                let current = load_remote_object_on(conn, object_id)?;
+                if !matches!(
+                    &current,
+                    RemoteObjectRecord::RetainedAuthority(record)
+                        if matches!(
+                            &record.identity.domain,
+                            crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                                reference
+                            } if reference == &head
+                        )
+                ) {
+                    return Err(DbError::Message(format!(
+                        "remote object {object_id} is not the exact prepared Store head"
+                    )));
+                }
+                mark_remote_object_uploaded_on(conn, current)?;
+                Ok(())
+            })
+            .await
     }
 }

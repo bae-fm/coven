@@ -278,7 +278,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             rusqlite::params![second_blob_remote_id.to_string(), second_blob_state],
         )
         .map_err(DbError::from)?;
-        Database::persist_prepared_audience_objects_on(
+        crate::sync::store::database::StoreDatabase::persist_prepared_audience_objects_on(
             &tx,
             &persisted_write_id,
             &[prepared_package],
@@ -289,7 +289,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .await
     .expect("persist prepared objects");
 
-    let reloaded = db
+    let reloaded = crate::sync::store::database::StoreDatabase::new(&db)
         .prepared_audience_objects(&write_id)
         .await
         .expect("reload prepared objects");

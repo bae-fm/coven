@@ -1,66 +1,27 @@
-use super::*;
-
-pub(crate) struct StoreWritePreparation {
-    pub write_id: WriteId,
-    pub remote_objects: Vec<RemoteObjectRecord>,
-    pub audiences: PreparedAudienceObjects,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
-    pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-    pub local_cleanup: StoreBatchLocalCleanup,
-    pub completion: StoreBatchCompletion,
-}
-
-pub(crate) struct MergeCandidateAbandonmentPreparation {
-    pub write_id: WriteId,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
-    pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CandidateCleanupObject {
-    pub(crate) object: ExactObjectRef,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum PreparedStoreWriteState {
-    Publication {
-        commit: DurablePreparedProtocolObject,
-        head: DurablePreparedProtocolObject,
-        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-        local_cleanup: StoreBatchLocalCleanup,
-        completion: StoreBatchCompletion,
-    },
-    MergeAbandonment {
-        candidate_commit: DurablePreparedProtocolObject,
-        candidate_head: DurablePreparedProtocolObject,
-        candidate_history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-        authority_commit: DurablePreparedProtocolObject,
-        authority_head: DurablePreparedProtocolObject,
-        authority_history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-        outcome: MergeAbandonmentOutcome,
-        local_cleanup: StoreBatchLocalCleanup,
-        completion: StoreBatchCompletion,
-    },
-}
-
-pub(crate) struct PreparedWriteMaterialization<'a> {
-    pub(crate) head: &'a StoreDeviceHead,
-    pub(crate) head_object: &'a ExactObjectRef,
-    pub(crate) history_summary: &'a crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-}
+use crate::database::*;
+use crate::sync::audience_package::AudiencePackage;
+use crate::sync::membership::{
+    AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
+    StoreMembershipConflictResolutionRef,
+};
+use crate::sync::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
+use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
+use crate::sync::store_commit::{
+    CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
+    RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceHead, StoreDeviceRegistration, StorePackageRef, VerifiedStoreDeviceOperations,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RetainedMergeMaterializationInput {
-    pub(super) commit: PreparedExactObject,
-    pub(super) activation_head: PreparedExactObject,
-    pub(super) history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-    pub(super) membership_objects: Option<VerifiedMergeMembershipObjects>,
-    pub(super) packages: Vec<RetainedAudiencePackage>,
-    pub(super) activation: RetainedCommitActivationInput,
+pub(crate) struct RetainedMergeMaterializationInput {
+    pub(crate) commit: PreparedExactObject,
+    pub(crate) activation_head: PreparedExactObject,
+    pub(crate) history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub(crate) membership_objects: Option<VerifiedMergeMembershipObjects>,
+    pub(crate) packages: Vec<RetainedAudiencePackage>,
+    pub(crate) activation: RetainedCommitActivationInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -72,15 +33,15 @@ pub(crate) struct VerifiedMergeMembershipObjects {
 }
 
 impl VerifiedMergeMembershipObjects {
-    pub(super) fn entry(&self) -> &MembershipEntryRef {
+    pub(crate) fn entry(&self) -> &MembershipEntryRef {
         &self.entry
     }
 
-    pub(super) fn head(&self) -> &MembershipHeadRef {
+    pub(crate) fn head(&self) -> &MembershipHeadRef {
         &self.head
     }
 
-    pub(super) fn resolution(&self) -> Option<&StoreMembershipConflictResolutionRef> {
+    pub(crate) fn resolution(&self) -> Option<&StoreMembershipConflictResolutionRef> {
         self.resolution.as_ref()
     }
 
@@ -122,7 +83,7 @@ impl VerifiedMergeMembershipObjects {
         })
     }
 
-    pub(super) fn object_ids(&self) -> impl Iterator<Item = ObjectHash> + '_ {
+    pub(crate) fn object_ids(&self) -> impl Iterator<Item = ObjectHash> + '_ {
         [
             Some(remote_object_id(&self.entry.object)),
             Some(remote_object_id(&self.head.object)),
@@ -137,14 +98,14 @@ impl VerifiedMergeMembershipObjects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct MergeRetractionCleanupInput {
-    pub(super) commit: PreparedExactObject,
-    pub(super) activation_head: PreparedExactObject,
+pub(crate) struct MergeRetractionCleanupInput {
+    pub(crate) commit: PreparedExactObject,
+    pub(crate) activation_head: PreparedExactObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum RetainedAudiencePackage {
+pub(crate) enum RetainedAudiencePackage {
     Store {
         reference: StorePackageRef,
         package: AudiencePackage,
@@ -156,13 +117,13 @@ pub(super) enum RetainedAudiencePackage {
 }
 
 impl RetainedAudiencePackage {
-    pub(super) fn package(&self) -> &AudiencePackage {
+    pub(crate) fn package(&self) -> &AudiencePackage {
         match self {
             Self::Store { package, .. } | Self::Circle { package, .. } => package,
         }
     }
 
-    pub(super) fn domain(&self) -> SharedLiveSetObjectDomain {
+    pub(crate) fn domain(&self) -> SharedLiveSetObjectDomain {
         match self {
             Self::Store { reference, .. } => SharedLiveSetObjectDomain::StorePackage {
                 reference: reference.clone(),
@@ -173,7 +134,7 @@ impl RetainedAudiencePackage {
         }
     }
 
-    pub(super) fn object(&self) -> &ExactObjectRef {
+    pub(crate) fn object(&self) -> &ExactObjectRef {
         match self {
             Self::Store { reference, .. } => &reference.object,
             Self::Circle { reference, .. } => &reference.package.object,
@@ -183,12 +144,12 @@ impl RetainedAudiencePackage {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RetainedCommitActivationInput {
-    pub(super) registrations: RetainedStoreDeviceRegistrationActivations,
-    pub(super) device_operations: RetainedStoreDeviceOperations,
-    pub(super) circle_activations: Vec<u8>,
+pub(crate) struct RetainedCommitActivationInput {
+    pub(crate) registrations: RetainedStoreDeviceRegistrationActivations,
+    pub(crate) device_operations: RetainedStoreDeviceOperations,
+    pub(crate) circle_activations: Vec<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) package_application: Option<RetainedPackageApplication>,
+    pub(crate) package_application: Option<RetainedPackageApplication>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -198,9 +159,9 @@ pub(crate) enum RetainedPackageApplication {
     Received { receiver_wall_ms: u64 },
 }
 
-pub(super) struct RetainedMergeMaterializationKey {
-    pub(super) commit_ref: String,
-    pub(super) input_hash: ObjectHash,
+pub(crate) struct RetainedMergeMaterializationKey {
+    pub(crate) commit_ref: String,
+    pub(crate) input_hash: ObjectHash,
 }
 
 pub(crate) struct VerifiedMergeMaterialization<'a> {
@@ -241,7 +202,7 @@ pub(crate) struct OwnedVerifiedMergeMaterialization {
 }
 
 impl OwnedVerifiedMergeMaterialization {
-    pub(super) fn verify(
+    pub(crate) fn verify(
         root: crate::sync::store_commit::StoreRootRef,
         commit: StoreBatchCommit,
         commit_ref: StoreBatchCommitRef,
@@ -477,29 +438,4 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             registrations,
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum MergeAbandonmentOutcome {
-    Prepared,
-    Accepted {
-        authority: StoreBatchCommitRef,
-    },
-    Lost {
-        winner_commit: StoreBatchCommitRef,
-        winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
-    },
-    AuthorExcluded,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PreparedMergeCandidate {
-    pub(super) commit: StoreBatchCommit,
-    pub(super) reference: StoreBatchCommitRef,
-    pub(super) canonical_signed_bytes: Vec<u8>,
-    pub(super) commit_prepared: PreparedExactObject,
-    pub(super) head: StoreDeviceHead,
-    pub(super) head_prepared: PreparedExactObject,
 }

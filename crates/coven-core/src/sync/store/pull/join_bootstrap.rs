@@ -382,8 +382,8 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 &commit,
                 &registrations,
             )?;
-            Database::record_materialized_merge_commit_on(
-                &tx,
+            crate::sync::store::database::StoreDatabaseTransaction::new(&tx)
+                .record_materialized_merge_commit(
                 &root,
                 &commit,
                 &commit_ref,

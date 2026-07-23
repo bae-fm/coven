@@ -328,9 +328,7 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let retried = self
-            .db
-            .retry_blocked_write(write_id)
+        let retried = coven_core::sync::store::retry_blocked_write(&self.db, write_id)
             .await
             .map_err(crate::CovenError::from)?;
         self.sync_now();
@@ -343,47 +341,47 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let merge_cleanup_pending = self
-            .db
-            .merge_candidate_cleanup_pending(write_id)
+        let outcome = coven_core::sync::store::discard_blocked_write(&self.db, write_id)
             .await
             .map_err(crate::CovenError::from)?;
-        let merge_abandonment_required = if merge_cleanup_pending {
-            false
-        } else {
-            self.db
-                .merge_candidate_abandonment_required(write_id)
-                .await
-                .map_err(crate::CovenError::from)?
-        };
-        if merge_cleanup_pending || merge_abandonment_required {
-            let abandonment = self
-                .sync_manager()
-                .ok_or_else(|| {
-                    crate::CovenError::CandidateResolution("sync is not connected".to_string())
-                })?
-                .abandon_merge_candidate(write_id.clone())
-                .await
-                .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
-            match abandonment {
-                coven_core::sync::store::MergeCandidateAbandonment::NotRequired => {
-                    return Err(crate::CovenError::CandidateResolution(
-                        "blocked Merge candidate has no abandonment authority".to_string(),
-                    ));
-                }
-                coven_core::sync::store::MergeCandidateAbandonment::Abandoned => {}
-                coven_core::sync::store::MergeCandidateAbandonment::CandidateActivated => {
-                    return Err(crate::CovenError::CandidateResolution(
-                        "Merge candidate activated before abandonment and cannot be discarded"
-                            .to_string(),
-                    ));
-                }
+        if let coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) = outcome {
+            return Ok(discarded);
+        }
+
+        let abandonment = self
+            .sync_manager()
+            .ok_or_else(|| {
+                crate::CovenError::CandidateResolution("sync is not connected".to_string())
+            })?
+            .abandon_merge_candidate(write_id.clone())
+            .await
+            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
+        match abandonment {
+            coven_core::sync::store::MergeCandidateAbandonment::NotRequired => {
+                return Err(crate::CovenError::CandidateResolution(
+                    "blocked Merge candidate has no abandonment authority".to_string(),
+                ));
+            }
+            coven_core::sync::store::MergeCandidateAbandonment::Abandoned => {}
+            coven_core::sync::store::MergeCandidateAbandonment::CandidateActivated => {
+                return Err(crate::CovenError::CandidateResolution(
+                    "Merge candidate activated before abandonment and cannot be discarded"
+                        .to_string(),
+                ));
             }
         }
-        self.db
-            .discard_blocked_write(write_id)
+
+        match coven_core::sync::store::discard_blocked_write(&self.db, write_id)
             .await
-            .map_err(crate::CovenError::from)
+            .map_err(crate::CovenError::from)?
+        {
+            coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) => Ok(discarded),
+            coven_core::sync::store::BlockedWriteDiscard::RemoteResolutionRequired => {
+                Err(crate::CovenError::CandidateResolution(
+                    "Merge candidate remains unresolved after abandonment".to_string(),
+                ))
+            }
+        }
     }
 
     /// Read the current durable status of one write.

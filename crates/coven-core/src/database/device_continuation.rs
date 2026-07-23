@@ -69,7 +69,9 @@ impl Database {
                 .latest_local_store_snapshot()
                 .await?
                 .map(|snapshot| snapshot.reference),
-            latest_position: self.latest_local_store_position().await?,
+            latest_position: crate::sync::store::database::StoreDatabase::new(self)
+                .latest_local_store_position()
+                .await?,
         })
     }
 
@@ -415,38 +417,6 @@ impl Database {
                     .map_err(DbError::from)?;
                 }
             }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn complete_merge_owner_recovery(
-        &self,
-        commit: StoreBatchCommit,
-        commit_ref: StoreBatchCommitRef,
-        activation_head: StoreDeviceHead,
-        activation_head_object: ExactObjectRef,
-        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
-        registration: StoreDeviceRegistration,
-        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let root = required_store_root_authority_on(&tx)?;
-            let registrations = vec![(registration, authority)];
-            Self::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
-            Self::record_materialized_merge_commit_on(
-                &tx,
-                &root,
-                &commit,
-                &commit_ref,
-                &registrations,
-                &activation_head,
-                &activation_head_object,
-                &history_summary,
-                &[],
-                None,
-            )?;
             tx.commit().map_err(DbError::from)
         })
         .await

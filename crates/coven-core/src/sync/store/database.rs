@@ -1,8 +1,18 @@
 mod acknowledgements;
+pub(crate) mod candidate_lifecycle;
+pub(crate) mod candidate_records;
 mod circle_controls;
 mod device_exclusion;
+mod materialization;
+pub(crate) mod materialization_models;
 mod owner_promotion;
+mod pending_publication;
+mod preparation;
+mod prepared_remote_objects;
+mod publication;
+pub(crate) mod publication_state;
 mod reclaim;
+mod write_lifecycle;
 
 use crate::database::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
@@ -19,14 +29,42 @@ use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 
 #[derive(Clone, Copy)]
-pub(super) struct StoreDatabase<'a> {
+pub(crate) struct StoreDatabase<'a> {
     database: &'a Database,
 }
 
+pub(in crate::sync::store) struct StoreDatabaseTransaction<'transaction, 'connection> {
+    transaction: &'transaction rusqlite::Transaction<'connection>,
+}
+
+impl<'transaction, 'connection> StoreDatabaseTransaction<'transaction, 'connection> {
+    pub(in crate::sync::store) fn new(
+        transaction: &'transaction rusqlite::Transaction<'connection>,
+    ) -> Self {
+        Self { transaction }
+    }
+}
+
 impl<'a> StoreDatabase<'a> {
-    pub(super) fn new(database: &'a Database) -> Self {
+    pub(crate) fn new(database: &'a Database) -> Self {
         Self { database }
     }
+}
+
+#[cfg(test)]
+pub(in crate::sync) fn record_verified_circle_activations_for_test(
+    connection: &rusqlite::Connection,
+    commit: &crate::sync::store_commit::StoreBatchCommit,
+    commit_ref: &crate::sync::store_commit::StoreBatchCommitRef,
+    activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+) -> Result<(), DbError> {
+    let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+    StoreDatabaseTransaction::new(&transaction).record_verified_circle_activations(
+        commit,
+        commit_ref,
+        activations,
+    )?;
+    transaction.commit().map_err(DbError::from)
 }
 
 #[cfg(test)]

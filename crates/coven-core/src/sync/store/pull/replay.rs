@@ -57,10 +57,13 @@ pub(super) async fn verified_terminal_merge_retractions(
     };
     let mut retractions = Vec::new();
     for materialization in &retained {
-        let mut locator = Box::pin(db.author_exclusion_activation_for_candidate(
-            materialization.commit_ref().clone(),
-            materialization.commit().author_registration.clone(),
-        ))
+        let mut locator = Box::pin(
+            crate::sync::store::database::StoreDatabase::new(db)
+                .author_exclusion_activation_for_candidate(
+                    materialization.commit_ref().clone(),
+                    materialization.commit().author_registration.clone(),
+                ),
+        )
         .await?;
         if locator.is_none() {
             let expected_stream =

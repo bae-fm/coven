@@ -539,7 +539,8 @@ fn activate_owner_promotion_merge_head<'a>(
                             .to_string(),
                     )
                 })?;
-            db.mark_remote_object_uploaded(remote)
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_remote_object_uploaded(remote)
                 .await
                 .map_err(|error| {
                     OwnerPromotionError::Protocol(format!(

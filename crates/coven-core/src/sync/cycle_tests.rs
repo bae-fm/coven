@@ -3673,7 +3673,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 activate_joined_test_device(&inner, &producer_db, &db_m, &keypair).await;
                 retain_store_packages_for_assertion(&db_m, &inner, b"existing-host-write-snapshot")
                     .await;
-                let peer_sequence = producer_db
+                let peer_sequence = crate::sync::store::database::StoreDatabase::new(&producer_db)
                     .latest_local_store_position()
                     .await
                     .expect("read producer Store position after activating M")
@@ -3772,7 +3772,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         ],
     )
     .await;
-    let peer_sequence = producer_db
+    let peer_sequence = crate::sync::store::database::StoreDatabase::new(&producer_db)
         .latest_local_store_position()
         .await
         .expect("read producer Store position after activating M")
@@ -3805,7 +3805,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 
     // Cycle 2 has no host write. The applied row must not create a local data
     // commit because apply bypasses the host write ledger.
-    let before = db_m
+    let before = crate::sync::store::database::StoreDatabase::new(&db_m)
         .latest_local_store_position()
         .await
         .expect("read local Store position before the empty cycle");
@@ -3820,7 +3820,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     )
     .await
     .expect("M's empty cycle succeeds");
-    let after = db_m
+    let after = crate::sync::store::database::StoreDatabase::new(&db_m)
         .latest_local_store_position()
         .await
         .expect("read local Store position after the empty cycle")
@@ -3916,7 +3916,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let rejected_blobs = reject_blob_create.rejected_blobs();
     assert_eq!(rejected_blobs.len(), 1);
     let prepared_blob = rejected_blobs[0].clone();
-    let prepared = db
+    let prepared = crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write after blob failure")
@@ -4754,7 +4754,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "publish Store write: storage operation failed: InMemoryCloudHome: forced failure before exact create call 1",
         "cycle surfaces the exact Store package append failure",
     );
-    let prepared = db
+    let prepared = crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read outbound Store queue")
@@ -4980,7 +4980,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
         let peer_at_snapshot = peer_at_snapshot.expect("peer Store stream reaches sequence 6");
         let (_peer_temp, peer_store_dir) = temp_store_dir();
         pull_into(&db, &storage, &peer_store_dir).await;
-        let local_at_snapshot = db
+        let local_at_snapshot = crate::sync::store::database::StoreDatabase::new(&db)
             .latest_local_store_position()
             .await
             .expect("read local Store position after peer setup")
@@ -5022,7 +5022,8 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 .expect("publish local Store commit after snapshot");
         }
         assert_eq!(
-            db.latest_local_store_position()
+            crate::sync::store::database::StoreDatabase::new(&db)
+                .latest_local_store_position()
                 .await
                 .expect("read latest local Store commit")
                 .expect("local Store stream has commits")
@@ -5117,7 +5118,8 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     .await
     .expect_err("the first Store package append fails");
     assert!(
-        db.oldest_prepared_store_write()
+        crate::sync::store::database::StoreDatabase::new(&db)
+            .oldest_prepared_store_write()
             .await
             .expect("read outbound Store queue")
             .is_some(),
@@ -5136,7 +5138,7 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     )
     .await
     .expect("retry prepared Store write");
-    assert!(db
+    assert!(crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read retried outbound Store queue")
@@ -5205,7 +5207,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     )
     .await
     .expect_err("the first Store package append fails");
-    let first_write_id = db
+    let first_write_id = crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write")
@@ -5640,7 +5642,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         ],
     )
     .await;
-    let second_sequence = owner_db
+    let second_sequence = crate::sync::store::database::StoreDatabase::new(&owner_db)
         .latest_local_store_position()
         .await
         .expect("read owner Store position after registration activation")
@@ -5665,7 +5667,7 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("derive owner Store announcement activation")
             .author_stream_id()
             .to_string();
-        let second_sequence = owner_db
+        let second_sequence = crate::sync::store::database::StoreDatabase::new(&owner_db)
             .latest_local_store_position()
             .await
             .expect("read published owner Store position")

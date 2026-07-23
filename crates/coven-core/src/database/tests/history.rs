@@ -81,7 +81,11 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
     let terminals = vec![high.clone(), low.clone()];
 
     let selected =
-        select_author_exclusion_activation_locator(&terminals, &stream, 4, |candidate| {
+        crate::sync::store::database::candidate_records::select_author_exclusion_activation_locator(
+            &terminals,
+            &stream,
+            4,
+            |candidate| {
             if candidate == &high {
                 Ok(high_locator.clone())
             } else if candidate == &low {
@@ -89,7 +93,8 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
             } else {
                 Err(DbError::Message("unexpected exclusion".to_string()))
             }
-        })
+            },
+        )
         .expect("select exclusion locator")
         .expect("one terminal excludes the candidate");
 

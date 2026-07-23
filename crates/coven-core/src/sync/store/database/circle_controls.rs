@@ -1,10 +1,10 @@
 use rusqlite::Connection;
 
-use super::StoreDatabase;
+use super::{StoreDatabase, StoreDatabaseTransaction};
 use crate::database::{
     candidate_graph_exact_objects, load_activated_registration_on, load_circle_operation_on,
     mark_remote_object_uploaded_on, persist_exact_remote_object_on,
-    required_store_root_authority_on, Database, DbError, PreparedCircleOperationRow,
+    required_store_root_authority_on, DbError, PreparedCircleOperationRow,
     VerifiedMergeMaterialization,
 };
 use crate::sync::circle::{CircleOperationId, CircleOperationState};
@@ -282,7 +282,8 @@ impl StoreDatabase<'_> {
                         &[],
                         None,
                     )?;
-                    Database::record_verified_merge_materialization_on(&tx, materialization)?;
+                    StoreDatabaseTransaction::new(&tx)
+                        .record_verified_merge_materialization(materialization)?;
                     (
                         commit,
                         activation.clone(),
@@ -297,13 +298,12 @@ impl StoreDatabase<'_> {
                 if let Some(head_object_id) = head_object_id {
                     object_ids.push(head_object_id);
                 }
-                Database::activate_store_operation_remote_objects_on(
-                    &tx,
+                let store_transaction = StoreDatabaseTransaction::new(&tx);
+                store_transaction.activate_store_operation_remote_objects(
                     &operation.commit_ref,
                     &object_ids,
                 )?;
-                Database::record_verified_circle_activations_on(
-                    &tx,
+                store_transaction.record_verified_circle_activations(
                     &commit,
                     &operation.commit_ref,
                     &[activation],

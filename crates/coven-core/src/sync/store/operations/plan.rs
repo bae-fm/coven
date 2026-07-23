@@ -311,7 +311,9 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
 ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(db, device_id, keypair).await?;
-    let previous = db.latest_local_store_position().await?;
+    let previous = crate::sync::store::database::StoreDatabase::new(db)
+        .latest_local_store_position()
+        .await?;
     let dependencies =
         super::store_commit::CommitFrontier::from_refs(db.materialized_frontier().await?)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;

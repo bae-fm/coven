@@ -1,5 +1,9 @@
 use super::*;
 
+fn store_database(db: &Database) -> crate::sync::store::database::StoreDatabase<'_> {
+    crate::sync::store::database::StoreDatabase::new(db)
+}
+
 #[tokio::test]
 async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let fixture = prepared_write_fixture().await;
@@ -118,8 +122,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             "transport failure retains the exact prepared write for retry",
         );
         assert!(
-            fixture
-                .db
+            crate::sync::store::database::StoreDatabase::new(&fixture.db)
                 .oldest_prepared_store_write()
                 .await
                 .unwrap()
@@ -151,12 +154,13 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
                 .expect("retry exact outbound batch"),
             1,
         );
-        assert!(fixture
-            .db
-            .oldest_prepared_store_write()
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            crate::sync::store::database::StoreDatabase::new(&fixture.db)
+                .oldest_prepared_store_write()
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             fixture
                 .db
@@ -256,22 +260,20 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
                     )
             )
     ));
-    let discard_error = fixture
-        .db
-        .discard_blocked_write(&fixture.write_id)
-        .await
-        .expect_err("candidate cleanup must precede local Merge discard");
-    assert!(
-        discard_error.to_string().contains("cleanup"),
-        "unexpected discard error: {discard_error}"
+    assert_eq!(
+        store_database(&fixture.db)
+            .discard_blocked_write(&fixture.write_id)
+            .await
+            .expect("inspect blocked Merge discard"),
+        crate::sync::store::BlockedWriteDiscard::RemoteResolutionRequired,
     );
-    assert!(fixture
-        .db
-        .merge_candidate_cleanup_pending(&fixture.write_id)
-        .await
-        .expect("read pending Merge cleanup"));
-    let retry_error = fixture
-        .db
+    assert!(
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("read pending Merge cleanup")
+    );
+    let retry_error = store_database(&fixture.db)
         .retry_blocked_write(&fixture.write_id)
         .await
         .expect_err("an occupied immutable Merge slot cannot be retried");
@@ -299,18 +301,18 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     )
     .await
     .expect("resume exact losing Merge cleanup");
-    assert!(!fixture
-        .db
-        .merge_candidate_cleanup_pending(&fixture.write_id)
-        .await
-        .expect("read completed Merge cleanup"));
+    assert!(
+        !crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("read completed Merge cleanup")
+    );
     assert_eq!(
-        fixture
-            .db
+        store_database(&fixture.db)
             .discard_blocked_write(&fixture.write_id)
             .await
             .expect("discard the cleaned losing Merge write"),
-        vec![fixture.write_id.clone()],
+        crate::sync::store::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
     );
     assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
     assert!(!exact_object_exists(
@@ -323,8 +325,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
 #[tokio::test]
 async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
     let fixture = prepared_write_fixture().await;
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -346,13 +347,13 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .expect("publish candidate abandonment"),
         MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!fixture
-        .db
-        .merge_candidate_cleanup_pending(&fixture.write_id)
-        .await
-        .expect("candidate cleanup completed"));
-    let authority = fixture
-        .db
+    assert!(
+        !crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("candidate cleanup completed")
+    );
+    let authority = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .latest_local_store_position()
         .await
         .expect("read local Merge position")
@@ -375,12 +376,11 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         &fixture.commit_ref.object
     ));
     assert_eq!(
-        fixture
-            .db
+        store_database(&fixture.db)
             .discard_blocked_write(&fixture.write_id)
             .await
             .expect("reverse the abandoned write"),
-        vec![fixture.write_id.clone()]
+        crate::sync::store::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()])
     );
     assert!(matches!(
         fixture.db.write_status(&fixture.write_id).await.unwrap(),
@@ -392,8 +392,7 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
 #[tokio::test]
 async fn prepared_merge_abandonment_resumes_after_restart() {
     let fixture = prepared_write_fixture().await;
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -430,8 +429,7 @@ async fn prepared_merge_abandonment_resumes_after_restart() {
 async fn merge_abandonment_retries_commit_and_head_publication_failures() {
     for failed_call in 1..=2 {
         let fixture = prepared_write_fixture().await;
-        fixture
-            .db
+        store_database(&fixture.db)
             .set_write_status(
                 &fixture.write_id,
                 crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -481,8 +479,7 @@ async fn merge_abandonment_retries_commit_and_head_publication_failures() {
 #[tokio::test]
 async fn accepted_merge_abandonment_retries_losing_object_deletion() {
     let fixture = prepared_write_fixture().await;
-    let batch = fixture
-        .db
+    let batch = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")
@@ -500,13 +497,11 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
         .create_protocol_object(&batch.commit.prepared)
         .await
         .expect("publish original candidate commit");
-    fixture
-        .db
+    store_database(&fixture.db)
         .mark_candidate_commit_uploaded(fixture.commit_ref.clone())
         .await
         .expect("record uploaded original candidate commit");
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -529,11 +524,12 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
         .is_err(),
         "losing object deletion fails",
     );
-    assert!(fixture
-        .db
-        .merge_candidate_cleanup_pending(&fixture.write_id)
-        .await
-        .expect("cleanup remains pending"));
+    assert!(
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("cleanup remains pending")
+    );
     assert_eq!(
         abandon_merge_candidate(
             &fixture.db,
@@ -551,8 +547,7 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
 #[tokio::test]
 async fn original_candidate_activation_wins_abandonment_race() {
     let fixture = prepared_write_fixture().await;
-    let batch = fixture
-        .db
+    let batch = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")
@@ -575,8 +570,7 @@ async fn original_candidate_activation_wins_abandonment_race() {
         .create_protocol_object(&batch.head.prepared)
         .await
         .expect("activate original candidate");
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -614,8 +608,7 @@ async fn original_candidate_activation_wins_abandonment_race() {
 #[tokio::test]
 async fn third_candidate_wins_after_abandonment_preparation() {
     let fixture = prepared_write_fixture().await;
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -633,8 +626,7 @@ async fn third_candidate_wins_after_abandonment_preparation() {
     )
     .await
     .expect("persist Merge abandonment"));
-    let authority = fixture
-        .db
+    let authority = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared abandonment")
@@ -655,11 +647,12 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         .expect("settle third-candidate winner"),
         MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!fixture
-        .db
-        .merge_candidate_cleanup_pending(&fixture.write_id)
-        .await
-        .expect("all losing candidates are cleaned"));
+    assert!(
+        !crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("all losing candidates are cleaned")
+    );
     assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
     assert!(!exact_object_exists(
         &fixture.home,
@@ -669,20 +662,18 @@ async fn third_candidate_wins_after_abandonment_preparation() {
     assert!(!remote_object_exists(&fixture.db, &authority_commit).await);
     assert!(!remote_object_exists(&fixture.db, &authority_head).await);
     assert_eq!(
-        fixture
-            .db
+        store_database(&fixture.db)
             .discard_blocked_write(&fixture.write_id)
             .await
             .expect("reverse the abandoned local write"),
-        vec![fixture.write_id.clone()],
+        crate::sync::store::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
     );
 }
 
 #[tokio::test]
 async fn alternate_head_for_abandonment_authority_is_accepted() {
     let fixture = prepared_write_fixture().await;
-    fixture
-        .db
+    store_database(&fixture.db)
         .set_write_status(
             &fixture.write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -767,12 +758,13 @@ async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
         crate::WriteStatus::Publishing,
         "a provider readback mismatch retains the exact prepared write for retry",
     );
-    assert!(fixture
-        .db
-        .oldest_prepared_store_write()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .oldest_prepared_store_write()
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -841,12 +833,13 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         crate::WriteStatus::Publishing,
     );
     assert!(exact_object_exists(&fixture.home, &fixture.head_object));
-    assert!(fixture
-        .db
-        .oldest_prepared_store_write()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        crate::sync::store::database::StoreDatabase::new(&fixture.db)
+            .oldest_prepared_store_write()
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         fixture
             .db
@@ -951,7 +944,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         )
         .await
         .expect("prepare write"));
-        let write_id = db
+        let write_id = crate::sync::store::database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("load prepared write")
@@ -1071,7 +1064,10 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
     );
 
     assert_eq!(
-        db.retry_blocked_write(&first).await.unwrap(),
+        store_database(&db)
+            .retry_blocked_write(&first)
+            .await
+            .unwrap(),
         vec![first.clone()]
     );
     assert!(matches!(
@@ -1097,7 +1093,8 @@ async fn blocked_write_requires_explicit_retry_before_production_revalidates_it(
         db.write_status(&first).await.unwrap(),
         crate::WriteStatus::Blocked(_)
     ));
-    db.retry_blocked_write(&first)
+    store_database(&db)
+        .retry_blocked_write(&first)
         .await
         .expect("explicit retry after repair");
     assert!(prepare_merge_store_write(
@@ -1172,8 +1169,11 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     .is_err());
 
     assert_eq!(
-        db.discard_blocked_write(&first).await.unwrap(),
-        vec![first.clone(), second.clone()]
+        store_database(&db)
+            .discard_blocked_write(&first)
+            .await
+            .unwrap(),
+        crate::sync::store::BlockedWriteDiscard::Discarded(vec![first.clone(), second.clone()])
     );
     let note_count: i64 = db
         .call(|conn| {

@@ -1091,7 +1091,7 @@ mod tests {
         let first_commit = commit.clone();
         let first_commit_ref = commit_ref.clone();
         db.call(move |conn| {
-            crate::database::Database::record_verified_circle_activations_on(
+            crate::sync::store::record_verified_circle_activations_for_test(
                 conn,
                 &first_commit,
                 &first_commit_ref,
@@ -1223,7 +1223,7 @@ mod tests {
         .expect("reference second Store commit");
         let error = db
             .call(move |conn| {
-                crate::database::Database::record_verified_circle_activations_on(
+                crate::sync::store::record_verified_circle_activations_for_test(
                     conn,
                     &second_commit,
                     &second_commit_ref,

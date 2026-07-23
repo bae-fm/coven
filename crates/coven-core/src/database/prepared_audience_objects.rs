@@ -203,7 +203,7 @@ pub(crate) enum StoredBlobReferenceState {
     Unresolved,
 }
 
-pub(super) fn validate_prepared_audience_blob_graph(
+pub(crate) fn validate_prepared_audience_blob_graph(
     object_ids: &std::collections::BTreeSet<ObjectHash>,
     audiences: &PreparedAudienceObjects,
 ) -> Result<(), DbError> {

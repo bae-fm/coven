@@ -770,7 +770,7 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             ]
         })
         .collect::<Vec<_>>();
-    let previous = db
+    let previous = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_position()
         .await
         .expect("load local Store position");

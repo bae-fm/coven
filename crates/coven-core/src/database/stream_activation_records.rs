@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn record_verified_stream_activations_on(
+pub(crate) fn record_verified_stream_activations_on(
     conn: &Connection,
     verified: &VerifiedStreamActivations,
     activating_commit_json: &str,

@@ -13,7 +13,9 @@ use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
 pub(crate) mod abandonment;
 mod acknowledgements;
 pub(crate) mod circle_controls;
-mod database;
+pub(crate) mod database;
+#[cfg(test)]
+pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 pub(crate) mod device_exclusion;
 #[doc(hidden)]
 pub mod device_join;
@@ -58,15 +60,21 @@ pub use reclaim::{
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef,
     StorePackageReclaimClaim, StorePackageReclaimTarget, StoreReclaimError, StoreReclaimResult,
 };
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-pub use registration::ensure_active_registration as ensure_active_registration_for_test;
 pub(crate) use registration::{
     bootstrap_pending_device, ensure_active_registration, install_existing_founder_device,
     prepare_registration_for_origin,
 };
 pub use registration::{recover_owner_device, StoreRegistrationError};
 pub use snapshot::load_store_snapshot_ref;
+
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub async fn ensure_active_registration_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+) -> Result<(), StoreRegistrationError> {
+    registration::ensure_active_registration(db, storage).await
+}
 
 enum StoreLoadError {
     Database(crate::database::DbError),
@@ -99,6 +107,30 @@ pub async fn abandon_merge_candidate(
     load_store(db, storage)
         .await?
         .abandon_candidate(device_id, identity, write_id)
+        .await
+}
+
+pub async fn retry_blocked_write(
+    db: &Database,
+    write_id: &crate::WriteId,
+) -> Result<Vec<crate::WriteId>, crate::database::DbError> {
+    database::StoreDatabase::new(db)
+        .retry_blocked_write(write_id)
+        .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockedWriteDiscard {
+    Discarded(Vec<crate::WriteId>),
+    RemoteResolutionRequired,
+}
+
+pub async fn discard_blocked_write(
+    db: &Database,
+    write_id: &crate::WriteId,
+) -> Result<BlockedWriteDiscard, crate::database::DbError> {
+    database::StoreDatabase::new(db)
+        .discard_blocked_write(write_id)
         .await
 }
 

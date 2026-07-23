@@ -197,7 +197,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     )
     .await
     .expect("prepare removal-witnessing predecessor commit"));
-    let prepared = owner_db
+    let prepared = crate::sync::store::database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
         .expect("load removal-witnessing predecessor")
@@ -276,7 +276,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     )
     .await
     .expect("prepare predecessor commit"));
-    let predecessor = owner_db
+    let predecessor = crate::sync::store::database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
         .expect("load predecessor commit")

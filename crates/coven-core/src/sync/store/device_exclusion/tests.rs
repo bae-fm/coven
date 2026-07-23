@@ -260,7 +260,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
             &candidate_write_id,
         ))
         .await;
-        let transferred_candidate = restored
+        let transferred_candidate = crate::sync::store::database::StoreDatabase::new(&restored)
             .blocked_merge_candidate(candidate_write_id.clone())
             .await
             .expect("load candidate before tampering with snapshot evidence")
@@ -281,12 +281,12 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         ))
         .await
         .expect_err("tampered snapshot exclusion evidence must fail loud");
-        assert!(restored
+        assert!(crate::sync::store::database::StoreDatabase::new(&restored)
             .blocked_merge_candidate(candidate_write_id.clone())
             .await
             .expect("reload candidate after tampered snapshot evidence")
             .is_some());
-        assert!(!restored
+        assert!(!crate::sync::store::database::StoreDatabase::new(&restored)
             .merge_candidate_cleanup_pending(&candidate_write_id)
             .await
             .expect("tampered snapshot evidence cannot start cleanup"));
@@ -306,12 +306,12 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         &candidate_write_id,
     ))
     .await;
-    let transferred_candidate = restored
+    let transferred_candidate = crate::sync::store::database::StoreDatabase::new(&restored)
         .blocked_merge_candidate(candidate_write_id.clone())
         .await
         .expect("load restored exclusion candidate")
         .expect("restored exclusion candidate exists");
-    restored
+    crate::sync::store::database::StoreDatabase::new(&restored)
         .author_exclusion_activation_for_candidate(
             transferred_candidate.head.value.commit.clone(),
             transferred_candidate
@@ -335,7 +335,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .expect("consume snapshotted exclusion evidence"),
         crate::sync::store::abandonment::MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!restored
+    assert!(!crate::sync::store::database::StoreDatabase::new(&restored)
         .merge_candidate_cleanup_pending(&candidate_write_id)
         .await
         .expect("restored candidate cleanup completes"));
@@ -457,7 +457,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     }
 
     let exclusion = activate_peer_exclusion(&owner_db, &store, &signer, &proposal).await;
-    let activation = owner_db
+    let activation = crate::sync::store::database::StoreDatabase::new(&owner_db)
         .latest_local_store_position()
         .await
         .expect("read exclusion activation position")
@@ -515,7 +515,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         )
         .await
         .expect("open pre-exclusion snapshot");
-    joining_db
+    StoreDatabase::new(&joining_db)
         .install_device_join_bootstrap(store.root.clone(), plan)
         .await
         .expect("replay exclusion after snapshot");
@@ -555,10 +555,12 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .expect("consume replayed exclusion evidence"),
         crate::sync::store::abandonment::MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!joining_db
-        .merge_candidate_cleanup_pending(&candidate_write_id)
-        .await
-        .expect("replayed exclusion candidate cleanup completes"));
+    assert!(
+        !crate::sync::store::database::StoreDatabase::new(&joining_db)
+            .merge_candidate_cleanup_pending(&candidate_write_id)
+            .await
+            .expect("replayed exclusion candidate cleanup completes")
+    );
 }
 
 async fn finalize_peer_exclusion(
@@ -1151,7 +1153,7 @@ async fn assert_terminal_merge_transaction_rollback(
             .expect("count rows after transaction rollback"),
         3,
     );
-    assert!(!peer_db
+    assert!(!crate::sync::store::database::StoreDatabase::new(peer_db)
         .merge_candidate_cleanup_pending(write_id)
         .await
         .expect("rolled-back transaction created no cleanup"));
@@ -1235,7 +1237,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .await
         .expect("prepare excluded peer candidate")
     );
-    let candidate = peer_db
+    let candidate = crate::sync::store::database::StoreDatabase::new(&peer_db)
         .oldest_prepared_store_write()
         .await
         .expect("load excluded peer candidate")
@@ -1276,7 +1278,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .create_protocol_object(&candidate.commit.prepared)
         .await
         .expect("upload excluded peer candidate commit");
-    peer_db
+    crate::sync::store::database::StoreDatabase::new(&peer_db)
         .mark_candidate_commit_uploaded(candidate_ref.clone())
         .await
         .expect("record uploaded excluded peer commit");
@@ -1347,7 +1349,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         assert_eq!(local_partitions, 1);
         assert!(local_changeset_bytes > 0);
         finalize_peer_exclusion_detached(&owner_db, store.clone(), &signer, &target).await;
-        let activation_commit = owner_db
+        let activation_commit = crate::sync::store::database::StoreDatabase::new(&owner_db)
             .author_exclusion_activation_for_candidate(candidate_ref.clone(), target.clone())
             .await
             .expect("load terminal transaction activation")
@@ -1442,7 +1444,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .expect("count surviving retained Store-package row");
         assert_eq!(surviving_row_count, 1);
-        assert!(peer_db
+        assert!(crate::sync::store::database::StoreDatabase::new(&peer_db)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("retracted candidate requires cleanup"));
@@ -1455,7 +1457,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             ExpectedHeldCandidate::None,
         )
         .await;
-        assert!(!reopened
+        assert!(!crate::sync::store::database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("retracted candidate cleanup completed"));
@@ -1588,7 +1590,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .expect_err("excluded peer cannot activate its late candidate")
     };
-    let local_position = peer_db
+    let local_position = crate::sync::store::database::StoreDatabase::new(&peer_db)
         .latest_local_store_position()
         .await
         .expect("load excluded peer position");
@@ -1615,7 +1617,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         status => panic!("excluded peer write has unexpected status: {status:?}"),
     }
     assert!(matches!(
-        peer_db
+        crate::sync::store::database::StoreDatabase::new(&peer_db)
             .merge_abandonment_state(&write_id)
             .await
             .expect("load excluded peer abandonment state"),
@@ -1691,7 +1693,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     drop(peer_db);
 
     let reopened = open(&path, "excluded-peer-host");
-    let cleanup_pending = reopened
+    let cleanup_pending = crate::sync::store::database::StoreDatabase::new(&reopened)
         .merge_candidate_cleanup_pending(&write_id)
         .await
         .expect("load excluded peer cleanup state");
@@ -1708,7 +1710,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .is_err()
         );
-        assert!(reopened
+        assert!(crate::sync::store::database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("excluded peer cleanup remains pending"));
@@ -1728,7 +1730,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ));
     }
     if cleanup_pending && !indexed_shared_blobs.is_empty() {
-        let cleanup_targets = reopened
+        let cleanup_targets = crate::sync::store::database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_targets(write_id.clone())
             .await
             .expect("load excluded candidate cleanup targets");
@@ -1864,7 +1866,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             })
             .await
             .expect("sabotage durable activation head");
-        assert!(reopened
+        assert!(crate::sync::store::database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .is_err());
@@ -1901,7 +1903,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         reopened
     };
     assert_eq!(
-        retried
+        crate::sync::store::database::StoreDatabase::new(&retried)
             .latest_local_store_position()
             .await
             .expect("reload excluded peer position"),
@@ -1920,7 +1922,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .await,
                 Err(crate::sync::storage::StorageError::NotFound(_))
             ));
-            assert!(retried
+            assert!(crate::sync::store::database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read absent candidate head state")
@@ -1941,7 +1943,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .expect("reload retained exact late head"),
                 candidate.head.value.to_bytes(),
             );
-            let inert = retried
+            let inert = crate::sync::store::database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read exact late candidate head state")
@@ -2008,7 +2010,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             ));
         }
         ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
-            assert!(retried
+            assert!(crate::sync::store::database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read candidate head state after third winner")
@@ -2044,7 +2046,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ))
     ));
     assert!(matches!(
-        retried
+        crate::sync::store::database::StoreDatabase::new(&retried)
             .merge_abandonment_state(&write_id)
             .await
             .expect("reload excluded peer abandonment state"),
@@ -2057,11 +2059,11 @@ async fn run_excluded_author_candidate_cleanup_case(
     {
         crate::WriteStatus::Blocked(_) => {
             assert_eq!(
-                retried
+                crate::sync::store::database::StoreDatabase::new(&retried)
                     .discard_blocked_write(&write_id)
                     .await
                     .expect("discard excluded peer write"),
-                vec![write_id.clone()]
+                crate::sync::store::BlockedWriteDiscard::Discarded(vec![write_id.clone()])
             );
         }
         crate::WriteStatus::Resolved(crate::WriteResolution::Retracted { witness }) => {
@@ -2075,7 +2077,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
             | ExcludedCandidateHeadPublication::AfterHeadReadBack
     ) {
-        assert!(retried
+        assert!(crate::sync::store::database::StoreDatabase::new(&retried)
             .protocol_inert_object(candidate_head)
             .await
             .expect("reload exact late candidate head state")
@@ -2110,7 +2112,7 @@ async fn maybe_prepare_merge_abandonment(
     if !prepare {
         return None;
     }
-    peer_db
+    crate::sync::store::database::StoreDatabase::new(peer_db)
         .set_write_status(
             write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -2130,7 +2132,7 @@ async fn maybe_prepare_merge_abandonment(
     )
     .await
     .expect("prepare abandonment before exclusion"));
-    peer_db
+    crate::sync::store::database::StoreDatabase::new(peer_db)
         .prepared_merge_abandonment_candidates(write_id.clone())
         .await
         .expect("load prepared abandonment candidates")
@@ -2339,7 +2341,7 @@ async fn publish_after_absent_proof_detached(
         ) {
             return;
         }
-        let candidate = peer_db
+        let candidate = crate::sync::store::database::StoreDatabase::new(&peer_db)
             .blocked_merge_candidate(write_id)
             .await
             .expect("reload post-proof candidate")
@@ -2442,11 +2444,11 @@ async fn finish_prepared_exclusion_cleanup(
         }
     }
     assert_eq!(
-        peer_db
+        crate::sync::store::database::StoreDatabase::new(peer_db)
             .discard_blocked_write(&write_id)
             .await
             .expect("discard excluded prepared abandonment write"),
-        vec![write_id],
+        crate::sync::store::BlockedWriteDiscard::Discarded(vec![write_id]),
     );
 }
 
@@ -2888,13 +2890,13 @@ async fn prepare_transfer_candidate(
         .await
         .expect("prepare transfer candidate")
     );
-    let candidate = peer_db
+    let candidate = crate::sync::store::database::StoreDatabase::new(peer_db)
         .oldest_prepared_store_write()
         .await
         .expect("load transfer candidate")
         .expect("transfer candidate exists");
     let write_id = candidate.commit.value.write_id.clone();
-    peer_db
+    crate::sync::store::database::StoreDatabase::new(peer_db)
         .set_write_status(
             &write_id,
             crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -3092,7 +3094,7 @@ async fn resume_proposal_and_publish_freeze_ack(
         .expect("publish exclusion acknowledgement"),
         1
     );
-    let base_sequence = reopened
+    let base_sequence = crate::sync::store::database::StoreDatabase::new(&reopened)
         .latest_local_store_position()
         .await
         .expect("read cancellation base")

@@ -569,8 +569,8 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     let mut returned_changes = Vec::new();
     let mut package_reported_fk_violation = false;
     Database::record_activated_store_device_registrations_on(conn, &commit, &registrations)?;
-    Database::record_verified_circle_activations_on(
-        conn,
+    let store_transaction = crate::sync::store::database::StoreDatabaseTransaction::new(conn);
+    store_transaction.record_verified_circle_activations(
         &commit,
         &commit_ref,
         circle_activations.circles(),
@@ -703,7 +703,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         &commit_ref,
         &membership_remote_objects,
     )?;
-    Database::record_verified_merge_materialization_on(conn, verified)?;
+    store_transaction.record_verified_merge_materialization(verified)?;
     Ok(AppliedMergeMaterialization {
         outcome: ApplyOutcome::Applied(returned_changes),
         max_updated_at: changeset_max,

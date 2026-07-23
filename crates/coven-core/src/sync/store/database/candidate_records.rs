@@ -1,8 +1,33 @@
-use crate::database::store_device_state::store_device_state_for_history_cut_on;
+use crate::database::*;
+use crate::sync::remote_object::{remote_object_id, RemoteObjectRecord};
+use crate::sync::storage::ExactObjectRef;
+use crate::sync::store_commit::{
+    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceRegistrationRef, StoreHistoryCut,
+};
+use crate::write::WriteId;
+use rusqlite::{Connection, OptionalExtension};
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::*;
+use super::publication_state::PreparedStoreWriteState;
 
-pub(super) fn parse_prepared_merge_candidate_on(
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedMergeCandidate {
+    pub(crate) commit: StoreBatchCommit,
+    pub(crate) reference: StoreBatchCommitRef,
+    pub(crate) canonical_signed_bytes: Vec<u8>,
+    pub(crate) commit_prepared: crate::sync::storage::PreparedExactObject,
+    pub(crate) head: StoreDeviceHead,
+    pub(crate) head_prepared: crate::sync::storage::PreparedExactObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateCleanupObject {
+    pub(crate) object: ExactObjectRef,
+}
+
+pub(crate) fn parse_prepared_merge_candidate_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -17,13 +42,13 @@ pub(super) fn parse_prepared_merge_candidate_on(
     parse_prepared_merge_candidate_parts_on(conn, commit, head)
 }
 
-pub(super) fn parse_prepared_merge_candidate_parts_on(
+pub(crate) fn parse_prepared_merge_candidate_parts_on(
     conn: &Connection,
     commit: &DurablePreparedProtocolObject,
     head: &DurablePreparedProtocolObject,
 ) -> Result<PreparedMergeCandidate, DbError> {
     let root = required_store_root_authority_on(conn)?;
-    let unverified: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
+    let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
         .map_err(|error| DbError::Message(format!("signed Merge candidate: {error}")))?;
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
@@ -36,17 +61,17 @@ pub(super) fn parse_prepared_merge_candidate_parts_on(
         sequence: unverified.seq(),
     };
     let value = StoreBatchCommit::parse_at(
-        &commit.semantic_bytes,
+        commit.semantic_bytes(),
         root.store_root_hash,
         &coord,
         &registration,
     )
     .map_err(|error| DbError::Message(format!("verify Merge candidate: {error}")))?;
     let reference =
-        StoreBatchCommitRef::from_commit(&value, coord, commit.prepared.reference().clone())
+        StoreBatchCommitRef::from_commit(&value, coord, commit.prepared().reference().clone())
             .map_err(|error| DbError::Message(error.to_string()))?;
     let head_value = StoreDeviceHead::parse_at(
-        &head.semantic_bytes,
+        head.semantic_bytes(),
         root.store_root_hash,
         &registration,
         &reference,
@@ -55,10 +80,10 @@ pub(super) fn parse_prepared_merge_candidate_parts_on(
     Ok(PreparedMergeCandidate {
         commit: value,
         reference,
-        canonical_signed_bytes: commit.semantic_bytes.clone(),
-        commit_prepared: commit.prepared.clone(),
+        canonical_signed_bytes: commit.semantic_bytes().to_vec(),
+        commit_prepared: commit.prepared().clone(),
         head: head_value,
-        head_prepared: head.prepared.clone(),
+        head_prepared: head.prepared().clone(),
     })
 }
 
@@ -81,7 +106,7 @@ pub(super) fn blocked_merge_candidate_from_prepared(
     }
 }
 
-pub(super) fn parse_prepared_merge_publication_on(
+pub(crate) fn parse_prepared_merge_publication_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -102,7 +127,7 @@ pub(super) enum MergeCandidateHeadEvidence<'a> {
     Verified(&'a crate::sync::remote_object::VerifiedCandidateHeadNonactivation),
 }
 
-pub(super) fn author_exclusion_activation_for_candidate_on(
+pub(crate) fn author_exclusion_activation_for_candidate_on(
     conn: &Connection,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
@@ -125,7 +150,8 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
         .into_values()
         .map(|reference| (reference.coord.stream_id, reference))
         .collect::<BTreeMap<_, _>>();
-    let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
+    let (_, state) =
+        crate::database::store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
     let Some(record) = state.devices.get(&author.device_id) else {
         return Err(DbError::Message(
             "candidate author is absent from the current device state".to_string(),
@@ -151,7 +177,7 @@ pub(super) fn author_exclusion_activation_for_candidate_on(
     )
 }
 
-pub(super) fn select_author_exclusion_activation_locator(
+pub(crate) fn select_author_exclusion_activation_locator(
     terminals: &[crate::sync::store_commit::StoreDeviceExclusionRef],
     expected_stream: &crate::sync::causal_grants::AuthorStreamId,
     sequence: u64,
@@ -172,7 +198,7 @@ pub(super) fn select_author_exclusion_activation_locator(
     Ok(None)
 }
 
-pub(super) fn load_author_exclusion_activation_locator_on(
+pub(crate) fn load_author_exclusion_activation_locator_on(
     conn: &Connection,
     exclusion: &crate::sync::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
@@ -276,7 +302,7 @@ pub(super) fn validate_terminal_candidate_authority_on(
     validate_terminal_nonactivation_authority_on(conn, durable)
 }
 
-pub(super) fn validate_terminal_nonactivation_authority_on(
+pub(crate) fn validate_terminal_nonactivation_authority_on(
     conn: &Connection,
     durable: &crate::sync::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
@@ -383,7 +409,7 @@ pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
     }
 }
 
-pub(super) fn begin_merge_candidate_nonactivation_on(
+pub(crate) fn begin_merge_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -672,12 +698,12 @@ pub(super) fn finish_merge_retraction_cleanup_on(
     Ok(())
 }
 
-pub(super) enum MergeCandidateHeadCleanup {
+pub(crate) enum MergeCandidateHeadCleanup {
     Remote { complete: bool },
     ProtocolInert,
 }
 
-pub(super) fn load_merge_candidate_head_cleanup_on(
+pub(crate) fn load_merge_candidate_head_cleanup_on(
     conn: &Connection,
     head: &ExactObjectRef,
     candidate: &StoreBatchCommitRef,

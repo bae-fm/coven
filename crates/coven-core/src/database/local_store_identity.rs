@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn local_store_authority_on(
+pub(crate) fn local_store_authority_on(
     conn: &Connection,
 ) -> Result<
     (
@@ -77,7 +77,7 @@ pub(super) fn local_activated_registration_ref_on(
     Ok(Some(reference))
 }
 
-pub(super) fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError> {
+pub(crate) fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError> {
     let local_device_id = conn
         .query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",

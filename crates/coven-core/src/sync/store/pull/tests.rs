@@ -55,7 +55,7 @@ async fn one_retained_checkpoint() -> (
             .expect("publish checkpoint commit"),
         1,
     );
-    let reference = db
+    let reference = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_position()
         .await
         .expect("load checkpoint position")
@@ -124,7 +124,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
     )
     .await
     .expect("publish retained acknowledgement");
-    let acknowledgement_commit = db
+    let acknowledgement_commit = crate::sync::store::database::StoreDatabase::new(&db)
         .latest_local_store_position()
         .await
         .expect("load acknowledgement commit")
@@ -310,7 +310,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("publish traversal-earlier Owner removal control");
-    let earlier_control = earlier_db
+    let earlier_control = crate::sync::store::database::StoreDatabase::new(earlier_db)
         .latest_local_store_position()
         .await
         .expect("load earlier Owner position")
@@ -332,7 +332,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         ],
     )
     .await;
-    later_db
+    crate::sync::store::database::StoreDatabase::new(later_db)
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
@@ -379,7 +379,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     crate::sync::store::publication::drain_store_writes(later_db, &store.storage)
         .await
         .expect("publish later concurrent write");
-    let later_commit = later_db
+    let later_commit = crate::sync::store::database::StoreDatabase::new(later_db)
         .latest_local_store_position()
         .await
         .expect("load later Owner position")

@@ -427,17 +427,18 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
     )
     .await
     .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    db.mark_remote_object_uploaded(
-        completion
-            .remote_object(&publication.head_ref.object)
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?,
-    )
-    .await
-    .map_err(|error| {
-        InviteError::InvalidDurableMutation(format!(
-            "record uploaded Merge membership head: {error}"
-        ))
-    })?;
+    crate::sync::store::database::StoreDatabase::new(db)
+        .mark_remote_object_uploaded(
+            completion
+                .remote_object(&publication.head_ref.object)
+                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            InviteError::InvalidDurableMutation(format!(
+                "record uploaded Merge membership head: {error}"
+            ))
+        })?;
     let membership_objects = VerifiedMergeMembershipObjects::verify(
         &candidate.commit,
         &candidate.reference,

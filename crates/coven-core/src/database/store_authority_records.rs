@@ -450,7 +450,7 @@ pub(super) fn ensure_founder_replay_baseline_on(
     install_generation_zero_replay_baseline_on(conn, schema_version, routing_hash, authority)
 }
 
-pub(super) fn install_store_founder_state_on(
+pub(crate) fn install_store_founder_state_on(
     conn: &Connection,
     root: &crate::sync::store_commit::StoreRootRef,
     founder_reference: &StoreDeviceRegistrationRef,

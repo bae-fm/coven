@@ -7,6 +7,7 @@ use crate::keys::UserKeypair;
 
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{PreparedExactObject, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
     registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
@@ -52,7 +53,7 @@ impl super::AuthorizedStore<'_> {
     }
 }
 
-pub async fn ensure_active_registration(
+pub(crate) async fn ensure_active_registration(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<(), StoreRegistrationError> {
@@ -1208,17 +1209,18 @@ pub async fn recover_owner_device(
         .create_protocol_object(&head_prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    db.complete_merge_owner_recovery(
-        commit,
-        commit_ref,
-        head,
-        head_prepared.reference().clone(),
-        history.summary,
-        registration,
-        registration_activation,
-    )
-    .await
-    .map_err(database_error)?;
+    StoreDatabase::new(db)
+        .complete_owner_recovery(
+            commit,
+            commit_ref,
+            head,
+            head_prepared.reference().clone(),
+            history.summary,
+            registration,
+            registration_activation,
+        )
+        .await
+        .map_err(database_error)?;
     Ok(registration_ref)
 }
 
@@ -1242,9 +1244,12 @@ pub(crate) async fn bootstrap_pending_device(
     }
     let attempt = verified_attempt.value;
     let activation_stream = attempt_activation.coord.stream_id.to_string();
-    Box::pin(db.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
-        .await
-        .map_err(database_error)?;
+    Box::pin(
+        StoreDatabase::new(db)
+            .install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan),
+    )
+    .await
+    .map_err(database_error)?;
     if Box::pin(db.exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()))
         .await
         .map_err(database_error)?

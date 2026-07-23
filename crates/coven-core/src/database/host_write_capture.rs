@@ -486,7 +486,7 @@ impl Database {
         .await
     }
 
-    pub(super) fn store_write_partitions_on(
+    pub(crate) fn store_write_partitions_on(
         conn: &Connection,
         write_id: &str,
         stored_store_changeset: &[u8],

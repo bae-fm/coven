@@ -2,8 +2,9 @@ use crate::database::blob_records::remote_audience_to_db;
 use crate::database::store_reclaim_records::store_reclaim_journal_error;
 
 use super::*;
+use crate::sync::store::database::candidate_records::load_author_exclusion_activation_locator_on;
 
-pub(super) enum RemoteStoredRepresentationRef<'a> {
+pub(crate) enum RemoteStoredRepresentationRef<'a> {
     Inline(&'a [u8]),
     Blob,
 }
@@ -16,7 +17,7 @@ pub(crate) fn candidate_graph_exact_objects(
         .map_err(|error| DbError::Message(format!("closed candidate object graph: {error}")))
 }
 
-pub(super) fn validate_remote_object_on(
+pub(crate) fn validate_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
     expected_object: &ExactObjectRef,
@@ -498,7 +499,7 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
 
-pub(super) fn begin_remote_candidate_nonactivation_with_verified_head_on(
+pub(crate) fn begin_remote_candidate_nonactivation_with_verified_head_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     nonactivation: crate::sync::remote_object::CandidateNonactivation,
@@ -518,7 +519,7 @@ pub(super) fn begin_remote_candidate_nonactivation_with_verified_head_on(
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
 
-pub(super) fn finish_remote_candidate_nonactivation_on(
+pub(crate) fn finish_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     remote: RemoteObjectRecord,
@@ -726,7 +727,7 @@ pub(crate) fn mark_remote_object_uploaded_on(
     Ok(uploaded)
 }
 
-pub(super) fn mark_reusable_retained_authority_uploaded_on(
+pub(crate) fn mark_reusable_retained_authority_uploaded_on(
     conn: &Connection,
     expected: RemoteObjectRecord,
 ) -> Result<RemoteObjectRecord, DbError> {
@@ -797,7 +798,7 @@ pub(super) fn mark_reusable_retained_authority_uploaded_on(
     Ok(current)
 }
 
-pub(super) fn merge_prepared_remote_object(
+pub(crate) fn merge_prepared_remote_object(
     existing: RemoteObjectRecord,
     proposed: &RemoteObjectRecord,
     owner: &StoreBatchCommitRef,
@@ -978,7 +979,7 @@ pub(super) fn merge_prepared_remote_object(
     Ok(merged)
 }
 
-pub(super) fn validate_prepared_package_on(
+pub(crate) fn validate_prepared_package_on(
     conn: &Connection,
     write_id: &WriteId,
     expected: &PreparedAudiencePackage,
@@ -1013,7 +1014,7 @@ pub(super) fn validate_prepared_package_on(
     Ok(())
 }
 
-pub(super) fn validate_prepared_blob_on(
+pub(crate) fn validate_prepared_blob_on(
     conn: &Connection,
     write_id: &WriteId,
     expected: &PreparedAudienceBlob,

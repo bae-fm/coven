@@ -162,7 +162,8 @@ impl StoreMembershipJournalCompletion {
                         "activated Owner-promotion graph is empty".to_string(),
                     ));
                 }
-                Database::activate_store_operation_remote_objects_on(tx, candidate, &object_ids)?;
+                StoreDatabaseTransaction::new(tx)
+                    .activate_store_operation_remote_objects(candidate, &object_ids)?;
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
                 StoreDatabase::advance_owner_promotion_journal_on(

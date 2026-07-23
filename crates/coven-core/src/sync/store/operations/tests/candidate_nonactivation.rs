@@ -4,8 +4,7 @@ use crate::sync::store_commit::StoreBatchCommitDeletionTarget;
 #[tokio::test]
 async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
     let fixture = prepared_write_fixture().await;
-    let batch = fixture
-        .db
+    let batch = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")

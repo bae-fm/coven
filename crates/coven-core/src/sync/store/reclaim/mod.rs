@@ -1076,7 +1076,9 @@ async fn drive_reclaim_candidate(
                             | crate::sync::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
                     )
             ) {
-                db.mark_reusable_retained_authority_uploaded(remote).await?;
+                crate::sync::store::database::StoreDatabase::new(db)
+                    .mark_reusable_retained_authority_uploaded(remote)
+                    .await?;
             }
         }
         match Box::pin(super::operations::publish_prepared_store_operation(

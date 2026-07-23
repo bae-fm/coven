@@ -178,7 +178,8 @@ async fn publish_acknowledgement_object(
                 "prepared activation does not own its acknowledgement object".to_string(),
             )
         })?;
-    db.mark_remote_object_uploaded(acknowledgement_remote)
+    crate::sync::store::database::StoreDatabase::new(db)
+        .mark_remote_object_uploaded(acknowledgement_remote)
         .await?;
     Ok(true)
 }

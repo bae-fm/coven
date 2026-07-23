@@ -1,23 +1,36 @@
-use crate::database::store_device_state::apply_store_device_exclusion_freezes_on;
-use crate::database::store_device_state::load_declared_store_device_state_on;
+use std::collections::BTreeSet;
 
-use crate::database::blob_records::load_activated_registration_on;
-use crate::database::remote_object_records::load_remote_object_on;
-use crate::database::remote_object_records::update_remote_object_on;
-use crate::database::store_ack_records::record_activated_store_ack_on;
-use crate::database::store_reclaim_records::record_store_reclaim_activation_on;
-use crate::database::store_reclaim_records::store_reclaim_journal_error;
-use crate::database::stream_activation_records::record_verified_stream_activations_on;
+use rusqlite::OptionalExtension;
 
-use super::*;
+use super::{StoreDatabase, StoreDatabaseTransaction};
+use crate::database::{
+    apply_store_device_exclusion_freezes_on, install_store_founder_state_on,
+    load_activated_registration_on, load_declared_store_device_state_on, load_remote_object_on,
+    record_activated_store_ack_on, record_store_reclaim_activation_on,
+    record_verified_stream_activations_on, required_store_root_authority_on,
+    store_reclaim_journal_error, update_remote_object_on, Database, DbError,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
+};
+use crate::sync::audience_package::AudiencePackage;
+use crate::sync::remote_object::RemoteObjectRecord;
+use crate::sync::storage::ExactObjectRef;
+use crate::sync::store::circle_controls::activation::{
+    VerifiedCircleActivations, VerifiedStreamActivations,
+};
+use crate::sync::store::ReclaimCommitActivation;
+use crate::sync::store_commit::{
+    CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
+    VerifiedStoreDeviceOperations,
+};
 
-impl Database {
+impl StoreDatabase<'_> {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
         plan: crate::sync::store::pull::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
-        self.call(move |conn| {
+        self.database.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let installed_root = required_store_root_authority_on(&tx)?;
             if installed_root != root || plan.founder.store_root != root {
@@ -34,13 +47,13 @@ impl Database {
                 &plan.genesis,
             )?;
 
-            let frontier = Self::materialized_frontier_on(&tx, None)?;
+            let frontier = Database::materialized_frontier_on(&tx, None)?;
             let mut represented = BTreeSet::new();
             for prepared in &plan.commits {
                 let stream_id = prepared.reference.coord.stream_id.to_string();
                 let sequence = prepared.reference.coord.sequence();
                 if let Some(existing) =
-                    Self::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+                    Database::materialized_commit_ref_on(&tx, &stream_id, sequence)?
                 {
                     if existing != prepared.reference {
                         return Err(DbError::Message(format!(
@@ -89,7 +102,7 @@ impl Database {
                     continue;
                 }
                 let stream_id = prepared.reference.coord.stream_id.to_string();
-                if let Some(existing) = Self::materialized_commit_ref_on(
+                if let Some(existing) = Database::materialized_commit_ref_on(
                     &tx,
                     &stream_id,
                     prepared.reference.coord.sequence(),
@@ -102,7 +115,7 @@ impl Database {
                     }
                     continue;
                 }
-                Self::record_activated_store_device_registrations_on(
+                Database::record_activated_store_device_registrations_on(
                     &tx,
                     &prepared.commit,
                     &prepared.registrations,
@@ -125,15 +138,54 @@ impl Database {
                     &[],
                     None,
                 )?;
-                Self::record_verified_merge_materialization_on(&tx, materialization)?;
+                StoreDatabaseTransaction::new(&tx)
+                    .record_verified_merge_materialization(materialization)?;
             }
             tx.commit().map_err(DbError::from)
         })
         .await
     }
 
-    pub(crate) fn record_materialized_merge_commit_on(
-        conn: &rusqlite::Transaction<'_>,
+    pub(in crate::sync::store) async fn complete_owner_recovery(
+        &self,
+        commit: StoreBatchCommit,
+        commit_ref: StoreBatchCommitRef,
+        activation_head: StoreDeviceHead,
+        activation_head_object: ExactObjectRef,
+        history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
+        registration: StoreDeviceRegistration,
+        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    ) -> Result<(), DbError> {
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let root = required_store_root_authority_on(&tx)?;
+                let registrations = vec![(registration, authority)];
+                Database::record_activated_store_device_registrations_on(
+                    &tx,
+                    &commit,
+                    &registrations,
+                )?;
+                StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
+                    &root,
+                    &commit,
+                    &commit_ref,
+                    &registrations,
+                    &activation_head,
+                    &activation_head_object,
+                    &history_summary,
+                    &[],
+                    None,
+                )?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
+    }
+}
+
+impl StoreDatabaseTransaction<'_, '_> {
+    pub(in crate::sync::store) fn record_materialized_merge_commit(
+        &self,
         root: &crate::sync::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -165,15 +217,15 @@ impl Database {
             packages,
             package_application,
         )?;
-        Self::record_verified_merge_materialization_on(conn, materialization)
+        self.record_verified_merge_materialization(materialization)
     }
 
-    pub(crate) fn record_verified_merge_materialization_on(
-        conn: &rusqlite::Transaction<'_>,
+    pub(in crate::sync::store) fn record_verified_merge_materialization(
+        &self,
         materialization: VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
-        Self::record_author_exclusion_activations_on(
-            conn,
+        let conn = self.transaction;
+        self.record_author_exclusion_activations(
             materialization.commit(),
             materialization.commit_ref(),
             materialization.device_operations(),
@@ -181,8 +233,7 @@ impl Database {
             materialization.activation_head_object(),
         )?;
         let root = required_store_root_authority_on(conn)?;
-        let state_after = Self::derive_materialized_store_device_state_on(
-            conn,
+        let state_after = self.derive_materialized_store_device_state(
             &root,
             materialization.commit(),
             materialization.device_operations(),
@@ -203,7 +254,8 @@ impl Database {
                     .to_string(),
             ));
         }
-        let retained_commit_ref = Self::retain_merge_materialization_on(conn, &materialization)?;
+        let retained_commit_ref =
+            Database::retain_merge_materialization_on(conn, &materialization)?;
         let activation = ReclaimCommitActivation::new(
             materialization.commit_ref().clone(),
             crate::sync::store_commit::StoreDeviceHeadRef {
@@ -212,8 +264,7 @@ impl Database {
             },
         )
         .map_err(store_reclaim_journal_error)?;
-        Self::record_materialized_commit_with_device_operations_on(
-            conn,
+        self.record_materialized_commit_with_device_operations(
             materialization.commit(),
             materialization.commit_ref(),
             materialization.device_operations(),
@@ -223,12 +274,13 @@ impl Database {
         )
     }
 
-    fn derive_materialized_store_device_state_on(
-        conn: &Connection,
+    fn derive_materialized_store_device_state(
+        &self,
         root: &crate::sync::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
     ) -> Result<crate::sync::store_commit::ResolvedStoreDeviceState, DbError> {
+        let conn = self.transaction;
         let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
         let recovery_author = commit
             .device_registrations()
@@ -345,8 +397,8 @@ impl Database {
         Ok(device_state)
     }
 
-    pub(super) fn record_materialized_commit_with_device_operations_on(
-        conn: &Connection,
+    fn record_materialized_commit_with_device_operations(
+        &self,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         device_operations: &VerifiedStoreDeviceOperations,
@@ -354,6 +406,7 @@ impl Database {
         retention: &RetainedMergeMaterializationKey,
         activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
+        let conn = self.transaction;
         commit_ref
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -404,7 +457,7 @@ impl Database {
         let predecessor = if commit.seq() == 1 {
             None
         } else if let Some(reference) =
-            Self::materialized_commit_ref_on(conn, &stream_id, commit.seq() - 1)?
+            Database::materialized_commit_ref_on(conn, &stream_id, commit.seq() - 1)?
         {
             Some(reference)
         } else {
@@ -413,7 +466,7 @@ impl Database {
                  WHERE device_id = ?1 AND seq = ?2",
                 (
                     &stream_id,
-                    Self::sequence_to_sqlite(&stream_id, commit.seq() - 1)?,
+                    Database::sequence_to_sqlite(&stream_id, commit.seq() - 1)?,
                 ),
                 |row| row.get::<_, String>(0),
             )
@@ -435,14 +488,10 @@ impl Database {
                 predecessor
             )));
         }
-        let device_state = Self::derive_materialized_store_device_state_on(
-            conn,
-            &root,
-            commit,
-            device_operations,
-        )?;
+        let device_state =
+            self.derive_materialized_store_device_state(&root, commit, device_operations)?;
         record_activated_store_ack_on(conn, commit, commit_ref)?;
-        let seq = Self::sequence_to_sqlite(&stream_id, commit.seq())?;
+        let seq = Database::sequence_to_sqlite(&stream_id, commit.seq())?;
         let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::Message(format!("serialize exact Store commit ref: {error}"))
         })?;
@@ -494,14 +543,15 @@ impl Database {
         record_store_reclaim_activation_on(conn, commit, commit_ref, activation)
     }
 
-    fn record_author_exclusion_activations_on(
-        conn: &Connection,
+    fn record_author_exclusion_activations(
+        &self,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         device_operations: &VerifiedStoreDeviceOperations,
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
     ) -> Result<(), DbError> {
+        let conn = self.transaction;
         let root = required_store_root_authority_on(conn)?;
         commit_ref
             .verify_commit(commit)
@@ -609,12 +659,13 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn record_verified_circle_activations_on(
-        conn: &Connection,
+    pub(in crate::sync::store) fn record_verified_circle_activations(
+        &self,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     ) -> Result<(), DbError> {
+        let conn = self.transaction;
         if activations.len() != commit.circle_controls().len() {
             return Err(DbError::Message(
                 "verified circle activations do not cover every control reference".to_string(),
@@ -624,7 +675,7 @@ impl Database {
             .verify_commit(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let stream_id = commit_ref.coord.stream_id.to_string();
-        let seq = Self::sequence_to_sqlite(&stream_id, commit_ref.coord.sequence())?;
+        let seq = Database::sequence_to_sqlite(&stream_id, commit_ref.coord.sequence())?;
         for activation in activations {
             if !commit.circle_controls().contains(&activation.reference)
                 || activation.reference.circle_id() != activation.circle_id
@@ -699,8 +750,11 @@ impl Database {
                     )));
                 }
             }
-            let current_state_payload =
-                Self::reduce_circle_current_state_on(conn, commit.candidate_family(), activation)?;
+            let current_state_payload = Database::reduce_circle_current_state_on(
+                conn,
+                commit.candidate_family(),
+                activation,
+            )?;
             let control_coord =
                 serde_json::to_string(&activation.control.coord).map_err(|error| {
                     DbError::Message(format!("serialize circle control coordinate: {error}"))
@@ -771,11 +825,12 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn activate_store_operation_remote_objects_on(
-        conn: &Connection,
+    pub(in crate::sync::store) fn activate_store_operation_remote_objects(
+        &self,
         commit_ref: &StoreBatchCommitRef,
         object_ids: &[ObjectHash],
     ) -> Result<(), DbError> {
+        let conn = self.transaction;
         let mut unique = std::collections::BTreeSet::new();
         for object_id in object_ids {
             if !unique.insert(*object_id) {

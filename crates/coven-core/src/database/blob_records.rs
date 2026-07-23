@@ -198,7 +198,7 @@ pub(super) fn validate_stored_row_binding_on(
     Ok(())
 }
 
-pub(super) fn load_prepared_audience_objects_on(
+pub(crate) fn load_prepared_audience_objects_on(
     conn: &Connection,
     write_id: &WriteId,
 ) -> Result<PreparedAudienceObjects, DbError> {
@@ -361,7 +361,7 @@ pub(crate) fn previous_row_blob_for_write_on(
     Ok(Some(StoreWriteRemoteBlob { authority, stored }))
 }
 
-pub(super) fn remote_audience_to_db(audience: &RemoteAudience) -> String {
+pub(crate) fn remote_audience_to_db(audience: &RemoteAudience) -> String {
     match audience {
         RemoteAudience::Store => "store".to_string(),
         RemoteAudience::Circle(circle_id) => circle_id.to_string(),

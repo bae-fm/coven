@@ -17,6 +17,7 @@ use crate::sync::circle::{
 use crate::sync::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
@@ -943,7 +944,7 @@ pub(super) async fn prepare_circle_operation_request(
                     "circle creator is not a current Store writer".to_string(),
                 )
             })?;
-        let base = db.latest_local_store_position().await?;
+        let base = StoreDatabase::new(db).latest_local_store_position().await?;
         let seq = base
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence() + 1);

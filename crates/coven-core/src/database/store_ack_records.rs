@@ -170,7 +170,7 @@ pub(crate) fn finish_outbound_store_ack_on(
     record_published_store_ack_on(conn, reference, successor_slot)
 }
 
-pub(super) fn record_activated_store_ack_on(
+pub(crate) fn record_activated_store_ack_on(
     conn: &Connection,
     commit: &StoreBatchCommit,
     commit_ref: &StoreBatchCommitRef,

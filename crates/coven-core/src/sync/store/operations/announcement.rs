@@ -173,7 +173,7 @@ pub(crate) async fn reject_excluded_merge_candidate(
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<(), StoreError> {
-    if db
+    if crate::sync::store::database::StoreDatabase::new(db)
         .author_exclusion_activation_for_candidate(candidate.clone(), author.clone())
         .await?
         .is_some()

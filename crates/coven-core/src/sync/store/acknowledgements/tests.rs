@@ -377,7 +377,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         .await
         .expect("read drained acknowledgement outbox")
         .is_none());
-    assert!(loser_db
+    assert!(crate::sync::store::database::StoreDatabase::new(&loser_db)
         .protocol_inert_object(loser.reference.object)
         .await
         .expect("read losing acknowledgement inert state")
@@ -475,7 +475,8 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
-    db.mark_remote_object_uploaded(acknowledgement_remote)
+    crate::sync::store::database::StoreDatabase::new(&db)
+        .mark_remote_object_uploaded(acknowledgement_remote)
         .await
         .expect("record acknowledgement upload");
     crate::sync::store::operations::publish_prepared(
@@ -487,13 +488,19 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     )
     .await
     .expect("activate acknowledgement commit");
-    let activated_position = db.latest_local_store_position().await.unwrap();
+    let activated_position = crate::sync::store::database::StoreDatabase::new(&db)
+        .latest_local_store_position()
+        .await
+        .unwrap();
     drop(db);
 
     let reopened = open(&path, "ack-test-device");
     assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 1);
     assert_eq!(
-        reopened.latest_local_store_position().await.unwrap(),
+        crate::sync::store::database::StoreDatabase::new(&reopened)
+            .latest_local_store_position()
+            .await
+            .unwrap(),
         activated_position
     );
     assert!(reopened
@@ -535,7 +542,10 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     ));
     assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 1);
     assert_eq!(
-        reopened.latest_local_store_position().await.unwrap(),
+        crate::sync::store::database::StoreDatabase::new(&reopened)
+            .latest_local_store_position()
+            .await
+            .unwrap(),
         Some(expected)
     );
 }
@@ -618,7 +628,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .reference,
         outbound.reference
     );
-    let inert = db
+    let inert = crate::sync::store::database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -668,7 +678,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
         crate::database::OutboundStoreAckActivation::Nonactivating(ref candidate)
             if candidate.reference == losing.reference
     ));
-    assert!(db
+    assert!(crate::sync::store::database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()

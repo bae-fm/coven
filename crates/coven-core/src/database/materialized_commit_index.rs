@@ -156,7 +156,7 @@ impl Database {
         Ok(frontier)
     }
 
-    pub(super) fn parse_stored_commit_ref(
+    pub(crate) fn parse_stored_commit_ref(
         stream_id: &str,
         sequence: u64,
         encoded: &str,

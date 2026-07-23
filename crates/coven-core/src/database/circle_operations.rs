@@ -328,7 +328,7 @@ impl Database {
         Ok(state)
     }
 
-    pub(super) fn reduce_circle_current_state_on(
+    pub(crate) fn reduce_circle_current_state_on(
         conn: &Connection,
         candidate_family: crate::sync::store_commit::CandidateFamilyId,
         activation: &crate::sync::store::circle_controls::VerifiedCircleReference,

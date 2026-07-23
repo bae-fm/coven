@@ -1,7 +1,9 @@
+use super::database::StoreDatabase;
 use super::*;
-use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
+use crate::database::{PreparedProtocolObject, PreparedStoreWrite};
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::sync::store::database::publication_state::StoreWritePreparation;
 use crate::sync::store::package_preparation::{close_prepared_packages, prepare_partition_package};
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
@@ -56,7 +58,7 @@ pub(crate) async fn prepare_store_write(
             &registration_ref,
             crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let previous = db.latest_local_store_position().await?;
+        let previous = StoreDatabase::new(db).latest_local_store_position().await?;
         let seq = next_store_sequence(previous.as_ref())?;
         let coord = StoreCommitCoord {
             stream_id,
@@ -301,7 +303,9 @@ pub(crate) async fn prepare_store_write(
             return Err(error);
         }
     };
-    db.prepare_store_write_commit(preparation).await?;
+    StoreDatabase::new(db)
+        .prepare_store_write_commit(preparation)
+        .await?;
     Ok(true)
 }
 
@@ -313,7 +317,8 @@ async fn record_preparation_failure(
     let Some(block) = blocked_status(error) else {
         return Ok(());
     };
-    db.block_write_if_unresolved(write_id, block)
+    crate::sync::store::database::StoreDatabase::new(db)
+        .block_write_if_unresolved(write_id, block)
         .await
         .map(|_| ())
         .map_err(|status_error| {

@@ -68,7 +68,10 @@ pub(crate) async fn publish_prepared_remote_objects(
     write_id: &crate::WriteId,
     store_root_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    for prepared in db.prepared_remote_objects(write_id).await? {
+    for prepared in crate::sync::store::database::StoreDatabase::new(db)
+        .prepared_remote_objects(write_id)
+        .await?
+    {
         let remote = prepared.record;
         let prepared_state = match &remote {
             super::remote_object::RemoteObjectRecord::CandidateCommit(record) => matches!(
@@ -197,7 +200,9 @@ pub(crate) async fn publish_prepared_remote_objects(
             }
         }
         if prepared_state {
-            db.mark_remote_object_uploaded(remote).await?;
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_remote_object_uploaded(remote)
+                .await?;
         }
     }
     Ok(())

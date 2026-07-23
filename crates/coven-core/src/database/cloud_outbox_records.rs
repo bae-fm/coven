@@ -33,7 +33,7 @@ pub(super) fn upload_entry_for_identity_on(
     .map_err(DbError::from)
 }
 
-pub(super) fn consume_created_upload_handoff_on(
+pub(crate) fn consume_created_upload_handoff_on(
     conn: &Connection,
     package: &AudiencePackage,
     binding: &RowBlobLocatorBinding,

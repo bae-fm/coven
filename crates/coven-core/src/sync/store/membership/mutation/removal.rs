@@ -636,7 +636,9 @@ async fn execute_revoke_mutation(
     for wrapped in &plan.wraps {
         if let Some(remotes) = &remote_objects {
             let expected = exact_owned_remote(remotes, &wrapped.prepared.reference.object)?;
-            persistence.db.mark_remote_object_uploaded(expected).await?;
+            crate::sync::store::database::StoreDatabase::new(persistence.db)
+                .mark_remote_object_uploaded(expected)
+                .await?;
         }
     }
     match &plan.publication {
@@ -675,7 +677,9 @@ async fn execute_revoke_mutation(
     }
     if let Some(remotes) = &remote_objects {
         let expected = exact_owned_remote(remotes, &publication.entry_ref.object)?;
-        persistence.db.mark_remote_object_uploaded(expected).await?;
+        crate::sync::store::database::StoreDatabase::new(persistence.db)
+            .mark_remote_object_uploaded(expected)
+            .await?;
     }
     match cloud_home.set_access(plan.desired_access.clone()).await? {
         CloudAccessOutcome::Absent(_) => {}
@@ -738,8 +742,7 @@ async fn execute_revoke_mutation(
             crate::sync::store::operations::upload_commit(storage, &candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            persistence
-                .db
+            crate::sync::store::database::StoreDatabase::new(persistence.db)
                 .mark_remote_object_uploaded(exact_owned_remote(
                     &initial_remotes,
                     &candidate.reference.object,

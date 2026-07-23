@@ -56,7 +56,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
         )
         .await
         .expect("prepare outbound write"));
-        let batch = db
+        let batch = crate::sync::store::database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("read prepared write")
@@ -90,8 +90,7 @@ pub(super) async fn prepared_write_fixture() -> PreparedWriteFixture {
 pub(super) async fn publish_competing_merge_head(
     fixture: &PreparedWriteFixture,
 ) -> StoreDeviceHeadRef {
-    let batch = fixture
-        .db
+    let batch = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")
@@ -246,8 +245,7 @@ pub(super) async fn publish_competing_merge_head(
 pub(super) async fn publish_alternate_head_for_prepared_commit(
     fixture: &PreparedWriteFixture,
 ) -> StoreDeviceHeadRef {
-    let batch = fixture
-        .db
+    let batch = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")

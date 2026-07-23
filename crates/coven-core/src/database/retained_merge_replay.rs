@@ -12,6 +12,10 @@ use crate::database::remote_object_records::load_remote_object_on;
 use crate::database::remote_object_records::update_remote_object_on;
 
 use super::*;
+use crate::sync::store::database::candidate_records::{
+    author_exclusion_activation_for_candidate_on, load_author_exclusion_activation_locator_on,
+    parse_prepared_merge_candidate_parts_on, validate_terminal_nonactivation_authority_on,
+};
 
 impl Database {
     fn canonical_retained_merge_packages(
@@ -792,7 +796,7 @@ impl Database {
         )
     }
 
-    pub(super) fn retain_merge_materialization_on(
+    pub(crate) fn retain_merge_materialization_on(
         conn: &rusqlite::Transaction<'_>,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<RetainedMergeMaterializationKey, DbError> {
@@ -963,7 +967,7 @@ impl Database {
         Ok(verified)
     }
 
-    pub(super) fn load_retained_merge_materialization_by_ref_on(
+    pub(crate) fn load_retained_merge_materialization_by_ref_on(
         conn: &Connection,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
@@ -1308,7 +1312,7 @@ impl Database {
         })
     }
 
-    pub(super) fn load_merge_retraction_cleanup_on(
+    pub(crate) fn load_merge_retraction_cleanup_on(
         conn: &Connection,
         candidate: &StoreBatchCommitRef,
     ) -> Result<PreparedMergeCandidate, DbError> {

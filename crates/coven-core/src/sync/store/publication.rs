@@ -1,4 +1,5 @@
 use super::abandonment::{read_occupied_merge_head, verify_merge_candidate_nonactivations};
+use super::database::StoreDatabase;
 use super::StoreError;
 use super::*;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
@@ -17,9 +18,10 @@ pub(crate) async fn drain_store_writes(
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreError> {
     let mut published = 0_u64;
-    while let Some(batch) = db.oldest_prepared_store_write().await? {
+    while let Some(batch) = StoreDatabase::new(db).oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();
-        db.set_write_status(&write_id, crate::WriteStatus::Publishing)
+        crate::sync::store::database::StoreDatabase::new(db)
+            .set_write_status(&write_id, crate::WriteStatus::Publishing)
             .await?;
         let attempt = async {
             Box::pin(reject_excluded_merge_candidate(
@@ -61,7 +63,8 @@ pub(crate) async fn drain_store_writes(
                     "prepared commit exact readback differs from its signed bytes".to_string(),
                 ));
             }
-            db.mark_candidate_commit_uploaded(head.commit.clone())
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_candidate_commit_uploaded(head.commit.clone())
                 .await?;
             #[cfg(any(test, feature = "test-utils"))]
             db.reach_test_point(
@@ -107,7 +110,8 @@ pub(crate) async fn drain_store_writes(
                         &registration,
                     )?;
                     let (winner, winner_prepared) = observation.into_head();
-                    db.adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
+                    crate::sync::store::database::StoreDatabase::new(db)
+                        .adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
                         .await?;
                     #[cfg(any(test, feature = "test-utils"))]
                     db.reach_test_point(
@@ -116,7 +120,7 @@ pub(crate) async fn drain_store_writes(
                         },
                     )
                     .await;
-                    match db
+                    match StoreDatabase::new(db)
                         .complete_prepared_store_write(head.commit.clone(), nonactivations)
                         .await?
                     {
@@ -145,7 +149,8 @@ pub(crate) async fn drain_store_writes(
                     ),
                     &registration,
                 )?;
-                db.mark_merge_candidate_conflict(write_id.clone(), nonactivations)
+                StoreDatabase::new(db)
+                    .mark_merge_candidate_conflict(write_id.clone(), nonactivations)
                     .await?;
                 return Ok::<bool, StoreError>(false);
             }
@@ -177,17 +182,18 @@ pub(crate) async fn drain_store_writes(
                     .map(|manifest| manifest.candidate.clone()),
                 &registration,
             )?;
-            db.mark_store_head_uploaded(StoreDeviceHeadRef {
-                head_hash: head.head_hash(),
-                object: batch.head.object.clone(),
-            })
-            .await?;
+            crate::sync::store::database::StoreDatabase::new(db)
+                .mark_store_head_uploaded(StoreDeviceHeadRef {
+                    head_hash: head.head_hash(),
+                    object: batch.head.object.clone(),
+                })
+                .await?;
             #[cfg(any(test, feature = "test-utils"))]
             db.reach_test_point(crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
                 write_id: write_id.clone(),
             })
             .await;
-            match db
+            match StoreDatabase::new(db)
                 .complete_prepared_store_write(head.commit.clone(), nonactivations)
                 .await?
             {
@@ -204,7 +210,9 @@ pub(crate) async fn drain_store_writes(
             Ok(true) => {}
             Err(error) => {
                 if let Some(block) = blocked_status(&error) {
-                    db.block_write_if_unresolved(&write_id, block).await?;
+                    crate::sync::store::database::StoreDatabase::new(db)
+                        .block_write_if_unresolved(&write_id, block)
+                        .await?;
                 }
                 return Err(error);
             }

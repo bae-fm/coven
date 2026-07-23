@@ -380,8 +380,7 @@ async fn execute_resolution_mutation(
     store_objects::load_membership_resolution_ref(storage, root.store_root_hash, &plan.reference)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    persistence
-        .db
+    crate::sync::store::database::StoreDatabase::new(persistence.db)
         .mark_remote_object_uploaded(exact_owned_remote(&remotes, &plan.reference.object)?)
         .await?;
     publish_prepared_merge_membership_authority(
@@ -391,8 +390,7 @@ async fn execute_resolution_mutation(
         &[],
     )
     .await?;
-    persistence
-        .db
+    crate::sync::store::database::StoreDatabase::new(persistence.db)
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.transition.entry_ref.object,
@@ -401,8 +399,7 @@ async fn execute_resolution_mutation(
     operations::upload_commit(storage, &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    persistence
-        .db
+    crate::sync::store::database::StoreDatabase::new(persistence.db)
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.candidate.reference.object,

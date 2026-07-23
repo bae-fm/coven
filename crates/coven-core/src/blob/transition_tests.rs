@@ -689,7 +689,8 @@ async fn publish_fixture_position(
         .publish_pending(db, store_dir)
         .await
         .expect("publish fixture Store position"));
-    db.latest_local_store_position()
+    crate::sync::store::database::StoreDatabase::new(db)
+        .latest_local_store_position()
         .await
         .expect("read fixture Store position")
         .expect("fixture Store write has an exact position")

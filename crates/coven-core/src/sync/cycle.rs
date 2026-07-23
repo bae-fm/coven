@@ -611,7 +611,7 @@ async fn prepare_cycle_before_pull(
         }
     }
 
-    let local_seq = db
+    let local_seq = crate::sync::store::database::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
@@ -751,7 +751,7 @@ async fn complete_cycle_after_pull(
         false
     };
 
-    let local_seq = db
+    let local_seq = crate::sync::store::database::StoreDatabase::new(db)
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position after publish: {error}"))?

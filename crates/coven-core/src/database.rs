@@ -8,7 +8,10 @@
 //! Hosts open coven with [`crate::Coven::builder`] and run app SQL through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
-pub(crate) use crate::database::blob_records::load_activated_registration_on;
+pub(crate) use crate::database::blob_records::{
+    load_activated_registration_on, remote_audience_to_db,
+};
+pub(crate) use crate::database::cloud_outbox_records::consume_created_upload_handoff_on;
 use crate::database::connection_io::open_connection;
 use crate::database::connection_io::open_connection_read_only;
 use crate::database::connection_io::scan_max_updated_at;
@@ -17,20 +20,35 @@ use crate::database::local_store_identity::local_activated_registration_ref_on;
 use crate::database::local_store_identity::pin_host_device_id_on;
 use crate::database::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;
-use crate::database::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
+pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
 pub(crate) use crate::database::remote_object_records::candidate_graph_exact_objects;
+pub(crate) use crate::database::remote_object_records::finish_remote_candidate_nonactivation_on;
 pub(crate) use crate::database::remote_object_records::load_protocol_inert_object_on;
 pub(crate) use crate::database::remote_object_records::load_remote_object_on;
 pub(crate) use crate::database::remote_object_records::mark_remote_object_uploaded_on;
+pub(crate) use crate::database::remote_object_records::mark_reusable_retained_authority_uploaded_on;
+pub(crate) use crate::database::remote_object_records::merge_prepared_remote_object;
 pub(crate) use crate::database::remote_object_records::persist_exact_remote_object_on;
 pub(crate) use crate::database::remote_object_records::record_reclaimed_store_package_on;
 pub(crate) use crate::database::remote_object_records::replace_prepared_merge_head_remote_on;
 pub(crate) use crate::database::remote_object_records::update_remote_object_on;
+pub(crate) use crate::database::remote_object_records::{
+    validate_prepared_blob_on, validate_prepared_package_on, validate_remote_object_on,
+    RemoteStoredRepresentationRef,
+};
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
+pub(crate) use crate::database::store_ack_records::record_activated_store_ack_on;
+pub(crate) use crate::database::store_authority_records::install_store_founder_state_on;
+pub(crate) use crate::database::store_device_state::{
+    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
+    store_device_state_for_history_cut_on,
+};
 pub(crate) use crate::database::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
-    parse_store_reclaim_operation, store_reclaim_journal_error, update_store_reclaim_operation_on,
+    parse_store_reclaim_operation, record_store_reclaim_activation_on, store_reclaim_journal_error,
+    update_store_reclaim_operation_on,
 };
+pub(crate) use crate::database::stream_activation_records::record_verified_stream_activations_on;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -54,10 +72,7 @@ use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::sync::circle::Audience;
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
-use crate::sync::membership::{
-    AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
-    StoreMembershipConflictResolutionRef,
-};
+use crate::sync::membership::{AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef};
 use crate::sync::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
@@ -77,14 +92,13 @@ use crate::sync::store::{
     StoreReclaimJournalError,
 };
 use crate::sync::store_commit::{
-    ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CirclePackageRef,
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceOperations,
-    RetainedStoreDeviceRegistrationActivations, SnapshotImageRef, SnapshotMeta, StoreAck,
-    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
+    ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
+    ObjectHash, ResolvedStoreDeviceState, RetainedStoreDeviceRegistrationActivations,
+    SnapshotImageRef, SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
+    StoreCommitCoord, StoreDeviceExclusionProposalId, StoreDeviceHead, StoreDeviceProposalAck,
     StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreHistoryCut, StorePackageRef, StoreProtocolRoot, StoreSnapshotRef,
-    StreamActivationId, VerifiedStoreDeviceOperations,
+    StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot, StoreSnapshotRef, StreamActivationId,
+    VerifiedStoreDeviceOperations,
 };
 use crate::write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteResolution,
@@ -97,7 +111,6 @@ mod circle_operation_records;
 mod circle_operations;
 mod cloud_outbox;
 mod cloud_outbox_records;
-mod commit_materialization;
 mod connection_io;
 mod database_open;
 mod database_runtime;
@@ -110,11 +123,8 @@ mod local_store_identity;
 mod make_remote;
 mod materialized_commit_index;
 mod membership_mutations;
-mod merge_candidate_lifecycle;
-mod merge_candidate_records;
 mod operation_models;
 mod prepared_audience_objects;
-mod prepared_remote_objects;
 mod provider_probes;
 mod remote_object_records;
 mod retained_merge_replay;
@@ -130,19 +140,28 @@ mod store_coordinates;
 mod store_creation_attempts;
 mod store_device_state;
 mod store_reclaim_records;
-mod store_write_preparation;
-mod store_write_publication;
 mod stream_activation_records;
 mod write_lifecycle;
 mod write_models;
-mod write_publication_records;
 
-pub(crate) use blob_records::previous_row_blob_for_write_on;
+pub(crate) use crate::sync::store::database::candidate_records::CandidateCleanupObject;
+use crate::sync::store::database::candidate_records::PreparedMergeCandidate;
+use crate::sync::store::database::materialization_models::{
+    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedCommitActivationInput,
+    RetainedMergeMaterializationInput,
+};
+pub(crate) use crate::sync::store::database::materialization_models::{
+    OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+};
+pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
 pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
 };
 use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
-use merge_candidate_records::*;
+#[cfg(test)]
+pub(crate) use local_store_identity::local_merge_stream_id_on;
+pub(crate) use local_store_identity::local_store_authority_on;
 pub(crate) use operation_models::{
     DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
     LocalDeviceRegistrationState, MembershipMutationActivation, PreparedSnapshotBlob,
@@ -151,21 +170,22 @@ pub(crate) use operation_models::{
 use operation_models::{LocalDeviceRegistrationJournalRow, PreparedLocalDeviceRegistrationRow};
 #[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
-use prepared_audience_objects::validate_prepared_audience_blob_graph;
 pub(crate) use prepared_audience_objects::{
-    BlobActivation, MakeRemoteIntentState, PreparedAudienceBlob, PreparedAudienceObjects,
-    PreparedAudiencePackage, PreparedRemoteObject, StoredBlobReferenceState,
+    validate_prepared_audience_blob_graph, BlobActivation, MakeRemoteIntentState,
+    PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, PreparedRemoteObject,
+    StoredBlobReferenceState,
 };
-use schema_contract::{validate_host_synced_tables, DurablePreparedProtocolObject};
+use schema_contract::validate_host_synced_tables;
+pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
 pub(crate) use store_ack_records::{finish_outbound_store_ack_on, load_outbound_store_ack_on};
 pub(crate) use store_authority_records::required_store_root_authority_on;
 use store_authority_records::{
     consume_store_creation_probes_on, ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
-    install_store_founder_state_on, install_store_root_authority_on,
-    load_generation_zero_replay_baseline_on, load_local_store_founder_graph_on,
-    load_store_root_authority_on, validate_founder_graph, DurableFounderMembershipJournal,
+    install_store_root_authority_on, load_generation_zero_replay_baseline_on,
+    load_local_store_founder_graph_on, load_store_root_authority_on, validate_founder_graph,
+    DurableFounderMembershipJournal,
 };
 pub(crate) use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
@@ -178,16 +198,6 @@ pub(crate) use write_models::{
     PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase,
     StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteRemoteBlob, StoreWriteRouting,
     TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
-};
-pub(crate) use write_publication_records::{
-    CandidateCleanupObject, MergeCandidateAbandonmentPreparation,
-    OwnedVerifiedMergeMaterialization, PreparedWriteMaterialization, RetainedPackageApplication,
-    StoreWritePreparation, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
-};
-use write_publication_records::{
-    MergeAbandonmentOutcome, MergeRetractionCleanupInput, PreparedMergeCandidate,
-    PreparedStoreWriteState, RetainedAudiencePackage, RetainedCommitActivationInput,
-    RetainedMergeMaterializationInput, RetainedMergeMaterializationKey,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";

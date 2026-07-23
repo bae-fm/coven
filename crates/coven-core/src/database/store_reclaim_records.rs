@@ -92,7 +92,7 @@ pub(crate) fn update_store_reclaim_operation_on(
     Ok(())
 }
 
-pub(super) fn record_store_reclaim_activation_on(
+pub(crate) fn record_store_reclaim_activation_on(
     conn: &Connection,
     commit: &StoreBatchCommit,
     commit_ref: &StoreBatchCommitRef,
