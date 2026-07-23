@@ -43,6 +43,7 @@ pub(crate) enum ProtectedObjectDomain {
     CircleRosterResolution,
     CircleMetadata,
     CirclePackage,
+    CircleBootstrapImage,
     CircleAccessLeaf,
     CircleAccessEnvelope,
 }
@@ -423,6 +424,14 @@ impl ProtectedObjectDomain {
                 },
                 extension: ".pkg",
             },
+            Self::CircleBootstrapImage => ProtocolObjectMetadata {
+                aad_label: b"circle-bootstrap-image",
+                path: ProtocolPathRule::CircleCandidate {
+                    kind: "bootstraps",
+                    component_count: 9,
+                },
+                extension: ".db",
+            },
             Self::CircleAccessLeaf => ProtocolObjectMetadata {
                 aad_label: b"circle-access-leaf",
                 path: ProtocolPathRule::CircleCandidate {
@@ -536,6 +545,8 @@ impl ProtocolObjectDomain {
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleMetadata);
     pub const CirclePackage: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CirclePackage);
+    pub const CircleBootstrapImage: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleBootstrapImage);
 }
 
 /// Authenticated storage context for one immutable semantic object.
@@ -1657,6 +1668,11 @@ mod tests {
                     "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
             },
             DomainPathCase {
+                domain: ProtectedObjectDomain::CircleBootstrapImage,
+                valid: &["circles/circle/candidates/family/bootstraps/owner/epoch/recipient/hash"],
+                cross_domain: "circles/circle/candidates/family/packages/device/1/hash",
+            },
+            DomainPathCase {
                 domain: ProtectedObjectDomain::CircleAccessLeaf,
                 valid: &[
                     "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
@@ -1728,6 +1744,12 @@ mod tests {
             (
                 ProtectedObjectDomain::CirclePackage,
                 "circles/circle/candidates/family/packages/device/1/hash",
+                2,
+                4,
+            ),
+            (
+                ProtectedObjectDomain::CircleBootstrapImage,
+                "circles/circle/candidates/family/bootstraps/owner/epoch/recipient/hash",
                 2,
                 4,
             ),

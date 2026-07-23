@@ -288,11 +288,45 @@ pub fn create_snapshot(
         .map(|snapshot| snapshot.db_image)
 }
 
+#[cfg(test)]
+fn create_circle_snapshot(
+    conn: &Connection,
+    temp_dir: &Path,
+    tables: &[SyncedTable],
+    routing_encryption: &crate::encryption::EncryptionService,
+    circle_id: crate::sync::circle::CircleId,
+) -> Result<Vec<u8>, SnapshotError> {
+    create_snapshot_for_audience_with_host_blobs(
+        conn,
+        temp_dir,
+        tables,
+        Some(routing_encryption),
+        &crate::sync::circle::Audience::Circle(circle_id),
+    )
+    .map(|snapshot| snapshot.db_image)
+}
+
 pub(crate) fn create_snapshot_with_host_blobs(
     conn: &Connection,
     temp_dir: &Path,
     tables: &[SyncedTable],
     routing_encryption: Option<&crate::encryption::EncryptionService>,
+) -> Result<CreatedSnapshot, SnapshotError> {
+    create_snapshot_for_audience_with_host_blobs(
+        conn,
+        temp_dir,
+        tables,
+        routing_encryption,
+        &crate::sync::circle::Audience::Store,
+    )
+}
+
+fn create_snapshot_for_audience_with_host_blobs(
+    conn: &Connection,
+    temp_dir: &Path,
+    tables: &[SyncedTable],
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
+    audience: &crate::sync::circle::Audience,
 ) -> Result<CreatedSnapshot, SnapshotError> {
     // A snapshot with no synced set would either leak every local-only table or
     // clear the whole DB — both wrong. Refuse before doing any work.
@@ -334,7 +368,8 @@ pub(crate) fn create_snapshot_with_host_blobs(
     // The copy is a whole-DB byte image, so it still holds every local-only
     // table's data. Strip those before reading: open the copy as its own
     // connection and DELETE from every table outside the synced set.
-    if let Err(e) = clear_local_only_tables(&snapshot_path, tables, routing_key.as_ref()) {
+    if let Err(e) = clear_local_only_tables(&snapshot_path, tables, routing_key.as_ref(), audience)
+    {
         cleanup_snapshot_path(&snapshot_path);
         return Err(e);
     }
@@ -574,10 +609,11 @@ fn clear_local_only_tables(
     path: &Path,
     synced: &[SyncedTable],
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+    audience: &crate::sync::circle::Audience,
 ) -> Result<(), SnapshotError> {
     let conn = Connection::open(path)
         .map_err(|e| SnapshotError::ClearFailed(format!("failed to open snapshot copy: {e}")))?;
-    clear_non_synced(&conn, synced, routing_key)?;
+    clear_non_synced(&conn, synced, routing_key, audience)?;
     conn.close()
         .map_err(|(_, e)| SnapshotError::ClearFailed(format!("failed to close snapshot copy: {e}")))
 }
@@ -605,6 +641,14 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "retained_replay_objects",
 ];
 
+const CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
+    "_coven_audience",
+    "_coven_row_routes",
+    "remote_objects",
+    "blob_locators",
+    "row_blob_locators",
+];
+
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
 /// cross devices, then VACUUM to reclaim the freed pages:
 ///
@@ -619,6 +663,7 @@ fn clear_non_synced(
     conn: &Connection,
     synced: &[SyncedTable],
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+    audience: &crate::sync::circle::Audience,
 ) -> Result<(), SnapshotError> {
     let gates = crate::sync::gate::Gates::from_tables(conn, synced)
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
@@ -630,6 +675,8 @@ fn clear_non_synced(
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    tx.pragma_update(None, "defer_foreign_keys", "ON")
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let coverage = crate::sync::store::StoreDatabase::materialized_frontier_on(&tx, None)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let cleared_materialization_tables = ["materialized_commits"];
@@ -640,17 +687,28 @@ fn clear_non_synced(
         ))
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
-    crate::sync::store::StoreDatabase::retain_snapshot_author_exclusion_activations_on(&tx)
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    crate::sync::store::StoreDatabase::retain_snapshot_device_states_on(&tx, coverage)
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    if matches!(audience, crate::sync::circle::Audience::Store) {
+        crate::sync::store::StoreDatabase::retain_snapshot_author_exclusion_activations_on(&tx)
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        crate::sync::store::StoreDatabase::retain_snapshot_device_states_on(&tx, coverage)
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    }
+    let preserved_non_synced_tables = match audience {
+        crate::sync::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
+        crate::sync::circle::Audience::Circle(_) => CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES,
+        crate::sync::circle::Audience::Local => {
+            return Err(SnapshotError::ClearFailed(
+                "Local rows cannot enter a snapshot".to_string(),
+            ));
+        }
+    };
     for table in crate::db::user_table_names(conn)
         .map_err(|error| SnapshotError::ClearFailed(format!("list user tables: {error}")))?
     {
         if synced.iter().any(|t| t.name() == table) {
             continue;
         }
-        if SNAPSHOT_PRESERVED_NON_SYNCED_TABLES.contains(&table.as_str()) {
+        if preserved_non_synced_tables.contains(&table.as_str()) {
             continue;
         }
         if cleared_materialization_tables.contains(&table.as_str()) {
@@ -667,13 +725,24 @@ fn clear_non_synced(
     // gated-false rows on the wire, so the snapshot must drop them too or a
     // private subtree leaks to a restoring device. Reuse the changeset gate's
     // model rather than re-deriving the FK walk.
-    gates
-        .delete_gated_false(&tx)
-        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
+    match audience {
+        crate::sync::circle::Audience::Store => gates
+            .delete_gated_false(&tx)
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
+        crate::sync::circle::Audience::Circle(_) => {
+            crate::sync::gate::retain_snapshot_audience_rows(&tx, &gates, audience)
+                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        }
+        crate::sync::circle::Audience::Local => {
+            return Err(SnapshotError::ClearFailed(
+                "Local rows cannot enter a snapshot".to_string(),
+            ));
+        }
+    }
     if let Some(routing_key) = routing_key {
         crate::sync::gate::prune_private_routes_without_rows(&tx, &gates)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-        crate::sync::gate::validate_store_snapshot_routing_state(&tx, &gates, routing_key)
+        crate::sync::gate::validate_snapshot_routing_state(&tx, &gates, routing_key, audience)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     }
 
@@ -998,7 +1067,7 @@ mod tests {
         )
     }
 
-    async fn seed_scoped_snapshot_rows(source: &Database) {
+    async fn seed_scoped_snapshot_rows(source: &Database) -> crate::sync::circle::CircleId {
         let tables = source.synced_tables().to_vec();
         let gates = source.gates();
         let blob_decls = source.blob_decls();
@@ -1070,12 +1139,13 @@ mod tests {
                                 "0000000001005-0000-owner",
                             ),
                         )?;
-                        Ok(())
+                        Ok(circle)
                     },
                 )
             })
             .await
-            .expect("commit scoped snapshot rows");
+            .expect("commit scoped snapshot rows")
+            .value
     }
 
     #[derive(Clone, Copy)]
@@ -1336,6 +1406,196 @@ mod tests {
             .expect("count scoped snapshot rows");
         assert_eq!(materialized, (1, 1));
         assert_eq!((routes, mirrors), (2, 4), "Store root {:?}", store.root);
+    }
+
+    #[tokio::test]
+    async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
+        let source = open_scoped_snapshot_test_db();
+        crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-circle-projection",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Circle snapshot Store");
+        let circle_id = seed_scoped_snapshot_rows(&source).await;
+
+        let image_dir = tempfile::tempdir().expect("Circle snapshot directory");
+        let image_path = image_dir.path().to_path_buf();
+        let image_tables = source.synced_tables().to_vec();
+        let image = source
+            .call(move |connection| {
+                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+                create_circle_snapshot(connection, &image_path, &image_tables, &routing, circle_id)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create Circle snapshot image");
+        let inspected_path = image_dir.path().join("circle.db");
+        std::fs::write(&inspected_path, image).expect("write inspected Circle snapshot");
+        let inspected = Connection::open(inspected_path).expect("open inspected Circle snapshot");
+        let rows = inspected
+            .query_row(
+                "SELECT
+                     (SELECT group_concat(body, ',') FROM documents),
+                     (SELECT group_concat(body, ',') FROM paragraphs),
+                     (SELECT COUNT(*) FROM _coven_row_routes),
+                     (SELECT COUNT(*) FROM _coven_audience),
+                     (SELECT COUNT(*) FROM circle_current_state),
+                     (SELECT COUNT(*) FROM protocol_state)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .expect("inspect Circle snapshot rows");
+        assert_eq!(
+            rows,
+            (
+                "Circle document".to_string(),
+                "Circle paragraph".to_string(),
+                2,
+                2,
+                0,
+                0,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
+        let tables = vec![
+            SyncedTable::new(
+                "folders",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            ),
+            SyncedTable::new(
+                "documents",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            )
+            .scoped_by("audience"),
+        ];
+        let source = crate::sync::test_helpers::open_test_db_schema(
+            tables.clone(),
+            vec![Migration::sql(
+                1,
+                "Circle snapshot Store parent schema",
+                "CREATE TABLE folders (
+                     id TEXT PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;
+                 CREATE TABLE documents (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     folder_id TEXT NOT NULL REFERENCES folders(id),
+                     body TEXT NOT NULL,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )],
+        );
+        crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-circle-store-parent",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Circle parent snapshot Store");
+        let gates = source.gates();
+        let blob_decls = source.blob_decls();
+        let write_id = source.new_write_id();
+        let write_tables = tables.clone();
+        let circle_id = source
+            .call(move |connection| {
+                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+                let (circle_id, _) = crate::sync::test_helpers::install_test_active_circle(
+                    connection,
+                    "snapshot-parent-circle",
+                );
+                StoreDatabase::run_store_write_transaction_on(
+                    connection,
+                    &write_tables,
+                    &gates,
+                    &blob_decls,
+                    Some(&routing),
+                    write_id,
+                    |transaction| {
+                        transaction.execute(
+                            "INSERT INTO folders VALUES (?1, 'kept', ?2)",
+                            (
+                                "93c8343e-6a43-4d66-9aba-f275825047ac",
+                                "0000000001000-0000-owner",
+                            ),
+                        )?;
+                        transaction.execute(
+                            "INSERT INTO folders VALUES (?1, 'omitted', ?2)",
+                            (
+                                "7d748d61-0a3b-4c79-9651-75be31988680",
+                                "0000000001001-0000-owner",
+                            ),
+                        )?;
+                        transaction.execute(
+                            "INSERT INTO documents VALUES (?1, ?2, ?3, 'Circle document', ?4)",
+                            (
+                                "17052cff-e9ce-469a-8987-bf4e02c2ce0d",
+                                circle_id.to_string(),
+                                "93c8343e-6a43-4d66-9aba-f275825047ac",
+                                "0000000001002-0000-owner",
+                            ),
+                        )?;
+                        Ok(circle_id)
+                    },
+                )
+            })
+            .await
+            .expect("commit Circle row with Store parent")
+            .value;
+
+        let image_dir = tempfile::tempdir().expect("Circle parent snapshot directory");
+        let image_path = image_dir.path().to_path_buf();
+        let image = source
+            .call(move |connection| {
+                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+                create_circle_snapshot(connection, &image_path, &tables, &routing, circle_id)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create Circle snapshot with Store parent");
+        let inspected_path = image_dir.path().join("circle-parent.db");
+        std::fs::write(&inspected_path, image).expect("write inspected Circle parent snapshot");
+        let inspected =
+            Connection::open(inspected_path).expect("open inspected Circle parent snapshot");
+        let rows = inspected
+            .query_row(
+                "SELECT
+                     (SELECT group_concat(name, ',') FROM folders),
+                     (SELECT group_concat(body, ',') FROM documents),
+                     (SELECT COUNT(*) FROM _coven_row_routes),
+                     (SELECT COUNT(*) FROM _coven_audience),
+                     (SELECT COUNT(*) FROM pragma_foreign_key_check)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .expect("inspect Circle parent snapshot rows");
+        assert_eq!(
+            rows,
+            ("kept".to_string(), "Circle document".to_string(), 1, 1, 0,)
+        );
     }
 
     #[tokio::test]

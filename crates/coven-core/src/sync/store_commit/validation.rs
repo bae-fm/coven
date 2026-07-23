@@ -250,6 +250,20 @@ pub fn circle_package_semantic_prefix(
     )
 }
 
+pub fn circle_bootstrap_image_semantic_prefix(
+    circle_id: CircleId,
+    family: CandidateFamilyId,
+    owner_pubkey: &str,
+    epoch_id: CircleEpochId,
+    recipient_slot: &str,
+    image_hash: ObjectHash,
+) -> String {
+    format!(
+        "circles/{circle_id}/candidates/{}/bootstraps/{owner_pubkey}/{epoch_id}/{recipient_slot}/{image_hash}",
+        family.as_hash(),
+    )
+}
+
 pub fn commit_slot_prefix(device_id: &str, seq: u64) -> String {
     format!("{STORE_CANDIDATE_PREFIX}*/commits/{device_id}/{seq}")
 }
@@ -445,7 +459,7 @@ pub(super) fn validate_commit_predecessor_states(
     }
 }
 
-pub(super) fn validate_commit_frontier(
+pub(crate) fn validate_commit_frontier(
     frontier: &CommitFrontier,
 ) -> Result<(), StoreProtocolError> {
     {

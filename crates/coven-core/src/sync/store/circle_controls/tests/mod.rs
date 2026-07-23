@@ -315,6 +315,7 @@ fn promote_store_member_access_without_adding_to_circle_roster(
         keyring: creation.keyring.clone(),
         key_fingerprint: creation.control.value.key_fingerprint(),
         roster: creation.control.value.roster_state_ref(),
+        bootstrap: None,
     };
     access.leaf.value.signature = keys::sign_hex(owner, &access.leaf.value.canonical_bytes()).1;
     let recipient_key =

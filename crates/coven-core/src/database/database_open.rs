@@ -251,8 +251,13 @@ impl DatabaseCore {
                                     .to_string(),
                             )
                         })?;
-                        gate::validate_store_snapshot_routing_state(&tx, &gates, routing_key)
-                            .map_err(|error| DbError::Message(error.to_string()))?;
+                        gate::validate_snapshot_routing_state(
+                            &tx,
+                            &gates,
+                            routing_key,
+                            &crate::sync::circle::Audience::Store,
+                        )
+                        .map_err(|error| DbError::Message(error.to_string()))?;
                     }
                     install.install_on(&tx, schema_version, resolved.hash())?;
                 }

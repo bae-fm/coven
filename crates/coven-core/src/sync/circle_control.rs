@@ -15,7 +15,8 @@ use super::membership::{MemberRole, MembershipGrantCreationAuthority, Membership
 use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef};
 use super::storage::ExactObjectRef;
 use super::store_commit::{
-    ObjectHash, OwnerRecoveryCursor, StoreDeviceRegistration, SuccessorLink, STORE_PROTOCOL_VERSION,
+    CommitFrontier, ObjectHash, OwnerRecoveryCursor, SnapshotImageRef, StoreDeviceRegistration,
+    SuccessorLink, STORE_PROTOCOL_VERSION,
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -427,6 +428,33 @@ pub struct MergeCircleMetadataStateRef {
 
 pub type CircleMetadataStateRef = MergeCircleMetadataStateRef;
 
+/// Exact Circle database image offered when one recipient becomes active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleBootstrapRef {
+    pub coverage: CommitFrontier,
+    pub schema_version: u32,
+    pub sync_routing_hash: ObjectHash,
+    pub image: SnapshotImageRef,
+}
+
+impl CircleBootstrapRef {
+    fn verify_for_access(&self, access: &CircleAccessLeaf) -> bool {
+        if super::store_commit::validate_commit_frontier(&self.coverage).is_err() {
+            return false;
+        }
+        let semantic_prefix = super::store_commit::circle_bootstrap_image_semantic_prefix(
+            access.circle_id,
+            access.candidate_family,
+            &access.owner_pubkey,
+            access.epoch_id,
+            &access.recipient_slot,
+            self.image.image_hash,
+        );
+        self.image.object.slot().logical_key() == format!("{semantic_prefix}.db")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleAccessDisposition {
@@ -434,6 +462,7 @@ pub enum CircleAccessDisposition {
         keyring: String,
         key_fingerprint: KeyFingerprint,
         roster: CircleRosterStateRef,
+        bootstrap: Option<CircleBootstrapRef>,
     },
     Inactive,
 }
@@ -514,6 +543,7 @@ impl CircleAccessLeaf {
                     keyring,
                     key_fingerprint,
                     roster,
+                    bootstrap,
                 } => {
                     roster == &control.value.roster_state_ref()
                         && *key_fingerprint == control.value.key_fingerprint()
@@ -521,6 +551,9 @@ impl CircleAccessLeaf {
                             EncryptionService::from(keyring).seal_key_fingerprint()
                                 == *key_fingerprint
                         })
+                        && bootstrap
+                            .as_ref()
+                            .is_none_or(|bootstrap| bootstrap.verify_for_access(self))
                 }
                 CircleAccessDisposition::Inactive => true,
             }
@@ -1122,6 +1155,7 @@ fn prepare_access_material(
                     keyring: keyring.to_string(),
                     key_fingerprint,
                     roster: roster_state.clone(),
+                    bootstrap: None,
                 }
             } else {
                 CircleAccessDisposition::Inactive

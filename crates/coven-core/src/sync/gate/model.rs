@@ -101,6 +101,10 @@ impl Gates {
         self.synced_tables.contains(table)
     }
 
+    pub(super) fn synced_table_names(&self) -> impl Iterator<Item = &str> {
+        self.synced_tables.iter().map(String::as_str)
+    }
+
     pub(super) fn row_identity(&self, table: &str) -> Option<RowIdentity> {
         self.row_identities.get(table).copied()
     }

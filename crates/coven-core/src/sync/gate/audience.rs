@@ -1,6 +1,6 @@
 //! Audience resolution and atomic partitioning of one captured host changeset.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use rusqlite::ffi;
 use rusqlite::Connection;
@@ -560,11 +560,145 @@ pub(crate) fn store_audience_transitions(
     Ok(transitions)
 }
 
-pub(crate) fn validate_store_snapshot_routing_state(
+pub(crate) fn retain_snapshot_audience_rows(
+    conn: &Connection,
+    gates: &Gates,
+    audience: &Audience,
+) -> Result<(), GateError> {
+    let Audience::Circle(circle_id) = audience else {
+        return Err(GateError::InvalidMaterializedRouting(
+            "audience row projection requires a Circle".to_string(),
+        ));
+    };
+    let mut tables = gates
+        .synced_table_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tables.sort();
+    let mut retained = BTreeSet::<(String, String)>::new();
+    let mut pending = VecDeque::new();
+    for table in &tables {
+        let row_ids = query_mapped_rows(
+            conn,
+            &format!("SELECT id FROM {}", quote_ident(table)),
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        for row_id in row_ids {
+            if live_row_audience(conn, gates, table, &row_id)? == Audience::Circle(*circle_id) {
+                pending.push_back((table.clone(), row_id));
+            }
+        }
+    }
+
+    while let Some((table, row_id)) = pending.pop_front() {
+        if !retained.insert((table.clone(), row_id.clone())) {
+            continue;
+        }
+        for (child_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
+            if !gates.is_synced_table(&parent_table) {
+                continue;
+            }
+            let parent_key = query_row_optional(
+                conn,
+                &format!(
+                    "SELECT {} FROM {} WHERE id = ?1",
+                    quote_ident(&child_column),
+                    quote_ident(&table),
+                ),
+                [&row_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: table.clone(),
+                row_id: row_id.clone(),
+            })?;
+            let Some(parent_key) = parent_key else {
+                continue;
+            };
+            let parent_id =
+                row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
+                    .ok_or_else(|| GateError::MissingAudienceParent {
+                        table: table.clone(),
+                        row_id: Some(row_id.clone()),
+                        parent: parent_table.clone(),
+                    })?;
+            let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
+            if parent_audience != Audience::Store && parent_audience != *audience {
+                return Err(GateError::InvalidAudience {
+                    table: table.clone(),
+                    value: audience.column_value(),
+                    reason: format!(
+                        "Circle snapshot relationship through {child_column} references \
+                         {parent_table}.{parent_id} in {parent_audience:?}"
+                    ),
+                });
+            }
+            pending.push_back((parent_table, parent_id));
+        }
+    }
+
+    conn.execute_batch(
+        "CREATE TEMP TABLE snapshot_retained_rows (
+             table_name TEXT NOT NULL,
+             row_id TEXT NOT NULL,
+             PRIMARY KEY (table_name, row_id)
+         ) STRICT;",
+    )
+    .map_err(|error| GateError::Sql("create snapshot retained rows".to_string(), error))?;
+    for (table, row_id) in &retained {
+        conn.execute(
+            "INSERT INTO snapshot_retained_rows (table_name, row_id) VALUES (?1, ?2)",
+            (table, row_id),
+        )
+        .map_err(|error| GateError::Sql("retain snapshot row".to_string(), error))?;
+    }
+    tables.reverse();
+    for table in tables {
+        conn.execute(
+            &format!(
+                "DELETE FROM {}
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM snapshot_retained_rows AS retained
+                     WHERE retained.table_name = ?1
+                       AND retained.row_id = {}.id
+                 )",
+                quote_ident(&table),
+                quote_ident(&table),
+            ),
+            [&table],
+        )
+        .map_err(|error| GateError::Sql(format!("scope {table} to Circle snapshot rows"), error))?;
+    }
+    conn.execute_batch(
+        "DELETE FROM _coven_row_routes
+         WHERE NOT EXISTS (
+             SELECT 1 FROM snapshot_retained_rows AS retained
+             WHERE retained.table_name = _coven_row_routes.table_name
+               AND retained.row_id = _coven_row_routes.row_id
+         );
+         DELETE FROM _coven_audience
+         WHERE NOT EXISTS (
+             SELECT 1 FROM _coven_row_routes AS route
+             WHERE route.routing_id = _coven_audience.routing_id
+         );
+         DROP TABLE snapshot_retained_rows;",
+    )
+    .map_err(|error| GateError::Sql("scope Circle snapshot routing".to_string(), error))?;
+    Ok(())
+}
+
+pub(crate) fn validate_snapshot_routing_state(
     conn: &Connection,
     gates: &Gates,
     routing_key: &RowRoutingKey,
+    snapshot_audience: &Audience,
 ) -> Result<(), GateError> {
+    if matches!(snapshot_audience, Audience::Local) {
+        return Err(GateError::InvalidMaterializedRouting(
+            "Local rows cannot enter a snapshot".to_string(),
+        ));
+    }
     if !gates.has_scoped_graph() {
         return Ok(());
     }
@@ -655,24 +789,29 @@ pub(crate) fn validate_store_snapshot_routing_state(
             }
             let mirror = audience_mirrors.get(&routing_id);
             let audience = live_row_audience(conn, gates, &table, &row_id)?;
-            match audience {
-                Audience::Local => {
+            match (snapshot_audience, &audience) {
+                (_, Audience::Local) => {
                     return Err(GateError::InvalidMaterializedRouting(format!(
                         "Store snapshot contains Local row {table}.{row_id}"
                     )));
                 }
-                expected => {
-                    if matches!(&expected, Audience::Circle(_)) {
-                        return Err(GateError::InvalidMaterializedRouting(format!(
-                            "Store snapshot contains Circle row {table}.{row_id}"
-                        )));
-                    }
+                (Audience::Store, Audience::Circle(_)) => {
+                    return Err(GateError::InvalidMaterializedRouting(format!(
+                        "Store snapshot contains Circle row {table}.{row_id}"
+                    )));
+                }
+                (Audience::Circle(expected), Audience::Circle(actual)) if expected != actual => {
+                    return Err(GateError::InvalidMaterializedRouting(format!(
+                        "Circle {expected} snapshot contains row {table}.{row_id} for Circle {actual}"
+                    )));
+                }
+                _ => {
                     let (mirrored, mirror_stamp) = mirror.ok_or_else(|| {
                         GateError::InvalidMaterializedRouting(format!(
                             "shared row {table}.{row_id} has no Store audience mirror"
                         ))
                     })?;
-                    if *mirrored != expected {
+                    if mirrored != &audience {
                         return Err(GateError::InvalidMaterializedRouting(format!(
                             "Store audience mirror for {table}.{row_id} differs from its row"
                         )));
@@ -705,7 +844,9 @@ pub(crate) fn validate_store_snapshot_routing_state(
         }
     }
     for (routing_id, (audience, _)) in audience_mirrors {
-        if audience == Audience::Store && !materialized_routing_ids.contains(&routing_id) {
+        let must_be_materialized =
+            audience == Audience::Store || matches!(snapshot_audience, Audience::Circle(_));
+        if must_be_materialized && !materialized_routing_ids.contains(&routing_id) {
             return Err(GateError::InvalidMaterializedRouting(format!(
                 "Store audience mirror has no materialized row for {routing_id}"
             )));
@@ -2711,7 +2852,7 @@ mod tests {
         )
         .expect("insert Store mirror at the audience-transition stamp");
 
-        validate_store_snapshot_routing_state(&conn, &note_gates(&conn), &key)
+        validate_snapshot_routing_state(&conn, &note_gates(&conn), &key, &Audience::Store)
             .expect("content-only edits must not invalidate unchanged routing");
     }
 
