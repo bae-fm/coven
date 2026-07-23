@@ -19,6 +19,25 @@ fn open_circle_routing_test_db() -> Database {
     )
 }
 
+async fn circle_blob_opening_error(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    authority: &crate::blob::RowBlobAuthority,
+    stored: &crate::blob::locator::StoredBlobRef,
+) -> crate::blob::cache::BlobCacheError {
+    match crate::sync::store::blob::opening_protection(
+        &StoreDatabase::new(db),
+        storage,
+        authority,
+        stored,
+    )
+    .await
+    {
+        Ok(_) => panic!("invalid Circle blob authority must fail"),
+        Err(error) => error,
+    }
+}
+
 #[tokio::test]
 async fn merge_publication_handles_every_exact_create_failure_boundary() {
     tokio::spawn(async {
@@ -294,6 +313,49 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("activate founder transition");
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-bootstrap-member".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle bootstrap Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let member_db = crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "documents",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")
+        .carries_blob(crate::sync::session::BlobDecl::new(
+            "files",
+            crate::blob::Provenance::HostProvided,
+            crate::blob::CacheFill::CacheEager,
+        ))],
+        vec![crate::migration::Migration::sql(
+            1,
+            "Circle member bootstrap schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    );
+    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .await
+        .expect("activate Store member device");
     let (_temp, store_dir) = temp_store_dir();
     let blob_id = "00000000-0000-4000-8000-000000000001";
     let blob_bytes = b"Circle bootstrap attachment";
@@ -342,22 +404,122 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
         .expect("publish Circle row and blob");
-    let owner_pubkey = keys::public_key_hex(&signer);
+    let historical_blob = db
+        .row_blob_ref("documents", blob_id)
+        .await
+        .expect("load blob reference from the founder control");
 
     components
         .add_circle_member(
             &store_dir,
             circle_id,
-            owner_pubkey.clone(),
-            CircleRole::Owner,
+            member_pubkey.clone(),
+            CircleRole::Member,
         )
         .await
         .expect("activate Circle member successor");
-
-    let (current, _) = StoreDatabase::new(&db)
-        .circle_authoring_context(circle_id, &owner_pubkey)
+    let member_store = store
+        .loaded_store(&member_db)
         .await
-        .expect("load successor Circle state");
+        .expect("load Circle member Store");
+    let (member_temp, member_store_dir) = temp_store_dir();
+    let member_pull = member_store
+        .authorize()
+        .await
+        .expect("authorize Circle member Store")
+        .pull(
+            &member_store_dir,
+            &member,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("pull Circle member bootstrap");
+    assert!(
+        member_pull.held_positions.is_empty(),
+        "{:?}",
+        member_pull.held_positions
+    );
+    let (current, _) = StoreDatabase::new(&member_db)
+        .circle_authoring_context(circle_id, &member_pubkey)
+        .await
+        .expect("load Circle member successor state");
+    crate::sync::store::blob::materialize_row_blob(
+        &StoreDatabase::new(&db),
+        &store_dir,
+        Some(&store.storage),
+        &historical_blob,
+    )
+    .await
+    .expect("materialize a blob through its retained founder control");
+    assert_eq!(
+        crate::sync::store::blob::read_blob(
+            &StoreDatabase::new(&db),
+            &store_dir,
+            Some(&store.storage),
+            &historical_blob,
+        )
+        .await
+        .expect("read a blob through its retained founder control"),
+        blob_bytes,
+    );
+    let protection = crate::sync::store::blob::opening_protection(
+        &StoreDatabase::new(&member_db),
+        &store.storage,
+        historical_blob.authority(),
+        historical_blob
+            .stored()
+            .expect("published historical blob has an exact stored reference"),
+    )
+    .await
+    .expect("new Circle member resolves the founder blob key from its successor grant");
+    let opened_destination = member_temp.path().join("new-member-opened-founder-blob");
+    let opened = store
+        .storage
+        .stage_verified_blob_plaintext(
+            historical_blob
+                .stored()
+                .expect("published historical blob has an exact stored reference"),
+            protection,
+            &opened_destination,
+        )
+        .await
+        .expect("new Circle member opens the exact founder blob");
+    assert_eq!(
+        tokio::fs::read(opened.path())
+            .await
+            .expect("read opened founder blob"),
+        blob_bytes,
+    );
+    let substituted = crate::blob::RowBlobRef::new(
+        historical_blob.table().to_string(),
+        historical_blob.row_id().to_string(),
+        historical_blob.row_stamp().to_string(),
+        historical_blob.column().to_string(),
+        historical_blob.blob().clone(),
+        historical_blob.plaintext_size(),
+        historical_blob.plaintext_hash(),
+        crate::blob::RowBlobAuthority::Remote(
+            crate::sync::audience_package::PackageAudience::Circle {
+                circle_id,
+                control: current.control.coord.clone(),
+                key_fingerprint: current.control.value.key_fingerprint(),
+            },
+        ),
+        historical_blob.stored().cloned(),
+    )
+    .expect("construct same-Circle successor-control substitution");
+    let substitution_error = crate::sync::store::blob::read_blob(
+        &StoreDatabase::new(&db),
+        &store_dir,
+        Some(&store.storage),
+        &substituted,
+    )
+    .await
+    .expect_err("row blob binding must reject a substituted Circle control");
+    assert!(
+        substitution_error.to_string().contains("is stale"),
+        "{substitution_error}"
+    );
     let CircleAccessDisposition::Active {
         bootstrap: Some(bootstrap),
         ..
@@ -585,6 +747,34 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .await
     .expect("load pre-close Circle package commit");
     assert_eq!(package_commit.circle_packages().len(), 1);
+    let historical_locator = crate::blob::locator::BlobLocator::opaque(
+        "files",
+        "old-epoch-blob",
+        package_commit.author_registration.clone(),
+        crate::blob::locator::RemoteAudience::Circle(circle_id),
+        crate::blob::BlobScope::Master,
+        prior_fingerprint,
+        1,
+        ObjectHash::digest(b"x"),
+    )
+    .expect("construct old-epoch Circle blob locator");
+    let historical_stored = crate::blob::locator::StoredBlobRef::new(
+        historical_locator.clone(),
+        ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(historical_locator.semantic_key())
+                .expect("old-epoch blob locator has a valid logical key"),
+            b"ciphertext".len() as u64,
+            ObjectHash::digest(b"ciphertext"),
+        ),
+    )
+    .expect("construct exact old-epoch stored blob");
+    let historical_authority = crate::blob::RowBlobAuthority::Remote(
+        crate::sync::audience_package::PackageAudience::Circle {
+            circle_id,
+            control: prior_control.clone(),
+            key_fingerprint: prior_fingerprint,
+        },
+    );
 
     let operation_id = components
         .remove_circle_member(circle_id, member_pubkey.clone())
@@ -607,7 +797,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .is_err());
     let historical_access = StoreDatabase::new(&db)
-        .circle_package_access(circle_id, prior_control)
+        .circle_package_access(circle_id, prior_control.clone())
         .await
         .expect("load historical pre-close access")
         .expect("historical pre-close access remains retained");
@@ -748,6 +938,100 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .roster
         .members()
         .contains_key(&remaining_member_pubkey));
+    let historical_protection = crate::sync::store::blob::opening_protection(
+        &StoreDatabase::new(&db),
+        &store.storage,
+        &historical_authority,
+        &historical_stored,
+    )
+    .await
+    .expect("resolve old-epoch blob protection through retained Circle authority");
+    let crate::sync::storage::BlobSpoolProtection::Opaque(historical_encryption) =
+        historical_protection
+    else {
+        panic!("Circle blob protection must be opaque");
+    };
+    assert_eq!(
+        historical_encryption.seal_key_fingerprint(),
+        prior_fingerprint
+    );
+    let successor_substitution = crate::blob::RowBlobAuthority::Remote(
+        crate::sync::audience_package::PackageAudience::Circle {
+            circle_id,
+            control: successor.control.coord.clone(),
+            key_fingerprint: successor.control.value.key_fingerprint(),
+        },
+    );
+    let substitution_error = circle_blob_opening_error(
+        &db,
+        &store.storage,
+        &successor_substitution,
+        &historical_stored,
+    )
+    .await;
+    assert!(
+        substitution_error
+            .to_string()
+            .contains("key differs from its exact activated authority"),
+        "{substitution_error}"
+    );
+    let mut absent_control = prior_control;
+    absent_control.control_hash = ObjectHash::digest(b"absent Circle control");
+    let absent_authority = crate::blob::RowBlobAuthority::Remote(
+        crate::sync::audience_package::PackageAudience::Circle {
+            circle_id,
+            control: absent_control,
+            key_fingerprint: prior_fingerprint,
+        },
+    );
+    let absent_error =
+        circle_blob_opening_error(&db, &store.storage, &absent_authority, &historical_stored).await;
+    assert!(
+        absent_error
+            .to_string()
+            .contains("has no retained authority"),
+        "{absent_error}"
+    );
+    let wrong_circle_authority = crate::blob::RowBlobAuthority::Remote(
+        crate::sync::audience_package::PackageAudience::Circle {
+            circle_id: CircleId::from_bytes([0x77; 16]),
+            control: successor.control.coord.clone(),
+            key_fingerprint: successor.control.value.key_fingerprint(),
+        },
+    );
+    let wrong_circle_error = circle_blob_opening_error(
+        &db,
+        &store.storage,
+        &wrong_circle_authority,
+        &historical_stored,
+    )
+    .await;
+    assert!(
+        wrong_circle_error
+            .to_string()
+            .contains("key differs from its exact activated authority"),
+        "{wrong_circle_error}"
+    );
+    let wrong_fingerprint_authority = crate::blob::RowBlobAuthority::Remote(
+        crate::sync::audience_package::PackageAudience::Circle {
+            circle_id,
+            control: successor.control.coord.clone(),
+            key_fingerprint: crate::KeyFingerprint::from_bytes([0x55; 8]),
+        },
+    );
+    let wrong_fingerprint_error = circle_blob_opening_error(
+        &db,
+        &store.storage,
+        &wrong_fingerprint_authority,
+        &historical_stored,
+    )
+    .await;
+    assert!(
+        wrong_fingerprint_error
+            .to_string()
+            .contains("key differs from its exact activated authority"),
+        "{wrong_fingerprint_error}"
+    );
     let crate::sync::circle::CircleControlState::ActiveEpoch(active) =
         successor.control.value.state()
     else {

@@ -44,6 +44,24 @@ pub(crate) struct CirclePackageAccess {
 }
 
 impl VerifiedCircleReference {
+    pub(crate) fn retained_keyring(
+        &self,
+    ) -> Result<Option<EncryptionService>, CircleOperationError> {
+        let Some(access) = self.local_access.as_ref() else {
+            return Ok(None);
+        };
+        let Some(active) = access.active.as_ref() else {
+            return Ok(None);
+        };
+        verified_keyring_from(
+            self.circle_id,
+            &self.control.value,
+            &access.leaf.value.disposition,
+            &active.roster,
+        )
+        .map(|(keyring, _)| Some(keyring))
+    }
+
     pub(crate) fn package_access(
         &self,
     ) -> Result<Option<CirclePackageAccess>, CircleOperationError> {
@@ -69,6 +87,28 @@ fn package_access_from(
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
 ) -> Result<CirclePackageAccess, CircleOperationError> {
+    let (keyring, key_fingerprint) =
+        verified_keyring_from(circle_id, control, disposition, roster)?;
+    let encryption = keyring
+        .service_for_fingerprint(key_fingerprint.as_bytes())
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "select Circle package key for {circle_id}: {error}"
+            ))
+        })?;
+    Ok(CirclePackageAccess {
+        encryption,
+        key_fingerprint,
+        writers: roster.members().keys().cloned().collect(),
+    })
+}
+
+fn verified_keyring_from(
+    circle_id: CircleId,
+    control: &CircleControl,
+    disposition: &CircleAccessDisposition,
+    roster: &CircleMaterializedRoster,
+) -> Result<(EncryptionService, KeyFingerprint), CircleOperationError> {
     if control.circle_id != circle_id
         || !roster.verify()
         || roster.state_hash() != control.roster_state_ref().state_hash
@@ -97,18 +137,15 @@ fn package_access_from(
             "parse Circle package keyring for {circle_id}: {error}"
         ))
     })?;
-    let encryption = EncryptionService::from(keyring)
+    let keyring = EncryptionService::from(keyring);
+    keyring
         .service_for_fingerprint(key_fingerprint.as_bytes())
         .map_err(|error| {
             CircleOperationError::InvalidState(format!(
                 "select Circle package key for {circle_id}: {error}"
             ))
         })?;
-    Ok(CirclePackageAccess {
-        encryption,
-        key_fingerprint: *key_fingerprint,
-        writers: roster.members().keys().cloned().collect(),
-    })
+    Ok((keyring, *key_fingerprint))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

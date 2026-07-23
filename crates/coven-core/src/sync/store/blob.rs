@@ -4,7 +4,9 @@ use futures_util::stream::TryStreamExt;
 
 use crate::blob::cache::{BlobCacheError, RemoteBlobAccess};
 use crate::blob::{RowBlobAuthority, RowBlobRef};
+use crate::encryption::KeyFingerprint;
 use crate::store_dir::StoreDir;
+use crate::sync::circle::CircleId;
 use crate::sync::storage::{BlobSpoolProtection, StorageError, SyncStorage};
 
 use super::StoreDatabase;
@@ -29,23 +31,31 @@ pub(crate) async fn opening_protection(
             control,
             key_fingerprint,
         }) => {
-            let (encryption, activated_fingerprint) = database
-                .circle_publication_context(*circle_id, control.clone())
+            validate_circle_blob_locator(*circle_id, *key_fingerprint, stored)?;
+            let encryption = database
+                .circle_blob_opening_key(*circle_id, control.clone(), *key_fingerprint)
                 .await
                 .map_err(BlobCacheError::Metadata)?;
-            if activated_fingerprint != *key_fingerprint
-                || stored.locator().key_fingerprint() != Some(*key_fingerprint)
-                || encryption.seal_key_fingerprint() != *key_fingerprint
-            {
-                return Err(BlobCacheError::Storage(StorageError::InvalidContent(
-                    format!(
-                        "Circle {circle_id} blob locator key differs from its exact activated authority"
-                    ),
-                )));
-            }
             Ok(BlobSpoolProtection::Opaque(encryption))
         }
     }
+}
+
+fn validate_circle_blob_locator(
+    circle_id: CircleId,
+    key_fingerprint: KeyFingerprint,
+    stored: &crate::blob::locator::StoredBlobRef,
+) -> Result<(), BlobCacheError> {
+    if stored.locator().audience() != crate::blob::locator::RemoteAudience::Circle(circle_id)
+        || stored.locator().key_fingerprint() != Some(key_fingerprint)
+    {
+        return Err(BlobCacheError::Storage(StorageError::InvalidContent(
+            format!(
+                "Circle {circle_id} blob locator audience or key differs from its exact activated authority"
+            ),
+        )));
+    }
+    Ok(())
 }
 
 async fn remote_access<'a>(

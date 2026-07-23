@@ -281,6 +281,107 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn circle_blob_opening_key(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: crate::sync::circle::CircleControlCoord,
+        expected_key_fingerprint: crate::KeyFingerprint,
+    ) -> Result<EncryptionService, DbError> {
+        self.database
+            .call(move |conn| {
+                Self::circle_blob_opening_key_on(
+                    conn,
+                    circle_id,
+                    &expected_control,
+                    expected_key_fingerprint,
+                )
+            })
+            .await
+    }
+
+    pub(crate) fn circle_blob_opening_key_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: &crate::sync::circle::CircleControlCoord,
+        expected_key_fingerprint: crate::KeyFingerprint,
+    ) -> Result<EncryptionService, DbError> {
+        let Some(authority) =
+            Self::verified_circle_activation_on(conn, circle_id, expected_control)?
+        else {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} has no retained authority for control {expected_control:?}"
+            )));
+        };
+        if authority.control.value.key_fingerprint() != expected_key_fingerprint {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} blob key {expected_key_fingerprint} differs from \
+                 exact control {expected_control:?}"
+            )));
+        }
+
+        let mut statement = conn
+            .prepare(
+                "SELECT control_coord
+                 FROM circle_control_activations
+                 WHERE circle_id = ?1
+                 ORDER BY control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?;
+        let mut controls = Vec::new();
+        for encoded in rows {
+            let encoded = encoded.map_err(DbError::from)?;
+            controls.push(serde_json::from_str(&encoded).map_err(|error| {
+                DbError::Message(format!(
+                    "parse retained Circle {circle_id} control coordinate: {error}"
+                ))
+            })?);
+        }
+        drop(statement);
+
+        let mut retained_key = None;
+        for control in controls {
+            let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} activation index lost control {control:?}"
+                    ))
+                })?;
+            let Some(keyring) = activation
+                .retained_keyring()
+                .map_err(|error| DbError::Message(error.to_string()))?
+            else {
+                continue;
+            };
+            for (generation, key) in keyring.keyring_entries() {
+                let candidate = EncryptionService::from_key_at_generation(generation, key);
+                if candidate.seal_key_fingerprint() != expected_key_fingerprint {
+                    continue;
+                }
+                if retained_key
+                    .as_ref()
+                    .is_some_and(|existing: &EncryptionService| {
+                        existing.current_generation() != generation || existing.key_bytes() != key
+                    })
+                {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} retains inconsistent key material for fingerprint \
+                         {expected_key_fingerprint}"
+                    )));
+                }
+                retained_key = Some(candidate);
+            }
+        }
+        retained_key.ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} retains no local key for fingerprint \
+                     {expected_key_fingerprint}"
+            ))
+        })
+    }
+
     pub(crate) async fn verified_circle_activation(
         &self,
         circle_id: crate::sync::circle::CircleId,
