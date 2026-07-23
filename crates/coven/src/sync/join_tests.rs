@@ -46,7 +46,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("decode join request")
         .public_key;
     let invitation_home = GrantingCloudHome(store.home.as_ref().clone());
-    let invite = crate::sync::store::invite_member(
+    let invite = crate::sync::test_helpers::invite_store_member_for_test(
         &store.storage,
         &invitation_home,
         &owner,
@@ -91,7 +91,21 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     publish_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
         .await
         .expect("publish join snapshot acknowledgement");
-    let authorization = membership;
+    let owner_store_storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
+                [42; 32],
+            )),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            store_id,
+            owner.clone(),
+        )
+        .expect("construct production Store storage"),
+    );
+    let owner_store = crate::sync::store::Store::load(owner_database.clone(), owner_store_storage)
+        .await
+        .expect("open production Store owner");
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = crate::store_dir::StoreLayout::new(app.path());
@@ -112,21 +126,19 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("construct DeviceJoinClient")
         .with_test_bootstrap_home(store.home.clone())
     };
-    let offer = Box::pin(crate::sync::store::device_join::begin_device_join(
-        &owner_database,
-        &store.storage,
-        &authorization,
-        &owner,
-        &member_pubkey,
-        store
-            .protocol_root
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone(),
-    ))
-    .await
-    .expect("begin join");
+    let offer = owner_store
+        .begin_device_join(
+            &owner,
+            &member_pubkey,
+            store
+                .protocol_root
+                .descriptor
+                .founder_provider_admin
+                .grant_id
+                .clone(),
+        )
+        .await
+        .expect("begin join");
 
     let access_request = new_client()
         .prepare_provider_access_request(offer.clone())
@@ -147,19 +159,10 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             access_request.clone(),
         )],
     );
-    let approval = Box::pin(
-        crate::sync::store::device_join::authorize_device_provider_access(
-            &owner_database,
-            &store.storage,
-            Some(store.home.as_ref()),
-            None,
-            &authorization,
-            &owner,
-            access_request,
-        ),
-    )
-    .await
-    .expect("authorize provider access");
+    let approval = owner_store
+        .authorize_device_provider_access(&owner, access_request, None)
+        .await
+        .expect("authorize provider access");
     let registration_request = new_client()
         .prepare_registration_request(approval.clone())
         .await
@@ -171,27 +174,14 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             .expect("retry registration request after process restart"),
         registration_request,
     );
-    let provisional = Box::pin(
-        crate::sync::store::device_join::accept_device_registration_request(
-            &owner_database,
-            &store.storage,
-            &authorization,
-            &owner,
-            registration_request,
-        ),
-    )
-    .await
-    .expect("accept registration request");
-    let provider_ready = Box::pin(
-        crate::sync::store::device_join::publish_device_provider_challenge(
-            &owner_database,
-            &store.storage,
-            Some(store.home.as_ref()),
-            provisional,
-        ),
-    )
-    .await
-    .expect("publish provider challenge");
+    let provisional = owner_store
+        .accept_device_registration_request(&owner, registration_request)
+        .await
+        .expect("accept registration request");
+    let provider_ready = owner_store
+        .publish_device_provider_challenge(provisional)
+        .await
+        .expect("publish provider challenge");
     let readiness = Box::pin(new_client().bootstrap_pending_device(
         provider_ready.clone(),
         |_status| {},
@@ -207,58 +197,41 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     .await
     .expect("resume bootstrap after lost response");
     assert_eq!(readiness_retry, readiness);
-    let completion = Box::pin(
-        crate::sync::store::device_join::complete_device_provider_admission(
-            &owner_database,
-            Some(store.home.as_ref()),
-            &owner,
-            readiness,
-        ),
-    )
-    .await
-    .expect("complete provider admission");
+    let completion = owner_store
+        .complete_device_provider_admission(&owner, readiness)
+        .await
+        .expect("complete provider admission");
     store.home.fail_exact_create_before_call(1);
-    let interrupted = Box::pin(crate::sync::store::device_join::finalize_device_join(
-        &owner_database,
-        &store.storage,
-        &authorization,
-        &owner,
-        completion.clone(),
-    ))
-    .await;
+    let interrupted = owner_store
+        .finalize_device_join(&owner, completion.clone())
+        .await;
     assert!(
         interrupted.is_err(),
         "the outcome create interruption surfaces"
     );
     assert!(matches!(
-        crate::sync::store::device_join::load_store_device_join_status(
-            &owner_db,
-            completion.readiness.proof.attempt.attempt_id,
-            crate::DeviceJoinRole::Owner,
-        )
+        owner_database
+            .device_join_status(
+                completion.readiness.proof.attempt.attempt_id,
+                crate::DeviceJoinRole::Owner,
+            )
         .await
         .expect("load interrupted owner finalization"),
         Some(crate::DeviceJoinStatus::AwaitingActivation { completion: durable })
             if durable == completion
     ));
-    assert!(
-        crate::sync::store::device_join::load_store_device_join_actions(&owner_db)
-            .await
-            .expect("enumerate Store join actions")
-            .contains(&crate::DeviceJoinAction::ResumeOperation {
-                attempt_id: completion.readiness.proof.attempt.attempt_id,
-                role: crate::DeviceJoinRole::Owner,
-            })
-    );
-    let activation = Box::pin(crate::sync::store::device_join::finalize_device_join(
-        &owner_database,
-        &store.storage,
-        &authorization,
-        &owner,
-        completion,
-    ))
-    .await
-    .expect("resume finalization from the durable completion");
+    assert!(owner_database
+        .device_join_actions()
+        .await
+        .expect("enumerate Store join actions")
+        .contains(&crate::DeviceJoinAction::ResumeOperation {
+            attempt_id: completion.readiness.proof.attempt.attempt_id,
+            role: crate::DeviceJoinRole::Owner,
+        }));
+    let activation = owner_store
+        .finalize_device_join(&owner, completion)
+        .await
+        .expect("resume finalization from the durable completion");
     let activation_slot = activation.outcome_activation.object.slot();
     let activation_bytes = store
         .home

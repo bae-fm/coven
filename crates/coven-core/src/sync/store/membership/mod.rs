@@ -129,7 +129,7 @@ pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
 pub(crate) use key_rotation::apply_key_rotation;
 pub(crate) use listing::{current_membership_floor, get_members};
-pub use merge::{invite_member, remove_member};
+pub(crate) use merge::{invite_member, remove_member};
 pub use mutation::{resolve_membership_conflict, unwrap_store_keyring, InviteError};
 
 #[cfg(test)]

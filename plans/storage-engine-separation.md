@@ -38,6 +38,10 @@ This ownership work completes the Store foundation required by
   journal, authority, Owner, joiner, provider-administrator, cleanup, and error
   modules. Each workflow implementation lives in its owning module; sibling
   dependencies are explicit imports rather than forwarding entry points.
+- Complete: the device-join implementation module is private. Initialized
+  Owner and provider-administrator commands enter `Store`; local Store journal
+  reads enter `StoreDatabase`; the joining device's pending journal and
+  bootstrap operations remain a distinct pre-Store boundary.
 - Complete: device-exclusion proposal, cancellation, finalization, restart,
   collision handling, cleanup, journal parsing, atomic journal transitions,
   and tests live below `sync::store`; the root workflow and database modules
@@ -295,9 +299,9 @@ commits wholly or rolls back.
    acknowledgement, and join transitions behind the Store database owner.
    Keep host-facing read models on `Database`; Store protocol progress and
    completion transitions live on `StoreDatabase`.
-1. **In progress.** Route cycle and application commands through Store
-   operations, remove raw Store workflow methods from `Database`, make the
-   remaining Store implementation modules private, move manual membership
+1. **In progress.** Route the remaining cycle and application commands through
+   Store operations, remove raw Store workflow methods from `Database`, make
+   the remaining Store implementation modules private, move manual membership
    conflict resolution behind Store ownership, and reduce widened helper
    visibility to the exact remaining callers.
 1. Run the boundary searches, sabotage tests, focused failure-injection tests,

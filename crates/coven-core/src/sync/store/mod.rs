@@ -21,8 +21,7 @@ pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 #[doc(hidden)]
 pub use database::StoreDatabase;
 pub(crate) mod device_exclusion;
-#[doc(hidden)]
-pub mod device_join;
+mod device_join;
 mod error;
 mod membership;
 pub(crate) mod operations;
@@ -50,6 +49,45 @@ pub use device_exclusion::{
     StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo,
     StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
 };
+#[cfg(test)]
+pub(crate) use device_join::{
+    abandon_device_join, activate_device_join_cleanup, cancel_device_join,
+    close_device_provider_admission, complete_owner_device_join_cleanup,
+    load_store_device_join_actions, load_store_device_join_status, prepare_device_join_cleanup,
+    revoke_device_provider_admission_writes, revoke_joining_device_writes,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use device_join::{
+    accept_device_registration_request, authorize_device_provider_access, begin_device_join,
+    complete_device_provider_admission, finalize_device_join,
+    load_current_device_join_authorization, publish_device_provider_challenge,
+};
+#[doc(hidden)]
+pub use device_join::{
+    accept_joiner_device_join_cleanup, close_joining_device, complete_device_join,
+    complete_joiner_device_join_cleanup, load_pending_device_join_actions,
+    load_pending_device_join_status, observe_device_join_abandonment,
+    observe_device_join_activation, prepare_device_provider_access_request,
+    prepare_device_registration_request, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
+    DeviceJoinRoleProgress, JoinerJoinProgress, OwnerJoinProgress, PreparedDeviceJoinObject,
+    ProviderAdminJoinProgress,
+};
+#[doc(hidden)]
+pub use device_join::{bootstrap_joining_device, materialize_joined_store_activation};
+pub use device_join::{
+    DeviceJoinAbandonment, DeviceJoinAbandonmentRef, DeviceJoinAction, DeviceJoinActivation,
+    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
+    DeviceJoinCleanupReceipt, DeviceJoinCleanupReceiptRef, DeviceJoinError, DeviceJoinOffer,
+    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
+    DeviceJoinStatus, DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionChallenge, DeviceProviderAdmissionCompletion,
+    DeviceProviderChallengePublication, DeviceProviderReadiness, DeviceProviderResponseReservation,
+    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
+    JoinerResponseDisposition, ProviderAdminJoinClosure, ProviderAdminJoinTerminal,
+    ProviderChallengeDisposition, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
+    ProvisionalDeviceBootstrap, SlotDisposition,
+};
 pub use error::StoreError;
 pub(crate) use membership::{
     apply_key_rotation, load_and_persist_owner_anchor, unwrap_store_keyring_for_refs,
@@ -60,8 +98,7 @@ pub(crate) use membership::{
     signed_wrapped_keyring_for_test,
 };
 #[cfg(any(test, feature = "test-utils"))]
-#[doc(hidden)]
-pub use membership::{invite_member, remove_member};
+pub(crate) use membership::{invite_member, remove_member};
 pub use membership::{
     resolve_membership_conflict, AnchoredChainError, InviteError, MembershipOpsError,
     OWNER_PUBKEY_STATE_KEY,
@@ -101,13 +138,15 @@ pub(crate) use registration::{
 pub use registration::{recover_owner_device, StoreRegistrationError};
 #[cfg(test)]
 pub(crate) use snapshot::drain_outbound_store_snapshot;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use snapshot::push_store_snapshot;
 #[doc(hidden)]
 pub use snapshot::{
     bootstrap_from_snapshot, create_snapshot, load_store_snapshot_ref, reconcile_snapshot_blobs,
     BootstrapResult, SnapshotBlobReconcile, SnapshotError,
 };
 pub(crate) use snapshot::{
-    create_snapshot_with_host_blobs, push_store_snapshot, should_create_snapshot, CreatedSnapshot,
+    create_snapshot_with_host_blobs, should_create_snapshot, CreatedSnapshot,
 };
 
 #[cfg(feature = "test-utils")]

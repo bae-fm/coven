@@ -876,6 +876,10 @@ impl CloudSyncStorage {
         (self.exact.as_ref(), self.exact_probe_peer.as_ref())
     }
 
+    pub(crate) fn exact_slot_storage(&self) -> &dyn ExactSlotStorage {
+        self.exact.as_ref()
+    }
+
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
         self.blob_paths
     }

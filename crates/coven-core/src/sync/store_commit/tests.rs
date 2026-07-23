@@ -833,7 +833,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     .unwrap();
     let attempt_cut = StoreHistoryCut(BTreeMap::new());
     let owner_device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let offer = crate::sync::store::device_join::DeviceJoinOffer::signed(
+    let offer = crate::sync::store::DeviceJoinOffer::signed(
         attempt_id,
         keys::public_key_hex(&joiner),
         fixture.root_ref.clone(),
@@ -847,7 +847,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         &owner_device_signer,
     )
     .unwrap();
-    let access_request = crate::sync::store::device_join::DeviceProviderAccessRequest::signed(
+    let access_request = crate::sync::store::DeviceProviderAccessRequest::signed(
         offer,
         provider_admin.provider.clone(),
         &joiner,
@@ -881,14 +881,14 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         semantic_hash: fixture.root_ref.store_root_hash,
         object: fixture.root_ref.object.clone(),
     };
-    let approval = crate::sync::store::device_join::DeviceProviderAdmissionApproval::signed(
+    let approval = crate::sync::store::DeviceProviderAdmissionApproval::signed(
         access_request,
         crate::sync::provider::ActivatedStoreMemberProviderAccessGrant {
             grant: access_grant,
             grant_ref: access_grant_ref,
             activation: fixture.commit_ref.clone(),
         },
-        crate::sync::store::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
+        crate::sync::store::DeviceProviderAdmissionChallenge::SamePrincipal,
         &verified_root,
         &fixture.registration,
         &owner_device_signer,
@@ -905,7 +905,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         membership,
         provider_admin.grant_id,
         approval,
-        crate::sync::store::device_join::DeviceProviderResponseReservation::SamePrincipal,
+        crate::sync::store::DeviceProviderResponseReservation::SamePrincipal,
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,
@@ -1130,7 +1130,7 @@ fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
             b"attempt body",
         ),
     };
-    let abandonment = crate::sync::store::device_join::DeviceJoinAbandonmentRef {
+    let abandonment = crate::sync::store::DeviceJoinAbandonmentRef {
         attempt_id,
         abandonment_hash: ObjectHash::digest(b"abandonment body"),
         object: exact(

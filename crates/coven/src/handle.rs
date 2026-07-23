@@ -52,7 +52,7 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::{StorageError, SyncStorage};
-use crate::sync::store::StoreDatabase;
+use crate::sync::store::{Store, StoreDatabase};
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::sync_manager::MemberInfo;
 use crate::sync::sync_manager::{ConfigProvider, SyncError, SyncManager};
@@ -1061,35 +1061,24 @@ impl CovenHandle {
         member_pubkey: &str,
         provider_administrator: crate::ProviderAdminGrantId,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::store::device_join::begin_device_join(
-            &self.database,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            member_pubkey,
-            provider_administrator,
-        )
-        .await?)
+        Ok(self
+            .device_join_store()
+            .await?
+            .begin_device_join(&signer, member_pubkey, provider_administrator)
+            .await?)
     }
 
     pub async fn abandon_device_join(
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::store::device_join::abandon_device_join(
-            &self.database,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            offer,
-        )
-        .await?)
+        Ok(self
+            .device_join_store()
+            .await?
+            .abandon_device_join(&signer, offer)
+            .await?)
     }
 
     pub async fn authorize_device_provider_access(
@@ -1097,58 +1086,35 @@ impl CovenHandle {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        let exact = self.device_join_exact_storage()?;
-        Ok(
-            crate::sync::store::device_join::authorize_device_provider_access(
-                &self.database,
-                storage.as_ref(),
-                Some(exact.as_ref()),
-                access_administrator,
-                &authorization,
-                &signer,
-                request,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .authorize_device_provider_access(&signer, request, access_administrator)
+            .await?)
     }
 
     pub async fn accept_device_registration_request(
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(
-            crate::sync::store::device_join::accept_device_registration_request(
-                &self.database,
-                storage.as_ref(),
-                &authorization,
-                &signer,
-                request,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .accept_device_registration_request(&signer, request)
+            .await?)
     }
 
     pub async fn publish_device_provider_challenge(
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        let storage = self.device_join_storage()?;
-        let exact = self.device_join_exact_storage()?;
-        Ok(
-            crate::sync::store::device_join::publish_device_provider_challenge(
-                &self.database,
-                storage.as_ref(),
-                Some(exact.as_ref()),
-                bootstrap,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .publish_device_provider_challenge(bootstrap)
+            .await?)
     }
 
     pub async fn complete_device_provider_admission(
@@ -1156,69 +1122,47 @@ impl CovenHandle {
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let exact = self.device_join_exact_storage()?;
-        Ok(
-            crate::sync::store::device_join::complete_device_provider_admission(
-                &self.database,
-                Some(exact.as_ref()),
-                &signer,
-                readiness,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .complete_device_provider_admission(&signer, readiness)
+            .await?)
     }
 
     pub async fn finalize_device_join(
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::store::device_join::finalize_device_join(
-            &self.database,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            completion,
-        )
-        .await?)
+        Ok(self
+            .device_join_store()
+            .await?
+            .finalize_device_join(&signer, completion)
+            .await?)
     }
 
     pub async fn cancel_device_join(
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(crate::sync::store::device_join::cancel_device_join(
-            &self.database,
-            storage.as_ref(),
-            &authorization,
-            &signer,
-            attempt,
-        )
-        .await?)
+        Ok(self
+            .device_join_store()
+            .await?
+            .cancel_device_join(&signer, attempt)
+            .await?)
     }
 
     pub async fn close_device_provider_admission(
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        let storage = self.device_join_storage()?;
-        let exact = self.device_join_exact_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        Ok(
-            crate::sync::store::device_join::close_device_provider_admission(
-                &self.database,
-                storage.as_ref(),
-                Some(exact.as_ref()),
-                &signer,
-                cancellation,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .close_device_provider_admission(&signer, cancellation)
+            .await?)
     }
 
     pub async fn revoke_device_provider_admission_writes(
@@ -1227,21 +1171,17 @@ impl CovenHandle {
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
         executor_grant: crate::ProviderAdminGrantId,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(
-            crate::sync::store::device_join::revoke_device_provider_admission_writes(
-                &self.database,
-                storage.as_ref(),
-                &authorization,
+        Ok(self
+            .device_join_store()
+            .await?
+            .revoke_device_provider_admission_writes(
                 &signer,
                 cancellation,
                 revocation_executor,
                 executor_grant,
             )
-            .await?,
-        )
+            .await?)
     }
 
     pub async fn revoke_joining_device_writes(
@@ -1250,21 +1190,17 @@ impl CovenHandle {
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
         executor_grant: crate::ProviderAdminGrantId,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(
-            crate::sync::store::device_join::revoke_joining_device_writes(
-                &self.database,
-                storage.as_ref(),
-                &authorization,
+        Ok(self
+            .device_join_store()
+            .await?
+            .revoke_joining_device_writes(
                 &signer,
                 cancellation,
                 revocation_executor,
                 executor_grant,
             )
-            .await?,
-        )
+            .await?)
     }
 
     pub async fn cleanup_cancelled_device_join(
@@ -1273,57 +1209,39 @@ impl CovenHandle {
         administrator_terminal: crate::ProviderAdminJoinTerminal,
         joiner_terminal: crate::JoinerJoinTerminal,
     ) -> Result<crate::DeviceJoinCleanupReceipt, SyncError> {
-        let storage = self.device_join_storage()?;
-        let exact = self.device_join_exact_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(
-            crate::sync::store::device_join::prepare_device_join_cleanup(
-                &self.database,
-                storage.as_ref(),
-                exact.as_ref(),
-                &authorization,
+        Ok(self
+            .device_join_store()
+            .await?
+            .prepare_device_join_cleanup(
                 &signer,
                 cancellation,
                 administrator_terminal,
                 joiner_terminal,
             )
-            .await?,
-        )
+            .await?)
     }
 
     pub async fn activate_device_join_cleanup(
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        let attempt_id = receipt.receipt.attempt_id;
-        let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let authorization = self.device_join_authorization(&storage).await?;
-        Ok(
-            crate::sync::store::device_join::activate_device_join_cleanup(
-                &self.database,
-                storage.as_ref(),
-                &authorization,
-                &signer,
-                attempt_id,
-                receipt,
-            )
-            .await?,
-        )
+        Ok(self
+            .device_join_store()
+            .await?
+            .activate_device_join_cleanup(&signer, receipt)
+            .await?)
     }
 
     pub async fn complete_cancelled_device_join(
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        let attempt_id = activation.receipt.attempt_id;
-        crate::sync::store::device_join::complete_owner_device_join_cleanup(
-            &self.database,
-            attempt_id,
-            activation,
-        )
-        .await?;
+        self.device_join_store()
+            .await?
+            .complete_owner_device_join_cleanup(activation)
+            .await?;
         Ok(())
     }
 
@@ -1332,18 +1250,11 @@ impl CovenHandle {
         attempt_id: crate::DeviceJoinAttemptId,
         role: crate::DeviceJoinRole,
     ) -> Result<Option<crate::DeviceJoinStatus>, SyncError> {
-        Ok(
-            crate::sync::store::device_join::load_store_device_join_status(
-                self.db(),
-                attempt_id,
-                role,
-            )
-            .await?,
-        )
+        Ok(self.database.device_join_status(attempt_id, role).await?)
     }
 
     pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
-        Ok(crate::sync::store::device_join::load_store_device_join_actions(self.db()).await?)
+        Ok(self.database.device_join_actions().await?)
     }
 
     fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
@@ -1354,26 +1265,8 @@ impl CovenHandle {
         Ok(loop_handle.storage().clone())
     }
 
-    fn device_join_exact_storage(
-        &self,
-    ) -> Result<Arc<dyn crate::storage::cloud::ExactSlotStorage>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        let home = manager.cloud_home().ok_or(SyncError::NotConfigured)?;
-        home.exact_slot_storage()
-            .ok_or_else(|| SyncError::Protocol("provider has no exact-slot adapter".to_string()))
-    }
-
-    async fn device_join_authorization(
-        &self,
-        storage: &CloudSyncStorage,
-    ) -> Result<crate::sync::membership::MembershipChain, SyncError> {
-        Ok(
-            crate::sync::store::device_join::load_current_device_join_authorization(
-                &self.database,
-                storage,
-            )
-            .await?,
-        )
+    async fn device_join_store(&self) -> Result<Store, SyncError> {
+        Ok(Store::load(self.database.clone(), self.device_join_storage()?).await?)
     }
 
     pub async fn invite_member(

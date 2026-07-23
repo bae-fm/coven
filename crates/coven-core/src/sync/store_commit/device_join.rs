@@ -118,8 +118,8 @@ pub struct DeviceJoinAttempt {
     pub bootstrap_cut: StoreHistoryCut,
     pub membership: StoreMembershipStateRef,
     pub provider_admin_grant: crate::sync::provider::ProviderAdminGrantId,
-    pub provider_approval: crate::sync::store::device_join::DeviceProviderAdmissionApproval,
-    pub provider_response: crate::sync::store::device_join::DeviceProviderResponseReservation,
+    pub provider_approval: crate::sync::store::DeviceProviderAdmissionApproval,
+    pub provider_response: crate::sync::store::DeviceProviderResponseReservation,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
     pub signature: String,
@@ -166,8 +166,8 @@ struct DeviceJoinAttemptSignedFields<'a> {
     bootstrap_cut: &'a StoreHistoryCut,
     membership: &'a StoreMembershipStateRef,
     provider_admin_grant: &'a crate::sync::provider::ProviderAdminGrantId,
-    provider_approval: &'a crate::sync::store::device_join::DeviceProviderAdmissionApproval,
-    provider_response: &'a crate::sync::store::device_join::DeviceProviderResponseReservation,
+    provider_approval: &'a crate::sync::store::DeviceProviderAdmissionApproval,
+    provider_response: &'a crate::sync::store::DeviceProviderResponseReservation,
     owner_registration: &'a StoreDeviceRegistrationRef,
     owner_grant: &'a MembershipGrantId,
 }
@@ -184,8 +184,8 @@ impl DeviceJoinAttempt {
         bootstrap_cut: StoreHistoryCut,
         membership: StoreMembershipStateRef,
         provider_admin_grant: crate::sync::provider::ProviderAdminGrantId,
-        provider_approval: crate::sync::store::device_join::DeviceProviderAdmissionApproval,
-        provider_response: crate::sync::store::device_join::DeviceProviderResponseReservation,
+        provider_approval: crate::sync::store::DeviceProviderAdmissionApproval,
+        provider_response: crate::sync::store::DeviceProviderResponseReservation,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
         owner: &StoreDeviceRegistration,
@@ -288,14 +288,12 @@ impl DeviceJoinAttempt {
         }
         match (&self.provider_approval.admission, &self.provider_response) {
             (
-                crate::sync::store::device_join::DeviceProviderAdmissionChallenge::SamePrincipal,
-                crate::sync::store::device_join::DeviceProviderResponseReservation::SamePrincipal,
+                crate::sync::store::DeviceProviderAdmissionChallenge::SamePrincipal,
+                crate::sync::store::DeviceProviderResponseReservation::SamePrincipal,
             )
             | (
-                crate::sync::store::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(_),
-                crate::sync::store::device_join::DeviceProviderResponseReservation::CrossPrincipal {
-                    ..
-                },
+                crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_),
+                crate::sync::store::DeviceProviderResponseReservation::CrossPrincipal { .. },
             ) => {}
             _ => return Err(StoreProtocolError::JoinAttemptMismatch),
         }

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Invite a member through Merge membership authority.
-pub fn invite_member<'a>(
+pub(crate) fn invite_member<'a>(
     storage: &'a dyn SyncStorage,
     cloud_home: &'a dyn crate::storage::cloud::CloudHome,
     user_keypair: &'a UserKeypair,
@@ -135,7 +135,7 @@ async fn invite_merge_member_impl(
 }
 
 /// Remove a member through Merge membership authority and adopt the rotated key.
-pub async fn remove_member(
+pub(crate) async fn remove_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     user_keypair: &UserKeypair,

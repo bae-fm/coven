@@ -526,7 +526,21 @@ impl DeviceJoinRole {
     }
 }
 
-pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus {
+impl StoreDatabase {
+    pub async fn device_join_status(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+        role: DeviceJoinRole,
+    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinError> {
+        load_store_device_join_status(self.sqlite(), attempt_id, role).await
+    }
+
+    pub async fn device_join_actions(&self) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
+        load_store_device_join_actions(self.sqlite()).await
+    }
+}
+
+pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus {
     match &*record.progress {
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(offer))
         | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::OfferReceived(offer)) => {
@@ -694,7 +708,7 @@ pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus 
     }
 }
 
-pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoinAction> {
+fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoinAction> {
     let resume = || DeviceJoinAction::ResumeOperation {
         attempt_id: record.attempt_id,
         role: record.progress.role(),
@@ -811,7 +825,7 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
     }
 }
 
-pub async fn load_store_device_join_actions(
+pub(crate) async fn load_store_device_join_actions(
     db: &Database,
 ) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
     let rows = db
@@ -850,7 +864,7 @@ pub fn load_pending_device_join_actions(
     pending.actions()
 }
 
-pub async fn load_store_device_join_status(
+pub(crate) async fn load_store_device_join_status(
     db: &Database,
     attempt_id: DeviceJoinAttemptId,
     role: DeviceJoinRole,

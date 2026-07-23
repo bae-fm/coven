@@ -174,26 +174,16 @@ pub use sync::circle::{
 };
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{MemberInfo, MemberRole};
-pub use sync::store::device_join::{
-    abandon_device_join, accept_device_registration_request, activate_device_join_cleanup,
-    authorize_device_provider_access, begin_device_join, bootstrap_pending_device,
-    cancel_device_join, close_device_provider_admission, close_joining_device,
-    complete_device_join, complete_device_provider_admission, complete_joiner_device_join_cleanup,
-    complete_owner_device_join_cleanup, device_join_status, finalize_device_join,
-    load_current_device_join_authorization, load_pending_device_join_actions,
-    load_pending_device_join_status, load_store_device_join_actions, load_store_device_join_status,
-    observe_device_join_abandonment, observe_device_join_activation, prepare_device_join_cleanup,
-    prepare_device_provider_access_request, prepare_device_registration_request,
-    publish_device_provider_challenge, revoke_device_provider_admission_writes,
-    revoke_joining_device_writes, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
-    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
-    DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
-    DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinRole,
-    DeviceJoinStatus, DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
-    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
-    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
-    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
+pub use sync::store::{
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
+    DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
+    DeviceJoinError, DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation,
+    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinWriteRevocationExecutor,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
+    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
+    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
+    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
+    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
 };
 
 // Sync setup / restore / join bootstrap.

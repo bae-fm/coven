@@ -250,7 +250,7 @@ impl DeviceProviderAdmissionApproval {
         );
     }
 
-    pub(crate) fn verify(
+    pub(in crate::sync::store) fn verify(
         &self,
         store_root: &crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         owner: &StoreDeviceRegistration,
@@ -516,7 +516,7 @@ pub struct DeviceJoinAbandonmentRef {
 }
 
 impl DeviceJoinAbandonmentRef {
-    pub(crate) fn verify(
+    pub(in crate::sync::store) fn verify(
         &self,
         abandonment: &DeviceJoinAbandonmentObject,
         owner: &StoreDeviceRegistration,
@@ -538,7 +538,7 @@ impl DeviceJoinAbandonmentRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinAbandonmentObject {
+pub(in crate::sync::store) struct DeviceJoinAbandonmentObject {
     pub version: u32,
     pub store_root_hash: ObjectHash,
     pub offer_hash: ObjectHash,
@@ -550,7 +550,7 @@ pub struct DeviceJoinAbandonmentObject {
 }
 
 impl DeviceJoinAbandonmentObject {
-    pub fn signed(
+    pub(in crate::sync::store) fn signed(
         offer: &DeviceJoinOffer,
         owner: &StoreDeviceRegistration,
         owner_device_signer: &UserKeypair,
@@ -577,11 +577,11 @@ impl DeviceJoinAbandonmentObject {
         Ok(value)
     }
 
-    pub fn abandonment_hash(&self) -> ObjectHash {
+    pub(in crate::sync::store) fn abandonment_hash(&self) -> ObjectHash {
         ObjectHash::digest(&domain_json(ABANDONMENT_DOMAIN, &self.signed_fields()))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(in crate::sync::store) fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("device join abandonment serialization cannot fail")
     }
 
@@ -898,7 +898,7 @@ pub struct DeviceJoinCleanupReceiptRef {
 }
 
 impl DeviceJoinCleanupReceiptRef {
-    pub(crate) fn verify(
+    pub(in crate::sync::store) fn verify(
         &self,
         receipt: &DeviceJoinCleanupReceiptObject,
         executor: &StoreDeviceRegistration,
@@ -920,7 +920,7 @@ impl DeviceJoinCleanupReceiptRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinCleanupReceiptObject {
+pub(in crate::sync::store) struct DeviceJoinCleanupReceiptObject {
     pub version: u32,
     pub store_root_hash: ObjectHash,
     pub cancellation: DeviceJoinOutcomeRef,
@@ -935,7 +935,7 @@ pub struct DeviceJoinCleanupReceiptObject {
 
 impl DeviceJoinCleanupReceiptObject {
     #[allow(clippy::too_many_arguments)]
-    pub fn signed(
+    pub(in crate::sync::store) fn signed(
         attempt: &DeviceJoinAttempt,
         cancellation: DeviceJoinOutcomeRef,
         administrator_terminal: ProviderAdminJoinTerminal,
@@ -978,11 +978,11 @@ impl DeviceJoinCleanupReceiptObject {
         Ok(value)
     }
 
-    pub fn receipt_hash(&self) -> ObjectHash {
+    pub(in crate::sync::store) fn receipt_hash(&self) -> ObjectHash {
         ObjectHash::digest(&domain_json(CLEANUP_RECEIPT_DOMAIN, &self.signed_fields()))
     }
 
-    pub(crate) fn verify(
+    pub(in crate::sync::store) fn verify(
         &self,
         attempt: &DeviceJoinAttempt,
         executor: &StoreDeviceRegistration,
@@ -1002,7 +1002,7 @@ impl DeviceJoinCleanupReceiptObject {
         )
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(in crate::sync::store) fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("device join cleanup receipt serialization cannot fail")
     }
 

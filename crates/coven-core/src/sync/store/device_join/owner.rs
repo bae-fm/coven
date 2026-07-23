@@ -1,12 +1,114 @@
-use super::authority::{load_local_store_root, resolved_provider_admin};
+use super::authority::{authorize_store, load_local_store_root, resolved_provider_admin};
 use super::joiner::cross_challenge_context;
 use super::journal::{
     advance_store_journal, begin_store_journal, database_error, load_store_journal, provider_error,
 };
 use super::*;
 
+impl Store {
+    #[doc(hidden)]
+    pub async fn begin_device_join(
+        &self,
+        identity_signer: &UserKeypair,
+        member_pubkey: &str,
+        provider_admin_grant: ProviderAdminGrantId,
+    ) -> Result<DeviceJoinOffer, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        begin_device_join(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            member_pubkey,
+            provider_admin_grant,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn abandon_device_join(
+        &self,
+        identity_signer: &UserKeypair,
+        offer: DeviceJoinOffer,
+    ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        abandon_device_join(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            offer,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn accept_device_registration_request(
+        &self,
+        identity_signer: &UserKeypair,
+        request: DeviceRegistrationRequest,
+    ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        accept_device_registration_request(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            request,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn cancel_device_join(
+        &self,
+        identity_signer: &UserKeypair,
+        attempt: DeviceJoinAttemptRef,
+    ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        cancel_device_join(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            attempt,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn finalize_device_join(
+        &self,
+        identity_signer: &UserKeypair,
+        completion: DeviceProviderAdmissionCompletion,
+    ) -> Result<DeviceJoinActivation, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        finalize_device_join(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            completion,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn complete_owner_device_join_cleanup(
+        &self,
+        activation: DeviceJoinCleanupActivation,
+    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+        complete_owner_device_join_cleanup(
+            self.database(),
+            activation.receipt.attempt_id,
+            activation,
+        )
+        .await
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn begin_device_join(
+pub(crate) async fn begin_device_join(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -85,7 +187,7 @@ pub async fn begin_device_join(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn abandon_device_join(
+pub(crate) async fn abandon_device_join(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -205,7 +307,7 @@ pub async fn abandon_device_join(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn accept_device_registration_request(
+pub(crate) async fn accept_device_registration_request(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -361,7 +463,7 @@ pub async fn accept_device_registration_request(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn cancel_device_join(
+pub(crate) async fn cancel_device_join(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -533,7 +635,7 @@ pub async fn cancel_device_join(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn complete_owner_device_join_cleanup(
+pub(crate) async fn complete_owner_device_join_cleanup(
     database: &StoreDatabase,
     attempt_id: DeviceJoinAttemptId,
     activation: DeviceJoinCleanupActivation,
@@ -646,7 +748,7 @@ pub async fn observe_device_join_abandonment(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn finalize_device_join(
+pub(crate) async fn finalize_device_join(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -885,7 +987,7 @@ pub async fn finalize_device_join(
     Ok(activation)
 }
 
-pub fn materialize_device_join_activation<'a>(
+pub fn materialize_joined_store_activation<'a>(
     database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     activation: DeviceJoinActivation,

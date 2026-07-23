@@ -672,7 +672,7 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
 pub use coven_core::sync::membership::MembershipCoord;
-pub use coven_core::sync::store::device_join::{
+pub use coven_core::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
     DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer,

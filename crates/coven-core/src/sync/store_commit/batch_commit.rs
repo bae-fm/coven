@@ -148,7 +148,7 @@ impl StoreBatchCommit {
 
     pub fn device_join_cleanup_receipts(
         &self,
-    ) -> &[crate::sync::store::device_join::DeviceJoinCleanupReceiptRef] {
+    ) -> &[crate::sync::store::DeviceJoinCleanupReceiptRef] {
         self.operations().map_or(&[], |operations| {
             operations.device_join_cleanup_receipts.as_slice()
         })
@@ -635,7 +635,7 @@ impl StoreBatchCommit {
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
         membership_authority: StoreOperationMembershipAuthority,
-        abandonments: Vec<crate::sync::store::device_join::DeviceJoinAbandonmentRef>,
+        abandonments: Vec<crate::sync::store::DeviceJoinAbandonmentRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         Self::signed_operations(
@@ -682,7 +682,7 @@ impl StoreBatchCommit {
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
         membership_authority: StoreOperationMembershipAuthority,
-        receipts: Vec<crate::sync::store::device_join::DeviceJoinCleanupReceiptRef>,
+        receipts: Vec<crate::sync::store::DeviceJoinCleanupReceiptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         Self::signed_operations(

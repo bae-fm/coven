@@ -1,8 +1,51 @@
-use super::authority::resolved_provider_admin;
+use super::authority::{authorize_store, exact_slot_storage, resolved_provider_admin};
 use super::journal::{
     advance_store_journal, database_error, load_store_journal, require_distinct_slots,
 };
 use super::*;
+
+impl Store {
+    #[doc(hidden)]
+    pub async fn prepare_device_join_cleanup(
+        &self,
+        identity_signer: &UserKeypair,
+        cancellation: DeviceJoinCancellation,
+        administrator_terminal: ProviderAdminJoinTerminal,
+        joiner_terminal: JoinerJoinTerminal,
+    ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        let exact = exact_slot_storage(self);
+        prepare_device_join_cleanup(
+            authorized.database(),
+            authorized.storage(),
+            exact,
+            authorized.membership(),
+            identity_signer,
+            cancellation,
+            administrator_terminal,
+            joiner_terminal,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn activate_device_join_cleanup(
+        &self,
+        identity_signer: &UserKeypair,
+        receipt: DeviceJoinCleanupReceipt,
+    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        activate_device_join_cleanup(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            receipt.receipt.attempt_id,
+            receipt,
+        )
+        .await
+    }
+}
 
 #[async_trait::async_trait]
 pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
@@ -18,7 +61,7 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
     ) -> Result<ProviderAccessWithdrawal, DeviceJoinError>;
 }
 
-pub fn prepare_device_join_cleanup<'a>(
+pub(crate) fn prepare_device_join_cleanup<'a>(
     database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
     executor_exact: &'a dyn ExactSlotStorage,
@@ -416,7 +459,7 @@ pub(super) async fn sign_device_join_producer_write_revocation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn activate_device_join_cleanup(
+pub(crate) async fn activate_device_join_cleanup(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -510,7 +553,7 @@ pub async fn activate_device_join_cleanup(
     Ok(activation)
 }
 
-pub fn validate_member_for_join(
+pub(super) fn validate_member_for_join(
     member_pubkey: &str,
     members: &[(String, MemberRole)],
 ) -> Result<(), DeviceJoinError> {
@@ -524,7 +567,7 @@ pub fn validate_member_for_join(
     }
 }
 
-pub fn canonical_cleanup_slots(
+pub(super) fn canonical_cleanup_slots(
     attempt: &DeviceJoinAttempt,
 ) -> Result<Vec<ObjectSlot>, DeviceJoinError> {
     let mut slots = vec![

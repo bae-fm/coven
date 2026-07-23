@@ -1,6 +1,17 @@
 use super::journal::database_error;
 use super::*;
 
+pub(super) async fn authorize_store(store: &Store) -> Result<AuthorizedStore<'_>, DeviceJoinError> {
+    store
+        .authorize()
+        .await
+        .map_err(|error| DeviceJoinError::Store(error.to_string()))
+}
+
+pub(super) fn exact_slot_storage(store: &Store) -> &dyn ExactSlotStorage {
+    store.storage().exact_slot_storage()
+}
+
 pub(super) fn resolved_provider_admin(
     membership: &MembershipChain,
     grant_id: &ProviderAdminGrantId,
@@ -17,7 +28,7 @@ pub(super) fn resolved_provider_admin(
         .ok_or(DeviceJoinError::ProviderAdministratorRequired)
 }
 
-pub async fn load_current_device_join_authorization(
+pub(crate) async fn load_current_device_join_authorization(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<MembershipChain, DeviceJoinError> {

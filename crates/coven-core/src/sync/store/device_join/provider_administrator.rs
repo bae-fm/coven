@@ -1,4 +1,4 @@
-use super::authority::{load_local_store_root, resolved_provider_admin};
+use super::authority::{authorize_store, load_local_store_root, resolved_provider_admin};
 use super::cleanup::{
     ensure_exact_slot_absent, require_cancelled_outcome, sign_device_join_producer_write_revocation,
 };
@@ -8,6 +8,93 @@ use super::journal::{
     load_store_journal, provider_error,
 };
 use super::*;
+
+impl Store {
+    #[doc(hidden)]
+    pub async fn authorize_device_provider_access(
+        &self,
+        identity_signer: &UserKeypair,
+        request: DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+    ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        let exact = self.storage().exact_slot_storage();
+        authorize_device_provider_access(
+            authorized.database(),
+            authorized.storage(),
+            Some(exact),
+            access_administrator,
+            authorized.membership(),
+            identity_signer,
+            request,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: ProvisionalDeviceBootstrap,
+    ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
+        let exact = self.storage().exact_slot_storage();
+        publish_device_provider_challenge(
+            self.database(),
+            &**self.storage(),
+            Some(exact),
+            bootstrap,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn complete_device_provider_admission(
+        &self,
+        identity_signer: &UserKeypair,
+        readiness: DeviceJoinReadiness,
+    ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
+        let exact = self.storage().exact_slot_storage();
+        complete_device_provider_admission(self.database(), Some(exact), identity_signer, readiness)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn close_device_provider_admission(
+        &self,
+        identity_signer: &UserKeypair,
+        cancellation: DeviceJoinCancellation,
+    ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+        let exact = self.storage().exact_slot_storage();
+        close_device_provider_admission(
+            self.database(),
+            &**self.storage(),
+            Some(exact),
+            identity_signer,
+            cancellation,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn revoke_device_provider_admission_writes(
+        &self,
+        identity_signer: &UserKeypair,
+        cancellation: DeviceJoinCancellation,
+        revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
+        executor_grant: ProviderAdminGrantId,
+    ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        revoke_device_provider_admission_writes(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            cancellation,
+            revocation_executor,
+            executor_grant,
+        )
+        .await
+    }
+}
 
 #[async_trait::async_trait]
 pub trait DeviceProviderAccessAdministrator: Send + Sync {
@@ -19,7 +106,7 @@ pub trait DeviceProviderAccessAdministrator: Send + Sync {
     ) -> Result<crate::sync::provider::ProviderAccessLocator, DeviceJoinError>;
 }
 
-pub async fn publish_device_provider_challenge(
+pub(crate) async fn publish_device_provider_challenge(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,
@@ -133,7 +220,7 @@ pub async fn publish_device_provider_challenge(
     Ok(ready)
 }
 
-pub async fn complete_device_provider_admission(
+pub(crate) async fn complete_device_provider_admission(
     database: &StoreDatabase,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     identity_signer: &UserKeypair,
@@ -235,7 +322,7 @@ pub async fn complete_device_provider_admission(
     Ok(completion)
 }
 
-pub async fn close_device_provider_admission(
+pub(crate) async fn close_device_provider_admission(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,
@@ -413,7 +500,7 @@ pub async fn close_device_provider_admission(
     Ok(ProviderAdminJoinTerminal::Cancelled(closure))
 }
 
-pub async fn revoke_device_provider_admission_writes(
+pub(crate) async fn revoke_device_provider_admission_writes(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -473,7 +560,7 @@ pub async fn revoke_device_provider_admission_writes(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn authorize_device_provider_access(
+pub(crate) async fn authorize_device_provider_access(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     administrator_exact: Option<&dyn ExactSlotStorage>,

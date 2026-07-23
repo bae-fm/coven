@@ -26,7 +26,7 @@ use crate::sync::provider::{
 use crate::sync::storage::{
     ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding, SyncStorage,
 };
-use crate::sync::store::StoreDatabase;
+use crate::sync::store::{AuthorizedStore, Store, StoreDatabase};
 use crate::sync::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
@@ -43,7 +43,7 @@ mod journal;
 mod owner;
 mod provider_administrator;
 
-pub use authority::*;
+pub(crate) use authority::*;
 pub use cleanup::*;
 pub use error::*;
 pub use exchange::*;

@@ -1,3 +1,4 @@
+use super::authority::authorize_store;
 use super::cleanup::{
     ensure_exact_slot_absent, observe_exact_slot, require_cancelled_outcome,
     sign_device_join_producer_write_revocation,
@@ -7,6 +8,29 @@ use super::journal::{
     provider_error, store_journal_key,
 };
 use super::*;
+
+impl Store {
+    #[doc(hidden)]
+    pub async fn revoke_joining_device_writes(
+        &self,
+        identity_signer: &UserKeypair,
+        cancellation: DeviceJoinCancellation,
+        revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
+        executor_grant: ProviderAdminGrantId,
+    ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
+        let authorized = authorize_store(self).await?;
+        revoke_joining_device_writes(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            cancellation,
+            revocation_executor,
+            executor_grant,
+        )
+        .await
+    }
+}
 
 pub async fn prepare_device_provider_access_request(
     pending: &DeviceJoinJournalDatabase,
@@ -278,7 +302,7 @@ pub fn prepare_device_registration_request<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn bootstrap_pending_device<'a>(
+pub fn bootstrap_joining_device<'a>(
     database: &'a StoreDatabase,
     pending: &'a DeviceJoinJournalDatabase,
     storage: &'a dyn SyncStorage,
@@ -660,7 +684,7 @@ pub async fn close_joining_device(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn revoke_joining_device_writes(
+pub(crate) async fn revoke_joining_device_writes(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     authorization: &MembershipChain,
@@ -879,7 +903,7 @@ pub fn complete_device_join<'a>(
             else {
                 return Err(DeviceJoinError::JournalConflict);
             };
-            let joined = Box::pin(materialize_device_join_activation(
+            let joined = Box::pin(materialize_joined_store_activation(
                 database, storage, activation,
             ))
             .await?;
@@ -888,7 +912,7 @@ pub fn complete_device_join<'a>(
                 .ok_or(DeviceJoinError::JournalConflict);
         }
         let current_readiness = observe_device_join_activation(pending, &activation)?;
-        let joined = Box::pin(materialize_device_join_activation(
+        let joined = Box::pin(materialize_joined_store_activation(
             database, storage, activation,
         ))
         .await?;
