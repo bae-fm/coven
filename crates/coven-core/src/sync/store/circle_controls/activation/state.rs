@@ -1,6 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use super::verify_control_context;
+use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::sync::circle::{
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleControl, CircleControlCoord,
     CircleId, CircleMetadata, PreparedAccessLeaf, PreparedCircleAccess, PreparedCircleControl,
@@ -31,6 +34,81 @@ pub(crate) struct VerifiedCircleAccess {
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+#[derive(Clone)]
+pub(crate) struct CirclePackageAccess {
+    pub(crate) encryption: EncryptionService,
+    pub(crate) key_fingerprint: KeyFingerprint,
+    pub(crate) writers: BTreeSet<String>,
+}
+
+impl VerifiedCircleReference {
+    pub(crate) fn package_access(
+        &self,
+    ) -> Result<Option<CirclePackageAccess>, CircleOperationError> {
+        let Some(access) = self.local_access.as_ref() else {
+            return Ok(None);
+        };
+        let Some(active) = access.active.as_ref() else {
+            return Ok(None);
+        };
+        package_access_from(
+            self.circle_id,
+            &self.control.value,
+            &access.leaf.value.disposition,
+            &active.roster,
+        )
+        .map(Some)
+    }
+}
+
+fn package_access_from(
+    circle_id: CircleId,
+    control: &CircleControl,
+    disposition: &CircleAccessDisposition,
+    roster: &CircleMaterializedRoster,
+) -> Result<CirclePackageAccess, CircleOperationError> {
+    if control.circle_id != circle_id
+        || !roster.verify()
+        || roster.state_hash() != control.roster_state_ref().state_hash
+    {
+        return Err(CircleOperationError::InvalidState(format!(
+            "Circle {circle_id} package roster differs from its activated control"
+        )));
+    }
+    let CircleAccessDisposition::Active {
+        keyring,
+        key_fingerprint,
+        ..
+    } = disposition
+    else {
+        return Err(CircleOperationError::InvalidState(format!(
+            "active Circle access for {circle_id} has an inactive leaf"
+        )));
+    };
+    if *key_fingerprint != control.key_fingerprint() {
+        return Err(CircleOperationError::InvalidState(format!(
+            "Circle package key for {circle_id} differs from its activated control"
+        )));
+    }
+    let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
+        CircleOperationError::InvalidState(format!(
+            "parse Circle package keyring for {circle_id}: {error}"
+        ))
+    })?;
+    let encryption = EncryptionService::from(keyring)
+        .service_for_fingerprint(key_fingerprint.as_bytes())
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "select Circle package key for {circle_id}: {error}"
+            ))
+        })?;
+    Ok(CirclePackageAccess {
+        encryption,
+        key_fingerprint: *key_fingerprint,
+        writers: roster.members().keys().cloned().collect(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -646,6 +724,31 @@ impl CircleCurrentState {
         }
     }
 
+    pub(crate) fn package_access(
+        &self,
+        expected_control: &CircleControlCoord,
+    ) -> Result<Option<CirclePackageAccess>, CircleOperationError> {
+        let Self::Active(active) = self else {
+            return Ok(None);
+        };
+        if active.current.coordinate() != expected_control {
+            return Ok(None);
+        }
+        if !verify_accessible_state(active) {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {} current package access is invalid",
+                active.current.circle_id()
+            )));
+        }
+        package_access_from(
+            active.current.circle_id(),
+            &active.current.control.value,
+            &active.access.disposition,
+            &active.roster,
+        )
+        .map(Some)
+    }
+
     pub(super) fn resolved_control(&self) -> Option<&CircleCurrentControl> {
         match self {
             Self::Active(active) => Some(&active.current),
@@ -716,4 +819,3 @@ fn metadata_matches_control(metadata: &CircleMetadata, control: &CircleControl) 
     let state = control.metadata_state_ref();
     state.selected == metadata.coord() && state.state_hash == metadata.metadata_hash()
 }
-use std::collections::BTreeMap;

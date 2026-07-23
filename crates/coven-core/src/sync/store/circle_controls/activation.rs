@@ -36,9 +36,9 @@ use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle
 #[cfg(test)]
 use state::CircleCurrentControl;
 pub(crate) use state::{
-    CircleAuthoringState, CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActivations,
-    VerifiedCircleActive, VerifiedCircleReference, VerifiedStreamActivationPrefix,
-    VerifiedStreamActivations,
+    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, VerifiedCircleAccess,
+    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleReference,
+    VerifiedStreamActivationPrefix, VerifiedStreamActivations,
 };
 
 struct VerifiedAccessPair {

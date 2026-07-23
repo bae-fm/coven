@@ -144,85 +144,32 @@ impl StoreDatabase {
         DbError,
     > {
         let identity_pubkey = identity_pubkey.to_string();
-        self.database.call(move |conn| {
-            let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
-                DbError::Message(format!("Circle {circle_id} has no current state"))
-            })?;
-            let authoring = state.authoring_state().ok_or_else(|| {
-                DbError::Message(format!("Circle {circle_id} has no active authoring state"))
-            })?;
-            if authoring.access.recipient_pubkey != identity_pubkey {
-                return Err(DbError::Message(format!(
-                    "active Circle {circle_id} belongs to another local identity"
-                )));
-            }
-            let control_coord = serde_json::to_string(&authoring.control.coord).map_err(|error| {
-                DbError::Message(format!("serialize current Circle control coordinate: {error}"))
-            })?;
-            let commit_hash = conn
-                .query_row(
-                    "SELECT commit_hash FROM circle_control_activations
-                     WHERE circle_id = ?1 AND control_coord = ?2",
-                    rusqlite::params![circle_id.to_string(), control_coord],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?;
-            let mut statement = conn
-                .prepare(
-                    "SELECT device_id, seq, commit_ref,
-                            retained_commit_ref, retained_input_hash
-                     FROM materialized_commits",
-                )
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                })
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
-            drop(statement);
-            let mut activated_commit = None;
-            for row in rows {
-                let (
-                    stream_id,
-                    sequence,
-                    encoded,
-                    retained_commit_ref,
-                    retained_input_hash,
-                ) = row;
-                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-                let reference = Self::parse_materialized_commit_row_on(
-                    conn,
-                    &stream_id,
-                    sequence,
-                    &encoded,
-                    retained_commit_ref.as_deref(),
-                    retained_input_hash.as_deref(),
-                )?;
-                if reference.commit_hash.to_string() != commit_hash {
-                    continue;
-                }
-                if activated_commit.replace(reference).is_some() {
+        self.database
+            .call(move |conn| {
+                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no current state"))
+                })?;
+                let authoring = state.authoring_state().ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no active authoring state"))
+                })?;
+                if authoring.access.recipient_pubkey != identity_pubkey {
                     return Err(DbError::Message(format!(
-                        "Circle {circle_id} activation commit is duplicated in the materialized ledger"
+                        "active Circle {circle_id} belongs to another local identity"
                     )));
                 }
-            }
-            let activated_commit = activated_commit.ok_or_else(|| {
-                DbError::Message(format!(
-                    "Circle {circle_id} activation commit {commit_hash} is absent from the materialized ledger"
-                ))
-            })?;
-            Ok((authoring, activated_commit))
-        })
-        .await
+                let activated_commit = Self::circle_activation_commit_ref_on(
+                    conn,
+                    circle_id,
+                    &authoring.control.coord,
+                )?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} current control has no materialized activation"
+                    ))
+                })?;
+                Ok((authoring, activated_commit))
+            })
+            .await
     }
 
     pub(crate) async fn closing_circle_controls(
@@ -260,76 +207,117 @@ impl StoreDatabase {
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
     ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
-        self.circle_access_context(circle_id, expected_control)
-            .await?
-            .ok_or_else(|| {
-                DbError::Message(format!("Circle {circle_id} has no active publication key"))
+        self.database
+            .call(move |conn| {
+                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no current state"))
+                })?;
+                let access = state
+                    .package_access(&expected_control)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "Circle {circle_id} has no active publication key"
+                        ))
+                    })?;
+                Ok((access.encryption, access.key_fingerprint))
             })
+            .await
     }
 
-    pub(crate) async fn circle_access_context(
+    pub(crate) async fn circle_package_access(
         &self,
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
-    ) -> Result<Option<(EncryptionService, crate::KeyFingerprint)>, DbError> {
+    ) -> Result<Option<crate::sync::store::circle_controls::CirclePackageAccess>, DbError> {
         self.database
             .call(move |conn| {
-                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                    return Ok(None);
-                };
-                let Some((current, access, _roster, _metadata)) = state.active() else {
-                    return Ok(None);
-                };
-                if current.coordinate() != &expected_control {
-                    return Ok(None);
-                }
-                let crate::sync::circle::CircleAccessDisposition::Active {
-                    keyring,
-                    key_fingerprint,
-                    ..
-                } = &access.disposition
+                let Some(activation) =
+                    Self::verified_circle_activation_on(conn, circle_id, &expected_control)?
                 else {
-                    return Err(DbError::Message(format!(
-                        "active Circle {circle_id} has inactive access"
-                    )));
+                    return Ok(None);
                 };
-                let encryption = EncryptionService::from(
-                    crate::encryption::MasterKeyring::from_serialized(keyring).map_err(
-                        |error| {
-                            DbError::Message(format!("parse Circle publication keyring: {error}"))
-                        },
-                    )?,
-                );
-                if encryption.seal_key_fingerprint() != *key_fingerprint {
-                    return Err(DbError::Message(format!(
-                        "Circle {circle_id} publication key fingerprint is invalid"
-                    )));
-                }
-                Ok(Some((encryption, *key_fingerprint)))
+                activation
+                    .package_access()
+                    .map_err(|error| DbError::Message(error.to_string()))
             })
             .await
     }
 
-    pub(crate) async fn circle_authorizes_writer(
-        &self,
+    fn circle_activation_commit_ref_on(
+        conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
-        expected_control: crate::sync::circle::CircleControlCoord,
-        author_pubkey: String,
-    ) -> Result<bool, DbError> {
-        self.database
-            .call(move |conn| {
-                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                    return Ok(false);
-                };
-                let Some((current, _access, roster, _metadata)) = state.active() else {
-                    return Ok(false);
-                };
-                if current.coordinate() != &expected_control {
-                    return Ok(false);
-                }
-                Ok(roster.members().contains_key(&author_pubkey))
-            })
-            .await
+        control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
+        let control_coord = serde_json::to_string(control).map_err(|error| {
+            DbError::Message(format!("serialize Circle control coordinate: {error}"))
+        })?;
+        let stored = conn
+            .query_row(
+                "SELECT stream_id, seq, commit_hash
+                 FROM circle_control_activations
+                 WHERE circle_id = ?1 AND control_coord = ?2",
+                rusqlite::params![circle_id.to_string(), control_coord],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((stream_id, sequence, commit_hash)) = stored else {
+            return Ok(None);
+        };
+        let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
+        let reference = Self::materialized_commit_ref_on(conn, &stream_id, sequence)?.ok_or_else(
+            || {
+                DbError::Message(format!(
+                    "Circle {circle_id} activation commit {stream_id}/{sequence} is absent from the materialized ledger"
+                ))
+            },
+        )?;
+        if reference.commit_hash.to_string() != commit_hash {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} activation index differs from its materialized commit"
+            )));
+        }
+        Ok(Some(reference))
+    }
+
+    fn verified_circle_activation_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<Option<crate::sync::store::circle_controls::VerifiedCircleReference>, DbError> {
+        let Some(activation_commit) =
+            Self::circle_activation_commit_ref_on(conn, circle_id, control)?
+        else {
+            return Ok(None);
+        };
+        let retained =
+            Self::load_retained_merge_materialization_by_ref_on(conn, &activation_commit)?;
+        let verified = retained.as_verified()?;
+        let mut matches = verified
+            .circle_activations()
+            .circles()
+            .iter()
+            .filter(|activation| {
+                activation.circle_id == circle_id && activation.control.coord == *control
+            });
+        let activation = matches.next().cloned().ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} retained activation omits control {control:?}"
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} retained activation duplicates control {control:?}"
+            )));
+        }
+        Ok(Some(activation))
     }
 
     fn circle_current_state_on(

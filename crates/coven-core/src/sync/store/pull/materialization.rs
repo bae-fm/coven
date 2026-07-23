@@ -354,15 +354,13 @@ pub(super) async fn apply_candidate(
             )))
         }
     };
-    let no_prior_circle_accesses = CirclePackageAccesses::new();
-    let circle_packages = match load_applicable_circle_packages_with_prior_accesses(
+    let circle_packages = match load_applicable_circle_packages(
         database,
         storage,
         &candidate.commit_ref,
         &candidate.commit,
         verified_circle_activations.circles(),
         &candidate.author,
-        &no_prior_circle_accesses,
     )
     .await
     {

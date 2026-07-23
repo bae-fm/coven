@@ -70,6 +70,9 @@ rebuild the deleted choice.
   participants, and reserved response and outcome slots. Remaining devices
   publish device-signed applied frontiers to their exact create-once response
   slots after pull; the close blocks old-epoch authoring.
+- Later-discovered old-epoch packages reopen their exact retained verified
+  activation. Package decryption, key selection, and writer authority therefore
+  remain available while the Circle's current state is closing.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host

@@ -55,67 +55,13 @@ pub(crate) async fn load_circle_payload_activations(
     .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
 }
 
-fn circle_package_access(
-    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
-) -> Result<Option<CirclePackageAccess>, String> {
-    let Some(access) = activation.local_access.as_ref() else {
-        return Ok(None);
-    };
-    let Some(active) = access.active.as_ref() else {
-        return Ok(None);
-    };
-    if !active.roster.verify() {
-        return Err(format!(
-            "Circle {} package roster is invalid",
-            activation.circle_id
-        ));
-    }
-    let super::circle::CircleAccessDisposition::Active {
-        keyring,
-        key_fingerprint,
-        ..
-    } = &access.leaf.value.disposition
-    else {
-        return Err(format!(
-            "active Circle access for {} has an inactive leaf",
-            activation.circle_id
-        ));
-    };
-    if *key_fingerprint != activation.control.value.key_fingerprint() {
-        return Err(format!(
-            "Circle package key for {} differs from its activated control",
-            activation.circle_id
-        ));
-    }
-    let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
-        format!(
-            "parse Circle package keyring for {}: {error}",
-            activation.circle_id
-        )
-    })?;
-    let encryption = EncryptionService::from(keyring)
-        .service_for_fingerprint(key_fingerprint.as_bytes())
-        .map_err(|error| {
-            format!(
-                "select Circle package key for {}: {error}",
-                activation.circle_id
-            )
-        })?;
-    Ok(Some(CirclePackageAccess {
-        encryption,
-        key_fingerprint: *key_fingerprint,
-        writers: active.roster.members().keys().cloned().collect(),
-    }))
-}
-
-pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
+pub(crate) async fn load_applicable_circle_packages(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
-    prior_accesses: &CirclePackageAccesses,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
     let db = database.sqlite();
     let mut loaded = Vec::new();
@@ -133,8 +79,9 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
                 && activation.control.coord == reference.control
         });
         let context = if let Some(activation) = same_commit {
-            let Some(access) =
-                circle_package_access(activation).map_err(PullCircleActivationError::Invalid)?
+            let Some(access) = activation
+                .package_access()
+                .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?
             else {
                 debug!(
                     circle_id = %reference.circle_id,
@@ -156,25 +103,9 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
                 )));
             }
             access.encryption
-        } else if let Some(access) =
-            prior_accesses.get(&(reference.circle_id, reference.control.clone()))
-        {
-            if !access.writers.contains(&author.author_pubkey) {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package author is not a member of {} at its exact control",
-                    reference.circle_id
-                )));
-            }
-            if access.key_fingerprint != reference.key_fingerprint {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "Circle package key for {} differs from prepared access",
-                    reference.circle_id
-                )));
-            }
-            access.encryption.clone()
         } else {
-            let Some((encryption, key_fingerprint)) = database
-                .circle_access_context(reference.circle_id, reference.control.clone())
+            let Some(access) = database
+                .circle_package_access(reference.circle_id, reference.control.clone())
                 .await
                 .map_err(PullCircleActivationError::Database)?
             else {
@@ -185,34 +116,19 @@ pub(crate) async fn load_applicable_circle_packages_with_prior_accesses(
                 );
                 continue;
             };
-            if !database
-                .circle_authorizes_writer(
-                    reference.circle_id,
-                    reference.control.clone(),
-                    author.author_pubkey.clone(),
-                )
-                .await
-                .map_err(PullCircleActivationError::Database)?
-            {
+            if !access.writers.contains(&author.author_pubkey) {
                 return Err(PullCircleActivationError::Invalid(format!(
                     "Circle package author is not a member of {} at its exact control",
                     reference.circle_id
                 )));
             }
-            if key_fingerprint != reference.key_fingerprint {
+            if access.key_fingerprint != reference.key_fingerprint {
                 return Err(PullCircleActivationError::Invalid(format!(
                     "Circle package key for {} differs from durable access",
                     reference.circle_id
                 )));
             }
-            encryption
-                .service_for_fingerprint(reference.key_fingerprint.as_bytes())
-                .map_err(|error| {
-                    PullCircleActivationError::Invalid(format!(
-                        "select durable Circle package key for {}: {error}",
-                        reference.circle_id
-                    ))
-                })?
+            access.encryption
         };
         let blob_protection = BlobSpoolProtection::Opaque(context.clone());
         let package = load_circle_package(storage, commit_ref, commit, reference, context)

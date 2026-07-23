@@ -177,16 +177,6 @@ pub(crate) struct LoadedCirclePackage {
     pub(crate) blob_protection: BlobSpoolProtection,
 }
 
-#[derive(Clone)]
-pub(crate) struct CirclePackageAccess {
-    pub(crate) encryption: EncryptionService,
-    pub(crate) key_fingerprint: KeyFingerprint,
-    pub(crate) writers: BTreeSet<String>,
-}
-
-pub(crate) type CirclePackageAccesses =
-    BTreeMap<(super::circle::CircleId, super::circle::CircleControlCoord), CirclePackageAccess>;
-
 pub(crate) fn parse_candidate_store_package(
     candidate: &Candidate,
     bytes: &[u8],

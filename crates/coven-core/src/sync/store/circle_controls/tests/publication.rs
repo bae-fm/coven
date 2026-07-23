@@ -503,6 +503,61 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         )
         .await
         .expect("add Circle member");
+    let prior_control = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .expect("load pre-close Circle control")
+        .0
+        .control
+        .coord;
+    let tables = db.synced_tables().to_vec();
+    let write_id = db.new_write_id();
+    let captured_write_id = write_id.clone();
+    let routing = EncryptionService::from_key([42; 32]);
+    db.call(move |connection| {
+        StoreDatabase::run_internal_store_write_transaction_on(
+            connection,
+            &tables,
+            Some(&routing),
+            captured_write_id,
+            |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            "00000000-0000-4000-8000-000000000001",
+                            circle_id.to_string(),
+                            "0000000002500-0000-owner",
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            },
+        )
+    })
+    .await
+    .expect("capture pre-close Circle row");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish pre-close Circle package");
+    let package_commit_ref = match db
+        .write_status(&write_id)
+        .await
+        .expect("load pre-close Circle write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("pre-close Circle write was not published: {status:?}"),
+    };
+    let (package_commit, package_author) = crate::sync::store::pull::load_commit_with_author(
+        &store.storage,
+        &store.root,
+        &package_commit_ref,
+    )
+    .await
+    .expect("load pre-close Circle package commit");
+    assert_eq!(package_commit.circle_packages().len(), 1);
 
     let operation_id = components
         .remove_circle_member(circle_id, member_pubkey)
@@ -524,6 +579,33 @@ async fn member_removal_activates_an_exact_epoch_close_and_blocks_authoring() {
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .is_err());
+    let historical_access = StoreDatabase::new(&db)
+        .circle_package_access(circle_id, prior_control)
+        .await
+        .expect("load historical pre-close access")
+        .expect("historical pre-close access remains retained");
+    assert!(historical_access
+        .writers
+        .contains(&keys::public_key_hex(&signer)));
+    let loaded_packages = match crate::sync::store::pull::load_applicable_circle_packages(
+        &StoreDatabase::new(&db),
+        &store.storage,
+        &package_commit_ref,
+        &package_commit,
+        &[],
+        &package_author,
+    )
+    .await
+    {
+        Ok(packages) => packages,
+        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+            panic!("load late pre-close Circle package from retained access: {error}")
+        }
+        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+            panic!("load late pre-close Circle package from retained access: {error}")
+        }
+    };
+    assert_eq!(loaded_packages.len(), 1);
 
     components
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)

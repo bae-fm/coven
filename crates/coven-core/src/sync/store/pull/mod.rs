@@ -14,7 +14,6 @@ use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup;
 use crate::changeset::RowChange;
 use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
-use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::audience_package::{AudiencePackage, PackageAudience};
@@ -98,8 +97,7 @@ pub(crate) use join_activation::*;
 pub(crate) use join_validation::*;
 pub(crate) use model::{
     commit_stream_id, held_commit, held_dependency, held_package, parse_candidate_circle_package,
-    parse_candidate_store_package, Candidate, CirclePackageAccess, CirclePackageAccesses,
-    LoadedCirclePackage, StorePullFuture,
+    parse_candidate_store_package, Candidate, LoadedCirclePackage, StorePullFuture,
 };
 pub use model::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
