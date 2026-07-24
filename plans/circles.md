@@ -98,6 +98,9 @@ rebuild the deleted choice.
 - Retained replay applies old-epoch Circle packages only through the accepted
   exact cutoff. Activating the successor cutoff atomically rebuilds the live
   projection, and a conflicting commit at an accepted coordinate fails loud.
+  Commit positions and device-state snapshots are facts accepted at commit time,
+  maintained incrementally by materialization and retraction; a filtered replay
+  never recomputes them, so only explicit retraction removes them.
 - Later-discovered old-epoch packages reopen their exact retained verified
   activation. Package decryption, key selection, and writer authority therefore
   remain available while the Circle's current state is closing.
@@ -124,11 +127,15 @@ rebuild the deleted choice.
   per participant (a response or an exclusion ref); its verifier recomputes the
   cutoff over the response arms and verifies each exclusion arm's slot, signature,
   and Owner authority against the actual slot contents, refusing an outcome that
-  names an exclusion for a slot that holds a response. Enforcing that an excluded
-  device resets from the successor bootstrap before it writes or acknowledges —
-  detection at pull, projection reset through bootstrap-seeded replay, and the
-  typed publication-context refusal until coverage records the successor
-  bootstrap — is not yet implemented.
+  names an exclusion for a slot that holds a response. An excluded device resets
+  from the successor bootstrap before it writes or acknowledges: detection at
+  pull derives strictly from the verified outcome and records a durable
+  exclusion; the reset installs the successor bootstrap and rebuilds the Circle
+  projection through bootstrap-seeded replay, dropping beyond-cutoff acceptance;
+  and the publication context refuses with the typed `ExcludedDeviceMustReset`
+  until the successor bootstrap's coverage records. A device that cannot yet read
+  the bootstrap holds the successor and stays gated until a later pull completes
+  the reset.
 - Pull derives effective Store membership from both the latest verified
   membership chain and the exact chain resulting from each candidate. When the
   candidate causally includes the latest chain, its result governs. When the
@@ -296,8 +303,11 @@ rebuild the deleted choice.
    permanent-nonactivation proof — a different verified winner already holds the
    candidate's successor slot, or the author was excluded — exact-deleting the
    candidate-exclusive objects and clearing the journal row, resumable from a
-   durable `Discarding` state. Finish the excluded-device bootstrap reset and
-   publication gate.
+   durable `Discarding` state. The excluded-device bootstrap reset and
+   publication gate are implemented: a pull detects the local device's exclusion
+   from the verified successor outcome, resets the projection through
+   bootstrap-seeded replay, and refuses publication with the typed
+   `ExcludedDeviceMustReset` until the successor bootstrap coverage records.
 1. Circle acknowledgement and standalone-snapshot authoring, publication,
    bootstrap-machinery install, snapshot acknowledgement-stability gating, and
    mixed Store-and-Circle restore staging are implemented. Restore re-resolves the

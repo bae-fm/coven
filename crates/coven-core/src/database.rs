@@ -227,6 +227,17 @@ pub enum DbError {
     Message(String),
     #[error("database error: Store protocol root hash is absent")]
     StoreRootHashMissing,
+    /// The local device was excluded from a Circle epoch close and has not yet
+    /// reset its projection from the successor bootstrap, so it cannot publish
+    /// into the Circle. Stays matchable at the publication boundary rather than
+    /// flattening into a message.
+    #[error(
+        "device excluded from circle {circle_id} close {close_id} must reset before publishing"
+    )]
+    ExcludedDeviceMustReset {
+        circle_id: crate::sync::circle::CircleId,
+        close_id: crate::sync::circle::CircleEpochCloseId,
+    },
 }
 
 impl DbError {
@@ -234,6 +245,7 @@ impl DbError {
         match self {
             Self::Message(message) => message,
             Self::StoreRootHashMissing => "Store protocol root hash is absent".to_string(),
+            other @ Self::ExcludedDeviceMustReset { .. } => other.to_string(),
         }
     }
 }

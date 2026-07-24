@@ -366,6 +366,32 @@ pub(super) async fn apply_candidate(
             )))
         }
     };
+    // An excluded device that cannot yet read its successor bootstrap records the
+    // exclusion now — detection is derived from the verified outcome, not the
+    // bootstrap — and holds the successor. Its position advances only once a later
+    // pull reads the bootstrap and reseeds; publication stays gated meanwhile.
+    if !verified_circle_activations
+        .bootstrap_pending_exclusions()
+        .is_empty()
+    {
+        let pending = verified_circle_activations
+            .bootstrap_pending_exclusions()
+            .to_vec();
+        database
+            .sqlite()
+            .call(move |conn| {
+                for exclusion in &pending {
+                    crate::sync::store::database::StoreDatabase::record_circle_close_exclusion_on(
+                        conn, exclusion,
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+        return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+            "excluded device awaiting its successor bootstrap to reset".to_string(),
+        )));
+    }
     let circle_packages = match load_applicable_circle_packages(
         database,
         storage,
@@ -1420,6 +1446,13 @@ async fn commit_candidate(
                     })
             });
     let installs_circle_bootstrap = !materialization.circle_activations.bootstraps().is_empty();
+    // The local device's own exclusions from the successor outcomes this commit
+    // activates — derived from the verified outcome, never unverified storage.
+    // A successor commit finalizes exactly one close, so there is at most one.
+    let local_exclusions = materialization
+        .circle_activations
+        .local_exclusions()
+        .to_vec();
     #[cfg(any(test, feature = "test-utils"))]
     let materialization_failure = db.merge_materialization_failure_injection();
     let applied = db
@@ -1456,6 +1489,15 @@ async fn commit_candidate(
                     return Err(DbError::Message(
                         "injected failure after Merge summary materialization".to_string(),
                     ));
+                }
+                // Detection: record this device's own exclusions from the verified
+                // successor outcome. The reseed below rebuilds the Circle projection
+                // at the cutoff, dropping beyond-cutoff acceptance the close declared
+                // invalid; publication stays gated until its coverage records.
+                for exclusion in &local_exclusions {
+                    crate::sync::store::database::StoreDatabase::record_circle_close_exclusion_on(
+                        &tx, exclusion,
+                    )?;
                 }
                 let retracted = retractions
                     .iter()

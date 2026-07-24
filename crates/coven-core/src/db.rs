@@ -45,6 +45,16 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            circle_close_exclusions,
+            "
+    circle_id TEXT PRIMARY KEY,
+    close_id TEXT NOT NULL,
+    excluded_registration TEXT NOT NULL CHECK (json_valid(excluded_registration)),
+    successor_control TEXT NOT NULL CHECK (json_valid(successor_control)),
+    activating_commit TEXT NOT NULL CHECK (json_valid(activating_commit))
+"
+        );
+        $visit!(
             retained_merge_materializations,
             "
     device_id TEXT NOT NULL,

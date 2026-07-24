@@ -46,6 +46,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "circle_bootstrap_coverage",
         ReplayTableDisposition::Preserve,
     ),
+    ("circle_close_exclusions", ReplayTableDisposition::Preserve),
     (
         "circle_control_activations",
         ReplayTableDisposition::Replace,
@@ -69,7 +70,14 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "local_store_protocol_root",
         ReplayTableDisposition::Preserve,
     ),
-    ("materialized_commits", ReplayTableDisposition::Replace),
+    // A commit's position is a fact accepted at commit time, maintained
+    // incrementally by materialization and retraction — never rebuilt by a
+    // projection replay. A filtered replay (one that omits covered or
+    // beyond-cutoff Circle packages) would re-derive the commit's retained-input
+    // hash from its filtered packages and drift from the preserved
+    // `retained_merge_materializations` row, breaking the `materialized_commits`
+    // foreign key. Only explicit retraction removes these rows.
+    ("materialized_commits", ReplayTableDisposition::Preserve),
     (
         "merge_retraction_cleanups",
         ReplayTableDisposition::Preserve,
@@ -131,9 +139,12 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "store_device_registration_activations",
         ReplayTableDisposition::Replace,
     ),
+    // Preserved for the same reason as `materialized_commits`: a commit's
+    // derived device state is accepted at commit time, never recomputed by a
+    // filtered replay; only explicit retraction removes it.
     (
         "store_device_state_snapshots",
-        ReplayTableDisposition::Replace,
+        ReplayTableDisposition::Preserve,
     ),
     (
         "store_protocol_root_authority",

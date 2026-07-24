@@ -321,6 +321,19 @@ impl InMemoryCloudHome {
         slot
     }
 
+    /// Snapshot the bytes stored at one exact slot, or `None` if absent.
+    pub fn stored_exact_bytes(&self, slot: &ObjectSlot) -> Option<Vec<u8>> {
+        let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
+        self.writes.lock().unwrap().get(&key).cloned()
+    }
+
+    /// Re-insert bytes at one exact slot, restoring an object dropped by
+    /// [`remove_exact_object`](Self::remove_exact_object).
+    pub fn restore_exact_object(&self, slot: &ObjectSlot, bytes: Vec<u8>) {
+        let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
+        self.writes.lock().unwrap().insert(key, bytes);
+    }
+
     /// Remove one exact object without recording a protocol delete.
     pub fn remove_exact_object(&self, slot: &ObjectSlot) {
         let key = Self::exact_storage_key(slot).expect("test exact slot is valid");

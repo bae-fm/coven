@@ -464,11 +464,55 @@ impl StoreDatabase {
             ))
     }
 
+    /// The close this device was excluded from and has not yet reset, if
+    /// publication into `circle_id` must be refused. Derived from durable
+    /// verified state: an exclusions row whose successor the bootstrap coverage
+    /// does not yet record. Once the reseed records that coverage the gate
+    /// derives clear — nothing is ever unset.
+    pub(crate) fn circle_close_exclusion_reset_pending_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Option<crate::sync::circle::CircleEpochCloseId>, DbError> {
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT close_id, activating_commit FROM circle_close_exclusions
+                 WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((close_id, activating_commit)) = row else {
+            return Ok(None);
+        };
+        let coverage_commit: Option<String> = conn
+            .query_row(
+                "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if coverage_commit.as_deref() == Some(activating_commit.as_str()) {
+            return Ok(None);
+        }
+        let close_id = serde_json::from_str(&close_id).map_err(|error| {
+            DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
+        })?;
+        Ok(Some(close_id))
+    }
+
     pub(crate) fn circle_publication_context_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
         expected_control: &crate::sync::circle::CircleControlCoord,
     ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        if let Some(close_id) = Self::circle_close_exclusion_reset_pending_on(conn, circle_id)? {
+            return Err(DbError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            });
+        }
         let state = Self::circle_current_state_on(conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
         if state.is_deleted() {
@@ -481,6 +525,50 @@ impl StoreDatabase {
                 DbError::Message(format!("Circle {circle_id} has no active publication key"))
             })?;
         Ok((access.encryption, access.key_fingerprint))
+    }
+
+    /// Record this device's own exclusion from a Circle epoch close, derived from
+    /// the verified successor outcome at materialization. The row is keyed by
+    /// Circle: a later close for the same Circle supersedes it. It is never
+    /// deleted — the publication gate derives clear once the successor bootstrap's
+    /// coverage records.
+    pub(crate) fn record_circle_close_exclusion_on(
+        conn: &Connection,
+        exclusion: &crate::sync::store::circle_controls::LocalCircleExclusion,
+    ) -> Result<(), DbError> {
+        let circle_id = exclusion.circle_id.to_string();
+        let close_id = serde_json::to_string(&exclusion.close_id)
+            .map_err(|error| DbError::Message(format!("serialize close exclusion id: {error}")))?;
+        let excluded = serde_json::to_string(&exclusion.excluded).map_err(|error| {
+            DbError::Message(format!("serialize close exclusion registration: {error}"))
+        })?;
+        let successor_control =
+            serde_json::to_string(&exclusion.successor_control).map_err(|error| {
+                DbError::Message(format!("serialize close exclusion successor: {error}"))
+            })?;
+        let activating_commit =
+            serde_json::to_string(&exclusion.activating_commit).map_err(|error| {
+                DbError::Message(format!("serialize close exclusion activation: {error}"))
+            })?;
+        conn.execute(
+            "INSERT INTO circle_close_exclusions
+             (circle_id, close_id, excluded_registration, successor_control, activating_commit)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(circle_id) DO UPDATE SET
+               close_id = excluded.close_id,
+               excluded_registration = excluded.excluded_registration,
+               successor_control = excluded.successor_control,
+               activating_commit = excluded.activating_commit",
+            rusqlite::params![
+                circle_id,
+                close_id,
+                excluded,
+                successor_control,
+                activating_commit,
+            ],
+        )
+        .map_err(DbError::from)?;
+        Ok(())
     }
 
     pub(crate) async fn circle_package_access(

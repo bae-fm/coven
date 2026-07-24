@@ -6,15 +6,29 @@ use super::verify_control_context;
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::sync::circle::{
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
-    CircleControlCoord, CircleId, CircleMetadata, PreparedAccessLeaf, PreparedCircleAccess,
-    PreparedCircleControl,
+    CircleControlCoord, CircleEpochCloseId, CircleId, CircleMetadata, PreparedAccessLeaf,
+    PreparedCircleAccess, PreparedCircleControl,
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store_commit::{
     CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, ObjectHash, StoreBatchCommit,
-    StoreBatchCommitRef, StoreDeviceRegistration, StreamActivation, StreamActivationId,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StreamActivation,
+    StreamActivationId,
 };
+
+/// The local device's own exclusion from a Circle epoch close, derived strictly
+/// from the verified successor outcome at materialization. It records the exact
+/// close and successor an excluded device must reset from. Never derived from
+/// unverified storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalCircleExclusion {
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub excluded: StoreDeviceRegistrationRef,
+    pub successor_control: CircleControlCoord,
+    pub activating_commit: StoreBatchCommitRef,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedCircleReference {
@@ -315,6 +329,15 @@ pub(crate) struct VerifiedCircleActivations {
     pub(super) circles: Vec<VerifiedCircleReference>,
     pub(super) stream_activations: VerifiedStreamActivations,
     pub(super) bootstraps: Vec<VerifiedCircleImage>,
+    /// Transient: the local device's exclusions detected from the verified
+    /// outcomes this activation carries. Never serialized into the retained
+    /// form — a reset is dispatched from the durable `circle_close_exclusions`
+    /// row this records, not from replayed activations.
+    pub(super) local_exclusions: Vec<LocalCircleExclusion>,
+    /// Transient: exclusions whose successor bootstrap could not be read this
+    /// pull. The pull records the exclusion and holds the successor; a later
+    /// pull that reads the bootstrap completes the reset.
+    pub(super) bootstrap_pending_exclusions: Vec<LocalCircleExclusion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +383,8 @@ impl VerifiedCircleActivations {
             circles: Vec::new(),
             stream_activations: VerifiedStreamActivations::none(commit, commit_ref)?,
             bootstraps: Vec::new(),
+            local_exclusions: Vec::new(),
+            bootstrap_pending_exclusions: Vec::new(),
         })
     }
 
@@ -378,6 +403,8 @@ impl VerifiedCircleActivations {
                 commit, commit_ref,
             )?,
             bootstraps: Vec::new(),
+            local_exclusions: Vec::new(),
+            bootstrap_pending_exclusions: Vec::new(),
         })
     }
 
@@ -391,6 +418,14 @@ impl VerifiedCircleActivations {
 
     pub(crate) fn bootstraps(&self) -> &[VerifiedCircleImage] {
         &self.bootstraps
+    }
+
+    pub(crate) fn local_exclusions(&self) -> &[LocalCircleExclusion] {
+        &self.local_exclusions
+    }
+
+    pub(crate) fn bootstrap_pending_exclusions(&self) -> &[LocalCircleExclusion] {
+        &self.bootstrap_pending_exclusions
     }
 
     pub(crate) fn to_retained(&self) -> Result<Vec<u8>, CircleOperationError> {
@@ -504,6 +539,8 @@ impl VerifiedCircleActivations {
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
             bootstraps: retained.bootstraps,
+            local_exclusions: Vec::new(),
+            bootstrap_pending_exclusions: Vec::new(),
         })
     }
 }

@@ -32,6 +32,11 @@ pub enum CircleOperationError {
         circle_id: CircleId,
         removed_members: Vec<String>,
     },
+    #[error("device excluded from circle {circle_id} close {close_id} must reset from the successor bootstrap before publishing")]
+    ExcludedDeviceMustReset {
+        circle_id: CircleId,
+        close_id: crate::sync::circle::CircleEpochCloseId,
+    },
     #[error("circle {circle_id} has no retained control conflict to resolve")]
     NotConflicted { circle_id: CircleId },
     #[error("circle {circle_id} control conflict does not retain the chosen branch")]
@@ -67,6 +72,15 @@ pub enum CircleOperationError {
 
 impl From<crate::database::DbError> for CircleOperationError {
     fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.into_message())
+        match error {
+            crate::database::DbError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            } => Self::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            },
+            other => Self::Database(other.into_message()),
+        }
     }
 }

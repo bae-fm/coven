@@ -8,9 +8,9 @@ use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
     circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
     verify_circle_semantic_prefix, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
-    CircleControl, CircleControlCoord, CircleControlState, CircleId, CircleMetadataHeadRef,
-    CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedAccessLeaf,
-    PreparedCircleControl, ResolvedCircleRoster,
+    CircleControl, CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId,
+    CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef,
+    PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::storage::{
@@ -20,8 +20,8 @@ use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef, StreamActivation,
-    StreamActivationId,
+    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreRootRef, StreamActivation, StreamActivationId,
 };
 
 mod context;
@@ -36,10 +36,19 @@ use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle
 #[cfg(test)]
 use state::CircleCurrentControl;
 pub(crate) use state::{
-    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, VerifiedCircleAccess,
-    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
-    VerifiedStreamActivationPrefix, VerifiedStreamActivations,
+    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, LocalCircleExclusion,
+    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage,
+    VerifiedCircleReference, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
+
 };
+
+/// The verified epoch-close settlement a successor activation carries: the exact
+/// close it finalizes and the device registrations the Owner excluded. Derived
+/// only from the verified outcome, never from unverified storage.
+struct VerifiedCloseOutcome {
+    close_id: CircleEpochCloseId,
+    exclusions: Vec<StoreDeviceRegistrationRef>,
+}
 
 struct VerifiedAccessPair {
     reference: CircleAccessObjectRef,
@@ -178,7 +187,7 @@ async fn verify_epoch_close(
     objects: &CircleActivationObjects,
     encryption: EncryptionService,
     roster_chain: &crate::sync::circle::CircleRosterChain,
-) -> Result<(), CircleOperationError> {
+) -> Result<Option<VerifiedCloseOutcome>, CircleOperationError> {
     let CircleControlState::EpochClose(close) = control.value.state() else {
         // The successor is an ActiveEpoch. Dispatch on the settled slot object,
         // never the epoch origin: a reopened founder-origin epoch keeps its
@@ -190,7 +199,8 @@ async fn verify_epoch_close(
                     "Circle epoch reopen also carries a close outcome or intent".to_string(),
                 ));
             }
-            return verify_epoch_reopen(database, storage, commit, control, objects).await;
+            verify_epoch_reopen(database, storage, commit, control, objects).await?;
+            return Ok(None);
         }
         if objects.close_intent.is_some() {
             return Err(CircleOperationError::InvalidState(
@@ -261,7 +271,7 @@ async fn verify_epoch_close(
             "Circle epoch-close participants differ from the frozen active devices".to_string(),
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 async fn load_verified_epoch_close_intent(
@@ -324,7 +334,7 @@ async fn verify_epoch_close_outcome(
     control: &PreparedCircleControl,
     objects: &CircleActivationObjects,
     encryption: EncryptionService,
-) -> Result<(), CircleOperationError> {
+) -> Result<Option<VerifiedCloseOutcome>, CircleOperationError> {
     let active = control.value.active_epoch().ok_or_else(|| {
         CircleOperationError::InvalidState(
             "Circle epoch-close outcome has no active successor".to_string(),
@@ -366,7 +376,7 @@ async fn verify_epoch_close_outcome(
                 "Circle active successor of an epoch close carries no settlement".to_string(),
             ));
         }
-        return Ok(());
+        return Ok(None);
     };
     if !predecessor_is_close {
         // A closed-origin control whose exact predecessor is already an active
@@ -557,7 +567,19 @@ async fn verify_epoch_close_outcome(
             "Circle epoch-close outcome failed exact verification".to_string(),
         ));
     }
-    Ok(())
+    let exclusions = settlements
+        .into_iter()
+        .filter_map(|(settlement, _)| match settlement {
+            crate::sync::circle::CircleEpochCloseSettlement::Exclusion(reference) => {
+                Some(reference.registration)
+            }
+            crate::sync::circle::CircleEpochCloseSettlement::Response(_) => None,
+        })
+        .collect();
+    Ok(Some(VerifiedCloseOutcome {
+        close_id: outcome.close_id,
+        exclusions,
+    }))
 }
 
 /// Load the reopening control's exact predecessor close coordinate. The reopen's
@@ -1475,6 +1497,17 @@ pub(crate) async fn load_circle_activations_with_prefix(
     }
     let mut activations = Vec::with_capacity(commit.circle_controls().len());
     let mut bootstraps = Vec::new();
+    let mut local_exclusions = Vec::new();
+    let mut bootstrap_pending_exclusions = Vec::new();
+    let local_device_id = match identity {
+        Some(_) => {
+            database
+                .sqlite()
+                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await?
+        }
+        None => None,
+    };
     let mut consumed_stream_activations = BTreeSet::new();
     for reference in commit.circle_controls() {
         let objects = reference.objects();
@@ -1732,7 +1765,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                 let resolved = roster_chain
                     .try_resolved()
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-                verify_epoch_close(
+                let close_outcome = verify_epoch_close(
                     database,
                     storage,
                     commit,
@@ -1742,6 +1775,23 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     &roster_chain,
                 )
                 .await?;
+                if let (Some(outcome), Some(local_device_id)) =
+                    (&close_outcome, local_device_id.as_deref())
+                {
+                    if let Some(excluded) = outcome
+                        .exclusions
+                        .iter()
+                        .find(|registration| registration.device_id.to_string() == local_device_id)
+                    {
+                        local_exclusions.push(LocalCircleExclusion {
+                            circle_id: reference.circle_id(),
+                            close_id: outcome.close_id,
+                            excluded: excluded.clone(),
+                            successor_control: control.coord.clone(),
+                            activating_commit: commit_ref.clone(),
+                        });
+                    }
+                }
                 let resolved_members = resolved.members();
                 if !resolved_members.contains_key(&leaf.recipient_pubkey) {
                     return Err(CircleOperationError::InvalidState(
@@ -1780,19 +1830,38 @@ pub(crate) async fn load_circle_activations_with_prefix(
                     ..
                 } = &leaf.disposition
                 {
-                    bootstraps.push(
-                        build_verified_leaf_bootstrap_image(
-                            database,
-                            storage,
-                            commit.store_root_hash,
-                            leaf,
-                            &control,
-                            bootstrap,
-                            encryption,
-                            routing_key,
-                        )
-                        .await?,
-                    );
+                    // An excluded device that cannot yet read its successor bootstrap
+                    // image defers the reset: flag the exclusion so the pull records
+                    // it (detection is derived from the verified outcome above, not the
+                    // bootstrap) and holds the successor. Its publication stays gated
+                    // until a later pull reads the image and the reseed records
+                    // coverage. The image read is the only source of a `CircleObject`
+                    // error here — verification and blob checks fail as `InvalidState`.
+                    match build_verified_leaf_bootstrap_image(
+                        database,
+                        storage,
+                        commit.store_root_hash,
+                        leaf,
+                        &control,
+                        bootstrap,
+                        encryption,
+                        routing_key,
+                    )
+                    .await
+                    {
+                        Ok(image) => bootstraps.push(image),
+                        Err(error @ CircleOperationError::Object(_)) => {
+                            if let Some(exclusion) = local_exclusions
+                                .iter()
+                                .find(|exclusion| exclusion.circle_id == reference.circle_id())
+                            {
+                                bootstrap_pending_exclusions.push(exclusion.clone());
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Some(VerifiedCircleActive {
                     roster: resolved,
@@ -1830,6 +1899,8 @@ pub(crate) async fn load_circle_activations_with_prefix(
         circles: activations,
         stream_activations,
         bootstraps,
+        local_exclusions,
+        bootstrap_pending_exclusions,
     })
 }
 
