@@ -184,7 +184,9 @@ impl CircleOperationJournal {
                 let prepared = prepared_for(&reference.object)?;
                 materials.push(crate::sync::remote_object::CandidateObjectMaterial {
                     object: reference.object.clone(),
-                    canonical_semantic_bytes: outcome.to_bytes(),
+                    canonical_semantic_bytes:
+                        crate::sync::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
+                            .to_bytes(),
                     stored_bytes: prepared.stored_bytes().to_vec(),
                 });
             }
@@ -192,6 +194,33 @@ impl CircleOperationJournal {
             _ => {
                 return Err(CircleOperationError::Journal(
                     "Circle epoch-close outcome does not match its signed candidate graph"
+                        .to_string(),
+                ));
+            }
+        }
+        match (
+            &circle_reference.objects().close_cancellation,
+            &operation.creation.close_cancellation,
+        ) {
+            (Some(reference), Some(cancellation))
+                if reference.close_id == cancellation.close_id
+                    && reference.cancellation_hash == cancellation.cancellation_hash() =>
+            {
+                let prepared = prepared_for(&reference.object)?;
+                materials.push(crate::sync::remote_object::CandidateObjectMaterial {
+                    object: reference.object.clone(),
+                    canonical_semantic_bytes:
+                        crate::sync::circle::CircleEpochCloseSlotValue::Cancellation(
+                            cancellation.clone(),
+                        )
+                        .to_bytes(),
+                    stored_bytes: prepared.stored_bytes().to_vec(),
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(CircleOperationError::Journal(
+                    "Circle epoch-close cancellation does not match its signed candidate graph"
                         .to_string(),
                 ));
             }
@@ -418,7 +447,11 @@ impl CircleOperationJournal {
         }
         let commit = self.commit()?;
         let expected_write_id = if self.is_finalizing() {
-            self.operation_id.finalization_write_id()
+            if self.operation().creation.close_cancellation.is_some() {
+                self.operation_id.cancellation_write_id()
+            } else {
+                self.operation_id.finalization_write_id()
+            }
         } else {
             crate::WriteId::from_generated(self.operation_id.as_str().to_string())
         };

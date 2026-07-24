@@ -180,6 +180,18 @@ async fn verify_epoch_close(
     roster_chain: &crate::sync::circle::CircleRosterChain,
 ) -> Result<(), CircleOperationError> {
     let CircleControlState::EpochClose(close) = control.value.state() else {
+        // The successor is an ActiveEpoch. Dispatch on the settled slot object,
+        // never the epoch origin: a reopened founder-origin epoch keeps its
+        // `Founder` origin, so origin-based dispatch would accept a forged reopen
+        // that carries no cancellation.
+        if objects.close_cancellation.is_some() {
+            if objects.close_outcome.is_some() || objects.close_intent.is_some() {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle epoch reopen also carries a close outcome or intent".to_string(),
+                ));
+            }
+            return verify_epoch_reopen(database, storage, commit, control, objects).await;
+        }
         if objects.close_intent.is_some() {
             return Err(CircleOperationError::InvalidState(
                 "active Circle control carries an epoch-close intent".to_string(),
@@ -189,6 +201,7 @@ async fn verify_epoch_close(
             .await;
     };
     if objects.close_outcome.is_some()
+        || objects.close_cancellation.is_some()
         || close.frozen_device_state != commit.device_state
         || close.provisional_frontier
             != commit
@@ -330,6 +343,17 @@ async fn verify_epoch_close_outcome(
                 "founder Circle epoch carries a close outcome".to_string(),
             ));
         }
+        // A founder-origin active epoch is an ordinary transition only when its
+        // predecessor is itself active. An active successor of an epoch close must
+        // carry a settlement — a finalize outcome (origin `Closed`, handled above)
+        // or a reopen cancellation (dispatched before this function). Reaching here
+        // over an `EpochClose` predecessor is the forged reopen the cancellation
+        // dispatch key closes: reject it rather than trusting the `Founder` origin.
+        if predecessor_is_epoch_close(database, control).await? {
+            return Err(CircleOperationError::InvalidState(
+                "Circle active successor of an epoch close carries no settlement".to_string(),
+            ));
+        }
         return Ok(());
     };
     let outcome_ref = objects.close_outcome.as_ref().ok_or_else(|| {
@@ -387,12 +411,17 @@ async fn verify_epoch_close_outcome(
         &outcome_prefix,
     )
     .await?;
-    let outcome: crate::sync::circle::CircleEpochCloseOutcome =
-        serde_json::from_slice(&outcome_bytes).map_err(|error| {
+    let crate::sync::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
+        crate::sync::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(|error| {
             CircleOperationError::InvalidState(format!("parse Circle epoch-close outcome: {error}"))
-        })?;
-    if outcome.to_bytes() != outcome_bytes
-        || outcome.outcome_hash() != *outcome_hash
+        })?
+    else {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch-close outcome slot holds a cancellation for a finalized successor"
+                .to_string(),
+        ));
+    };
+    if outcome.outcome_hash() != *outcome_hash
         || crate::sync::circle::CircleEpochCloseOutcomeRef::from_outcome(
             &outcome,
             outcome_ref.object.clone(),
@@ -456,6 +485,150 @@ async fn verify_epoch_close_outcome(
     {
         return Err(CircleOperationError::InvalidState(
             "Circle epoch-close outcome failed exact verification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Load the reopening control's exact predecessor close coordinate. The reopen's
+/// same-stream predecessor is named by `previous_control_hash` and carried in the
+/// covered control heads.
+fn reopen_predecessor_coord(
+    control: &PreparedCircleControl,
+) -> Result<crate::sync::circle::CircleControlCoord, CircleOperationError> {
+    let active = control.value.active_epoch().ok_or_else(|| {
+        CircleOperationError::InvalidState("Circle reopen has no active successor".to_string())
+    })?;
+    let previous = control.value.previous_control_hash().ok_or_else(|| {
+        CircleOperationError::InvalidState(
+            "Circle active successor of an epoch close names no predecessor".to_string(),
+        )
+    })?;
+    active
+        .covered_control_heads
+        .iter()
+        .find(|head| head.coord.control_hash == previous)
+        .map(|head| head.coord.clone())
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "Circle successor predecessor is absent from its covered control heads".to_string(),
+            )
+        })
+}
+
+/// Whether the active successor's exact predecessor is an `EpochClose`. Used to
+/// reject a founder-origin active successor that carries no close settlement.
+async fn predecessor_is_epoch_close(
+    database: &StoreDatabase,
+    control: &PreparedCircleControl,
+) -> Result<bool, CircleOperationError> {
+    if control.value.previous_control_hash().is_none() {
+        return Ok(false);
+    }
+    let coord = reopen_predecessor_coord(control)?;
+    let Some(predecessor) = database
+        .verified_circle_activation(control.value.circle_id, coord)
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        predecessor.control.value.state(),
+        CircleControlState::EpochClose(_)
+    ))
+}
+
+/// Verify an `EpochClose → ActiveEpoch` reopen. The reopen is valid only when the
+/// exact-read outcome slot of the named predecessor close holds an Owner-signed
+/// cancellation, and the successor restores the frozen epoch's protocol identity
+/// exactly — re-issuing only the control-bound access material.
+async fn verify_epoch_reopen(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+    control: &PreparedCircleControl,
+    objects: &CircleActivationObjects,
+) -> Result<(), CircleOperationError> {
+    let active = control.value.active_epoch().ok_or_else(|| {
+        CircleOperationError::InvalidState(
+            "Circle epoch reopen has no active successor".to_string(),
+        )
+    })?;
+    let cancellation_ref = objects.close_cancellation.as_ref().ok_or_else(|| {
+        CircleOperationError::InvalidState(
+            "Circle epoch reopen omits its exact cancellation".to_string(),
+        )
+    })?;
+    let close_coord = reopen_predecessor_coord(control)?;
+    let predecessor = database
+        .verified_circle_activation(control.value.circle_id, close_coord.clone())
+        .await?
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "Circle reopen retained no exact close activation".to_string(),
+            )
+        })?;
+    let CircleControlState::EpochClose(close) = predecessor.control.value.state() else {
+        return Err(CircleOperationError::InvalidState(
+            "Circle reopen predecessor is an active epoch, not a close".to_string(),
+        ));
+    };
+    if predecessor.control.coord != close_coord
+        || cancellation_ref.close_id != close.close_id
+        || cancellation_ref.object.slot() != &close.outcome_slot
+        || !control.value.causally_covers(&predecessor.control.value)
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle reopen differs from its exact epoch close".to_string(),
+        ));
+    }
+    let cancellation_prefix = crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+        control.value.circle_id,
+        close.close_id,
+    );
+    let cancellation_bytes = read_exact_circle_object(
+        storage,
+        &ProtocolObjectContext::store_encrypted(
+            commit.store_root_hash,
+            ProtocolObjectDomain::CircleEpochCloseOutcome,
+        ),
+        &cancellation_ref.object,
+        &cancellation_prefix,
+    )
+    .await?;
+    let crate::sync::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
+        crate::sync::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes).map_err(
+            |error| {
+                CircleOperationError::InvalidState(format!(
+                    "parse Circle epoch-close cancellation: {error}"
+                ))
+            },
+        )?
+    else {
+        return Err(CircleOperationError::InvalidState(
+            "Circle reopen outcome slot holds a final outcome, not a cancellation".to_string(),
+        ));
+    };
+    if !cancellation.verify_for(&predecessor.control)
+        || crate::sync::circle::CircleEpochCloseCancellationRef::from_cancellation(
+            &cancellation,
+            cancellation_ref.object.clone(),
+        )? != *cancellation_ref
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle epoch-close cancellation failed exact verification".to_string(),
+        ));
+    }
+    let frozen = &close.frozen_epoch;
+    if active.common.epoch_id != frozen.common.epoch_id
+        || active.common.key_fingerprint != frozen.common.key_fingerprint
+        || active.common.owners != frozen.common.owners
+        || active.common.origin != frozen.common.origin
+        || active.metadata != frozen.metadata
+        || active.roster != frozen.roster
+    {
+        return Err(CircleOperationError::InvalidState(
+            "Circle reopen successor differs from its frozen epoch".to_string(),
         ));
     }
     Ok(())

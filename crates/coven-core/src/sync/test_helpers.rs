@@ -550,6 +550,7 @@ fn install_test_circle_current_state(
         metadata: draft.metadata,
         close_intent: draft.close_intent,
         close_outcome: None,
+        close_cancellation: None,
         access: draft.access,
         control: draft.control,
     };
@@ -557,6 +558,7 @@ fn install_test_circle_current_state(
         control: control_object,
         close_intent: None,
         close_outcome: None,
+        close_cancellation: None,
         roster_entries,
         roster_heads,
         roster_resolutions: BTreeMap::new(),

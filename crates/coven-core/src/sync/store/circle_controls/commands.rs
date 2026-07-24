@@ -450,6 +450,121 @@ impl Store {
         .await
     }
 
+    /// Cancel the Circle's in-flight epoch close by settling its one outcome slot
+    /// with an Owner-signed cancellation and activating a reopening control that
+    /// restores the frozen epoch. Refuses if no local close operation is waiting
+    /// for responses — a close whose outcome already won the slot has moved out of
+    /// the waiting state and cannot be cancelled.
+    pub(crate) async fn cancel_circle_epoch_close(
+        &self,
+        device_id: &str,
+        circle_id: CircleId,
+        signer: &UserKeypair,
+    ) -> Result<crate::sync::circle::CircleOperationId, CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let identity_pubkey = keys::public_key_hex(signer);
+        let mut journal = database
+            .waiting_circle_operations()
+            .await?
+            .into_iter()
+            .find(|journal| journal.circle_id() == circle_id)
+            .ok_or(CircleOperationError::NoCloseToCancel { circle_id })?;
+        let member_pubkey = match &journal.intent {
+            CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
+            _ => {
+                return Err(CircleOperationError::Journal(format!(
+                    "Circle operation {} waits for close responses without a removal intent",
+                    journal.operation_id
+                )));
+            }
+        };
+        let (current, activation_commit_ref) = database
+            .circle_closing_context(circle_id, &identity_pubkey)
+            .await?;
+        let crate::sync::circle::CircleControlState::EpochClose(close) =
+            current.control.value.state()
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle close-cancellation context is active".to_string(),
+            ));
+        };
+        if close.close_id
+            != crate::sync::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
+        {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} differs from its close id",
+                journal.operation_id
+            )));
+        }
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let (activation_commit, _) = crate::sync::store::pull::load_commit_with_author(
+            storage,
+            &root,
+            &activation_commit_ref,
+        )
+        .await?;
+        if activation_commit.candidate_family() != current.candidate_family {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} closing state differs from its activating Store commit"
+            )));
+        }
+        let reference = activation_commit
+            .circle_controls()
+            .iter()
+            .find(|reference| {
+                reference.circle_id() == circle_id && reference.control() == &current.control.coord
+            })
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} closing control is absent from its activating Store commit"
+                ))
+            })?;
+        let prepared = Box::pin(prepare_circle_operation_request(
+            database,
+            storage,
+            device_id,
+            CircleOperationRequest::CancelEpochClose(Box::new(CircleCancelEpochCloseRequest {
+                operation_id: journal.operation_id.clone(),
+                circle_id,
+                member_pubkey,
+                current,
+                previous_control: reference.clone(),
+            })),
+            signer,
+        ))
+        .await?;
+        if prepared.operation_id != journal.operation_id
+            || prepared.circle_id != circle_id
+            || prepared.intent != journal.intent
+        {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} cancellation changed its durable identity",
+                journal.operation_id
+            )));
+        }
+        journal.begin_finalization(prepared.operation().clone())?;
+        database
+            .begin_circle_operation_finalization(journal.clone())
+            .await?;
+        Box::pin(publish_circle_operation(
+            database,
+            storage,
+            &journal.operation_id,
+            signer,
+            None,
+        ))
+        .await?;
+        Ok(journal.operation_id)
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
@@ -567,6 +682,14 @@ pub(super) struct CircleFinalizeEpochCloseRequest {
     pub(super) bootstrap: crate::sync::store::snapshot::SnapshotCut,
 }
 
+pub(super) struct CircleCancelEpochCloseRequest {
+    pub(super) operation_id: crate::sync::circle::CircleOperationId,
+    pub(super) circle_id: CircleId,
+    pub(super) member_pubkey: String,
+    pub(super) current: CircleAuthoringState,
+    pub(super) previous_control: CircleControlRef,
+}
+
 pub(super) enum CircleOperationRequest {
     Create {
         name: String,
@@ -577,6 +700,7 @@ pub(super) enum CircleOperationRequest {
     RemoveMember(Box<CircleRemoveMemberRequest>),
     ResolveControl(Box<CircleResolveControlRequest>),
     FinalizeEpochClose(Box<CircleFinalizeEpochCloseRequest>),
+    CancelEpochClose(Box<CircleCancelEpochCloseRequest>),
 }
 
 impl CircleOperationRequest {
@@ -597,6 +721,9 @@ impl CircleOperationRequest {
                 chosen: request.chosen.control.coord.clone(),
             },
             Self::FinalizeEpochClose(request) => CircleOperationIntent::RemoveMember {
+                member_pubkey: request.member_pubkey.clone(),
+            },
+            Self::CancelEpochClose(request) => CircleOperationIntent::RemoveMember {
                 member_pubkey: request.member_pubkey.clone(),
             },
         }
@@ -620,12 +747,28 @@ impl CircleOperationRequest {
             Self::FinalizeEpochClose(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
+            Self::CancelEpochClose(request) => {
+                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
         }
     }
 
-    pub(super) fn operation_id(&self) -> Option<&crate::sync::circle::CircleOperationId> {
+    /// The stable operation id and derived write identity for a close settlement.
+    /// Finalize and cancel settle the same durable operation but derive distinct
+    /// write identities, so a crashed settlement resumes as the kind it began as
+    /// rather than being re-derived into the other.
+    pub(super) fn settlement(
+        &self,
+    ) -> Option<(crate::sync::circle::CircleOperationId, crate::WriteId)> {
         match self {
-            Self::FinalizeEpochClose(request) => Some(&request.operation_id),
+            Self::FinalizeEpochClose(request) => Some((
+                request.operation_id.clone(),
+                request.operation_id.finalization_write_id(),
+            )),
+            Self::CancelEpochClose(request) => Some((
+                request.operation_id.clone(),
+                request.operation_id.cancellation_write_id(),
+            )),
             Self::Create { .. }
             | Self::Rename(_)
             | Self::AddMember(_)

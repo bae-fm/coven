@@ -238,6 +238,19 @@ impl CircleOperationId {
             .to_string(),
         )
     }
+
+    pub(crate) fn cancellation_write_id(&self) -> crate::WriteId {
+        crate::WriteId::from_generated(
+            crate::sync::store_commit::ObjectHash::digest(
+                &[
+                    b"coven.circle-epoch-close-cancellation-write.v1\0".as_slice(),
+                    self.as_str().as_bytes(),
+                ]
+                .concat(),
+            )
+            .to_string(),
+        )
+    }
 }
 
 impl fmt::Display for CircleOperationId {
@@ -742,6 +755,7 @@ mod tests {
             control: control_object,
             close_intent: None,
             close_outcome: None,
+            close_cancellation: None,
             roster_entries: BTreeMap::new(),
             roster_heads: Vec::new(),
             roster_resolutions: BTreeMap::new(),

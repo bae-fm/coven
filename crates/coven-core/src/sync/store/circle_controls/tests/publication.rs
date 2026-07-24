@@ -1610,8 +1610,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect("read exact Circle epoch-close outcome");
-    let outcome: crate::sync::circle::CircleEpochCloseOutcome =
-        serde_json::from_slice(&outcome_bytes).expect("parse Circle epoch-close outcome");
+    let crate::sync::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
+        crate::sync::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes)
+            .expect("parse Circle epoch-close outcome slot value")
+    else {
+        panic!("finalized close slot must hold a final outcome");
+    };
     assert!(outcome.verify_for(
         control,
         operation
@@ -2127,4 +2131,718 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
         .await
         .expect("read rejected operation")
         .is_some());
+}
+
+async fn member_pull(fixture: &ClosingFounderCircle) {
+    crate::sync::store::Store::authorize_borrowed(&fixture.member_storage, &fixture.member_db)
+        .await
+        .expect("authorize Circle member Store")
+        .pull(
+            &fixture.member_store_dir,
+            &fixture.member,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("member pull");
+}
+
+/// Publish the member device's oldest pending durable write, returning the number
+/// of Store packages published. Errors while old-epoch publication is frozen —
+/// the closing Circle has no active control to resolve.
+async fn member_push(fixture: &ClosingFounderCircle, stamp: &str) -> Result<u64, String> {
+    let authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.member_storage, &fixture.member_db)
+            .await
+            .map_err(|error| error.to_string())?;
+    let device_id = fixture
+        .member_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read member device id")
+        .expect("member device id is installed");
+    authorized
+        .prepare_pending_store_write(
+            &device_id,
+            stamp,
+            &fixture.member,
+            &fixture.member_store_dir,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    authorized
+        .drain_store_writes()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+struct ClosingFounderCircle {
+    _temp: tempfile::TempDir,
+    store_dir: crate::store_dir::StoreDir,
+    db: Database,
+    store: TestStore,
+    signer: UserKeypair,
+    components: crate::sync::cycle::SyncComponents,
+    circle_id: CircleId,
+    member: UserKeypair,
+    member_db: Database,
+    member_storage: crate::sync::cloud_storage::CloudSyncStorage,
+    _member_temp: tempfile::TempDir,
+    member_store_dir: crate::store_dir::StoreDir,
+    member_pubkey: String,
+    remaining_member_pubkey: String,
+    operation_id: CircleOperationId,
+    prior_epoch: crate::sync::circle::CircleEpochId,
+    prior_fingerprint: crate::KeyFingerprint,
+}
+
+/// Drive a founder Circle to a member removal waiting on close responses, sharing
+/// the removal-test fixture. The returned handles resume from
+/// `CircleOperationState::WaitingForCloseResponses`.
+async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) = persist_merge_operation(&db, name).await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-cancel-owner".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle cancel Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let remaining_member = UserKeypair::generate();
+    let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("circle-cancel-second-member".to_string()),
+        &remaining_member_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        store.storage.store_id(),
+        "Circle cancel Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite remaining Store member");
+    let member_db = open_circle_routing_test_db();
+    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-24T00:00:00Z")
+        .await
+        .expect("activate Store member device");
+
+    let (_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        signer.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = crate::sync::cycle::init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        owner_storage,
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            remaining_member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add remaining Circle member");
+
+    // The member's own device installs the Circle bootstrap and becomes an active
+    // effective member holding the epoch key.
+    let member_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        member.clone(),
+    )
+    .expect("open Circle member storage");
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    crate::sync::store::Store::authorize_borrowed(&member_storage, &member_db)
+        .await
+        .expect("authorize Circle member Store")
+        .pull(
+            &member_store_dir,
+            &member,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("member installs the Circle bootstrap");
+
+    let prior = StoreDatabase::new(&db)
+        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+        .await
+        .expect("load pre-close Circle control")
+        .0;
+    let prior_epoch = prior.control.value.epoch_id();
+    let prior_fingerprint = prior.control.value.key_fingerprint();
+
+    let operation_id = components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("activate Circle epoch close");
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read Circle removal operation")
+            .expect("Circle removal waits for close responses")
+            .state(),
+        CircleOperationState::WaitingForCloseResponses
+    );
+
+    ClosingFounderCircle {
+        _temp,
+        store_dir,
+        db,
+        store,
+        signer,
+        components,
+        circle_id,
+        member,
+        member_db,
+        member_storage,
+        _member_temp,
+        member_store_dir,
+        member_pubkey,
+        remaining_member_pubkey,
+        operation_id,
+        prior_epoch,
+        prior_fingerprint,
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
+    let fixture = setup_closing_founder_circle("circle-cancel-reopen").await;
+
+    // Authoring is frozen while the epoch is closing; capture the exact close
+    // control the reopen must name as its predecessor.
+    let close_control = StoreDatabase::new(&fixture.db)
+        .closing_circle_controls()
+        .await
+        .expect("read closing Circle controls")
+        .into_iter()
+        .next()
+        .expect("member removal leaves one closing Circle")
+        .coord
+        .clone();
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .is_err());
+
+    // The member captures an old-epoch write while its Circle is still active,
+    // then pulls the close. While the epoch is closing, publication is frozen: the
+    // write does not reach the Store.
+    let member_row = "00000000-0000-4000-8000-0000000000c1";
+    let member_tables = fixture.member_db.synced_tables().to_vec();
+    let member_write_id = fixture.member_db.new_write_id();
+    let captured_member_write_id = member_write_id.clone();
+    let member_circle_id = fixture.circle_id;
+    fixture
+        .member_db
+        .call(move |connection| {
+            StoreDatabase::run_internal_store_write_transaction_on(
+                connection,
+                &member_tables,
+                Some(&EncryptionService::from_key([42; 32])),
+                captured_member_write_id,
+                |transaction| {
+                    transaction
+                        .execute(
+                            "INSERT INTO documents (id, audience, _updated_at)
+                             VALUES (?1, ?2, ?3)",
+                            rusqlite::params![
+                                member_row,
+                                member_circle_id.to_string(),
+                                "0000000003000-0000-member",
+                            ],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("member captures an old-epoch Circle row");
+    member_pull(&fixture).await;
+    assert!(
+        member_push(&fixture, "2026-07-24T00:00:10Z").await.is_err(),
+        "old-epoch publication is frozen while the epoch is closing"
+    );
+    assert!(
+        !matches!(
+            fixture
+                .member_db
+                .write_status(&member_write_id)
+                .await
+                .expect("read member write status during close"),
+            crate::WriteStatus::Published(_)
+        ),
+        "the frozen old-epoch write has not reached the Store"
+    );
+
+    fixture
+        .components
+        .cancel_circle_epoch_close(fixture.circle_id)
+        .await
+        .expect("cancel the Circle epoch close");
+
+    // The durable removal operation is complete and no close remains.
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read cancelled Circle removal operation")
+        .is_none());
+    assert!(StoreDatabase::new(&fixture.db)
+        .closing_circle_controls()
+        .await
+        .expect("read closing Circle controls after cancellation")
+        .is_empty());
+
+    // Authoring resumes on the identical epoch and key; the removal is undone.
+    let (reopened, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load reopened Circle authoring state");
+    assert_eq!(reopened.control.value.epoch_id(), fixture.prior_epoch);
+    assert_eq!(
+        reopened.control.value.key_fingerprint(),
+        fixture.prior_fingerprint
+    );
+    assert!(reopened
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    assert!(reopened
+        .roster
+        .members()
+        .contains_key(&fixture.remaining_member_pubkey));
+    let crate::sync::circle::CircleControlState::ActiveEpoch(active) =
+        reopened.control.value.state()
+    else {
+        panic!("reopened Circle control must be active");
+    };
+    assert_eq!(
+        active.common.origin,
+        crate::sync::circle::CircleEpochOrigin::Founder
+    );
+    assert_eq!(
+        reopened.control.value.previous_control_hash(),
+        Some(close_control.control_hash())
+    );
+
+    // The reopening control retains its exact cancellation binding.
+    let activation = StoreDatabase::new(&fixture.db)
+        .verified_circle_activation(fixture.circle_id, reopened.control.coord.clone())
+        .await
+        .expect("read reopened Circle activation")
+        .expect("reopened Circle activation is retained");
+    let cancellation_ref = activation
+        .reference
+        .objects()
+        .close_cancellation
+        .as_ref()
+        .expect("reopening control names its exact cancellation");
+    assert!(activation.reference.objects().close_outcome.is_none());
+    assert_eq!(
+        cancellation_ref.close_id,
+        crate::sync::circle::CircleEpochCloseId::from_operation_id(&fixture.operation_id)
+    );
+
+    // Liveness: the frozen member device pulls the reopened control and its
+    // old-epoch write now publishes successfully under the restored epoch key.
+    member_pull(&fixture).await;
+    assert_eq!(
+        member_push(&fixture, "2026-07-24T00:00:20Z")
+            .await
+            .expect("member publishes after the reopen"),
+        1,
+        "the member publishes its old-epoch package after the reopen"
+    );
+    let published = match fixture
+        .member_db
+        .write_status(&member_write_id)
+        .await
+        .expect("read member write status after reopen")
+    {
+        crate::WriteStatus::Published(position) => *position,
+        status => panic!("old-epoch member write did not publish after reopen: {status:?}"),
+    };
+    let (member_package_commit, _) = crate::sync::store::pull::load_commit_with_author(
+        &fixture.store.storage,
+        &fixture.store.root,
+        published.commit(),
+    )
+    .await
+    .expect("load the member's published old-epoch package commit");
+    let member_package = member_package_commit
+        .circle_packages()
+        .iter()
+        .find(|package| package.circle_id == fixture.circle_id)
+        .expect("member commit carries its Circle package");
+    assert_eq!(
+        member_package.key_fingerprint, fixture.prior_fingerprint,
+        "the member published under the restored old-epoch key"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_finalized_close_is_refused() {
+    let fixture = setup_closing_founder_circle("circle-cancel-refused").await;
+
+    // Finalize the close: publish the sole owner-device response, then drive the
+    // cycle that activates the exact outcome.
+    let authorized_store =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize Circle close response");
+    authorized_store
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the exact Circle epoch-close outcome");
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read finalized Circle removal operation")
+        .is_none());
+
+    // The final outcome won the slot; the operation is no longer waiting, so a
+    // cancellation is refused with a typed reason and the removal stands.
+    let error = fixture
+        .components
+        .cancel_circle_epoch_close(fixture.circle_id)
+        .await
+        .expect_err("cancel after finalization must be refused");
+    assert!(
+        matches!(
+            error,
+            CircleOperationError::NoCloseToCancel { circle_id }
+                if circle_id == fixture.circle_id
+        ),
+        "{error}"
+    );
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load finalized successor Circle authoring state");
+    assert_ne!(successor.control.value.epoch_id(), fixture.prior_epoch);
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+}
+
+#[tokio::test]
+async fn reopen_control_without_a_slot_cancellation_is_invalid() {
+    let fixture = setup_closing_founder_circle("circle-cancel-sabotage").await;
+    let owner_pubkey = keys::public_key_hex(&fixture.signer);
+
+    // Prepare a legitimate reopen but do not publish it.
+    let (current, activation_commit_ref) = StoreDatabase::new(&fixture.db)
+        .circle_closing_context(fixture.circle_id, &owner_pubkey)
+        .await
+        .expect("load closing Circle context");
+    let (activation_commit, author) = crate::sync::store::pull::load_commit_with_author(
+        &fixture.store.storage,
+        &fixture.store.root,
+        &activation_commit_ref,
+    )
+    .await
+    .expect("load closing activation commit");
+    let previous_control = activation_commit
+        .circle_controls()
+        .iter()
+        .find(|reference| {
+            reference.circle_id() == fixture.circle_id
+                && reference.control() == &current.control.coord
+        })
+        .expect("closing control is present in its activating commit")
+        .clone();
+    let device_id = local_device_id(&fixture.db).await;
+    let journal = prepare_circle_operation_request(
+        &StoreDatabase::new(&fixture.db),
+        &fixture.store.storage,
+        &device_id,
+        super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
+            super::super::commands::CircleCancelEpochCloseRequest {
+                operation_id: fixture.operation_id.clone(),
+                circle_id: fixture.circle_id,
+                member_pubkey: fixture.member_pubkey.clone(),
+                current,
+                previous_control,
+            },
+        )),
+        &fixture.signer,
+    )
+    .await
+    .expect("prepare Circle reopen");
+
+    // The prepared reopen is a founder-origin active successor of the close, so a
+    // verifier that keyed on the epoch origin would accept it. Publish every exact
+    // object except the cancellation, leaving the outcome slot empty, and strip the
+    // cancellation reference from the re-signed activating commit.
+    let old_commit = journal.commit().expect("parse prepared reopen commit");
+    for (step, object) in &journal.operation().prepared_objects {
+        if step == "epoch-close-cancellation" || step == "store-commit" || step == "store-head" {
+            continue;
+        }
+        crate::sync::store_objects::create_exact_object(&fixture.store.storage, object)
+            .await
+            .expect("publish reopen exact object");
+    }
+    let mut objects = old_commit.circle_controls()[0].objects().clone();
+    assert!(
+        objects.close_cancellation.is_some(),
+        "legitimate reopen names its cancellation"
+    );
+    objects.close_cancellation = None;
+    let mut journal = journal;
+    let forged_reference = journal.operation().creation.control_ref(
+        objects,
+        Some(old_commit.circle_controls()[0].head_object().clone()),
+    );
+    resign_merge_journal_with_reference(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+        &mut journal,
+        forged_reference,
+        |_| {},
+    )
+    .await;
+
+    let forged_commit = journal.commit().expect("parse forged reopen commit");
+    let error = load_circle_activations(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.store.root,
+        &journal.operation().commit_ref,
+        &forged_commit,
+        &author,
+        &fixture.signer,
+        &owner_pubkey,
+    )
+    .await
+    .expect_err("reopen without a slot cancellation must fail activation");
+    assert!(
+        error
+            .to_string()
+            .contains("active successor of an epoch close carries no settlement"),
+        "{error}"
+    );
+}
+
+/// Prepare the Circle's reopen, begin its finalization, and persist it durably —
+/// the `Finalizing` state a crash leaves before any object is published.
+async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
+    let owner_pubkey = keys::public_key_hex(&fixture.signer);
+    let device_id = local_device_id(&fixture.db).await;
+    let (current, activation_commit_ref) = StoreDatabase::new(&fixture.db)
+        .circle_closing_context(fixture.circle_id, &owner_pubkey)
+        .await
+        .expect("load closing Circle context");
+    let (activation_commit, _) = crate::sync::store::pull::load_commit_with_author(
+        &fixture.store.storage,
+        &fixture.store.root,
+        &activation_commit_ref,
+    )
+    .await
+    .expect("load closing activation commit");
+    let previous_control = activation_commit
+        .circle_controls()
+        .iter()
+        .find(|reference| {
+            reference.circle_id() == fixture.circle_id
+                && reference.control() == &current.control.coord
+        })
+        .expect("closing control is present in its activating commit")
+        .clone();
+    let prepared = prepare_circle_operation_request(
+        &StoreDatabase::new(&fixture.db),
+        &fixture.store.storage,
+        &device_id,
+        super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
+            super::super::commands::CircleCancelEpochCloseRequest {
+                operation_id: fixture.operation_id.clone(),
+                circle_id: fixture.circle_id,
+                member_pubkey: fixture.member_pubkey.clone(),
+                current,
+                previous_control,
+            },
+        )),
+        &fixture.signer,
+    )
+    .await
+    .expect("prepare Circle reopen");
+    let mut journal = StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read waiting Circle operation")
+        .expect("waiting Circle operation is durable");
+    journal
+        .begin_finalization(prepared.operation().clone())
+        .expect("begin cancellation finalization");
+    StoreDatabase::new(&fixture.db)
+        .begin_circle_operation_finalization(journal)
+        .await
+        .expect("persist cancellation finalization");
+}
+
+async fn assert_cancellation_reopened(fixture: &ClosingFounderCircle) {
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read completed cancellation operation")
+        .is_none());
+    let (reopened, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load reopened Circle authoring state");
+    assert_eq!(reopened.control.value.epoch_id(), fixture.prior_epoch);
+    assert_eq!(
+        reopened.control.value.key_fingerprint(),
+        fixture.prior_fingerprint
+    );
+    assert!(reopened
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+}
+
+#[tokio::test]
+async fn interrupted_cancellation_resumes_idempotently() {
+    // A crash between beginning the cancellation's finalization and publishing it:
+    // the durable operation resumes and completes exactly once. Its distinct write
+    // identity keeps it from being re-derived as a finalization.
+    let before_publication = setup_closing_founder_circle("circle-cancel-restart-before").await;
+    begin_cancellation_finalization(&before_publication).await;
+    assert_eq!(
+        StoreDatabase::new(&before_publication.db)
+            .circle_operation(&before_publication.operation_id)
+            .await
+            .expect("read persisted cancellation operation")
+            .expect("cancellation operation is durable")
+            .state(),
+        CircleOperationState::Finalizing
+    );
+    resume_circle_operations(
+        &before_publication.db,
+        &before_publication.store.storage,
+        &before_publication.signer,
+    )
+    .await
+    .expect("resume the interrupted cancellation");
+    resume_circle_operations(
+        &before_publication.db,
+        &before_publication.store.storage,
+        &before_publication.signer,
+    )
+    .await
+    .expect("second resume is idempotent");
+    assert_cancellation_reopened(&before_publication).await;
+
+    // A crash between publication and activation: the reopening control commit
+    // reaches durable storage, but the head create fails before the operation
+    // claims its device-stream head and records the activation. Resume finds the
+    // commit already published and completes idempotently. The reopen publishes
+    // 2*access + 5 exact objects (cancellation, access leaves, control, control
+    // head, access envelopes, then the commit and the head); failing before the
+    // final head create leaves the commit published and activation not recorded.
+    let after_publication = setup_closing_founder_circle("circle-cancel-restart-after").await;
+    begin_cancellation_finalization(&after_publication).await;
+    let journal = StoreDatabase::new(&after_publication.db)
+        .circle_operation(&after_publication.operation_id)
+        .await
+        .expect("read finalizing cancellation operation")
+        .expect("cancellation operation is durable");
+    let activations_before =
+        activation_count(&after_publication.db, after_publication.circle_id).await;
+    let head_create_call = 2 * journal.operation().creation.access.len() + 5;
+    after_publication
+        .store
+        .home
+        .fail_exact_create_before_call(head_create_call);
+
+    let interrupted = resume_circle_operations(
+        &after_publication.db,
+        &after_publication.store.storage,
+        &after_publication.signer,
+    )
+    .await
+    .expect_err("the head create fails after the commit is published");
+    assert!(
+        matches!(interrupted, CircleOperationError::Object(_)),
+        "{interrupted}"
+    );
+    assert_eq!(
+        activation_count(&after_publication.db, after_publication.circle_id).await,
+        activations_before,
+        "the interrupted cancellation has not activated"
+    );
+    assert_eq!(
+        StoreDatabase::new(&after_publication.db)
+            .circle_operation(&after_publication.operation_id)
+            .await
+            .expect("read interrupted cancellation")
+            .expect("the interrupted cancellation remains durable")
+            .state(),
+        CircleOperationState::Finalizing
+    );
+
+    resume_circle_operations(
+        &after_publication.db,
+        &after_publication.store.storage,
+        &after_publication.signer,
+    )
+    .await
+    .expect("resume completes the published-but-unactivated cancellation");
+    assert_cancellation_reopened(&after_publication).await;
+    assert_eq!(
+        activation_count(&after_publication.db, after_publication.circle_id).await,
+        activations_before + 1,
+        "the completed cancellation activates its reopening control exactly once"
+    );
 }

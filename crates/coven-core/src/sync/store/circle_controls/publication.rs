@@ -361,7 +361,8 @@ pub(super) async fn publish_circle_operation(
                     creation.circle_id,
                     outcome.close_id,
                 ),
-                &outcome.to_bytes(),
+                &crate::sync::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
+                    .to_bytes(),
             )
             .await?;
         }
@@ -369,6 +370,39 @@ pub(super) async fn publish_circle_operation(
         _ => {
             return Err(CircleOperationError::Journal(
                 "Circle epoch-close outcome differs from its signed object graph".to_string(),
+            ));
+        }
+    }
+    match (
+        &creation.close_cancellation,
+        &reference.objects().close_cancellation,
+    ) {
+        (Some(cancellation), Some(cancellation_ref))
+            if cancellation.close_id == cancellation_ref.close_id
+                && cancellation.cancellation_hash() == cancellation_ref.cancellation_hash =>
+        {
+            append_step(
+                database,
+                storage,
+                &mut journal,
+                "epoch-close-cancellation",
+                &ProtocolObjectContext::store_encrypted(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseOutcome,
+                ),
+                &crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                    creation.circle_id,
+                    cancellation.close_id,
+                ),
+                &crate::sync::circle::CircleEpochCloseSlotValue::Cancellation(cancellation.clone())
+                    .to_bytes(),
+            )
+            .await?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(CircleOperationError::Journal(
+                "Circle epoch-close cancellation differs from its signed object graph".to_string(),
             ));
         }
     }

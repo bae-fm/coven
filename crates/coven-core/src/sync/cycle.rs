@@ -1222,6 +1222,15 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn cancel_circle_epoch_close(
+        &self,
+        circle_id: super::circle::CircleId,
+    ) -> Result<super::circle::CircleOperationId, super::store::CircleOperationError> {
+        self.store
+            .cancel_circle_epoch_close(&self.device_id, circle_id, &self.user_keypair)
+            .await
+    }
+
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,

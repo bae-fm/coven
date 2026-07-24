@@ -67,6 +67,7 @@ pub struct CircleActivationObjects {
     pub control: ExactObjectRef,
     pub close_intent: Option<crate::sync::circle::CircleEpochCloseIntentRef>,
     pub close_outcome: Option<crate::sync::circle::CircleEpochCloseOutcomeRef>,
+    pub close_cancellation: Option<crate::sync::circle::CircleEpochCloseCancellationRef>,
     #[serde(with = "ordered_map_entries")]
     pub roster_entries: BTreeMap<CircleRosterCoord, ExactObjectRef>,
     pub roster_heads: Vec<CircleRosterHeadRef>,
@@ -628,6 +629,10 @@ pub enum CandidateExclusiveObjectRef {
     CircleEpochCloseOutcome {
         circle_id: CircleId,
         reference: crate::sync::circle::CircleEpochCloseOutcomeRef,
+    },
+    CircleEpochCloseCancellation {
+        circle_id: CircleId,
+        reference: crate::sync::circle::CircleEpochCloseCancellationRef,
     },
     CircleAccess {
         circle_id: CircleId,

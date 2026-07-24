@@ -59,6 +59,9 @@ pub(super) fn verify_prepared_objects_are_signed(
     if let Some(outcome) = &objects.close_outcome {
         signed.insert(outcome.object.clone());
     }
+    if let Some(cancellation) = &objects.close_cancellation {
+        signed.insert(cancellation.object.clone());
+    }
     for access in &objects.access {
         signed.insert(access.leaf.object.clone());
         signed.insert(access.envelope.object.clone());
@@ -290,6 +293,7 @@ pub(super) async fn prepare_circle_activation_objects(
     let mut prepared = BTreeMap::new();
     let mut stream_activations = Vec::new();
     let mut close_outcome = None;
+    let mut close_cancellation = None;
 
     let policy_objects = {
         let owner_grant = draft.metadata.author_owner_grant.clone();
@@ -907,7 +911,7 @@ pub(super) async fn prepare_circle_activation_objects(
                 ),
                 finalization.outcome_slot,
                 &outcome_prefix,
-                outcome.to_bytes(),
+                crate::sync::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone()).to_bytes(),
             )?;
             let outcome_ref = crate::sync::circle::CircleEpochCloseOutcomeRef::from_outcome(
                 &outcome,
@@ -915,6 +919,38 @@ pub(super) async fn prepare_circle_activation_objects(
             )?;
             prepared.insert("epoch-close-outcome".to_string(), outcome_prepared);
             close_outcome = Some((outcome, outcome_ref));
+        }
+        if let Some(cancellation_draft) = draft.close_cancellation.take() {
+            let cancellation = crate::sync::circle::CircleEpochCloseCancellation::signed(
+                &cancellation_draft.close_control,
+                identity_signer,
+            )?;
+            let cancellation_prefix =
+                crate::sync::circle::circle_epoch_close_outcome_semantic_prefix(
+                    draft.circle_id,
+                    cancellation.close_id,
+                );
+            let cancellation_prepared = prepare_circle_object_at(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    store_root_hash,
+                    ProtocolObjectDomain::CircleEpochCloseOutcome,
+                ),
+                cancellation_draft.outcome_slot,
+                &cancellation_prefix,
+                crate::sync::circle::CircleEpochCloseSlotValue::Cancellation(cancellation.clone())
+                    .to_bytes(),
+            )?;
+            let cancellation_ref =
+                crate::sync::circle::CircleEpochCloseCancellationRef::from_cancellation(
+                    &cancellation,
+                    cancellation_prepared.reference().clone(),
+                )?;
+            prepared.insert(
+                "epoch-close-cancellation".to_string(),
+                cancellation_prepared,
+            );
+            close_cancellation = Some((cancellation, cancellation_ref));
         }
         draft.control.value.signature =
             keys::sign_hex(identity_signer, &draft.control.value.canonical_bytes()).1;
@@ -1113,6 +1149,9 @@ pub(super) async fn prepare_circle_activation_objects(
         metadata: draft.metadata,
         close_intent: draft.close_intent,
         close_outcome: close_outcome.as_ref().map(|(outcome, _)| outcome.clone()),
+        close_cancellation: close_cancellation
+            .as_ref()
+            .map(|(cancellation, _)| cancellation.clone()),
         access: draft.access,
         control: draft.control,
     };
@@ -1122,6 +1161,7 @@ pub(super) async fn prepare_circle_activation_objects(
             control,
             close_intent,
             close_outcome: close_outcome.map(|(_, reference)| reference),
+            close_cancellation: close_cancellation.map(|(_, reference)| reference),
             roster_entries,
             roster_heads,
             roster_resolutions,
@@ -1173,13 +1213,13 @@ pub(super) async fn prepare_circle_operation_request(
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let author_pubkey = keys::public_key_hex(signer);
-    let operation_id = request.operation_id().cloned();
-    let write_id = operation_id.as_ref().map_or_else(
-        || db.new_write_id(),
-        CircleOperationId::finalization_write_id,
-    );
-    let operation_id =
-        operation_id.unwrap_or_else(|| CircleOperationId::from_write_id(write_id.clone()));
+    let (operation_id, write_id) = match request.settlement() {
+        Some((operation_id, write_id)) => (operation_id, write_id),
+        None => {
+            let write_id = db.new_write_id();
+            (CircleOperationId::from_write_id(write_id.clone()), write_id)
+        }
+    };
     let history = request.history();
     let intent = request.intent();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
@@ -1736,6 +1776,38 @@ pub(super) async fn prepare_circle_operation_request(
                     ));
                 }
                 (draft, bootstrap_objects)
+            }
+            CircleOperationRequest::CancelEpochClose(request) => {
+                if request.circle_id != request.current.control.value.circle_id {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle close-cancellation request differs from its current control"
+                            .to_string(),
+                    ));
+                }
+                let keyring = match &request.current.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle close cancellation requires retained active access".to_string(),
+                        ));
+                    }
+                };
+                (
+                    CircleTransitionDraft::reopen_epoch(
+                        candidate_family,
+                        &circle_device_id,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.current.control,
+                        &request.current.roster,
+                        &request.current.metadata,
+                        keyring,
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    Vec::new(),
+                )
             }
         };
         let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =

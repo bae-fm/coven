@@ -101,6 +101,19 @@ rebuild the deleted choice.
 - Later-discovered old-epoch packages reopen their exact retained verified
   activation. Package decryption, key selection, and writer authority therefore
   remain available while the Circle's current state is closing.
+- An Owner cancels an in-flight epoch close by settling its one create-once
+  outcome slot with an Owner-signed cancellation instead of a final outcome. The
+  slot holds exactly one of the two, parsed as a tagged value. Activating the
+  cancellation runs a reopening control that restores the frozen epoch byte-exact
+  in protocol identity — same epoch id, key generation, roster and metadata
+  frontiers, and origin — re-issuing only the control-bound access envelopes to
+  the reopening control. The reopen verifier dispatches on the presence of the
+  slot cancellation, never the epoch origin, so a founder-origin epoch cannot be
+  reopened by a forged control that names no cancellation; an
+  EpochClose→ActiveEpoch transition that carries no settlement is invalid. The
+  cancellation settles the same durable removal operation under a distinct stable
+  write identity, so a crashed cancel resumes as a cancel and never re-derives
+  into a finalize.
 - Pull derives effective Store membership from both the latest verified
   membership chain and the exact chain resulting from each candidate. When the
   candidate causally includes the latest chain, its result governs. When the
@@ -219,10 +232,10 @@ rebuild the deleted choice.
    orders converge through independent audience and content resolution.
    Recipient Circle bootstrap images use and verify that boundary atomically.
 1. **In progress.** Create, rename, member addition, recipient bootstrap
-   installation, member-removal epoch close, successor activation, and
-   Store-member-removal rotation blocking, and control-conflict resolution are
-   implemented. Finish close cancellation, device exclusion, deletion, and
-   restart coverage.
+   installation, member-removal epoch close, successor activation, close
+   cancellation, Store-member-removal rotation blocking, and control-conflict
+   resolution are implemented. Finish device exclusion, deletion, and restart
+   coverage.
 1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,

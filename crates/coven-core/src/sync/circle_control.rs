@@ -1254,10 +1254,6 @@ impl CircleEpochCloseOutcome {
                 .expect("Circle epoch-close outcome serialization cannot fail"),
         )
     }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("Circle epoch-close outcome serialization cannot fail")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1286,6 +1282,168 @@ impl CircleEpochCloseOutcomeRef {
             outcome_hash: outcome.outcome_hash(),
             object,
         })
+    }
+}
+
+/// One Owner-signed cancellation of an epoch close. It competes at the same
+/// create-once outcome slot as the final outcome; activating it reopens the
+/// frozen epoch instead of rotating to a successor epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseCancellation {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub close_control: CircleControlCoord,
+    pub intent: CircleEpochCloseIntentRef,
+    pub owner_pubkey: String,
+    pub signature: String,
+}
+
+impl CircleEpochCloseCancellation {
+    pub(crate) fn signed(
+        control: &PreparedCircleControl,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        };
+        let mut cancellation = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: control.value.store_root_hash,
+            circle_id: control.value.circle_id,
+            close_id: close.close_id,
+            close_control: control.coord.clone(),
+            intent: close.intent.clone(),
+            owner_pubkey: keys::public_key_hex(signer),
+            signature: String::new(),
+        };
+        if !cancellation.verify_shape(control) {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        cancellation.signature = keys::sign_hex(signer, &cancellation.canonical_bytes()).1;
+        Ok(cancellation)
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            circle_id: CircleId,
+            close_id: CircleEpochCloseId,
+            close_control: &'a CircleControlCoord,
+            intent: &'a CircleEpochCloseIntentRef,
+            owner_pubkey: &'a str,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.circle-epoch-close-cancellation.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            circle_id: self.circle_id,
+            close_id: self.close_id,
+            close_control: &self.close_control,
+            intent: &self.intent,
+            owner_pubkey: &self.owner_pubkey,
+        })
+        .expect("Circle epoch-close cancellation serialization cannot fail")
+    }
+
+    fn verify_shape(&self, control: &PreparedCircleControl) -> bool {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return false;
+        };
+        self.version == STORE_PROTOCOL_VERSION
+            && control.verify()
+            && self.store_root_hash == control.value.store_root_hash
+            && self.circle_id == control.value.circle_id
+            && self.close_id == close.close_id
+            && self.close_control == control.coord
+            && self.intent == close.intent
+            && close
+                .frozen_epoch
+                .common
+                .owners
+                .contains(&self.owner_pubkey)
+    }
+
+    pub(crate) fn verify_for(&self, control: &PreparedCircleControl) -> bool {
+        self.verify_shape(control)
+            && keys::verify_signature_hex(
+                &self.owner_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
+    }
+
+    pub(crate) fn verify_signature(&self) -> bool {
+        keys::verify_signature_hex(&self.owner_pubkey, &self.signature, &self.canonical_bytes())
+    }
+
+    pub fn cancellation_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self)
+                .expect("Circle epoch-close cancellation serialization cannot fail"),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseCancellationRef {
+    pub close_id: CircleEpochCloseId,
+    pub cancellation_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+impl CircleEpochCloseCancellationRef {
+    pub(crate) fn from_cancellation(
+        cancellation: &CircleEpochCloseCancellation,
+        object: ExactObjectRef,
+    ) -> Result<Self, CircleTransitionError> {
+        if object.slot().logical_key()
+            != format!(
+                "{}.json",
+                circle_epoch_close_outcome_semantic_prefix(
+                    cancellation.circle_id,
+                    cancellation.close_id
+                )
+            )
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(Self {
+            close_id: cancellation.close_id,
+            cancellation_hash: cancellation.cancellation_hash(),
+            object,
+        })
+    }
+}
+
+/// The exactly-one value the create-once epoch-close outcome slot holds. Readers
+/// parse this tagged form and dispatch on the settled arm: a final outcome
+/// rotates to a successor epoch, a cancellation reopens the frozen epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleEpochCloseSlotValue {
+    Outcome(CircleEpochCloseOutcome),
+    Cancellation(CircleEpochCloseCancellation),
+}
+
+impl CircleEpochCloseSlotValue {
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Circle epoch-close slot value serialization cannot fail")
+    }
+
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, CircleTransitionError> {
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
+        if value.to_bytes() != bytes {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(value)
     }
 }
 
@@ -1823,6 +1981,7 @@ pub(crate) struct CircleTransitionDraft {
     pub metadata: CircleMetadata,
     pub close_intent: Option<CircleEpochCloseIntent>,
     pub close_finalization: Option<CircleEpochCloseFinalizationDraft>,
+    pub close_cancellation: Option<CircleEpochCloseCancellationDraft>,
     pub access: Vec<PreparedCircleAccess>,
     pub control: PreparedCircleControl,
 }
@@ -1832,6 +1991,12 @@ pub(crate) struct CircleEpochCloseFinalizationDraft {
     pub close_control: PreparedCircleControl,
     pub intent: CircleEpochCloseIntent,
     pub responses: Vec<CircleEpochCloseResponseRef>,
+    pub outcome_slot: ObjectSlot,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CircleEpochCloseCancellationDraft {
+    pub close_control: PreparedCircleControl,
     pub outcome_slot: ObjectSlot,
 }
 
@@ -1967,6 +2132,7 @@ pub struct PreparedCircleTransition {
     pub metadata: CircleMetadata,
     pub close_intent: Option<CircleEpochCloseIntent>,
     pub close_outcome: Option<CircleEpochCloseOutcome>,
+    pub close_cancellation: Option<CircleEpochCloseCancellation>,
     pub access: Vec<PreparedCircleAccess>,
     pub control: PreparedCircleControl,
 }
@@ -2229,6 +2395,7 @@ impl CircleTransitionDraft {
             metadata,
             close_intent: None,
             close_finalization: None,
+            close_cancellation: None,
             access,
             control,
         })
@@ -2386,6 +2553,7 @@ impl CircleTransitionDraft {
             metadata: current_metadata.clone(),
             close_intent: None,
             close_finalization: None,
+            close_cancellation: None,
             access,
             control,
         })
@@ -2544,6 +2712,7 @@ impl CircleTransitionDraft {
             metadata: current_metadata.clone(),
             close_intent: Some(close_intent),
             close_finalization: None,
+            close_cancellation: None,
             access,
             control,
         })
@@ -2789,6 +2958,175 @@ impl CircleTransitionDraft {
                 responses,
                 outcome_slot: close.outcome_slot.clone(),
             }),
+            close_cancellation: None,
+            access,
+            control,
+        })
+    }
+
+    /// Reopen a frozen epoch by cancelling its close. The successor restores the
+    /// frozen epoch's protocol identity — same epoch, key generation, roster and
+    /// metadata frontiers, and origin — re-issuing only the control-bound access
+    /// material to the reopening control.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reopen_epoch(
+        candidate_family: super::store_commit::CandidateFamilyId,
+        device_id: &str,
+        store_membership: StoreMembershipStateRef,
+        membership_authority: MembershipGrantCreationAuthority,
+        mut store_members: Vec<(String, MemberRole)>,
+        close_control: &PreparedCircleControl,
+        current_roster: &CircleMaterializedRoster,
+        current_metadata: &CircleMetadata,
+        keyring: &str,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let CircleControlState::EpochClose(close) = close_control.value.state() else {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        };
+        let frozen = &close.frozen_epoch;
+        if !close_control.verify()
+            || current_roster.state_hash() != frozen.roster.state_hash
+            || current_metadata.coord() != frozen.metadata.selected
+            || current_metadata.epoch_id != frozen.common.epoch_id
+            || current_metadata.key_fingerprint != frozen.common.key_fingerprint
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        let author_pubkey = keys::public_key_hex(signer);
+        store_members.sort_by(|left, right| left.0.cmp(&right.0));
+        store_members.dedup_by(|left, right| left.0 == right.0);
+        if !store_members
+            .iter()
+            .any(|(pubkey, role)| pubkey == &author_pubkey && role.can_write())
+        {
+            return Err(CircleTransitionError::AuthorNotStoreWriter);
+        }
+        let (grant_id, owner_record) = current_roster
+            .active_grants()
+            .find(|(_, record)| {
+                record.member_pubkey == author_pubkey
+                    && record.role == super::circle::CircleRole::Owner
+            })
+            .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
+        let author_authority = match &owner_record.creation_authority {
+            CircleGrantCreationAuthority::Entry(created_at) => {
+                MergeCircleOwnerAuthorityRef::Roster {
+                    roster: frozen.roster.clone(),
+                    grant_id: grant_id.clone(),
+                    created_at: created_at.clone(),
+                }
+            }
+            CircleGrantCreationAuthority::ConflictResolution(resolution) => {
+                MergeCircleOwnerAuthorityRef::ConflictResolution {
+                    conflict_hash: resolution.conflict_hash,
+                    resolution_hash: resolution.resolution_hash,
+                }
+            }
+        };
+        let encryption = EncryptionService::from(
+            MasterKeyring::from_serialized(keyring)
+                .map_err(|_| CircleTransitionError::InvalidCurrentState)?,
+        );
+        let key_fingerprint = encryption.seal_key_fingerprint();
+        if key_fingerprint != frozen.common.key_fingerprint {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        let epoch_id = frozen.common.epoch_id;
+        let roster_state = frozen.roster.clone();
+        let mut control_value = CircleControl {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: close_control.value.store_root_hash,
+            circle_id: close_control.value.circle_id,
+            value: CircleControlValue {
+                order: MergeCircleControlOrder {
+                    device_id: device_id.to_string(),
+                    stream_id: close_control.value.value.order.stream_id,
+                    author_owner_grant: grant_id.clone(),
+                    seq: close_control
+                        .value
+                        .ordinal()
+                        .checked_add(1)
+                        .ok_or(CircleTransitionError::SequenceOverflow)?,
+                    previous_control_hash: Some(close_control.coord.control_hash()),
+                    dependencies: vec![close_control.coord.clone()],
+                },
+                state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
+                    common: ActiveCircleEpochCore {
+                        epoch_id,
+                        key_fingerprint,
+                        owners: frozen.common.owners.clone(),
+                        access_root: frozen.common.access_root,
+                        origin: frozen.common.origin.clone(),
+                    },
+                    metadata: frozen.metadata.clone(),
+                    roster: roster_state.clone(),
+                    store_membership,
+                    covered_control_heads: frozen.covered_control_heads.clone(),
+                }),
+                author_authority,
+                membership_authority,
+            },
+            author_pubkey,
+            signature: String::new(),
+        };
+        let leaves = prepare_access_material(
+            control_value.store_root_hash,
+            candidate_family,
+            control_value.circle_id,
+            epoch_id,
+            keyring,
+            key_fingerprint,
+            &roster_state,
+            &current_roster.members(),
+            &control_value.access_epoch().store_membership,
+            &store_members,
+            &std::collections::BTreeMap::new(),
+            ids,
+            signer,
+        )?;
+        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
+        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
+        control_value
+            .value
+            .state
+            .active_epoch_mut()
+            .expect("Circle reopen constructs an active epoch")
+            .common
+            .access_root = access_root;
+        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control_value.coord(),
+            bytes: serde_json::to_vec(&control_value)
+                .expect("Circle control serialization cannot fail"),
+            value: control_value,
+        };
+        let access = prepare_access_envelopes(
+            control.value.store_root_hash,
+            candidate_family,
+            control.value.circle_id,
+            &control,
+            leaves,
+            proofs,
+            signer,
+        );
+        Ok(Self {
+            circle_id: control.value.circle_id,
+            epoch_id,
+            keyring: keyring.to_string(),
+            roster: current_roster.clone(),
+            policy: CircleTransitionDraftPolicy {
+                roster: CircleRosterDraftPolicy::Inherited,
+                metadata_successor: false,
+            },
+            metadata: current_metadata.clone(),
+            close_intent: None,
+            close_finalization: None,
+            close_cancellation: Some(CircleEpochCloseCancellationDraft {
+                close_control: close_control.clone(),
+                outcome_slot: close.outcome_slot.clone(),
+            }),
             access,
             control,
         })
@@ -2988,6 +3326,7 @@ impl CircleTransitionDraft {
             metadata,
             close_intent: None,
             close_finalization: None,
+            close_cancellation: None,
             access,
             control,
         })
@@ -3151,6 +3490,7 @@ impl CircleTransitionDraft {
             metadata: chosen_metadata.clone(),
             close_intent: None,
             close_finalization: None,
+            close_cancellation: None,
             access,
             control,
         })

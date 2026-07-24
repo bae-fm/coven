@@ -33,6 +33,8 @@ pub enum CircleOperationError {
     NotConflicted { circle_id: CircleId },
     #[error("circle {circle_id} control conflict does not retain the chosen branch")]
     ChosenBranchNotRetained { circle_id: CircleId },
+    #[error("circle {circle_id} has no local epoch close waiting for cancellation")]
+    NoCloseToCancel { circle_id: CircleId },
     #[error("circle command channel is closed")]
     CommandChannelClosed,
     #[error("circle command ended without a reply")]
