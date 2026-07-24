@@ -91,6 +91,11 @@ pub(crate) async fn prepare_store_write(
         .map_err(StoreError::Preparation)?;
         let membership_state = authorization.membership_state;
         let device_state = authorization.device_state_ref;
+        let active_store_members: std::collections::BTreeSet<String> = membership
+            .current_members()
+            .into_iter()
+            .map(|(pubkey, _)| pubkey)
+            .collect();
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &registration_ref, &write_id, &order);
         let mut prepared_packages = Vec::new();
@@ -110,6 +115,7 @@ pub(crate) async fn prepare_store_write(
                     &blob_facts,
                     &blob_write_authority,
                     store_dir,
+                    &active_store_members,
                 )
                 .await?,
             );
@@ -130,6 +136,7 @@ pub(crate) async fn prepare_store_write(
                     &blob_facts,
                     &blob_write_authority,
                     store_dir,
+                    &active_store_members,
                 )
                 .await?,
             );

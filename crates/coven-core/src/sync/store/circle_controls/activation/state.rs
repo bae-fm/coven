@@ -680,6 +680,15 @@ pub(crate) enum CircleCurrentState {
     ControlConflict { branches: Vec<CircleCurrentControl> },
 }
 
+/// The roster identities that hold no active Store membership grant at the
+/// current materialized membership chain. Their presence in the resolved roster
+/// is what makes a Circle rotation-required until an Owner closes the epoch and
+/// activates a successor roster without them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RotationRequired {
+    pub removed_members: Vec<String>,
+}
+
 impl CircleCurrentControl {
     fn from_verified(activation: &VerifiedCircleReference) -> Self {
         Self {
@@ -845,6 +854,30 @@ impl CircleCurrentState {
             Self::Closing(closing) => closing.current.circle_id(),
             Self::Inactive(inactive) => inactive.current.circle_id(),
             Self::ControlConflict { branches } => branches[0].circle_id(),
+        }
+    }
+
+    /// A rotation is required when the resolved roster names identities that hold
+    /// no active Store membership grant. Only meaningful for states that carry a
+    /// roster; `Inactive` and `ControlConflict` return `None`.
+    pub(crate) fn rotation_required(
+        &self,
+        active_store_members: &BTreeSet<String>,
+    ) -> Option<RotationRequired> {
+        let accessible = match self {
+            Self::Active(accessible) | Self::Closing(accessible) => accessible,
+            Self::Inactive(_) | Self::ControlConflict { .. } => return None,
+        };
+        let removed_members: Vec<String> = accessible
+            .roster
+            .members()
+            .into_keys()
+            .filter(|pubkey| !active_store_members.contains(pubkey))
+            .collect();
+        if removed_members.is_empty() {
+            None
+        } else {
+            Some(RotationRequired { removed_members })
         }
     }
 

@@ -47,6 +47,7 @@ impl StoreDatabase {
     pub async fn get_circles(
         &self,
         identity_pubkey: &str,
+        active_store_members: std::collections::BTreeSet<String>,
     ) -> Result<Vec<crate::sync::circle::CircleInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
         self.database
@@ -88,6 +89,9 @@ impl StoreDatabase {
                             id: circle_id,
                             name: metadata.name.clone(),
                             role,
+                            rotation_required: state
+                                .rotation_required(&active_store_members)
+                                .is_some(),
                         });
                     }
                 }
@@ -249,6 +253,41 @@ impl StoreDatabase {
                 Self::circle_publication_context_on(conn, circle_id, &expected_control)
             })
             .await
+    }
+
+    /// Whether publishing new content into `circle_id` is blocked because the
+    /// Circle's resolved roster names Store identities that hold no active
+    /// membership grant at `active_store_members`. Derived from the current
+    /// materialized state, so activating a successor roster without those
+    /// identities clears it with no stored flag to reset.
+    pub(crate) async fn circle_publication_rotation_block(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        active_store_members: std::collections::BTreeSet<String>,
+    ) -> Result<Option<crate::sync::circle::CirclePublicationBlocked>, DbError> {
+        self.database
+            .call(move |conn| {
+                Self::circle_publication_rotation_block_on(conn, circle_id, &active_store_members)
+            })
+            .await
+    }
+
+    pub(crate) fn circle_publication_rotation_block_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        active_store_members: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<crate::sync::circle::CirclePublicationBlocked>, DbError> {
+        let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+            return Ok(None);
+        };
+        Ok(state
+            .rotation_required(active_store_members)
+            .map(
+                |rotation| crate::sync::circle::CirclePublicationBlocked::RotationRequired {
+                    circle_id,
+                    removed_members: rotation.removed_members,
+                },
+            ))
     }
 
     pub(crate) fn circle_publication_context_on(

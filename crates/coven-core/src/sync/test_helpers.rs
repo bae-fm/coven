@@ -226,7 +226,7 @@ pub fn install_test_active_circle(
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
+pub fn test_circle_owner_keypair() -> UserKeypair {
     let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
         "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
         "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"

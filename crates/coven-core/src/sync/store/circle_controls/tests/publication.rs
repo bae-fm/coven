@@ -82,7 +82,10 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                 }
                 assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
                 assert!(StoreDatabase::new(&db)
-                    .get_circles(&keys::public_key_hex(&signer))
+                    .get_circles(
+                        &keys::public_key_hex(&signer),
+                        BTreeSet::from([keys::public_key_hex(&signer)]),
+                    )
                     .await
                     .expect("read active circles")
                     .is_empty());
@@ -132,13 +135,17 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                 assert_eq!(activation_count(&db, expected.circle_id()).await, 1);
                 assert_eq!(
                     StoreDatabase::new(&db)
-                        .get_circles(&keys::public_key_hex(&signer))
+                        .get_circles(
+                            &keys::public_key_hex(&signer),
+                            BTreeSet::from([keys::public_key_hex(&signer)]),
+                        )
                         .await
                         .expect("read activated circle"),
                     vec![crate::sync::circle::CircleInfo {
                         id: expected.circle_id(),
                         name: "Household".to_string(),
                         role: crate::sync::circle::CircleRole::Owner,
+                        rotation_required: false,
                     }]
                 );
                 assert!(StoreDatabase::new(&db)
@@ -289,13 +296,17 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     assert_eq!(activation_count(&reopened, circle_id).await, 2);
     assert_eq!(
         StoreDatabase::new(&reopened)
-            .get_circles(&keys::public_key_hex(&signer))
+            .get_circles(
+                &keys::public_key_hex(&signer),
+                BTreeSet::from([keys::public_key_hex(&signer)]),
+            )
             .await
             .expect("read renamed circle"),
         vec![crate::sync::circle::CircleInfo {
             id: circle_id,
             name: "Household money".to_string(),
             role: crate::sync::circle::CircleRole::Owner,
+            rotation_required: false,
         }]
     );
     assert!(StoreDatabase::new(&reopened)

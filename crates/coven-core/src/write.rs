@@ -45,10 +45,24 @@ impl PublishedPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteBlock {
-    InvalidPackage { reason: String },
-    InvalidProtocolState { reason: String },
-    MissingBlob { namespace: String, id: String },
-    LocalUserBlob { namespace: String, id: String },
+    InvalidPackage {
+        reason: String,
+    },
+    InvalidProtocolState {
+        reason: String,
+    },
+    MissingBlob {
+        namespace: String,
+        id: String,
+    },
+    LocalUserBlob {
+        namespace: String,
+        id: String,
+    },
+    RotationRequired {
+        circle_id: crate::sync::circle::CircleId,
+        removed_members: Vec<String>,
+    },
 }
 
 /// Current durable state of one host transaction.

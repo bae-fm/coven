@@ -36,6 +36,8 @@ pub enum StoreError {
         expected: Box<StoreBatchCommitRef>,
         actual: Box<StoreBatchCommitRef>,
     },
+    #[error("{0}")]
+    CirclePublicationBlocked(crate::sync::circle::CirclePublicationBlocked),
 }
 
 impl From<crate::database::DbError> for StoreError {

@@ -130,6 +130,35 @@ pub struct CircleInfo {
     pub id: CircleId,
     pub name: String,
     pub role: CircleRole,
+    /// The resolved roster names a Store identity that is no longer an active
+    /// Store member. Publishing new Circle content is blocked until an Owner
+    /// closes the epoch and activates a successor roster without that identity.
+    pub rotation_required: bool,
+}
+
+/// Why publishing new content into a Circle is refused. Carried as the durable
+/// typed reason on a blocked host write and on a refused Circle lifecycle
+/// operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CirclePublicationBlocked {
+    RotationRequired {
+        circle_id: CircleId,
+        removed_members: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for CirclePublicationBlocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RotationRequired {
+                circle_id,
+                removed_members,
+            } => write!(
+                formatter,
+                "Circle {circle_id} requires rotation: its roster names removed Store members {removed_members:?}"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1170,7 +1199,10 @@ mod tests {
         .await
         .expect("remove historical Circle projections");
         let circles = crate::sync::store::StoreDatabase::new(&db)
-            .get_circles(&author_pubkey)
+            .get_circles(
+                &author_pubkey,
+                std::collections::BTreeSet::from([author_pubkey.clone()]),
+            )
             .await
             .expect("list Circle from its derived current state");
         assert_eq!(
@@ -1179,6 +1211,7 @@ mod tests {
                 id: creation.circle_id,
                 name: creation.metadata.name.clone(),
                 role: CircleRole::Owner,
+                rotation_required: false,
             }]
         );
         let (publication_encryption, publication_fingerprint) =

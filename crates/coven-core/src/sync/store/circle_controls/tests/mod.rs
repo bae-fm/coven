@@ -447,3 +447,4 @@ mod local_validation;
 mod publication;
 mod remote_validation;
 mod retained;
+mod rotation_required;

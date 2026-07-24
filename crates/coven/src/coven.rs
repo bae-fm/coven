@@ -2621,6 +2621,21 @@ mod tests {
             .await
             .expect("connect the exact test Store");
 
+        // The fabricated destination Circle names its fixed owner in its roster;
+        // that identity must be an active Store member or the Circle would be
+        // rotation-required and reject new content.
+        fixture
+            .handle
+            .invite_member(
+                &crate::keys::public_key_hex(
+                    &coven_core::sync::test_helpers::test_circle_owner_keypair(),
+                ),
+                None,
+                crate::MemberRole::Member,
+            )
+            .await
+            .expect("register the fabricated Circle roster owner as a Store member");
+
         let destination_circle_value = fixture.destination_circle.to_string();
         let receipt = fixture
             .handle

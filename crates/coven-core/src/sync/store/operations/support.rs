@@ -16,6 +16,15 @@ pub(crate) fn blocked_status(error: &StoreError) -> Option<crate::WriteBlock> {
         StoreError::AuthorExcluded { .. } => Some(crate::WriteBlock::InvalidProtocolState {
             reason: error.to_string(),
         }),
+        StoreError::CirclePublicationBlocked(
+            crate::sync::circle::CirclePublicationBlocked::RotationRequired {
+                circle_id,
+                removed_members,
+            },
+        ) => Some(crate::WriteBlock::RotationRequired {
+            circle_id: *circle_id,
+            removed_members: removed_members.clone(),
+        }),
         StoreError::Object(StoreObjectError::Storage(_)) => None,
         StoreError::MissingBlob { namespace, id } => Some(crate::WriteBlock::MissingBlob {
             namespace: namespace.clone(),

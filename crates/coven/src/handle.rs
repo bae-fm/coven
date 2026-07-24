@@ -1321,11 +1321,8 @@ impl CovenHandle {
 
     /// Return circles with a locally verified active access record.
     pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        self.database
-            .get_circles(&crate::keys::public_key_hex(&identity))
-            .await
-            .map_err(SyncError::from)
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.get_circles().await
     }
 
     /// Return current Circle members who remain current Store members.
@@ -2729,6 +2726,7 @@ mod tests {
                     id: circle_id,
                     name: "Household money".to_string(),
                     role: crate::CircleRole::Owner,
+                    rotation_required: false,
                 }]
             );
             assert_eq!(

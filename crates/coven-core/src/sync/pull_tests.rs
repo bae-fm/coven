@@ -4227,7 +4227,10 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     assert!(result.held_positions.is_empty(), "{result:?}");
     assert_eq!(
         store_database(&receiver)
-            .get_circles(&crate::keys::public_key_hex(&owner))
+            .get_circles(
+                &crate::keys::public_key_hex(&owner),
+                std::collections::BTreeSet::from([crate::keys::public_key_hex(&owner)]),
+            )
             .await
             .expect("read ordered Circle result")
             .into_iter()

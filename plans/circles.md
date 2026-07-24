@@ -118,6 +118,18 @@ rebuild the deleted choice.
   caches; and retains each resolved public Circle control as inactive with no
   grant. Public conflict branches remain intact so a verified successor after
   re-add can advance the retained control.
+- A Circle whose resolved roster names an identity without an active Store
+  membership grant is rotation-required, derived from the roster and the
+  materialized membership chain with nothing stored. Publishing new content
+  into that Circle is refused with a typed reason the durable write retains;
+  rename and member addition are refused; member removal and close
+  finalization remain available. A completed close or a Store re-add clears
+  the state by construction.
+- Close finalization's successor bootstrap cut still requires a device with
+  no unpublished Store writes, so an Owner whose only pending write is
+  blocked by the closing Circle cannot yet finalize from that device; the
+  cut must derive from the accepted-history projection to remove that
+  coupling.
 - A missing or corrupt Circle package for an active effective member holds its
   Store commit without partially applying rows, controls, routing, or frontier
   state.
@@ -173,10 +185,10 @@ rebuild the deleted choice.
    orders converge through independent audience and content resolution.
    Recipient Circle bootstrap images use and verify that boundary atomically.
 1. **In progress.** Create, rename, member addition, recipient bootstrap
-   installation, member-removal epoch close, and successor activation are
-   implemented. Finish Store-member removal, rotation-required handling,
-   control resolution, close cancellation, device exclusion, deletion, and
-   restart coverage.
+   installation, member-removal epoch close, successor activation, and
+   Store-member-removal rotation blocking are implemented. Finish control
+   resolution, close cancellation, device exclusion, deletion, and restart
+   coverage.
 1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,

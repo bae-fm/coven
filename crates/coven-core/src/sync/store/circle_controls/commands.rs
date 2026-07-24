@@ -3,10 +3,51 @@ use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
 use crate::keys::{self, UserKeypair};
-use crate::sync::circle::{CircleId, CircleRole, CircleRosterChain};
+use crate::sync::circle::{CircleId, CirclePublicationBlocked, CircleRole, CircleRosterChain};
 use crate::sync::cloud_storage::BlobPathScheme;
+use crate::sync::storage::SyncStorage;
+use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::Store;
 use crate::sync::store_commit::CircleControlRef;
+
+/// Refuse a transition that would distribute or rename the current key while a
+/// Store-removed identity still holds it. Renaming or adding a member before the
+/// epoch closes contradicts the close-first rotation rule; removing a member and
+/// finishing an in-flight close remain the paths out.
+async fn ensure_not_rotation_required(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    circle_id: CircleId,
+) -> Result<(), CircleOperationError> {
+    let membership = crate::sync::store::pull::load_cycle_membership(storage, database)
+        .await
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "load Store membership for Circle rotation check: {error}"
+            ))
+        })?;
+    let chain = membership
+        .chain
+        .ok_or(CircleOperationError::MissingState("Store membership chain"))?;
+    let active_store_members = chain
+        .current_members()
+        .into_iter()
+        .map(|(pubkey, _)| pubkey)
+        .collect();
+    if let Some(CirclePublicationBlocked::RotationRequired {
+        circle_id,
+        removed_members,
+    }) = database
+        .circle_publication_rotation_block(circle_id, active_store_members)
+        .await?
+    {
+        return Err(CircleOperationError::RotationRequired {
+            circle_id,
+            removed_members,
+        });
+    }
+    Ok(())
+}
 
 impl Store {
     pub(crate) async fn create_circle(
@@ -59,6 +100,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)
@@ -137,6 +179,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)

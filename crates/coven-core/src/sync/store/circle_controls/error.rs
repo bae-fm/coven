@@ -24,6 +24,11 @@ pub enum CircleOperationError {
     Journal(String),
     #[error("circle operation {circle_id} is blocked: {reason}")]
     Blocked { circle_id: CircleId, reason: String },
+    #[error("circle {circle_id} requires rotation: its roster names removed Store members {removed_members:?}")]
+    RotationRequired {
+        circle_id: CircleId,
+        removed_members: Vec<String>,
+    },
     #[error("circle command channel is closed")]
     CommandChannelClosed,
     #[error("circle command ended without a reply")]

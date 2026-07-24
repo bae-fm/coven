@@ -126,13 +126,17 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .is_none());
     assert_eq!(
         StoreDatabase::new(&successor_db)
-            .get_circles(&successor_pubkey)
+            .get_circles(
+                &successor_pubkey,
+                std::collections::BTreeSet::from([successor_pubkey.clone()]),
+            )
             .await
             .expect("read successor circles"),
         vec![crate::sync::circle::CircleInfo {
             id: later.circle_id(),
             name: "Later Circle".to_string(),
             role: CircleRole::Owner,
+            rotation_required: false,
         }]
     );
     assert_eq!(

@@ -668,7 +668,13 @@ async fn newly_discovered_store_admission_activates_circle_access() {
 
     assert_eq!(
         StoreDatabase::new(&member_database)
-            .get_circles(&crate::keys::public_key_hex(&fixture.member))
+            .get_circles(
+                &crate::keys::public_key_hex(&fixture.member),
+                std::collections::BTreeSet::from([
+                    crate::keys::public_key_hex(&fixture.owner),
+                    crate::keys::public_key_hex(&fixture.member),
+                ]),
+            )
             .await
             .expect("list Circles after newly discovered Store admission")
             .into_iter()
@@ -731,6 +737,20 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     let hidden_before_removal_package_slot =
         exact_circle_package_slot(&hidden_before_removal_commit);
 
+    // The last Circle package the owner authors before the removal. Once the
+    // removal is materialized the owner may no longer publish new Circle content
+    // (the Circle is rotation-required), so this models the newest package the
+    // removed member must still be pruned from.
+    let late = publish_effective_access_row(
+        &fixture,
+        &owner_store_dir,
+        "private just before removal",
+        "0000000002800-0000-owner",
+    )
+    .await;
+    let late_commit = load_commit(&fixture, &late).await;
+    let late_package_slot = exact_circle_package_slot(&late_commit);
+
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
     crate::sync::store::remove_member(
@@ -752,15 +772,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .expect("load Store removal position")
         .expect("Store removal has a position");
-    let late = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "private after removal",
-        "0000000003000-0000-owner",
-    )
-    .await;
-    let late_commit = load_commit(&fixture, &late).await;
-    let late_package_slot = exact_circle_package_slot(&late_commit);
     let latest_membership =
         current_membership(&member_database, fixture.member_storage.as_ref()).await;
     assert!(!latest_membership
@@ -827,7 +838,10 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     assert_eq!(state.row, None);
     assert_eq!(state.route, None);
     assert!(StoreDatabase::new(&member_database)
-        .get_circles(&crate::keys::public_key_hex(&fixture.member))
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.member),
+            std::collections::BTreeSet::from([crate::keys::public_key_hex(&fixture.owner)]),
+        )
         .await
         .expect("list Circles after Store membership removal")
         .is_empty());
@@ -898,7 +912,10 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         Some(removal)
     );
     assert!(StoreDatabase::new(&reopened)
-        .get_circles(&crate::keys::public_key_hex(&fixture.member))
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.member),
+            std::collections::BTreeSet::from([crate::keys::public_key_hex(&fixture.owner)]),
+        )
         .await
         .expect("list reopened Circles after Store membership removal")
         .is_empty());
@@ -949,6 +966,19 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     .expect("pull Circle row before Store removal");
     assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
 
+    // A Circle package the owner authors before the removal that the member has
+    // not yet pulled. The removal pull applies it under the removed membership,
+    // exercising the prune of the member's Circle rows.
+    let pre_removal = publish_effective_access_row(
+        &fixture,
+        &owner_store_dir,
+        "private just before removal",
+        "0000000002500-0000-owner",
+    )
+    .await;
+    let pre_removal_commit = load_commit(&fixture, &pre_removal).await;
+    let pre_removal_package_slot = exact_circle_package_slot(&pre_removal_commit);
+
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
     crate::sync::store::remove_member(
@@ -965,34 +995,38 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     )
     .await
     .expect("remove Store member before re-add");
-    let removed_interval = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "private during removal",
-        "0000000003000-0000-owner",
-    )
-    .await;
-    let removed_interval_commit = load_commit(&fixture, &removed_interval).await;
-    let removed_interval_package_slot = exact_circle_package_slot(&removed_interval_commit);
+    // Once the removal is materialized the owner can no longer publish new
+    // Circle content (the Circle is rotation-required until it is closed and
+    // rotated), so no package is authored during the removed interval; the
+    // re-add restores access to the Circle's current state alone.
+    let removed_membership =
+        current_membership(&member_database, fixture.member_storage.as_ref()).await;
+    fixture.store.home.clear_exact_reads();
     let removal_pull = pull_scoped_with(
         &member_database,
         &fixture.store,
         fixture.member_storage.as_ref(),
-        &initial_membership,
+        &removed_membership,
         &fixture.member,
         &member_store_dir,
     )
     .await
     .expect("pull Store membership removal");
     assert!(removal_pull.held_positions.is_empty(), "{removal_pull:?}");
+    assert!(
+        !fixture
+            .store
+            .home
+            .exact_reads()
+            .contains(&pre_removal_package_slot),
+        "a removed member does not fetch the unpulled pre-removal Circle package"
+    );
     assert_eq!(
         scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row,
         None
     );
-    let removed_membership =
-        current_membership(&member_database, fixture.member_storage.as_ref()).await;
 
     crate::sync::store::membership::invite_member(
         &fixture.store.storage,
@@ -1051,10 +1085,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     )
     .await;
 
-    fixture
-        .store
-        .home
-        .remove_exact_object(&removed_interval_package_slot);
     fixture.store.home.clear_exact_reads();
     let readd_pull = pull_scoped_with(
         &member_database,
@@ -1067,11 +1097,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     .await
     .expect("pull Store re-add and Circle successor");
     assert!(readd_pull.held_positions.is_empty(), "{readd_pull:?}");
-    assert!(!fixture
-        .store
-        .home
-        .exact_reads()
-        .contains(&removed_interval_package_slot));
     assert_eq!(
         scoped_routing_state(&member_database, READD_EFFECTIVE_ACCESS_ROW_ID)
             .await
@@ -1082,7 +1107,13 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     );
     assert_eq!(
         StoreDatabase::new(&member_database)
-            .get_circles(&crate::keys::public_key_hex(&fixture.member))
+            .get_circles(
+                &crate::keys::public_key_hex(&fixture.member),
+                std::collections::BTreeSet::from([
+                    crate::keys::public_key_hex(&fixture.owner),
+                    crate::keys::public_key_hex(&fixture.member),
+                ]),
+            )
             .await
             .expect("list restored Circles")
             .into_iter()
