@@ -39,14 +39,14 @@ pub(crate) struct VerifiedCircleActive {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct VerifiedCircleBootstrap {
+pub(crate) struct VerifiedCircleImage {
     circle_id: CircleId,
     control: CircleControlCoord,
     reference: CircleBootstrapRef,
     image_bytes: Vec<u8>,
 }
 
-impl VerifiedCircleBootstrap {
+impl VerifiedCircleImage {
     pub(super) fn new(
         circle_id: CircleId,
         control: CircleControlCoord,
@@ -62,6 +62,32 @@ impl VerifiedCircleBootstrap {
         };
         verified.verify_for_access(access)?;
         Ok(verified)
+    }
+
+    /// Reconstruct a verified Circle image from stored bytes and an exact
+    /// reference — the coverage-row and restore-selection path, which has no
+    /// access leaf (a standalone snapshot names none). The bytes are input to the
+    /// verifier, never trusted for being local: their digest must equal the
+    /// reference's image hash, and the caller separately runs
+    /// `verify_circle_bootstrap_image` against the retained control and routing
+    /// key for the full schema/routing/audience/blob-closure check.
+    pub(crate) fn from_stored_image(
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        reference: CircleBootstrapRef,
+        image_bytes: Vec<u8>,
+    ) -> Result<Self, CircleOperationError> {
+        if reference.image.image_hash != ObjectHash::digest(&image_bytes) {
+            return Err(CircleOperationError::InvalidState(
+                "stored Circle image differs from its exact image hash".to_string(),
+            ));
+        }
+        Ok(Self {
+            circle_id,
+            control,
+            reference,
+            image_bytes,
+        })
     }
 
     fn verify_for_access(&self, access: &CircleAccessLeaf) -> Result<(), CircleOperationError> {
@@ -288,7 +314,7 @@ impl VerifiedStreamActivationPrefix {
 pub(crate) struct VerifiedCircleActivations {
     pub(super) circles: Vec<VerifiedCircleReference>,
     pub(super) stream_activations: VerifiedStreamActivations,
-    pub(super) bootstraps: Vec<VerifiedCircleBootstrap>,
+    pub(super) bootstraps: Vec<VerifiedCircleImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +322,7 @@ pub(crate) struct VerifiedCircleActivations {
 struct RetainedCircleActivations {
     activating_commit: StoreBatchCommitRef,
     circles: Vec<RetainedCircleReference>,
-    bootstraps: Vec<VerifiedCircleBootstrap>,
+    bootstraps: Vec<VerifiedCircleImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,7 +389,7 @@ impl VerifiedCircleActivations {
         &self.stream_activations
     }
 
-    pub(crate) fn bootstraps(&self) -> &[VerifiedCircleBootstrap] {
+    pub(crate) fn bootstraps(&self) -> &[VerifiedCircleImage] {
         &self.bootstraps
     }
 

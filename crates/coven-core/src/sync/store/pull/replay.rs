@@ -573,7 +573,7 @@ fn apply_circle_bootstrap_projection_on(
     replay: &rusqlite::Connection,
     synced_tables: &[SyncedTable],
     activation_commit: &StoreBatchCommitRef,
-    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
 ) -> Result<(), DbError> {
     let source = crate::sync::store::snapshot::open_database_image(bootstrap.image_bytes())
         .map_err(|error| {
@@ -607,7 +607,7 @@ fn apply_circle_bootstrap_projection_on(
 fn install_circle_bootstrap_blob_graph_on(
     conn: &rusqlite::Connection,
     activation_commit: &StoreBatchCommitRef,
-    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
 ) -> Result<(), DbError> {
     install_circle_bootstrap_remote_objects_on(conn, activation_commit, bootstrap)?;
     for binding in &bootstrap.reference().blobs {
@@ -696,7 +696,7 @@ fn install_circle_bootstrap_blob_graph_on(
 pub(super) fn install_circle_bootstrap_remote_objects_on(
     conn: &rusqlite::Connection,
     activation_commit: &StoreBatchCommitRef,
-    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
 ) -> Result<(), DbError> {
     for binding in &bootstrap.reference().blobs {
         let stored = binding.stored().ok_or_else(|| {

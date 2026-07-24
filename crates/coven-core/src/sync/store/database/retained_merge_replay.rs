@@ -175,6 +175,15 @@ impl StoreDatabase {
                 DbError::Message(format!("serialize Circle bootstrap reference: {error}"))
             })?;
             let encoded_image_hash = bootstrap.reference().image.image_hash.to_string();
+            // The stored image bytes are input to the replay verifier, not trusted
+            // for being local: their digest binds the row's image hash at write and
+            // again at read, so a corrupted or swapped image fails loud.
+            let image_bytes = bootstrap.image_bytes();
+            if bootstrap.reference().image.image_hash != ObjectHash::digest(image_bytes) {
+                return Err(DbError::Message(
+                    "Circle bootstrap image bytes differ from their exact image hash".to_string(),
+                ));
+            }
             let existing: Option<(String, String, String, String, Vec<u8>)> = conn
                 .query_row(
                     "SELECT control_coord, activation_commit, exact_cut, image_hash, bootstrap_ref
@@ -265,13 +274,15 @@ impl StoreDatabase {
             }
             conn.execute(
                 "INSERT INTO circle_bootstrap_coverage
-                 (circle_id, control_coord, activation_commit, exact_cut, image_hash, bootstrap_ref)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (circle_id, control_coord, activation_commit, exact_cut, image_hash,
+                  image_bytes, bootstrap_ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(circle_id) DO UPDATE SET
                    control_coord = excluded.control_coord,
                    activation_commit = excluded.activation_commit,
                    exact_cut = excluded.exact_cut,
                    image_hash = excluded.image_hash,
+                   image_bytes = excluded.image_bytes,
                    bootstrap_ref = excluded.bootstrap_ref",
                 rusqlite::params![
                     circle_id,
@@ -279,6 +290,7 @@ impl StoreDatabase {
                     encoded_commit,
                     encoded_cut,
                     encoded_image_hash,
+                    image_bytes,
                     encoded_ref,
                 ],
             )
@@ -326,14 +338,14 @@ impl StoreDatabase {
     ) -> Result<
         Vec<(
             StoreBatchCommitRef,
-            crate::sync::store::circle_controls::VerifiedCircleBootstrap,
+            crate::sync::store::circle_controls::VerifiedCircleImage,
         )>,
         DbError,
     > {
         let mut statement = conn
             .prepare(
                 "SELECT circle_id, control_coord, activation_commit, exact_cut,
-                        image_hash, bootstrap_ref
+                        image_hash, image_bytes, bootstrap_ref
                  FROM circle_bootstrap_coverage ORDER BY circle_id",
             )
             .map_err(DbError::from)?;
@@ -346,6 +358,7 @@ impl StoreDatabase {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
                 ))
             })
             .map_err(DbError::from)?
@@ -353,8 +366,15 @@ impl StoreDatabase {
             .map_err(DbError::from)?;
         drop(statement);
         let mut bootstraps = Vec::with_capacity(rows.len());
-        for (circle_id, control, activation_commit, exact_cut, image_hash, encoded_reference) in
-            rows
+        for (
+            circle_id,
+            control,
+            activation_commit,
+            exact_cut,
+            image_hash,
+            image_bytes,
+            encoded_reference,
+        ) in rows
         {
             let circle_id: crate::sync::circle::CircleId = circle_id.parse().map_err(|error| {
                 DbError::Message(format!("parse retained Circle bootstrap id: {error}"))
@@ -384,33 +404,25 @@ impl StoreDatabase {
             })? != encoded_reference
                 || reference.coverage != exact_cut
                 || reference.image.image_hash.to_string() != image_hash
+                || ObjectHash::digest(&image_bytes).to_string() != image_hash
             {
                 return Err(DbError::Message(
                     "retained Circle bootstrap row differs from its exact reference".to_string(),
                 ));
             }
-            let retained =
-                Self::load_retained_merge_materialization_by_ref_on(conn, &activation_commit)?;
-            let mut matching =
-                retained
-                    .circle_activations()
-                    .bootstraps()
-                    .iter()
-                    .filter(|bootstrap| {
-                        bootstrap.circle_id() == circle_id
-                            && bootstrap.control() == &control
-                            && bootstrap.reference() == &reference
-                    });
-            let bootstrap = matching.next().cloned().ok_or_else(|| {
-                DbError::Message(
-                    "retained Circle bootstrap coverage has no exact replay input".to_string(),
+            // Reconstruct the replay input from the row's own durable bytes — the
+            // one representation restore-installed snapshots and pull-installed
+            // bootstraps both write. `from_stored_image` re-binds the digest; the
+            // replay loop runs the full image verification against the retained
+            // control and routing key.
+            let bootstrap =
+                crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
+                    circle_id,
+                    control,
+                    reference,
+                    image_bytes,
                 )
-            })?;
-            if matching.next().is_some() {
-                return Err(DbError::Message(
-                    "retained Circle bootstrap coverage has duplicate replay inputs".to_string(),
-                ));
-            }
+                .map_err(|error| DbError::Message(error.to_string()))?;
             bootstraps.push((activation_commit, bootstrap));
         }
         Ok(bootstraps)
@@ -2454,14 +2466,15 @@ mod tests {
                     .execute(
                         "INSERT INTO circle_bootstrap_coverage
                          (circle_id, control_coord, activation_commit, exact_cut, image_hash,
-                          bootstrap_ref)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                          image_bytes, bootstrap_ref)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         rusqlite::params![
                             "00000000-0000-4000-8000-000000000001",
                             "{}",
                             encoded_activation,
                             "{}",
                             ObjectHash::digest(b"Circle bootstrap retraction image").to_string(),
+                            b"Circle bootstrap retraction image".as_slice(),
                             b"{}".as_slice(),
                         ],
                     )

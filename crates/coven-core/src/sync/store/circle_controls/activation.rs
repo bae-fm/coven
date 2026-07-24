@@ -37,8 +37,8 @@ use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle
 use state::CircleCurrentControl;
 pub(crate) use state::{
     CircleAuthoringState, CircleCurrentState, CirclePackageAccess, VerifiedCircleAccess,
-    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleBootstrap,
-    VerifiedCircleReference, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
+    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
+    VerifiedStreamActivationPrefix, VerifiedStreamActivations,
 };
 
 struct VerifiedAccessPair {
@@ -1589,7 +1589,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                             ))
                         })?;
                     }
-                    bootstraps.push(VerifiedCircleBootstrap::new(
+                    bootstraps.push(VerifiedCircleImage::new(
                         leaf.circle_id,
                         control.coord.clone(),
                         leaf,

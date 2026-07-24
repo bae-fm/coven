@@ -11,8 +11,7 @@ mod publication;
 pub(crate) use activation::{
     load_circle_activations, load_exact_slot_bytes, verify_control_context, CircleAuthoringState,
     CircleCurrentState, CirclePackageAccess, VerifiedCircleAccess, VerifiedCircleActivations,
-    VerifiedCircleActive, VerifiedCircleBootstrap, VerifiedCircleReference,
-    VerifiedStreamActivations,
+    VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivations,
 };
 pub use error::CircleOperationError;
 pub(crate) use journal::{
