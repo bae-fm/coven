@@ -89,4 +89,5 @@ pub(crate) struct DurableCircleSnapshotPublication {
 pub(crate) struct PublishedCircleSnapshot {
     pub reference: crate::sync::store_commit::CircleSnapshotRef,
     pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub cut: crate::sync::store_commit::CommitFrontier,
 }

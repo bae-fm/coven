@@ -363,6 +363,7 @@ macro_rules! coven_tables {
     generation INTEGER NOT NULL CHECK (generation >= 0),
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
+    cut TEXT NOT NULL CHECK (json_valid(cut)),
     meta_bytes BLOB NOT NULL,
     PRIMARY KEY (circle_id, generation)
 "

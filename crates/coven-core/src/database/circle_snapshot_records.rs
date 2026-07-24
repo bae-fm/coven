@@ -11,7 +11,7 @@ pub(crate) fn load_published_circle_snapshot_on(
     circle_id: CircleId,
 ) -> Result<Option<PublishedCircleSnapshot>, DbError> {
     conn.query_row(
-        "SELECT generation, snapshot_ref, successor_slot, meta_bytes \
+        "SELECT generation, snapshot_ref, successor_slot, cut, meta_bytes \
          FROM published_circle_snapshot WHERE circle_id = ?1 \
          ORDER BY generation DESC LIMIT 1",
         [circle_id.to_string()],
@@ -20,13 +20,14 @@ pub(crate) fn load_published_circle_snapshot_on(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(generation, reference, successor_slot, bytes)| {
+    .map(|(generation, reference, successor_slot, cut, bytes)| {
         let generation = u64::try_from(generation).map_err(|_| {
             DbError::Message("published Circle snapshot generation is negative".to_string())
         })?;
@@ -44,9 +45,12 @@ pub(crate) fn load_published_circle_snapshot_on(
         let (root, author_ref, author) = local_store_authority_on(conn)?;
         let meta = CircleSnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &author)
             .map_err(|error| DbError::Message(format!("published Circle snapshot: {error}")))?;
+        let cut: crate::sync::store_commit::CommitFrontier = serde_json::from_str(&cut)
+            .map_err(|error| DbError::Message(format!("published Circle snapshot cut: {error}")))?;
         if meta.author_registration != author_ref
             || meta.circle_id != circle_id
             || meta.successor.next_slot != successor_slot
+            || meta.bootstrap.coverage != cut
         {
             return Err(DbError::Message(
                 "published Circle snapshot differs from its local stream state".to_string(),
@@ -55,6 +59,7 @@ pub(crate) fn load_published_circle_snapshot_on(
         Ok(PublishedCircleSnapshot {
             reference,
             successor_slot,
+            cut,
         })
     })
     .transpose()

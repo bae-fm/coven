@@ -127,6 +127,50 @@ impl StoreDatabase {
             .await
     }
 
+    /// The latest activated Circle acknowledgement each device that holds active
+    /// access to `circle_id` has published — one per device. Snapshot stability
+    /// reads this: a Circle snapshot is stable only when every such device has
+    /// acknowledged coverage past the snapshot's cut. An inactive recipient
+    /// holds no access and therefore publishes no acknowledgement, so it never
+    /// appears here.
+    pub(crate) async fn activated_circle_acks(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<Vec<CircleAckRef>, DbError> {
+        self.sqlite()
+            .call(move |conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT ack_ref FROM activated_circle_acks \
+                         WHERE circle_id = ?1 ORDER BY device_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
+                    .map_err(DbError::from)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(DbError::from)?;
+                drop(statement);
+                rows.into_iter()
+                    .map(|raw| {
+                        let reference: CircleAckRef =
+                            serde_json::from_str(&raw).map_err(|error| {
+                                DbError::Message(format!(
+                                    "activated Circle acknowledgement ref: {error}"
+                                ))
+                            })?;
+                        if reference.circle_id != circle_id {
+                            return Err(DbError::Message(
+                                "activated Circle acknowledgement names another Circle".to_string(),
+                            ));
+                        }
+                        Ok(reference)
+                    })
+                    .collect()
+            })
+            .await
+    }
+
     pub(crate) async fn latest_published_circle_ack(
         &self,
         circle_id: CircleId,

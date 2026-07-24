@@ -245,6 +245,22 @@ pub(crate) async fn push_circle_snapshots_for_test(
 }
 
 #[cfg(test)]
+pub(crate) async fn circle_snapshot_is_stable_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    circle_id: crate::sync::circle::CircleId,
+    control: &crate::sync::circle::CircleControlCoord,
+    snapshot_cut: &crate::sync::store_commit::CommitFrontier,
+) -> Result<bool, snapshot::SnapshotError> {
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
+    store
+        .circle_snapshot_is_stable(circle_id, control, snapshot_cut)
+        .await
+}
+
+#[cfg(test)]
 pub(crate) async fn stage_circle_acknowledgements_for_test(
     db: &Database,
     storage: &dyn SyncStorage,

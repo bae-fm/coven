@@ -718,6 +718,49 @@ impl super::AuthorizedStore<'_> {
             .await
             .map_err(publication_error)?;
         for input in inputs {
+            // Resume a pending publication for this Circle before authoring
+            // another — finishing a durable operation needs no fresh capture.
+            if let Some(pending) = self
+                .database()
+                .outbound_circle_snapshot_publication(input.circle_id)
+                .await
+                .map_err(publication_error)?
+            {
+                match publish_durable_circle_snapshot(self.storage(), self.database(), pending)
+                    .await
+                {
+                    Ok(meta) => tracing::info!(
+                        circle_id = %input.circle_id,
+                        generation = meta.generation,
+                        "resumed pending Circle snapshot publication"
+                    ),
+                    Err(error) => tracing::warn!(
+                        circle_id = %input.circle_id,
+                        "skip Circle snapshot: pending publication failed: {error}"
+                    ),
+                }
+                continue;
+            }
+            // Retention: do not author a new generation until every active-access
+            // device has acknowledged coverage past the previous one — an
+            // unstable snapshot is not yet usable as coverage evidence.
+            if let Some(previous) = self
+                .database()
+                .latest_local_circle_snapshot(input.circle_id)
+                .await
+                .map_err(publication_error)?
+            {
+                if !self
+                    .circle_snapshot_is_stable(input.circle_id, &input.control, &previous.cut)
+                    .await?
+                {
+                    tracing::debug!(
+                        circle_id = %input.circle_id,
+                        "skip Circle snapshot: previous generation is not yet acknowledgement-stable"
+                    );
+                    continue;
+                }
+            }
             let circle_temp = temp_dir.join(format!("circle-snapshot-{}", input.circle_id));
             std::fs::create_dir_all(&circle_temp).map_err(SnapshotError::Io)?;
             let cut = match self
@@ -761,6 +804,39 @@ impl super::AuthorizedStore<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Whether every device that holds active Circle access has published a
+    /// Circle acknowledgement whose accepted Store frontier covers `snapshot_cut`
+    /// — the point at which a snapshot at that cut is usable as coverage evidence.
+    /// The acknowledgements are read from `activated_circle_acks` and decrypted
+    /// with the epoch key resolved under the reader's current control (its keyring
+    /// retains the epochs it holds, so acknowledgements sealed under a rotated
+    /// epoch stay readable). No acknowledged device yet means not stable.
+    pub(crate) async fn circle_snapshot_is_stable(
+        &self,
+        circle_id: CircleId,
+        current_control: &CircleControlCoord,
+        snapshot_cut: &CommitFrontier,
+    ) -> Result<bool, SnapshotError> {
+        let acknowledgements = self
+            .database()
+            .activated_circle_acks(circle_id)
+            .await
+            .map_err(publication_error)?;
+        if acknowledgements.is_empty() {
+            return Ok(false);
+        }
+        for reference in acknowledgements {
+            let acknowledgement = self
+                .load_circle_acknowledgement(&reference, current_control)
+                .await
+                .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+            if !acknowledgement.store_cut.covers(snapshot_cut) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -824,13 +900,6 @@ pub(crate) async fn push_circle_snapshot(
     let db = database.sqlite();
     let _publication = database.lock_snapshot_publication().await;
     drain_snapshot_spool_cleanup(database).await?;
-    if let Some(pending) = database
-        .outbound_circle_snapshot_publication(circle_id)
-        .await
-        .map_err(publication_error)?
-    {
-        return publish_durable_circle_snapshot(storage, database, pending).await;
-    }
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -2100,5 +2169,162 @@ mod tests {
             Some(&routing_key),
         )
         .expect("Circle snapshot is installable as a bootstrap image");
+    }
+
+    #[tokio::test]
+    async fn circle_snapshot_stability_gates_on_acknowledgements() {
+        let directory = tempfile::tempdir().expect("snapshot database directory");
+        let path = directory.path().join("store.sqlite3");
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(&path, "circle-snapshot-stability");
+        initialize(&db, &storage, &signer).await;
+        db.call(|conn| {
+            crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("apply routing schema");
+        let (circle_id, control) = db
+            .call(|conn| {
+                Ok(crate::sync::test_helpers::install_test_active_circle(
+                    conn, "snap",
+                ))
+            })
+            .await
+            .expect("install active Circle");
+
+        crate::sync::store::push_circle_snapshots_for_test(
+            &db,
+            &storage,
+            directory.path().join("snap-temp"),
+            db.schema_version(),
+            &signer,
+            "2026-07-16T00:00:00Z",
+        )
+        .await
+        .expect("author Circle snapshots");
+        let published = store_database(&db)
+            .latest_local_circle_snapshot(circle_id)
+            .await
+            .expect("read published Circle snapshot")
+            .expect("a Circle snapshot was published");
+
+        // No device has acknowledged coverage yet: the snapshot is not stable.
+        assert!(!crate::sync::store::circle_snapshot_is_stable_for_test(
+            &db,
+            &storage,
+            circle_id,
+            &control,
+            &published.cut,
+        )
+        .await
+        .expect("evaluate stability without acknowledgements"));
+
+        // Publish this device's Store and Circle acknowledgements at the same
+        // frontier the snapshot covers.
+        let frontier = CommitFrontier::from_refs(
+            store_database(&db)
+                .materialized_frontier()
+                .await
+                .expect("read frontier"),
+        )
+        .expect("shape frontier");
+        crate::sync::store::stage_store_acknowledgement_for_test(
+            &db,
+            &storage,
+            frontier.clone(),
+            "2026-07-16T00:00:01Z".to_string(),
+            &signer,
+        )
+        .await
+        .expect("stage Store acknowledgement");
+        crate::sync::store::stage_circle_acknowledgements_for_test(
+            &db,
+            &storage,
+            &frontier,
+            "2026-07-16T00:00:01Z",
+            &signer,
+        )
+        .await
+        .expect("stage Circle acknowledgements");
+        crate::sync::store::drain_store_acknowledgements_for_test(&db, &storage, &signer)
+            .await
+            .expect("drain acknowledgements");
+
+        // Every acknowledged device now covers the snapshot cut: it is stable.
+        assert!(crate::sync::store::circle_snapshot_is_stable_for_test(
+            &db,
+            &storage,
+            circle_id,
+            &control,
+            &published.cut,
+        )
+        .await
+        .expect("evaluate stability with acknowledgements"));
+    }
+
+    #[tokio::test]
+    async fn non_member_cannot_decrypt_circle_snapshot() {
+        let directory = tempfile::tempdir().expect("snapshot database directory");
+        let path = directory.path().join("store.sqlite3");
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(&path, "circle-snapshot-outsider");
+        initialize(&db, &storage, &signer).await;
+        db.call(|conn| {
+            crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("apply routing schema");
+        let (circle_id, _control) = db
+            .call(|conn| {
+                Ok(crate::sync::test_helpers::install_test_active_circle(
+                    conn, "snap",
+                ))
+            })
+            .await
+            .expect("install active Circle");
+        crate::sync::store::push_circle_snapshots_for_test(
+            &db,
+            &storage,
+            directory.path().join("snap-temp"),
+            db.schema_version(),
+            &signer,
+            "2026-07-16T00:00:00Z",
+        )
+        .await
+        .expect("author Circle snapshots");
+
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .unwrap()
+            .expect("local device id");
+        let (root_ref, _, _, _) = crate::sync::store::operations::load_local_store_authority(
+            &store_database(&db),
+            &device_id,
+            &signer,
+        )
+        .await
+        .expect("load local Store authority");
+
+        // A Store member outside the Circle resolves an unrelated key and cannot
+        // open the Circle-sealed snapshot metadata.
+        let outsider = crate::encryption::EncryptionService::from_key([7u8; 32]);
+        let meta_context = ProtocolObjectContext::circle(
+            root_ref.store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+            outsider,
+        );
+        let prefix =
+            crate::sync::store_commit::circle_snapshot_slot_prefix(circle_id, &device_id, 0);
+        let slot = crate::storage::cloud::ObjectSlot::logical(format!("{prefix}.json"))
+            .expect("gen-0 slot");
+        let denied = storage
+            .read_protocol_slot(&meta_context, &slot, &prefix)
+            .await;
+        assert!(denied.is_err());
     }
 }

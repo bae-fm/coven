@@ -423,7 +423,6 @@ impl AuthorizedStore<'_> {
     /// holds, so an acknowledgement sealed under a rotated epoch key stays
     /// readable. A Store member without Circle access resolves no key and cannot
     /// read it.
-    #[cfg(test)]
     pub(crate) async fn load_circle_acknowledgement(
         &self,
         reference: &crate::sync::store_commit::CircleAckRef,

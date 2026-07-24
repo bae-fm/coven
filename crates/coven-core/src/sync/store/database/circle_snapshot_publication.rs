@@ -310,8 +310,8 @@ impl StoreDatabase {
                 })?;
                 tx.execute(
                     "INSERT INTO published_circle_snapshot \
-                 (circle_id, generation, snapshot_ref, successor_slot, meta_bytes) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (circle_id, generation, snapshot_ref, successor_slot, cut, meta_bytes) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         circle_id.to_string(),
                         accepted_generation,
@@ -321,6 +321,11 @@ impl StoreDatabase {
                         serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
                             |error| DbError::Message(format!(
                                 "serialize Circle snapshot successor slot: {error}"
+                            ))
+                        )?,
+                        serde_json::to_string(&outbound.meta.value.bootstrap.coverage).map_err(
+                            |error| DbError::Message(format!(
+                                "serialize Circle snapshot cut: {error}"
                             ))
                         )?,
                         outbound.meta.bytes,
