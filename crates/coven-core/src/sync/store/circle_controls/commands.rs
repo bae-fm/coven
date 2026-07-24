@@ -676,6 +676,57 @@ impl Store {
         Ok(())
     }
 
+    /// Return a blocked operation to its captured phase and re-enter the publish
+    /// pipeline, which revalidates against refreshed signed state. Initiator-driven
+    /// — the cycle never auto-unblocks. Refuses typed if the operation is not
+    /// blocked; retrying twice converges because publication is per-step
+    /// idempotent and re-blocks if authority is still absent.
+    pub(crate) async fn retry_circle_operation(
+        &self,
+        operation_id: &crate::sync::circle::CircleOperationId,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        signer: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let journal = database
+            .circle_operation(operation_id)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+            })?;
+        if !matches!(
+            journal.state(),
+            crate::sync::circle::CircleOperationState::Blocked { .. }
+        ) {
+            return Err(CircleOperationError::NotBlocked {
+                operation_id: operation_id.clone(),
+            });
+        }
+        database.unblock_circle_operation(operation_id).await?;
+        let routing_key = routing_encryption
+            .map(|encryption| {
+                crate::sync::circle::derive_row_routing_key(
+                    encryption,
+                    journal.operation().creation.control.value.store_root_hash,
+                )
+            })
+            .transpose()
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        Box::pin(publish_circle_operation(
+            database,
+            storage,
+            operation_id,
+            signer,
+            routing_key.as_ref(),
+        ))
+        .await
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,

@@ -64,7 +64,7 @@ pub(crate) enum CircleOperationProgress {
     WaitingForCloseResponses(Box<PreparedCircleOperation>),
     Finalizing(Box<PreparedCircleOperation>),
     Blocked {
-        reason: String,
+        block: crate::sync::circle::CircleOperationBlock,
         phase: CircleOperationPhase,
         operation: Box<PreparedCircleOperation>,
     },
@@ -354,13 +354,16 @@ impl CircleOperationJournal {
                 CircleOperationState::WaitingForCloseResponses
             }
             CircleOperationProgress::Finalizing(_) => CircleOperationState::Finalizing,
-            CircleOperationProgress::Blocked { reason, .. } => CircleOperationState::Blocked {
-                reason: reason.clone(),
+            CircleOperationProgress::Blocked { block, .. } => CircleOperationState::Blocked {
+                block: block.clone(),
             },
         }
     }
 
-    pub(crate) fn block(&mut self, reason: String) -> Result<(), CircleOperationError> {
+    pub(crate) fn block(
+        &mut self,
+        block: crate::sync::circle::CircleOperationBlock,
+    ) -> Result<(), CircleOperationError> {
         let (phase, operation) = match &self.progress {
             CircleOperationProgress::Ready(operation) => {
                 (CircleOperationPhase::Initial, operation.clone())
@@ -377,9 +380,29 @@ impl CircleOperationJournal {
             }
         };
         self.progress = CircleOperationProgress::Blocked {
-            reason,
+            block,
             phase,
             operation,
+        };
+        Ok(())
+    }
+
+    /// Return a blocked operation to the phase captured when it blocked, so it
+    /// re-enters the idempotent publish pipeline with its exact retained payload.
+    pub(crate) fn unblock(&mut self) -> Result<(), CircleOperationError> {
+        let CircleOperationProgress::Blocked {
+            phase, operation, ..
+        } = &self.progress
+        else {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} is not blocked",
+                self.operation_id
+            )));
+        };
+        let operation = operation.clone();
+        self.progress = match phase {
+            CircleOperationPhase::Initial => CircleOperationProgress::Ready(operation),
+            CircleOperationPhase::Finalization => CircleOperationProgress::Finalizing(operation),
         };
         Ok(())
     }

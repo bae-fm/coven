@@ -1241,6 +1241,19 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn retry_circle_operation(
+        &self,
+        operation_id: &super::circle::CircleOperationId,
+    ) -> Result<(), super::store::CircleOperationError> {
+        self.store
+            .retry_circle_operation(
+                operation_id,
+                self.routing_encryption.as_ref(),
+                &self.user_keypair,
+            )
+            .await
+    }
+
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,

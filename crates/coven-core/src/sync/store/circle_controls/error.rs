@@ -22,8 +22,11 @@ pub enum CircleOperationError {
     BrowsableStorage,
     #[error("circle operation journal: {0}")]
     Journal(String),
-    #[error("circle operation {circle_id} is blocked: {reason}")]
-    Blocked { circle_id: CircleId, reason: String },
+    #[error("circle operation {circle_id} is blocked: {block}")]
+    Blocked {
+        circle_id: CircleId,
+        block: crate::sync::circle::CircleOperationBlock,
+    },
     #[error("circle {circle_id} requires rotation: its roster names removed Store members {removed_members:?}")]
     RotationRequired {
         circle_id: CircleId,
@@ -41,6 +44,10 @@ pub enum CircleOperationError {
     DeviceNotACloseParticipant {
         circle_id: CircleId,
         device_id: crate::sync::store_commit::StoreDeviceId,
+    },
+    #[error("circle operation {operation_id} is not blocked")]
+    NotBlocked {
+        operation_id: crate::sync::circle::CircleOperationId,
     },
     #[error("circle command channel is closed")]
     CommandChannelClosed,

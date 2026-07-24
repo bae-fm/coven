@@ -290,13 +290,35 @@ pub enum CircleOperationKind {
     ResolveControl,
 }
 
+/// Why a durable Circle operation cannot currently publish. One variant per
+/// production block site; each future block site adds its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleOperationBlock {
+    /// The author's exact grant no longer holds current Store write authority.
+    AuthorityLost {
+        grant_id: crate::sync::membership::MembershipGrantId,
+    },
+}
+
+impl std::fmt::Display for CircleOperationBlock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorityLost { grant_id } => write!(
+                formatter,
+                "author grant {grant_id} no longer has current Store write authority"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationState {
     Pending,
     WaitingForCloseResponses,
     Finalizing,
-    Blocked { reason: String },
+    Blocked { block: CircleOperationBlock },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

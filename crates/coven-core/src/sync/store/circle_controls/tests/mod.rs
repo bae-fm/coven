@@ -110,6 +110,22 @@ async fn resume_circle_operations(
         .await
 }
 
+async fn retry_circle_operation(
+    db: &Database,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    operation_id: &CircleOperationId,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+        .await?
+        .retry_circle_operation(
+            operation_id,
+            Some(&crate::encryption::EncryptionService::from_key([42; 32])),
+            signer,
+        )
+        .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn rename_circle(
     db: &Database,
@@ -446,6 +462,7 @@ fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOper
 mod journal;
 mod local_validation;
 mod publication;
+mod recovery;
 mod remote_validation;
 mod resolution;
 mod retained;

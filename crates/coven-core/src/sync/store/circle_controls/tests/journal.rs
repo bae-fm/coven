@@ -82,7 +82,14 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .expect("persist second Circle operation");
 
     StoreDatabase::new(&db)
-        .block_circle_operation(&first.operation_id, "authority changed".to_string())
+        .block_circle_operation(
+            &first.operation_id,
+            crate::sync::circle::CircleOperationBlock::AuthorityLost {
+                grant_id: crate::sync::membership::MembershipGrantId(
+                    crate::sync::store_commit::ObjectHash::digest(b"revoked grant"),
+                ),
+            },
+        )
         .await
         .expect("block first Circle operation");
 

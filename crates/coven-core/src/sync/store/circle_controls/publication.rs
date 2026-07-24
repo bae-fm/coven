@@ -31,8 +31,8 @@ pub(super) async fn publish_circle_operation(
             CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
         })?;
     let circle_id = journal.circle_id();
-    if let CircleOperationState::Blocked { reason } = journal.state() {
-        return Err(CircleOperationError::Blocked { circle_id, reason });
+    if let CircleOperationState::Blocked { block } = journal.state() {
+        return Err(CircleOperationError::Blocked { circle_id, block });
     }
     let creation = journal.operation().creation.clone();
     let store_root_hash = creation.control.value.store_root_hash;
@@ -78,12 +78,13 @@ pub(super) async fn publish_circle_operation(
         ));
     }
     if !has_current_merge_authority(database, storage, &commit, &author).await? {
-        let reason = "circle operation author is not a current Store writer under its exact grant"
-            .to_string();
+        let block = crate::sync::circle::CircleOperationBlock::AuthorityLost {
+            grant_id: creation.control.value.author_grant_id(),
+        };
         database
-            .block_circle_operation(operation_id, reason.clone())
+            .block_circle_operation(operation_id, block.clone())
             .await?;
-        return Err(CircleOperationError::Blocked { circle_id, reason });
+        return Err(CircleOperationError::Blocked { circle_id, block });
     }
     {
         let CircleOperationPolicy {

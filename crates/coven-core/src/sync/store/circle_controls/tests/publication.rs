@@ -2857,6 +2857,106 @@ async fn interrupted_cancellation_resumes_idempotently() {
     );
 }
 
+#[tokio::test]
+async fn interrupted_finalization_resumes_from_its_recorded_payload() {
+    let fixture = setup_closing_founder_circle("circle-finalize-durable-first").await;
+    let authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize Owner Store");
+    authorized
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish Owner close response");
+    let device_id = local_device_id(&fixture.db).await;
+
+    // The finalization records its complete payload — including the random
+    // successor key — into the durable journal before uploading anything. Failing
+    // the first upload leaves the payload recorded and nothing in storage.
+    fixture.store.home.fail_exact_create_before_call(1);
+    let interrupted = authorized
+        .finalize_ready_circle_epoch_closes(
+            &device_id,
+            "2026-07-24T03:00:00Z",
+            &fixture.store_dir,
+            &EncryptionService::from_key([42; 32]),
+            &fixture.signer,
+        )
+        .await
+        .expect_err("the first finalization upload fails");
+    assert!(
+        matches!(interrupted, CircleOperationError::Object(_)),
+        "{interrupted}"
+    );
+
+    let recorded = StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read recorded finalization")
+        .expect("finalization payload is durable");
+    assert_eq!(recorded.state(), CircleOperationState::Finalizing);
+    // The recorded payload is a finalize settlement, distinct from a cancellation.
+    let creation = &recorded.operation().creation;
+    assert!(creation.close_outcome.is_some() && creation.close_cancellation.is_none());
+    let recorded_control = creation.control.coord.clone();
+    let recorded_epoch = creation.control.value.epoch_id();
+    let recorded_key = creation.control.value.key_fingerprint();
+    let recorded_commit_object = recorded.operation().commit_ref.object.clone();
+    assert_eq!(
+        recorded.commit().expect("parse recorded commit").write_id,
+        fixture.operation_id.finalization_write_id(),
+        "the recorded payload resumes as a finalization, not a cancellation"
+    );
+    // Nothing reached storage: the successor control object is absent.
+    let control_prefix = crate::sync::circle::circle_semantic_prefix(
+        crate::sync::circle::CircleSemanticSlot::Control {
+            circle_id: fixture.circle_id,
+            control: &recorded_control,
+        },
+    );
+    let control_context = ProtocolObjectContext::store_encrypted(
+        fixture.store.root.store_root_hash,
+        ProtocolObjectDomain::CircleControl,
+    );
+    let control_object = recorded
+        .commit()
+        .expect("parse recorded commit")
+        .circle_controls()[0]
+        .objects()
+        .control
+        .clone();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .storage
+                .read_protocol_slot(&control_context, control_object.slot(), &control_prefix)
+                .await,
+            Err(crate::sync::storage::StorageError::NotFound(_))
+        ),
+        "no finalization object reached storage before the payload was recorded"
+    );
+
+    // Resume completes the finalization from the recorded payload, regenerating
+    // nothing: the successor epoch, key, and commit object are byte-identical.
+    resume_circle_operations(&fixture.db, &fixture.store.storage, &fixture.signer)
+        .await
+        .expect("resume completes the recorded finalization");
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_operation(&fixture.operation_id)
+        .await
+        .expect("read completed finalization")
+        .is_none());
+    let (successor, successor_commit_ref) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load finalized successor");
+    assert_eq!(successor.control.coord, recorded_control);
+    assert_eq!(successor.control.value.epoch_id(), recorded_epoch);
+    assert_eq!(successor.control.value.key_fingerprint(), recorded_key);
+    assert_eq!(successor_commit_ref.object, recorded_commit_object);
+}
+
 struct SilentParticipantClose {
     _temp: tempfile::TempDir,
     store_dir: crate::store_dir::StoreDir,

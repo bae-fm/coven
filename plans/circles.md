@@ -250,8 +250,12 @@ rebuild the deleted choice.
    installation, member-removal epoch close, successor activation, close
    cancellation, the epoch-close device-exclusion slot competition, command, and
    outcome cutoff, Store-member-removal rotation blocking, and control-conflict
-   resolution are implemented. Finish the excluded-device bootstrap reset and
-   publication gate, deletion, and restart coverage.
+   resolution are implemented. Durable operation recovery types the block reason
+   (`AuthorityLost`), lets the initiator retry a blocked operation from its
+   captured phase, and records finalization payloads durable-first so a restart
+   resumes them byte-identically as their exact settlement kind. Finish the
+   excluded-device bootstrap reset and publication gate, verified-nonactivation
+   discard, and deletion.
 1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,

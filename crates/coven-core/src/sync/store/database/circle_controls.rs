@@ -198,7 +198,7 @@ impl StoreDatabase {
     pub(in crate::sync::store) async fn block_circle_operation(
         &self,
         operation_id: &CircleOperationId,
-        reason: String,
+        block: crate::sync::circle::CircleOperationBlock,
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.database
@@ -209,7 +209,28 @@ impl StoreDatabase {
                         DbError::Message(format!("circle operation {operation_id} is absent"))
                     })?;
                 journal
-                    .block(reason)
+                    .block(block)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                update_circle_operation_on(&tx, journal)?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(in crate::sync::store) async fn unblock_circle_operation(
+        &self,
+        operation_id: &CircleOperationId,
+    ) -> Result<(), DbError> {
+        let operation_id = operation_id.as_str().to_string();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let mut journal =
+                    load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
+                        DbError::Message(format!("circle operation {operation_id} is absent"))
+                    })?;
+                journal
+                    .unblock()
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 update_circle_operation_on(&tx, journal)?;
                 tx.commit().map_err(DbError::from)
