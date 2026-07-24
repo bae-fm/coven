@@ -1898,6 +1898,62 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .home
         .exact_reads()
         .contains(candidate_package_object.reference().slot()));
+
+    // Quiet-device equivalence: this device carries no unpublished writes, so the
+    // successor bootstrap image is the accepted-history projection at the exact
+    // cutoff. Its recorded coverage equals the close cutoff, its recorded image
+    // hash equals its exact bytes, and installing it converges on the accepted
+    // pre-cutoff Circle state.
+    let crate::sync::circle::CircleAccessDisposition::Active {
+        bootstrap: Some(successor_bootstrap),
+        ..
+    } = &successor.access.disposition
+    else {
+        panic!("the successor access leaf carries its bootstrap image");
+    };
+    assert_eq!(
+        &successor_bootstrap.coverage, cutoff,
+        "the successor bootstrap covers exactly the accepted close cutoff"
+    );
+    let retained_bootstrap = db
+        .call({
+            let control = successor.control.coord.clone();
+            move |connection| {
+                let bootstraps = StoreDatabase::circle_bootstrap_replay_inputs_on(connection)?;
+                Ok(bootstraps.into_iter().find_map(|(_, bootstrap)| {
+                    (bootstrap.circle_id() == circle_id && bootstrap.control() == &control)
+                        .then_some(bootstrap)
+                }))
+            }
+        })
+        .await
+        .expect("read retained successor bootstrap replay input")
+        .expect("the device retains its successor bootstrap image");
+    assert_eq!(
+        crate::sync::store_commit::ObjectHash::digest(retained_bootstrap.image_bytes()),
+        successor_bootstrap.image.image_hash,
+        "the retained bootstrap image hashes to its recorded image hash"
+    );
+    let (_image_temp, image_dir) = temp_store_dir();
+    let image_path = image_dir.as_ref().join("successor-bootstrap-image.sqlite3");
+    std::fs::write(&image_path, retained_bootstrap.image_bytes())
+        .expect("write the successor bootstrap image");
+    let image =
+        rusqlite::Connection::open(&image_path).expect("open the successor bootstrap image");
+    let converges: bool = image
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM documents
+                 WHERE id = '00000000-0000-4000-8000-000000000001'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read the successor bootstrap image projection");
+    assert!(
+        converges,
+        "a recipient installing the successor bootstrap converges on the accepted Circle row"
+    );
 }
 
 #[tokio::test]

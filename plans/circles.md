@@ -125,11 +125,17 @@ rebuild the deleted choice.
   rename and member addition are refused; member removal and close
   finalization remain available. A completed close or a Store re-add clears
   the state by construction.
-- Close finalization's successor bootstrap cut still requires a device with
-  no unpublished Store writes, so an Owner whose only pending write is
-  blocked by the closing Circle cannot yet finalize from that device; the
-  cut must derive from the accepted-history projection to remove that
-  coupling.
+- Close finalization's successor bootstrap image derives from the replayed
+  accepted-history projection at the exact cutoff, not the live database.
+  Locally captured but unpublished rows are absent from that projection by
+  construction, so they can never enter the image and later publish under the
+  successor epoch, and the cut no longer requires a write-free device: an Owner
+  whose only pending write is rotation-blocked can finalize the close. A write
+  captured under the closed epoch's control publishes under the successor
+  control once the successor is active, since publication resolves the Circle's
+  current control rather than the capture-time one. The ordinary Store snapshot
+  cut keeps its write-free precondition, because its coverage claims include the
+  device's own writes.
 - A missing or corrupt Circle package for an active effective member holds its
   Store commit without partially applying rows, controls, routing, or frontier
   state.

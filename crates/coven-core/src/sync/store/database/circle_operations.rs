@@ -255,6 +255,23 @@ impl StoreDatabase {
             .await
     }
 
+    /// The Circle's current active control coordinate. A durable write captured
+    /// under an earlier control publishes under this one, so an epoch close that
+    /// retired the capture-time control does not strand the write: its rows
+    /// belong to whichever epoch is live when it publishes. Fails when the
+    /// Circle is not currently active.
+    pub(crate) async fn current_circle_partition_control(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<crate::sync::gate::CirclePartitionControl, DbError> {
+        self.database
+            .call(move |conn| {
+                crate::sync::gate::active_circle_control(conn, circle_id)
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .await
+    }
+
     /// Whether publishing new content into `circle_id` is blocked because the
     /// Circle's resolved roster names Store identities that hold no active
     /// membership grant at `active_store_members`. Derived from the current

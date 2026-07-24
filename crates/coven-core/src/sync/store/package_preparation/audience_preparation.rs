@@ -17,14 +17,24 @@ pub(crate) async fn prepare_partition_package(
     store_dir: &StoreDir,
     active_store_members: &std::collections::BTreeSet<String>,
 ) -> Result<PreparedPartitionPackage, StoreError> {
-    if let super::circle::Audience::Circle(circle_id) = partition.audience {
+    let partition = if let super::circle::Audience::Circle(circle_id) = partition.audience {
         if let Some(blocked) = database
             .circle_publication_rotation_block(circle_id, active_store_members.clone())
             .await?
         {
             return Err(StoreError::CirclePublicationBlocked(blocked));
         }
-    }
+        // Publish under the Circle's current active control. An epoch close
+        // between capture and publication retires the control the write was
+        // captured under; its rows belong to the successor epoch that is live now.
+        let control = database.current_circle_partition_control(circle_id).await?;
+        super::gate::AudiencePartition {
+            control: Some(control),
+            ..partition
+        }
+    } else {
+        partition
+    };
     let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
     let (remote_audience, protection) = match partition.audience {
         super::circle::Audience::Store => (

@@ -88,7 +88,12 @@ impl super::AuthorizedStore<'_> {
         .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
         self.db()
             .call(move |connection| {
-                require_no_unpublished_store_writes(connection)?;
+                // The successor bootstrap image is the accepted-history projection
+                // at the exact cutoff, built below with no local write overlays.
+                // Locally captured but unpublished rows are absent from that
+                // projection by construction, so there is nothing for a
+                // write-free-device precondition to protect: an Owner whose only
+                // pending write is rotation-blocked can still finalize the close.
                 let transaction = connection
                     .unchecked_transaction()
                     .map_err(crate::database::DbError::from)?;

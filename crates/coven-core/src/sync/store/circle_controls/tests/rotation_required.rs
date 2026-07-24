@@ -32,7 +32,9 @@ struct RotationFixture {
     signer: UserKeypair,
     components: SyncComponents,
     circle_id: CircleId,
+    member: UserKeypair,
     member_pubkey: String,
+    member_db: Database,
     store_dir: crate::store_dir::StoreDir,
     _store_temp: tempfile::TempDir,
     custody: crate::sync::test_helpers::TestCustody,
@@ -106,7 +108,9 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         signer,
         components,
         circle_id,
+        member,
         member_pubkey,
+        member_db,
         store_dir,
         _store_temp: store_temp,
         custody,
@@ -445,6 +449,288 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
             .expect("read resumed write status"),
         crate::WriteStatus::Published(_)
     ));
+}
+
+#[tokio::test]
+async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
+    let fixture = rotation_fixture("rotation-close-with-blocked-write").await;
+    remove_store_member(&fixture).await;
+
+    // A Circle write captured after the removal stays durable blocked; its rows
+    // are materialized in the live database but its write never publishes.
+    let blocked = capture_document(
+        &fixture,
+        "00000000-0000-4000-8000-000000000040",
+        Some(fixture.circle_id),
+        "0000000003000-0000-owner",
+    )
+    .await;
+    let _ = fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await;
+    assert!(matches!(
+        fixture
+            .db
+            .write_status(&blocked)
+            .await
+            .expect("read blocked write status"),
+        crate::WriteStatus::Blocked(crate::WriteBlock::RotationRequired { .. })
+    ));
+
+    // The close finalizes even though a rotation-blocked write is unpublished:
+    // the successor bootstrap derives from accepted history at the exact cutoff,
+    // so the blocked write's live-only rows never enter the image and the cut no
+    // longer demands a write-free device.
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    let authorized_store =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize Circle close response");
+    authorized_store
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("finalize the close while a rotation-blocked write is unpublished");
+
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load successor Circle authoring state");
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    assert!(
+        !list_circles(&fixture)
+            .await
+            .iter()
+            .find(|circle| circle.id == fixture.circle_id)
+            .expect("Circle listed after close")
+            .rotation_required
+    );
+    // The blocked write survives the close as a durable write; the rows it holds
+    // were never surrendered.
+    assert!(matches!(
+        fixture
+            .db
+            .write_status(&blocked)
+            .await
+            .expect("read blocked write status after the close"),
+        crate::WriteStatus::Blocked(_)
+    ));
+
+    // Returning the same durable write to publication (no discard, no recreate)
+    // publishes it under the successor epoch: the write captured under the closed
+    // epoch's control now resolves the current control.
+    StoreDatabase::new(&fixture.db)
+        .retry_blocked_write(&blocked)
+        .await
+        .expect("return the durable write to publication after the close");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the formerly blocked write under the successor epoch");
+    let published = match fixture
+        .db
+        .write_status(&blocked)
+        .await
+        .expect("read republished write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("formerly blocked write must publish under the successor: {status:?}"),
+    };
+    let published_commit = crate::sync::store::pull::load_commit_with_author(
+        &fixture.store.storage,
+        &fixture.store.root,
+        &published,
+    )
+    .await
+    .expect("load the successor-epoch commit")
+    .0;
+    let [circle_package] = published_commit.circle_packages() else {
+        panic!("the successor-epoch write carries exactly one Circle package");
+    };
+    assert_eq!(circle_package.control, successor.control.coord);
+    assert_eq!(
+        circle_package.key_fingerprint,
+        successor.control.value.key_fingerprint()
+    );
+
+    // Safety: the removed member's device never receives the write's content.
+    // A Store-removed identity cannot decrypt the rotated-epoch objects, so its
+    // pull cannot advance into the successor epoch that carries the write; the
+    // write is published in the cloud yet absent from the removed member's
+    // projection.
+    let membership = fixture
+        .store
+        .open_into(&fixture.member_db)
+        .await
+        .expect("open the Store as the removed member");
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    let routing = EncryptionService::from_key([42; 32]);
+    let member_pull = crate::sync::store::pull_store_commits(
+        &StoreDatabase::new(&fixture.member_db),
+        fixture.member_db.synced_tables(),
+        &fixture.store.storage,
+        fixture.store.root.store_root_hash,
+        &member_store_dir,
+        &membership,
+        Some(&fixture.member),
+        Some(&routing),
+    )
+    .await
+    .expect("pull the close outcome as the removed member");
+    assert!(
+        !member_pull
+            .frontier
+            .values()
+            .any(|reference| reference == &published),
+        "the removed member cannot advance into the successor-epoch commit"
+    );
+    let received = fixture
+        .member_db
+        .call(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM documents
+                        WHERE id = '00000000-0000-4000-8000-000000000040'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read the removed member's documents projection");
+    assert!(
+        !received,
+        "the removed member's device never receives the blocked write's content"
+    );
+}
+
+#[tokio::test]
+async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
+    let fixture = rotation_fixture("close-cut-projection").await;
+
+    // An accepted Circle row: captured and published under the active control.
+    let published_id = "00000000-0000-4000-8000-000000000050";
+    capture_document(
+        &fixture,
+        published_id,
+        Some(fixture.circle_id),
+        "0000000003000-0000-owner",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the accepted Circle row");
+
+    // An unpublished Circle row: captured into the live database, never published.
+    let unpublished_id = "00000000-0000-4000-8000-000000000051";
+    capture_document(
+        &fixture,
+        unpublished_id,
+        Some(fixture.circle_id),
+        "0000000004000-0000-owner",
+    )
+    .await;
+
+    // Cut the successor bootstrap at the accepted frontier while the unpublished
+    // write is present. The cut no longer refuses, and the image is the accepted
+    // projection: the accepted row is present, the unpublished row is absent.
+    let cutoff = fixture
+        .db
+        .call(|conn| {
+            let refs =
+                crate::sync::store::database::StoreDatabase::materialized_frontier_on(conn, None)?;
+            crate::sync::store_commit::CommitFrontier::from_refs(refs)
+                .map_err(|error| DbError::Message(error.to_string()))
+        })
+        .await
+        .expect("read the accepted materialized frontier");
+    let authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize the successor bootstrap cut");
+    let (image_temp, image_dir) = temp_store_dir();
+    let cut = authorized
+        .capture_circle_snapshot_at_cutoff(
+            image_dir.as_ref().to_path_buf(),
+            &EncryptionService::from_key([42; 32]),
+            fixture.circle_id,
+            cutoff,
+        )
+        .await
+        .expect("cut the successor bootstrap from accepted history");
+    let image_path = image_temp.path().join("close-cut-image.sqlite3");
+    std::fs::write(&image_path, &cut.snapshot.db_image).expect("write the bootstrap image");
+    let image = rusqlite::Connection::open(&image_path).expect("open the bootstrap image");
+    let installed_ids = {
+        let mut statement = image
+            .prepare("SELECT id FROM documents ORDER BY id")
+            .expect("prepare image row query");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query image rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect image rows");
+        rows
+    };
+    assert!(
+        installed_ids.iter().any(|id| id == published_id),
+        "the accepted Circle row is present in the projection image: {installed_ids:?}"
+    );
+    assert!(
+        !installed_ids.iter().any(|id| id == unpublished_id),
+        "the unpublished Circle row is absent from the projection image: {installed_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
+    let fixture = rotation_fixture("store-cut-gate").await;
+    capture_document(
+        &fixture,
+        "00000000-0000-4000-8000-000000000060",
+        None,
+        "0000000003000-0000-owner",
+    )
+    .await;
+    let authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize the ordinary Store snapshot cut");
+    let (_temp, cut_dir) = temp_store_dir();
+    let error = match authorized
+        .capture_snapshot_cut(
+            cut_dir.as_ref().to_path_buf(),
+            fixture.db.synced_tables().to_vec(),
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+    {
+        Ok(_) => panic!("the ordinary Store snapshot cut still refuses unpublished writes"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("snapshot cut refused while unpublished Store writes exist"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
