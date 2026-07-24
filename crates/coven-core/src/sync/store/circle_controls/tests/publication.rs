@@ -3698,3 +3698,64 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         "an outcome claiming an exclusion for a slot holding a response is refused"
     );
 }
+
+#[tokio::test]
+async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
+    let fixture = setup_closing_founder_circle("circle-delete-closing").await;
+    let owner_pubkey = keys::public_key_hex(&fixture.signer);
+
+    // The Circle is mid-close: its winning control is an EpochClose waiting for
+    // responses, so the Active-only authoring context refuses it. A deletion must
+    // still succeed from the closing state, superseding the in-flight close.
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pubkey)
+        .await
+        .is_err());
+    fixture
+        .components
+        .delete_circle(fixture.circle_id)
+        .await
+        .expect("delete a closing Circle");
+
+    assert!(StoreDatabase::new(&fixture.db)
+        .circle_is_deleted(fixture.circle_id)
+        .await
+        .expect("read deleted state"));
+    assert_eq!(
+        StoreDatabase::new(&fixture.db)
+            .get_circles(&owner_pubkey, BTreeSet::from([owner_pubkey.clone()]))
+            .await
+            .expect("list Circles after deleting the closing Circle"),
+        vec![crate::sync::circle::CircleInfo::Deleted {
+            id: fixture.circle_id
+        }]
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_deleted_circles_close_is_refused() {
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) = persist_merge_operation(&db, "circle-cancel-deleted").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+    let device_id = local_device_id(&db).await;
+    delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+        .await
+        .expect("delete the Circle");
+
+    // A deleted Circle is terminal: every lifecycle command refuses it with the
+    // typed `Deleted` reason rather than a generic missing-close error.
+    let error = crate::sync::store::Store::load(StoreDatabase::new(&db), store.storage.clone())
+        .await
+        .expect("load Store for cancellation")
+        .cancel_circle_epoch_close(&device_id, circle_id, &signer)
+        .await
+        .expect_err("cancelling a deleted Circle's close is refused");
+    assert!(
+        matches!(&error, CircleOperationError::Deleted { circle_id: id }
+            if *id == circle_id),
+        "{error}"
+    );
+}

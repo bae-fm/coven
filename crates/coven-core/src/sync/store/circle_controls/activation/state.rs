@@ -986,6 +986,24 @@ impl CircleCurrentState {
         }
     }
 
+    /// The authoring state a terminal deletion signs from. Deletion is the one
+    /// command that authors from a closing epoch, so it accepts any state whose
+    /// local device holds owner access — `Active` or `Closing` — and reads the
+    /// frozen epoch spine through the control's `access_epoch`. `Inactive`,
+    /// `Deleted`, and `ControlConflict` hold no owner access to sign a successor.
+    pub(crate) fn deletable_authoring_state(&self) -> Option<CircleAuthoringState> {
+        match self {
+            Self::Active(accessible) | Self::Closing(accessible) => Some(CircleAuthoringState {
+                candidate_family: accessible.candidate_family,
+                control: accessible.current.control.clone(),
+                access: accessible.access.clone(),
+                roster: accessible.roster.clone(),
+                metadata: accessible.metadata.clone(),
+            }),
+            Self::Inactive(_) | Self::Deleted(_) | Self::ControlConflict { .. } => None,
+        }
+    }
+
     pub(crate) fn package_access(
         &self,
         expected_control: &CircleControlCoord,

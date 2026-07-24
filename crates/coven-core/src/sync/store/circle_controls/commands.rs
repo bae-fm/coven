@@ -483,6 +483,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_deleted(database, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let mut journal = database
             .waiting_circle_operations()
@@ -773,7 +774,7 @@ impl Store {
         }
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
-            .circle_authoring_context(circle_id, &identity_pubkey)
+            .circle_delete_context(circle_id, &identity_pubkey)
             .await?;
         let root = database
             .local_store_root_ref()
@@ -819,7 +820,24 @@ impl Store {
             ));
         }
         let operation_id = journal.operation_id.clone();
-        database.insert_circle_operation(journal).await?;
+        // A closing Circle holds a waiting close operation in its single operation
+        // slot. The terminal deletion supersedes that close: remove the waiting
+        // operation and take the slot in one transaction. An active Circle has no
+        // operation waiting, so the deletion inserts into a free slot.
+        let superseded = database
+            .waiting_circle_operations()
+            .await?
+            .into_iter()
+            .find(|waiting| waiting.circle_id() == circle_id)
+            .map(|waiting| waiting.operation_id.clone());
+        match superseded {
+            Some(superseded) => {
+                database
+                    .insert_circle_operation_superseding(journal, superseded)
+                    .await?
+            }
+            None => database.insert_circle_operation(journal).await?,
+        }
         Box::pin(publish_circle_operation(
             database,
             storage,

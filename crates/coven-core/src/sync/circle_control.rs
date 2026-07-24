@@ -2387,19 +2387,71 @@ impl PreparedCircleTransition {
 struct CircleSuccessorContext<'a> {
     store_members: Vec<(String, MemberRole)>,
     author_pubkey: String,
-    active_epoch: &'a MergeActiveCircleEpoch,
+    epoch: &'a MergeActiveCircleEpoch,
     grant_id: MembershipGrantId,
     author_authority: MergeCircleOwnerAuthorityRef,
     key_fingerprint: KeyFingerprint,
 }
 
+/// The successor context for a command that publishes a new active epoch: the
+/// current control must be `ActiveEpoch`, so a closing or deleted control is
+/// refused.
 fn circle_successor_context<'a>(
-    mut store_members: Vec<(String, MemberRole)>,
+    store_members: Vec<(String, MemberRole)>,
     current_control: &'a PreparedCircleControl,
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
     signer: &UserKeypair,
+) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
+    let epoch = current_control
+        .value
+        .active_epoch()
+        .ok_or(CircleTransitionError::InvalidCurrentState)?;
+    circle_authored_successor_context(
+        store_members,
+        current_control,
+        current_roster,
+        current_metadata,
+        keyring,
+        signer,
+        epoch,
+    )
+}
+
+/// The successor context for a terminal deletion, which supersedes an in-flight
+/// close. It authors over the control's access epoch — the active epoch itself,
+/// or a close's frozen epoch — so a `Closing` control resolves to the frozen
+/// spine the deletion freezes, rather than being refused for lacking an active
+/// epoch.
+fn circle_delete_successor_context<'a>(
+    store_members: Vec<(String, MemberRole)>,
+    current_control: &'a PreparedCircleControl,
+    current_roster: &CircleMaterializedRoster,
+    current_metadata: &CircleMetadata,
+    keyring: &str,
+    signer: &UserKeypair,
+) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
+    let epoch = current_control.value.access_epoch();
+    circle_authored_successor_context(
+        store_members,
+        current_control,
+        current_roster,
+        current_metadata,
+        keyring,
+        signer,
+        epoch,
+    )
+}
+
+fn circle_authored_successor_context<'a>(
+    mut store_members: Vec<(String, MemberRole)>,
+    current_control: &PreparedCircleControl,
+    current_roster: &CircleMaterializedRoster,
+    current_metadata: &CircleMetadata,
+    keyring: &str,
+    signer: &UserKeypair,
+    epoch: &'a MergeActiveCircleEpoch,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     if !current_control.verify()
         || !current_roster.verify()
@@ -2431,10 +2483,6 @@ fn circle_successor_context<'a>(
     {
         return Err(CircleTransitionError::InvalidCurrentState);
     }
-    let active_epoch = current_control
-        .value
-        .active_epoch()
-        .ok_or(CircleTransitionError::InvalidCurrentState)?;
     let (grant_id, record) = current_roster
         .active_grants()
         .find(|(_, record)| {
@@ -2443,7 +2491,7 @@ fn circle_successor_context<'a>(
         .ok_or(CircleTransitionError::AuthorNotCircleOwner)?;
     let author_authority = match &record.creation_authority {
         CircleGrantCreationAuthority::Entry(created_at) => MergeCircleOwnerAuthorityRef::Roster {
-            roster: active_epoch.roster.clone(),
+            roster: epoch.roster.clone(),
             grant_id: grant_id.clone(),
             created_at: created_at.clone(),
         },
@@ -2457,7 +2505,7 @@ fn circle_successor_context<'a>(
     Ok(CircleSuccessorContext {
         store_members,
         author_pubkey,
-        active_epoch,
+        epoch,
         grant_id: grant_id.clone(),
         author_authority,
         key_fingerprint,
@@ -2659,7 +2707,7 @@ impl CircleTransitionDraft {
         let CircleSuccessorContext {
             store_members,
             author_pubkey,
-            active_epoch,
+            epoch: active_epoch,
             grant_id,
             author_authority,
             key_fingerprint,
@@ -2816,7 +2864,7 @@ impl CircleTransitionDraft {
         let CircleSuccessorContext {
             store_members,
             author_pubkey,
-            active_epoch,
+            epoch: active_epoch,
             grant_id,
             author_authority,
             key_fingerprint,
@@ -3387,7 +3435,7 @@ impl CircleTransitionDraft {
         let CircleSuccessorContext {
             store_members,
             author_pubkey,
-            active_epoch,
+            epoch: active_epoch,
             grant_id,
             author_authority,
             key_fingerprint,
@@ -3592,7 +3640,7 @@ impl CircleTransitionDraft {
         let CircleSuccessorContext {
             store_members,
             author_pubkey,
-            active_epoch,
+            epoch: active_epoch,
             grant_id: _,
             author_authority,
             key_fingerprint,
@@ -3739,7 +3787,7 @@ impl CircleTransitionDraft {
         ids: &dyn crate::id_provider::IdProvider,
         signer: &UserKeypair,
     ) -> Result<Self, CircleTransitionError> {
-        let context = circle_successor_context(
+        let context = circle_delete_successor_context(
             store_members,
             current_control,
             current_roster,
@@ -3750,7 +3798,7 @@ impl CircleTransitionDraft {
         let CircleSuccessorContext {
             store_members: _,
             author_pubkey,
-            active_epoch,
+            epoch,
             grant_id,
             author_authority,
             key_fingerprint: _,
@@ -3759,13 +3807,13 @@ impl CircleTransitionDraft {
         let circle_id = current_control.value.circle_id;
         let epoch_id = current_control.value.epoch_id();
         let frozen_epoch = MergeActiveCircleEpoch {
-            common: active_epoch.common.clone(),
-            metadata: active_epoch.metadata.clone(),
-            roster: active_epoch.roster.clone(),
+            common: epoch.common.clone(),
+            metadata: epoch.metadata.clone(),
+            roster: epoch.roster.clone(),
             store_membership,
-            covered_control_heads: active_epoch.covered_control_heads.clone(),
+            covered_control_heads: epoch.covered_control_heads.clone(),
         };
-        let stream_id = active_epoch
+        let stream_id = epoch
             .covered_control_heads
             .iter()
             .find(|head| head.coord.stream_key().author_pubkey == author_pubkey)

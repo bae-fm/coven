@@ -1781,6 +1781,60 @@ async fn circle_control_activation_count(
         .expect("count Circle control activations")
 }
 
+async fn row_blob_binding_count(database: &Database, row_id: &str) -> i64 {
+    let row_id = row_id.to_string();
+    database
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM row_blob_locators WHERE row_id = ?1",
+                    [row_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("count row blob bindings")
+}
+
+/// Bind a blob to a materialized Circle row, mirroring the `remote_objects` →
+/// `blob_locators` → `row_blob_locators` chain a pulled blob-bearing package
+/// installs. The prune under test deletes the binding by `(table_name, row_id)`,
+/// so it rides on the Circle-scoped `notes` row and its removal proves the
+/// deletion prunes blob bindings.
+async fn bind_row_blob(database: &Database, row_id: &str) {
+    let row_id = row_id.to_string();
+    let object_id = "0".repeat(64);
+    database
+        .call(move |connection| {
+            connection
+                .execute(
+                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+                    [&object_id],
+                )
+                .map_err(DbError::from)?;
+            connection
+                .execute(
+                    "INSERT INTO blob_locators (remote_object_id, locator_hash)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![object_id, "1".repeat(64)],
+                )
+                .map_err(DbError::from)?;
+            connection
+                .execute(
+                    "INSERT INTO row_blob_locators
+                     (table_name, row_id, column_name, row_stamp, audience_authority,
+                      remote_object_id)
+                     VALUES ('notes', ?1, 'attachment', '0000000002000-0000-owner', '{}', ?2)",
+                    rusqlite::params![row_id, object_id],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("bind row blob");
+}
+
 async fn owner_delete_circle(fixture: &EffectiveAccessFixture) {
     let owner_store = fixture
         .store
@@ -1850,6 +1904,22 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         Some("before deletion")
     );
 
+    // The Circle row carries a blob. Both the owner (host author) and the member
+    // (recipient) hold a `row_blob_locators` binding for it, which the deletion
+    // must prune along with the row.
+    bind_row_blob(&fixture.owner_database, EFFECTIVE_ACCESS_ROW_ID).await;
+    bind_row_blob(&member_database, EFFECTIVE_ACCESS_ROW_ID).await;
+    assert_eq!(
+        row_blob_binding_count(&fixture.owner_database, EFFECTIVE_ACCESS_ROW_ID).await,
+        1,
+        "the owner holds the Circle row's blob binding before deletion"
+    );
+    assert_eq!(
+        row_blob_binding_count(&member_database, EFFECTIVE_ACCESS_ROW_ID).await,
+        1,
+        "the member holds the Circle row's blob binding before deletion"
+    );
+
     // A pre-deletion Circle package the member has not yet pulled.
     publish_effective_access_row_with_id(
         &fixture,
@@ -1872,6 +1942,11 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert!(
         circle_control_activation_count(&fixture.owner_database, fixture.circle_id).await > 0,
         "the owner retains the control authority spine after deletion"
+    );
+    assert_eq!(
+        row_blob_binding_count(&fixture.owner_database, EFFECTIVE_ACCESS_ROW_ID).await,
+        0,
+        "the owner's Circle row blob binding is pruned on deletion"
     );
     let owner_circles = StoreDatabase::new(&fixture.owner_database)
         .get_circles(
@@ -1915,6 +1990,11 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert!(
         circle_control_activation_count(&member_database, fixture.circle_id).await > 0,
         "the member retains the control authority spine after deletion"
+    );
+    assert_eq!(
+        row_blob_binding_count(&member_database, EFFECTIVE_ACCESS_ROW_ID).await,
+        0,
+        "the member's Circle row blob binding is pruned on deletion"
     );
     let member_circles = StoreDatabase::new(&member_database)
         .get_circles(
@@ -2107,19 +2187,27 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     )
     .await;
 
-    // The control chain the deletion will terminate — the package authority a
-    // retained historical commit was published under.
-    let owner_pubkey = crate::keys::public_key_hex(&fixture.owner);
-    let (historical, _) = StoreDatabase::new(&fixture.owner_database)
-        .circle_authoring_context(fixture.circle_id, &owner_pubkey)
-        .await
-        .expect("read the pre-deletion authoring control");
-    let historical_control = historical.control.coord.clone();
+    // A real Circle package the owner authored before deletion: its encrypted
+    // payload is the retained historical package the authority spine must still
+    // decrypt and verify against the frozen epoch's key.
+    let package_commit_ref = publish_effective_access_row(
+        &fixture,
+        &owner_store_dir,
+        "authored before deletion",
+        "0000000002000-0000-owner",
+    )
+    .await;
+    let package_commit = load_commit(&fixture, &package_commit_ref).await;
+    let [package_ref] = package_commit.circle_packages() else {
+        panic!("the pre-deletion Store commit carries one Circle package");
+    };
+    let package_ref = package_ref.clone();
+    let historical_control = package_ref.control.clone();
 
     owner_delete_circle(&fixture).await;
 
-    // Live materialization is gone, but the authority spine still resolves and
-    // verifies the historical control a retained old package was signed under.
+    // Live materialization is gone, but the authority spine still resolves the
+    // historical control the package was signed under.
     assert!(StoreDatabase::new(&fixture.owner_database)
         .circle_is_deleted(fixture.circle_id)
         .await
@@ -2133,5 +2221,29 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     assert!(
         retained.control.verify(),
         "the retained historical control still verifies against the authority spine"
+    );
+
+    // The historical-keyring path reconstructs the frozen epoch's key from the
+    // retained authority spine — the caches are gone, but the retained replay
+    // still yields the package access. Decrypting and verifying the actual
+    // retained package with it proves the spine keeps historical commits
+    // readable after deletion.
+    let access = retained
+        .package_access()
+        .expect("reconstruct retained package access after deletion")
+        .expect("the retained historical activation carries package access");
+    assert_eq!(access.key_fingerprint, package_ref.key_fingerprint);
+    let decrypted = load_circle_package(
+        fixture.store.storage.as_ref(),
+        &package_commit_ref,
+        &package_commit,
+        &package_ref,
+        access.encryption,
+    )
+    .await
+    .expect("decrypt and verify the retained package against the frozen epoch key");
+    assert!(
+        !decrypted.value.is_empty(),
+        "the retained package decrypts to its signed payload"
     );
 }

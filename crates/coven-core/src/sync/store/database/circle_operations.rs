@@ -188,6 +188,53 @@ impl StoreDatabase {
             .await
     }
 
+    /// The authoring context a terminal deletion signs from, accepting any
+    /// resolved state whose local device holds owner access — `Active` or
+    /// `Closing`. Unlike `circle_authoring_context` (Active-only, for commands
+    /// that publish a new active epoch), deletion supersedes an in-flight close,
+    /// so it authors equally from a closing control's frozen epoch.
+    pub(crate) async fn circle_delete_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        identity_pubkey: &str,
+    ) -> Result<
+        (
+            crate::sync::store::circle_controls::activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.database
+            .call(move |conn| {
+                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                    DbError::Message(format!("Circle {circle_id} has no current state"))
+                })?;
+                let authoring = state.deletable_authoring_state().ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} has no resolved authoring state to delete"
+                    ))
+                })?;
+                if authoring.access.recipient_pubkey != identity_pubkey {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} belongs to another local identity"
+                    )));
+                }
+                let activated_commit = Self::circle_activation_commit_ref_on(
+                    conn,
+                    circle_id,
+                    &authoring.control.coord,
+                )?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} current control has no materialized activation"
+                    ))
+                })?;
+                Ok((authoring, activated_commit))
+            })
+            .await
+    }
+
     /// The retained conflicting branch coordinates for a Circle whose control
     /// history forked, in canonical order. `None` when the Circle has no
     /// current state or its control is resolved.

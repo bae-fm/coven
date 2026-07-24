@@ -46,6 +46,56 @@ impl StoreDatabase {
             .await
     }
 
+    /// Insert the terminal deletion operation, superseding the operation that
+    /// currently holds the Circle's single operation slot. A closing Circle keeps
+    /// a waiting close operation there; the deletion removes it and takes the slot
+    /// in one transaction, so no window leaves the Circle carrying both a pending
+    /// close and a pending deletion.
+    pub(in crate::sync::store) async fn insert_circle_operation_superseding(
+        &self,
+        journal: CircleOperationJournal,
+        superseded: CircleOperationId,
+    ) -> Result<(), DbError> {
+        let remotes = journal
+            .closed_remote_objects()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let owner = journal.operation().commit_ref.clone();
+        let row = PreparedCircleOperationRow::from_journal(journal)?;
+        let superseded = superseded.as_str().to_string();
+        let circle_id = row.circle_id.clone();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let removed = tx
+                    .execute(
+                        "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
+                        rusqlite::params![superseded, circle_id],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(
+                        "superseded Circle operation is absent from its slot".to_string(),
+                    ));
+                }
+                for remote in &remotes {
+                    persist_prepared_remote_object_on(
+                        &tx,
+                        remote,
+                        &owner,
+                        "Circle candidate graph",
+                    )?;
+                }
+                tx.execute(
+                    "INSERT INTO circle_operations (operation_id, circle_id, payload)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![row.operation_id, row.circle_id, row.payload],
+                )
+                .map_err(DbError::from)?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
+    }
+
     pub(in crate::sync::store) async fn circle_operation(
         &self,
         operation_id: &CircleOperationId,
