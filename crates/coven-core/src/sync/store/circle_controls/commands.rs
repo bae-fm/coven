@@ -565,6 +565,117 @@ impl Store {
         Ok(journal.operation_id)
     }
 
+    /// Sign and publish an Owner exclusion of an unavailable participant device to
+    /// that device's create-once close-response slot, letting a stalled close reach
+    /// completion. Create-once decides the slot: if the device's own response
+    /// landed first, the exclusion is a no-op and that response is adopted.
+    pub(crate) async fn exclude_circle_close_device(
+        &self,
+        circle_id: CircleId,
+        excluded_device_id: crate::sync::store_commit::StoreDeviceId,
+        signer: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let identity_pubkey = keys::public_key_hex(signer);
+        let journal = database
+            .waiting_circle_operations()
+            .await?
+            .into_iter()
+            .find(|journal| journal.circle_id() == circle_id)
+            .ok_or(CircleOperationError::NoCloseToExclude { circle_id })?;
+        let (current, _) = database
+            .circle_closing_context(circle_id, &identity_pubkey)
+            .await?;
+        let crate::sync::circle::CircleControlState::EpochClose(close) =
+            current.control.value.state()
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle device-exclusion context is active".to_string(),
+            ));
+        };
+        if close.close_id
+            != crate::sync::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
+        {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} differs from its close id",
+                journal.operation_id
+            )));
+        }
+        let participant = close
+            .participants
+            .iter()
+            .find(|participant| participant.registration.device_id == excluded_device_id)
+            .ok_or(CircleOperationError::DeviceNotACloseParticipant {
+                circle_id,
+                device_id: excluded_device_id,
+            })?;
+        let exclusion = crate::sync::circle::CircleEpochCloseExclusion::signed(
+            &current.control,
+            participant.registration.clone(),
+            signer,
+        )?;
+        let prefix = crate::sync::circle::circle_epoch_close_response_semantic_prefix(
+            circle_id,
+            close.close_id,
+            excluded_device_id,
+        );
+        let context = crate::sync::storage::ProtocolObjectContext::store_encrypted(
+            current.control.value.store_root_hash,
+            crate::sync::storage::ProtocolObjectDomain::CircleEpochCloseResponse,
+        );
+        let prepared = storage
+            .prepare_protocol_object(
+                &context,
+                participant.response_slot.clone(),
+                &prefix,
+                crate::sync::circle::CircleEpochCloseResponseSlotValue::Exclusion(exclusion)
+                    .to_bytes(),
+            )
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        match storage.create_protocol_object(&prepared).await {
+            Ok(()) | Err(crate::sync::storage::StorageError::SlotCollision(_)) => {}
+            Err(error) => {
+                return Err(crate::sync::store_objects::StoreObjectError::from(error).into())
+            }
+        }
+        let (winner_bytes, _) = storage
+            .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        match crate::sync::circle::CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
+            crate::sync::circle::CircleEpochCloseResponseSlotValue::Exclusion(winner) => {
+                if !winner.verify_for(&current.control) {
+                    return Err(CircleOperationError::InvalidState(
+                        "published Circle epoch-close exclusion failed verification".to_string(),
+                    ));
+                }
+            }
+            crate::sync::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
+                let registration = database
+                    .activated_store_device_registration(participant.registration.clone())
+                    .await?;
+                if !response.verify_for(&current.control, &registration) {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle epoch-close response slot holds an unverifiable response"
+                            .to_string(),
+                    ));
+                }
+                tracing::debug!(
+                    circle_id = %circle_id,
+                    close_id = %close.close_id,
+                    device_id = %excluded_device_id,
+                    "device responded before exclusion; adopting its response"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
@@ -678,7 +789,7 @@ pub(super) struct CircleFinalizeEpochCloseRequest {
     pub(super) previous_control: CircleControlRef,
     pub(super) roster_chain: CircleRosterChain,
     pub(super) intent: crate::sync::circle::CircleEpochCloseIntent,
-    pub(super) responses: Vec<crate::sync::circle::CircleEpochCloseResponseRef>,
+    pub(super) responses: Vec<crate::sync::circle::CircleEpochCloseSettlement>,
     pub(super) bootstrap: crate::sync::store::snapshot::SnapshotCut,
 }
 

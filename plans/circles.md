@@ -114,6 +114,21 @@ rebuild the deleted choice.
   cancellation settles the same durable removal operation under a distinct stable
   write identity, so a crashed cancel resumes as a cancel and never re-derives
   into a finalize.
+- Each participant's create-once response slot holds one of two signed values,
+  parsed as a tagged value: the device's own response, or an Owner-signed
+  exclusion of an unavailable participant. Create-once decides every race — if
+  the device responded first the exclusion command adopts the response, if the
+  exclusion landed first a late device response is adopted as the exclusion. A
+  response set is complete when every slot holds either arm; the final cutoff
+  joins only the non-excluded responses. The close outcome carries one settlement
+  per participant (a response or an exclusion ref); its verifier recomputes the
+  cutoff over the response arms and verifies each exclusion arm's slot, signature,
+  and Owner authority against the actual slot contents, refusing an outcome that
+  names an exclusion for a slot that holds a response. Enforcing that an excluded
+  device resets from the successor bootstrap before it writes or acknowledges —
+  detection at pull, projection reset through bootstrap-seeded replay, and the
+  typed publication-context refusal until coverage records the successor
+  bootstrap — is not yet implemented.
 - Pull derives effective Store membership from both the latest verified
   membership chain and the exact chain resulting from each candidate. When the
   candidate causally includes the latest chain, its result governs. When the
@@ -233,9 +248,10 @@ rebuild the deleted choice.
    Recipient Circle bootstrap images use and verify that boundary atomically.
 1. **In progress.** Create, rename, member addition, recipient bootstrap
    installation, member-removal epoch close, successor activation, close
-   cancellation, Store-member-removal rotation blocking, and control-conflict
-   resolution are implemented. Finish device exclusion, deletion, and restart
-   coverage.
+   cancellation, the epoch-close device-exclusion slot competition, command, and
+   outcome cutoff, Store-member-removal rotation blocking, and control-conflict
+   resolution are implemented. Finish the excluded-device bootstrap reset and
+   publication gate, deletion, and restart coverage.
 1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,

@@ -5,8 +5,9 @@ use super::{
 };
 use crate::keys::UserKeypair;
 use crate::sync::circle::{
-    circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseResponse,
-    CircleEpochCloseResponseRef, PreparedCircleControl,
+    circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseExclusionRef,
+    CircleEpochCloseResponse, CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue,
+    CircleEpochCloseSettlement, PreparedCircleControl,
 };
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store::{operations, AuthorizedStore};
@@ -50,20 +51,20 @@ impl AuthorizedStore<'_> {
                     journal.operation_id
                 )));
             }
-            let Some(responses) = self
+            let Some(settlements) = self
                 .load_complete_circle_epoch_close_responses(&current.control)
                 .await?
             else {
                 continue;
             };
-            let cutoff = responses.iter().try_fold(
-                close.provisional_frontier.clone(),
-                |cutoff, (response, _)| {
+            let cutoff = settlements
+                .iter()
+                .filter_map(|(settlement, _)| settlement.response_frontier())
+                .try_fold(close.provisional_frontier.clone(), |cutoff, frontier| {
                     cutoff
-                        .join(response.frontier.clone())
+                        .join(frontier.clone())
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
-                },
-            )?;
+                })?;
             let bootstrap = self
                 .capture_circle_snapshot_at_cutoff(
                     store_dir.as_ref().to_path_buf(),
@@ -148,9 +149,9 @@ impl AuthorizedStore<'_> {
                         previous_control: reference.clone(),
                         roster_chain,
                         intent,
-                        responses: responses
+                        responses: settlements
                             .into_iter()
-                            .map(|(reference, _)| reference)
+                            .map(|(settlement, _)| settlement)
                             .collect(),
                         bootstrap,
                     },
@@ -192,7 +193,12 @@ impl AuthorizedStore<'_> {
         &self,
         control: &PreparedCircleControl,
     ) -> Result<
-        Option<Vec<(CircleEpochCloseResponseRef, CircleEpochCloseResponse)>>,
+        Option<
+            Vec<(
+                CircleEpochCloseSettlement,
+                CircleEpochCloseResponseSlotValue,
+            )>,
+        >,
         CircleOperationError,
     > {
         let CircleControlState::EpochClose(close) = control.value.state() else {
@@ -204,7 +210,7 @@ impl AuthorizedStore<'_> {
             control.value.store_root_hash,
             ProtocolObjectDomain::CircleEpochCloseResponse,
         );
-        let mut responses = Vec::with_capacity(close.participants.len());
+        let mut settlements = Vec::with_capacity(close.participants.len());
         for participant in &close.participants {
             let prefix = circle_epoch_close_response_semantic_prefix(
                 control.value.circle_id,
@@ -220,28 +226,59 @@ impl AuthorizedStore<'_> {
                 Err(StorageError::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(StoreObjectError::from(error).into()),
             };
-            let registration = self
-                .database()
-                .activated_store_device_registration(participant.registration.clone())
-                .await?;
-            let response = CircleEpochCloseResponse::parse_for(&bytes, control, &registration)
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle epoch-close response from device {} failed verification: {error}",
-                        participant.registration.device_id
-                    ))
-                })?;
-            let reference = CircleEpochCloseResponseRef::from_response(&response, object).map_err(
-                |error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle epoch-close response from device {} has an invalid exact reference: {error}",
-                        participant.registration.device_id
-                    ))
-                },
-            )?;
-            responses.push((reference, response));
+            let slot_value = CircleEpochCloseResponseSlotValue::parse(&bytes).map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle epoch-close response slot for device {} failed to parse: {error}",
+                    participant.registration.device_id
+                ))
+            })?;
+            let settlement = match &slot_value {
+                CircleEpochCloseResponseSlotValue::Response(response) => {
+                    let registration = self
+                        .database()
+                        .activated_store_device_registration(participant.registration.clone())
+                        .await?;
+                    if !response.verify_for(control, &registration) {
+                        return Err(CircleOperationError::InvalidState(format!(
+                            "Circle epoch-close response from device {} failed verification",
+                            participant.registration.device_id
+                        )));
+                    }
+                    CircleEpochCloseSettlement::Response(
+                        CircleEpochCloseResponseRef::from_response(response, object).map_err(
+                            |error| {
+                                CircleOperationError::InvalidState(format!(
+                                    "Circle epoch-close response from device {} has an invalid exact reference: {error}",
+                                    participant.registration.device_id
+                                ))
+                            },
+                        )?,
+                    )
+                }
+                CircleEpochCloseResponseSlotValue::Exclusion(exclusion) => {
+                    if !exclusion.verify_for(control)
+                        || exclusion.excluded != participant.registration
+                    {
+                        return Err(CircleOperationError::InvalidState(format!(
+                            "Circle epoch-close exclusion for device {} failed verification",
+                            participant.registration.device_id
+                        )));
+                    }
+                    CircleEpochCloseSettlement::Exclusion(
+                        CircleEpochCloseExclusionRef::from_exclusion(exclusion, object).map_err(
+                            |error| {
+                                CircleOperationError::InvalidState(format!(
+                                    "Circle epoch-close exclusion for device {} has an invalid exact reference: {error}",
+                                    participant.registration.device_id
+                                ))
+                            },
+                        )?,
+                    )
+                }
+            };
+            settlements.push((settlement, slot_value));
         }
-        Ok(Some(responses))
+        Ok(Some(settlements))
     }
 
     pub(crate) async fn publish_circle_epoch_close_responses(
@@ -306,7 +343,7 @@ impl AuthorizedStore<'_> {
                     &context,
                     participant.response_slot.clone(),
                     &prefix,
-                    response.to_bytes(),
+                    CircleEpochCloseResponseSlotValue::Response(response).to_bytes(),
                 )
                 .map_err(StoreObjectError::from)?;
             match self.storage().create_protocol_object(&prepared).await {
@@ -318,7 +355,33 @@ impl AuthorizedStore<'_> {
                 .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
                 .await
                 .map_err(StoreObjectError::from)?;
-            CircleEpochCloseResponse::parse_for(&winner_bytes, &control, &registration)?;
+            // Create-once decides the slot. The winner is this device's own
+            // response, or an Owner exclusion that landed first; a valid exclusion
+            // is adopted — the device was excluded before it could respond.
+            match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
+                CircleEpochCloseResponseSlotValue::Response(winner) => {
+                    if !winner.verify_for(&control, &registration) {
+                        return Err(CircleOperationError::InvalidState(format!(
+                            "Circle epoch-close response slot for device {} holds an unverifiable response",
+                            registration_ref.device_id
+                        )));
+                    }
+                }
+                CircleEpochCloseResponseSlotValue::Exclusion(exclusion) => {
+                    if !exclusion.verify_for(&control) {
+                        return Err(CircleOperationError::InvalidState(format!(
+                            "Circle epoch-close exclusion for device {} holds an unverifiable exclusion",
+                            registration_ref.device_id
+                        )));
+                    }
+                    tracing::debug!(
+                        circle_id = %control.value.circle_id,
+                        close_id = %close.close_id,
+                        device_id = %registration_ref.device_id,
+                        "local device was excluded from the Circle epoch close before it responded"
+                    );
+                }
+            }
         }
         Ok(())
     }

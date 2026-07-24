@@ -432,13 +432,13 @@ async fn verify_epoch_close_outcome(
             "Circle epoch-close outcome differs from its exact reference".to_string(),
         ));
     }
-    let mut responses = Vec::with_capacity(close.participants.len());
-    for (participant, response_ref) in close.participants.iter().zip(&outcome.responses) {
-        if participant.registration != response_ref.registration
-            || participant.response_slot != *response_ref.object.slot()
+    let mut settlements = Vec::with_capacity(close.participants.len());
+    for (participant, settlement_ref) in close.participants.iter().zip(&outcome.responses) {
+        if settlement_ref.registration() != &participant.registration
+            || settlement_ref.object().slot() != &participant.response_slot
         {
             return Err(CircleOperationError::InvalidState(
-                "Circle epoch-close outcome response differs from its participant".to_string(),
+                "Circle epoch-close outcome settlement differs from its participant".to_string(),
             ));
         }
         let prefix = crate::sync::circle::circle_epoch_close_response_semantic_prefix(
@@ -452,23 +452,53 @@ async fn verify_epoch_close_outcome(
                 commit.store_root_hash,
                 ProtocolObjectDomain::CircleEpochCloseResponse,
             ),
-            &response_ref.object,
+            settlement_ref.object(),
             &prefix,
         )
         .await?;
-        let registration = database
-            .activated_store_device_registration(participant.registration.clone())
-            .await?;
-        let response = crate::sync::circle::CircleEpochCloseResponse::parse_for(
-            &bytes,
-            &predecessor.control,
-            &registration,
-        )?;
-        let exact_ref = crate::sync::circle::CircleEpochCloseResponseRef::from_response(
-            &response,
-            response_ref.object.clone(),
-        )?;
-        responses.push((exact_ref, response));
+        // Dispatch on the slot's actual settled arm, not the outcome's claim: the
+        // outcome's declared settlement must equal the one derived here, which is
+        // what refuses an outcome naming an exclusion for a slot holding a response.
+        let slot_value = crate::sync::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "parse Circle epoch-close response slot: {error}"
+                ))
+            })?;
+        let settlement = match &slot_value {
+            crate::sync::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
+                let registration = database
+                    .activated_store_device_registration(participant.registration.clone())
+                    .await?;
+                if !response.verify_for(&predecessor.control, &registration) {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle epoch-close response failed exact verification".to_string(),
+                    ));
+                }
+                crate::sync::circle::CircleEpochCloseSettlement::Response(
+                    crate::sync::circle::CircleEpochCloseResponseRef::from_response(
+                        response,
+                        settlement_ref.object().clone(),
+                    )?,
+                )
+            }
+            crate::sync::circle::CircleEpochCloseResponseSlotValue::Exclusion(exclusion) => {
+                if !exclusion.verify_for(&predecessor.control)
+                    || exclusion.excluded != participant.registration
+                {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle epoch-close exclusion failed exact verification".to_string(),
+                    ));
+                }
+                crate::sync::circle::CircleEpochCloseSettlement::Exclusion(
+                    crate::sync::circle::CircleEpochCloseExclusionRef::from_exclusion(
+                        exclusion,
+                        settlement_ref.object().clone(),
+                    )?,
+                )
+            }
+        };
+        settlements.push((settlement, slot_value));
     }
     let successor = crate::sync::circle::CircleEpochSuccessor {
         epoch_id: active.common.epoch_id,
@@ -479,7 +509,7 @@ async fn verify_epoch_close_outcome(
         roster: active.roster.clone(),
         store_membership: active.store_membership.clone(),
     };
-    if !outcome.verify_for(&predecessor.control, &intent, &responses)
+    if !outcome.verify_for(&predecessor.control, &intent, &settlements)
         || outcome.cutoff != *cutoff
         || outcome.successor != successor
     {

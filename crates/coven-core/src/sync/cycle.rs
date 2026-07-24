@@ -1231,6 +1231,16 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn exclude_circle_close_device(
+        &self,
+        circle_id: super::circle::CircleId,
+        excluded_device_id: super::store_commit::StoreDeviceId,
+    ) -> Result<(), super::store::CircleOperationError> {
+        self.store
+            .exclude_circle_close_device(circle_id, excluded_device_id, &self.user_keypair)
+            .await
+    }
+
     pub async fn propose_device_exclusion(
         &self,
         target: &super::store_commit::StoreDeviceRegistrationRef,

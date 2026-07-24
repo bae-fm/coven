@@ -35,6 +35,13 @@ pub enum CircleOperationError {
     ChosenBranchNotRetained { circle_id: CircleId },
     #[error("circle {circle_id} has no local epoch close waiting for cancellation")]
     NoCloseToCancel { circle_id: CircleId },
+    #[error("circle {circle_id} has no local epoch close waiting for device exclusion")]
+    NoCloseToExclude { circle_id: CircleId },
+    #[error("device {device_id} is not a participant in circle {circle_id}'s epoch close")]
+    DeviceNotACloseParticipant {
+        circle_id: CircleId,
+        device_id: crate::sync::store_commit::StoreDeviceId,
+    },
     #[error("circle command channel is closed")]
     CommandChannelClosed,
     #[error("circle command ended without a reply")]

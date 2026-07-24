@@ -997,29 +997,11 @@ impl CircleEpochCloseResponse {
             )
     }
 
-    pub(crate) fn parse_for(
-        bytes: &[u8],
-        control: &PreparedCircleControl,
-        author: &StoreDeviceRegistration,
-    ) -> Result<Self, CircleTransitionError> {
-        let response: Self = serde_json::from_slice(bytes)
-            .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
-        if serde_json::to_vec(&response)
-            .expect("Circle epoch-close response serialization cannot fail")
-            != bytes
-            || !response.verify_for(control, author)
-        {
-            return Err(CircleTransitionError::InvalidCurrentState);
-        }
-        Ok(response)
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("Circle epoch-close response serialization cannot fail")
-    }
-
     pub fn response_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.to_bytes())
+        ObjectHash::digest(
+            &serde_json::to_vec(self)
+                .expect("Circle epoch-close response serialization cannot fail"),
+        )
     }
 }
 
@@ -1064,6 +1046,206 @@ impl CircleEpochCloseResponseRef {
     }
 }
 
+/// One Owner-signed exclusion of an unavailable participant device. It competes
+/// at that device's create-once response slot; activating it excludes the device
+/// from the close cutoff and forces it to reset from the successor bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseExclusion {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub close_control: CircleControlCoord,
+    pub excluded: StoreDeviceRegistrationRef,
+    pub owner_pubkey: String,
+    pub signature: String,
+}
+
+impl CircleEpochCloseExclusion {
+    pub(crate) fn signed(
+        control: &PreparedCircleControl,
+        excluded: StoreDeviceRegistrationRef,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        };
+        let mut exclusion = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: control.value.store_root_hash,
+            circle_id: control.value.circle_id,
+            close_id: close.close_id,
+            close_control: control.coord.clone(),
+            excluded,
+            owner_pubkey: keys::public_key_hex(signer),
+            signature: String::new(),
+        };
+        if !exclusion.verify_shape(control) {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        exclusion.signature = keys::sign_hex(signer, &exclusion.canonical_bytes()).1;
+        Ok(exclusion)
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            circle_id: CircleId,
+            close_id: CircleEpochCloseId,
+            close_control: &'a CircleControlCoord,
+            excluded: &'a StoreDeviceRegistrationRef,
+            owner_pubkey: &'a str,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.circle-epoch-close-exclusion.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            circle_id: self.circle_id,
+            close_id: self.close_id,
+            close_control: &self.close_control,
+            excluded: &self.excluded,
+            owner_pubkey: &self.owner_pubkey,
+        })
+        .expect("Circle epoch-close exclusion serialization cannot fail")
+    }
+
+    fn verify_shape(&self, control: &PreparedCircleControl) -> bool {
+        let CircleControlState::EpochClose(close) = control.value.state() else {
+            return false;
+        };
+        self.version == STORE_PROTOCOL_VERSION
+            && control.verify()
+            && self.store_root_hash == control.value.store_root_hash
+            && self.circle_id == control.value.circle_id
+            && self.close_id == close.close_id
+            && self.close_control == control.coord
+            && close
+                .participants
+                .iter()
+                .any(|participant| participant.registration == self.excluded)
+            && close
+                .frozen_epoch
+                .common
+                .owners
+                .contains(&self.owner_pubkey)
+    }
+
+    pub(crate) fn verify_for(&self, control: &PreparedCircleControl) -> bool {
+        self.verify_shape(control)
+            && keys::verify_signature_hex(
+                &self.owner_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
+    }
+
+    pub fn exclusion_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self)
+                .expect("Circle epoch-close exclusion serialization cannot fail"),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleEpochCloseExclusionRef {
+    pub registration: StoreDeviceRegistrationRef,
+    pub exclusion_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+impl CircleEpochCloseExclusionRef {
+    pub(crate) fn from_exclusion(
+        exclusion: &CircleEpochCloseExclusion,
+        object: ExactObjectRef,
+    ) -> Result<Self, CircleTransitionError> {
+        if object.slot().logical_key()
+            != format!(
+                "{}.json",
+                circle_epoch_close_response_semantic_prefix(
+                    exclusion.circle_id,
+                    exclusion.close_id,
+                    exclusion.excluded.device_id,
+                )
+            )
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(Self {
+            registration: exclusion.excluded.clone(),
+            exclusion_hash: exclusion.exclusion_hash(),
+            object,
+        })
+    }
+
+    pub(crate) fn verify_exclusion(&self, exclusion: &CircleEpochCloseExclusion) -> bool {
+        self.registration == exclusion.excluded && self.exclusion_hash == exclusion.exclusion_hash()
+    }
+}
+
+/// The exactly-one value a participant's create-once close-response slot holds:
+/// the device's own signed response, or an Owner-signed exclusion of that device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleEpochCloseResponseSlotValue {
+    Response(CircleEpochCloseResponse),
+    Exclusion(CircleEpochCloseExclusion),
+}
+
+impl CircleEpochCloseResponseSlotValue {
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self)
+            .expect("Circle epoch-close response slot value serialization cannot fail")
+    }
+
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, CircleTransitionError> {
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
+        if value.to_bytes() != bytes {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(value)
+    }
+}
+
+/// One participant's contribution to a close outcome: either its verified device
+/// response (whose frontier joins the cutoff) or an Owner exclusion (which does
+/// not). The outcome carries one per participant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleEpochCloseSettlement {
+    Response(CircleEpochCloseResponseRef),
+    Exclusion(CircleEpochCloseExclusionRef),
+}
+
+impl CircleEpochCloseSettlement {
+    pub(crate) fn registration(&self) -> &StoreDeviceRegistrationRef {
+        match self {
+            Self::Response(reference) => &reference.registration,
+            Self::Exclusion(reference) => &reference.registration,
+        }
+    }
+
+    pub(crate) fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::Response(reference) => &reference.object,
+            Self::Exclusion(reference) => &reference.object,
+        }
+    }
+
+    pub(crate) fn response_frontier(&self) -> Option<&CommitFrontier> {
+        match self {
+            Self::Response(reference) => Some(&reference.frontier),
+            Self::Exclusion(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleEpochSuccessor {
@@ -1085,7 +1267,7 @@ pub struct CircleEpochCloseOutcome {
     pub close_id: CircleEpochCloseId,
     pub close_control: CircleControlCoord,
     pub intent: CircleEpochCloseIntentRef,
-    pub responses: Vec<CircleEpochCloseResponseRef>,
+    pub responses: Vec<CircleEpochCloseSettlement>,
     pub cutoff: CommitFrontier,
     pub successor: CircleEpochSuccessor,
     pub owner_pubkey: String,
@@ -1096,7 +1278,7 @@ impl CircleEpochCloseOutcome {
     pub(crate) fn signed(
         control: &PreparedCircleControl,
         intent: &CircleEpochCloseIntent,
-        responses: Vec<CircleEpochCloseResponseRef>,
+        responses: Vec<CircleEpochCloseSettlement>,
         successor: CircleEpochSuccessor,
         signer: &UserKeypair,
     ) -> Result<Self, CircleTransitionError> {
@@ -1105,8 +1287,9 @@ impl CircleEpochCloseOutcome {
         };
         let cutoff = responses
             .iter()
-            .try_fold(close.provisional_frontier.clone(), |cutoff, response| {
-                cutoff.join(response.frontier.clone())
+            .filter_map(CircleEpochCloseSettlement::response_frontier)
+            .try_fold(close.provisional_frontier.clone(), |cutoff, frontier| {
+                cutoff.join(frontier.clone())
             })
             .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
         let mut outcome = Self {
@@ -1139,7 +1322,7 @@ impl CircleEpochCloseOutcome {
             close_id: CircleEpochCloseId,
             close_control: &'a CircleControlCoord,
             intent: &'a CircleEpochCloseIntentRef,
-            responses: &'a [CircleEpochCloseResponseRef],
+            responses: &'a [CircleEpochCloseSettlement],
             cutoff: &'a CommitFrontier,
             successor: &'a CircleEpochSuccessor,
             owner_pubkey: &'a str,
@@ -1167,22 +1350,24 @@ impl CircleEpochCloseOutcome {
         let responses_are_canonical = self
             .responses
             .windows(2)
-            .all(|pair| pair[0].registration.device_id < pair[1].registration.device_id);
-        let responses_match_participants = self.responses.len() == close.participants.len()
-            && self
-                .responses
-                .iter()
-                .zip(&close.participants)
-                .all(|(response, participant)| {
-                    response.registration == participant.registration
-                        && response.object.slot() == &participant.response_slot
-                        && response.frontier.covers(&close.provisional_frontier)
-                });
+            .all(|pair| pair[0].registration().device_id < pair[1].registration().device_id);
+        let responses_match_participants =
+            self.responses.len() == close.participants.len()
+                && self.responses.iter().zip(&close.participants).all(
+                    |(settlement, participant)| {
+                        settlement.registration() == &participant.registration
+                            && settlement.object().slot() == &participant.response_slot
+                            && settlement
+                                .response_frontier()
+                                .is_none_or(|frontier| frontier.covers(&close.provisional_frontier))
+                    },
+                );
         let expected_cutoff = self
             .responses
             .iter()
-            .try_fold(close.provisional_frontier.clone(), |cutoff, response| {
-                cutoff.join(response.frontier.clone())
+            .filter_map(CircleEpochCloseSettlement::response_frontier)
+            .try_fold(close.provisional_frontier.clone(), |cutoff, frontier| {
+                cutoff.join(frontier.clone())
             });
         self.version == STORE_PROTOCOL_VERSION
             && control.verify()
@@ -1223,19 +1408,38 @@ impl CircleEpochCloseOutcome {
         &self,
         control: &PreparedCircleControl,
         intent: &CircleEpochCloseIntent,
-        responses: &[(CircleEpochCloseResponseRef, CircleEpochCloseResponse)],
+        settlements: &[(
+            CircleEpochCloseSettlement,
+            CircleEpochCloseResponseSlotValue,
+        )],
     ) -> bool {
         self.verify_shape(control)
             && self.verify_intent(intent)
-            && self.responses.len() == responses.len()
+            && self.responses.len() == settlements.len()
             && self
                 .responses
                 .iter()
-                .zip(responses)
-                .all(|(expected, (reference, response))| {
-                    expected == reference
-                        && reference.verify_response(response)
-                        && response.close_control == self.close_control
+                .zip(settlements)
+                .all(|(expected, (settlement, slot_value))| {
+                    expected == settlement
+                        && match (settlement, slot_value) {
+                            (
+                                CircleEpochCloseSettlement::Response(reference),
+                                CircleEpochCloseResponseSlotValue::Response(response),
+                            ) => {
+                                reference.verify_response(response)
+                                    && response.close_control == self.close_control
+                            }
+                            (
+                                CircleEpochCloseSettlement::Exclusion(reference),
+                                CircleEpochCloseResponseSlotValue::Exclusion(exclusion),
+                            ) => {
+                                reference.verify_exclusion(exclusion)
+                                    && exclusion.verify_for(control)
+                                    && exclusion.close_control == self.close_control
+                            }
+                            _ => false,
+                        }
                 })
             && keys::verify_signature_hex(
                 &self.owner_pubkey,
@@ -1990,7 +2194,7 @@ pub(crate) struct CircleTransitionDraft {
 pub(crate) struct CircleEpochCloseFinalizationDraft {
     pub close_control: PreparedCircleControl,
     pub intent: CircleEpochCloseIntent,
-    pub responses: Vec<CircleEpochCloseResponseRef>,
+    pub responses: Vec<CircleEpochCloseSettlement>,
     pub outcome_slot: ObjectSlot,
 }
 
@@ -2733,7 +2937,7 @@ impl CircleTransitionDraft {
         current_metadata: &CircleMetadata,
         keyring: &str,
         intent: CircleEpochCloseIntent,
-        responses: Vec<CircleEpochCloseResponseRef>,
+        responses: Vec<CircleEpochCloseSettlement>,
         ids: &dyn crate::id_provider::IdProvider,
         signer: &UserKeypair,
     ) -> Result<Self, CircleTransitionError> {
