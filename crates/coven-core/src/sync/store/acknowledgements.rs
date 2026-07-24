@@ -428,10 +428,21 @@ impl AuthorizedStore<'_> {
         reference: &crate::sync::store_commit::CircleAckRef,
         control: &crate::sync::circle::CircleControlCoord,
     ) -> Result<CircleAck, StoreAckError> {
-        let (encryption, _) = self
+        // Resolve the epoch key from the retained activation of the exact control
+        // the acknowledgement was sealed under — not the current publication
+        // control — so an acknowledgement sealed under a rotated-away epoch stays
+        // readable to a member that still retains that control's activation.
+        let access = self
             .database()
-            .circle_publication_context(reference.circle_id, control.clone())
-            .await?;
+            .circle_package_access(reference.circle_id, control.clone())
+            .await?
+            .ok_or_else(|| {
+                StoreAckError::InvalidOutbound(format!(
+                    "Circle {} acknowledgement key is not resolvable from retained controls",
+                    reference.circle_id
+                ))
+            })?;
+        let encryption = access.encryption;
         let author = self
             .database()
             .activated_store_device_registration(reference.registration.clone())

@@ -1076,3 +1076,209 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         "the restored device converges to the owner's accepted Store frontier"
     );
 }
+
+#[tokio::test]
+async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
+    let fixture = rotation_fixture("rotation-ack-read").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // A cycle publishes the owner's Circle acknowledgement under the current
+    // (soon-rotated-away) epoch.
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("cycle publishes the owner's Circle acknowledgement");
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("old Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+    let acknowledgements = StoreDatabase::new(&fixture.db)
+        .activated_circle_acks(fixture.circle_id)
+        .await
+        .expect("read activated Circle acknowledgements");
+    let ack_ref = acknowledgements
+        .first()
+        .cloned()
+        .expect("the owner published a Circle acknowledgement");
+    let before = crate::sync::store::load_circle_acknowledgement_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &ack_ref,
+        &old_control,
+    )
+    .await
+    .expect("read acknowledgement under the current control");
+    assert_eq!(before.epoch_id, old_epoch);
+    assert_eq!(before.control, old_control);
+    // The owner authored the Circle; its projection never came from an image, so
+    // the acknowledgement names no seed coverage.
+    assert!(before.seeded_from.is_none());
+
+    // Remove the roster member: the old epoch closes and a successor epoch/key
+    // activates.
+    remove_store_member(&fixture).await;
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("successor Circle authoring context");
+    let new_control = new_authoring.control.coord.clone();
+    assert_ne!(new_control, old_control, "the epoch rotated");
+
+    // The pre-rotation acknowledgement, sealed under the rotated-away epoch key,
+    // stays readable after the epoch rotates: the read resolves that epoch's key
+    // from the retained activation of the control the acknowledgement names.
+    let after = crate::sync::store::load_circle_acknowledgement_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &ack_ref,
+        &old_control,
+    )
+    .await
+    .expect("read the pre-rotation acknowledgement after the epoch rotated");
+    assert_eq!(after.epoch_id, old_epoch);
+    assert_eq!(after.control, old_control);
+}
+
+#[tokio::test]
+async fn circle_snapshot_stability_gates_on_acknowledgements() {
+    let fixture = rotation_fixture("snapshot-stability").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+    let (authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("Circle authoring context");
+    let control = authoring.control.coord.clone();
+    let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+
+    // Author a Circle snapshot before any device has acknowledged coverage.
+    crate::sync::store::push_circle_snapshots_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        snapshot_temp.path().to_path_buf(),
+        fixture.db.schema_version(),
+        &fixture.signer,
+        "2026-07-23T00:00:00Z",
+    )
+    .await
+    .expect("author Circle snapshot");
+    let published = StoreDatabase::new(&fixture.db)
+        .latest_local_circle_snapshot(fixture.circle_id)
+        .await
+        .expect("read published Circle snapshot")
+        .expect("a Circle snapshot was published");
+
+    // No acknowledgement covers the cut yet: not stable.
+    assert!(!crate::sync::store::circle_snapshot_is_stable_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        fixture.circle_id,
+        &control,
+        &published.cut,
+    )
+    .await
+    .expect("evaluate stability without acknowledgements"));
+
+    // A cycle publishes the owner's Circle acknowledgement covering the cut.
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("cycle publishes the owner's acknowledgement");
+
+    // Every acknowledging device now covers the snapshot cut: stable.
+    assert!(crate::sync::store::circle_snapshot_is_stable_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        fixture.circle_id,
+        &control,
+        &published.cut,
+    )
+    .await
+    .expect("evaluate stability with acknowledgements"));
+}
+
+#[tokio::test]
+async fn circle_snapshot_stays_readable_across_epoch_rotation() {
+    let fixture = rotation_fixture("rotation-snapshot-read").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("old Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+
+    // Author a Circle snapshot under the current (soon-rotated-away) epoch.
+    let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+    crate::sync::store::push_circle_snapshots_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        snapshot_temp.path().to_path_buf(),
+        fixture.db.schema_version(),
+        &fixture.signer,
+        "2026-07-23T00:00:00Z",
+    )
+    .await
+    .expect("author Circle snapshot");
+
+    // Rotate the epoch by removing the roster member.
+    remove_store_member(&fixture).await;
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+
+    // The old-epoch snapshot, sealed under the rotated-away key, stays readable
+    // to a current member: resolve the key from the retained activation of the
+    // control the snapshot names.
+    let retained = StoreDatabase::new(&fixture.db)
+        .circle_package_access(fixture.circle_id, old_control.clone())
+        .await
+        .expect("read retained Circle activation")
+        .expect("the pre-rotation control's activation is retained");
+    let metas = crate::sync::store::load_circle_snapshot_metas_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        fixture.circle_id,
+        retained.encryption,
+        &fixture.signer,
+    )
+    .await
+    .expect("read the pre-rotation Circle snapshot after the epoch rotated");
+    let old = metas
+        .iter()
+        .find(|meta| meta.epoch_id == old_epoch)
+        .expect("the pre-rotation snapshot remains readable");
+    assert_eq!(old.control, old_control);
+}

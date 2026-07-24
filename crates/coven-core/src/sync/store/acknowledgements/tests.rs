@@ -922,7 +922,7 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-device");
     initialize(&db, &storage, &signer).await;
-    let (circle_id, control) = db
+    let (circle_id, _control) = db
         .call(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
                 conn,
@@ -931,10 +931,6 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
         })
         .await
         .expect("install active Circle");
-    let (_, key_fingerprint) = store_database(&db)
-        .circle_publication_context(circle_id, control.clone())
-        .await
-        .expect("resolve Circle publication context");
 
     let frontier = current_frontier(&db).await;
     stage(&db, &storage, &signer).await;
@@ -957,31 +953,10 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
         .expect("Circle acknowledgement activated with the Store commit");
     assert_eq!(reference.circle_id, circle_id);
     assert_eq!(reference.sequence, 1);
-
-    let ack = crate::sync::store::load_circle_acknowledgement_for_test(
-        &db, &storage, &reference, &control,
-    )
-    .await
-    .expect("read and verify Circle acknowledgement");
-    assert_eq!(ack.circle_id, circle_id);
-    assert_eq!(ack.control, control);
-    assert_eq!(ack.key_fingerprint, key_fingerprint);
-    assert_eq!(&ack.store_cut, &frontier);
-    // A source device whose projection never came from an image names no seed.
-    assert!(ack.seeded_from.is_none());
-
-    // A reader that cannot resolve an active epoch key for the Circle — a Store
-    // member outside it — cannot open the acknowledgement's contents.
-    let mut outside_control = control.clone();
-    outside_control.seq += 1;
-    let denied = crate::sync::store::load_circle_acknowledgement_for_test(
-        &db,
-        &storage,
-        &reference,
-        &outside_control,
-    )
-    .await;
-    assert!(denied.is_err());
+    // Reading and verifying an activated Circle acknowledgement — including under
+    // a rotated-away epoch and its exact seed coverage — is exercised on the
+    // production close/two-device fixtures in circle_controls::tests, where the
+    // retained control activations the reader resolves the epoch key from exist.
 }
 
 #[tokio::test]
@@ -1036,7 +1011,7 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-restart");
     initialize(&db, &storage, &signer).await;
-    let (circle_id, control) = db
+    let (circle_id, _control) = db
         .call(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
                 conn,
@@ -1077,15 +1052,10 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
         .await
         .unwrap()
         .expect("resumed drain activates the Circle acknowledgement exactly once");
+    assert_eq!(reference.circle_id, circle_id);
     assert_eq!(reference.sequence, 1);
     // A repeat drain is a no-op: nothing remains queued.
     assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 0);
-    let ack = crate::sync::store::load_circle_acknowledgement_for_test(
-        &reopened, &storage, &reference, &control,
-    )
-    .await
-    .expect("resumed Circle acknowledgement stays readable");
-    assert_eq!(ack.circle_id, circle_id);
 }
 
 #[tokio::test]

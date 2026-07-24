@@ -245,6 +245,37 @@ pub(crate) async fn push_circle_snapshots_for_test(
 }
 
 #[cfg(test)]
+pub(crate) async fn load_circle_snapshot_metas_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    circle_id: crate::sync::circle::CircleId,
+    encryption: crate::encryption::EncryptionService,
+    signer: &UserKeypair,
+) -> Result<Vec<super::store_commit::CircleSnapshotMeta>, snapshot::SnapshotError> {
+    let database = StoreDatabase::new(db);
+    let device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .ok_or_else(|| {
+            snapshot::SnapshotError::PublicationState("local device id absent".to_string())
+        })?;
+    let (root, registration_ref, registration, _) =
+        operations::load_local_store_authority(&database, &device_id, signer)
+            .await
+            .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
+    snapshot::load_circle_snapshot_stream(
+        storage,
+        &root,
+        circle_id,
+        encryption,
+        &registration_ref,
+        &registration,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn circle_snapshot_is_stable_for_test(
     db: &Database,
     storage: &dyn SyncStorage,
