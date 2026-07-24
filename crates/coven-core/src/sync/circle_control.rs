@@ -1651,11 +1651,22 @@ impl CircleEpochCloseSlotValue {
     }
 }
 
+/// A terminal deletion. It freezes the epoch spine it terminated — the same
+/// `MergeActiveCircleEpoch` an `EpochClose` freezes — so historical package
+/// verification and exact reclamation keep the epoch, key fingerprint, and
+/// roster-head spine with no live access material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletedCircle {
+    pub frozen_epoch: MergeActiveCircleEpoch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleControlState {
     ActiveEpoch(MergeActiveCircleEpoch),
     EpochClose(CircleEpochClose),
+    Deleted(DeletedCircle),
 }
 
 impl CircleControlState {
@@ -1663,6 +1674,7 @@ impl CircleControlState {
         match self {
             Self::ActiveEpoch(active) => active,
             Self::EpochClose(close) => &close.frozen_epoch,
+            Self::Deleted(deleted) => &deleted.frozen_epoch,
         }
     }
 
@@ -1670,21 +1682,26 @@ impl CircleControlState {
         match self {
             Self::ActiveEpoch(active) => active,
             Self::EpochClose(close) => &mut close.frozen_epoch,
+            Self::Deleted(deleted) => &mut deleted.frozen_epoch,
         }
     }
 
     pub(crate) fn active_epoch(&self) -> Option<&MergeActiveCircleEpoch> {
         match self {
             Self::ActiveEpoch(active) => Some(active),
-            Self::EpochClose(_) => None,
+            Self::EpochClose(_) | Self::Deleted(_) => None,
         }
     }
 
     pub(crate) fn active_epoch_mut(&mut self) -> Option<&mut MergeActiveCircleEpoch> {
         match self {
             Self::ActiveEpoch(active) => Some(active),
-            Self::EpochClose(_) => None,
+            Self::EpochClose(_) | Self::Deleted(_) => None,
         }
+    }
+
+    pub(crate) fn is_deleted(&self) -> bool {
+        matches!(self, Self::Deleted(_))
     }
 }
 
@@ -1908,6 +1925,10 @@ impl CircleControl {
         let state_is_valid = match &self.value.state {
             CircleControlState::ActiveEpoch(_) => true,
             CircleControlState::EpochClose(close) => !founder && close.verify_shape(self.circle_id),
+            // A deletion is always a successor of a live control; the frozen
+            // epoch it carries is validated by the shared access-epoch checks
+            // above.
+            CircleControlState::Deleted(_) => !founder,
         };
         self.version == STORE_PROTOCOL_VERSION
             && owners_are_canonical
@@ -3696,6 +3717,112 @@ impl CircleTransitionDraft {
             close_finalization: None,
             close_cancellation: None,
             access,
+            control,
+        })
+    }
+
+    /// Build the terminal deletion: a successor of the current control whose
+    /// state is `Deleted`, freezing the epoch spine for historical verification
+    /// and reclamation. It publishes no roster successor, metadata successor,
+    /// access material, or bootstraps — its control inherits the predecessor's
+    /// access root.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn delete(
+        device_id: &str,
+        store_membership: StoreMembershipStateRef,
+        membership_authority: MembershipGrantCreationAuthority,
+        store_members: Vec<(String, MemberRole)>,
+        current_control: &PreparedCircleControl,
+        current_roster: &CircleMaterializedRoster,
+        current_metadata: &CircleMetadata,
+        keyring: &str,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let context = circle_successor_context(
+            store_members,
+            current_control,
+            current_roster,
+            current_metadata,
+            keyring,
+            signer,
+        )?;
+        let CircleSuccessorContext {
+            store_members: _,
+            author_pubkey,
+            active_epoch,
+            grant_id,
+            author_authority,
+            key_fingerprint: _,
+        } = context;
+        let store_root_hash = current_control.value.store_root_hash;
+        let circle_id = current_control.value.circle_id;
+        let epoch_id = current_control.value.epoch_id();
+        let frozen_epoch = MergeActiveCircleEpoch {
+            common: active_epoch.common.clone(),
+            metadata: active_epoch.metadata.clone(),
+            roster: active_epoch.roster.clone(),
+            store_membership,
+            covered_control_heads: active_epoch.covered_control_heads.clone(),
+        };
+        let stream_id = active_epoch
+            .covered_control_heads
+            .iter()
+            .find(|head| head.coord.stream_key().author_pubkey == author_pubkey)
+            .map_or_else(
+                || {
+                    AuthorStreamId::from_digest(generated_id_digest(
+                        ids,
+                        b"coven.circle-transition-draft-stream.v1\0",
+                    ))
+                },
+                |head| head.coord.stream_id,
+            );
+        let mut control_value = CircleControl {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            circle_id,
+            value: CircleControlValue {
+                order: MergeCircleControlOrder {
+                    device_id: device_id.to_string(),
+                    stream_id,
+                    author_owner_grant: grant_id,
+                    seq: current_control
+                        .value
+                        .ordinal()
+                        .checked_add(1)
+                        .ok_or(CircleTransitionError::SequenceOverflow)?,
+                    previous_control_hash: Some(current_control.coord.control_hash()),
+                    dependencies: vec![current_control.coord.clone()],
+                },
+                state: CircleControlState::Deleted(DeletedCircle { frozen_epoch }),
+                author_authority,
+                membership_authority,
+            },
+            author_pubkey,
+            signature: String::new(),
+        };
+        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control_value.coord(),
+            bytes: serde_json::to_vec(&control_value)
+                .expect("circle control serialization cannot fail"),
+            value: control_value,
+        };
+        Ok(Self {
+            circle_id,
+            epoch_id,
+            keyring: keyring.to_string(),
+            roster: current_roster.clone(),
+            policy: CircleTransitionDraftPolicy {
+                roster: CircleRosterDraftPolicy::Inherited,
+                metadata_successor: false,
+            },
+            metadata: current_metadata.clone(),
+            close_intent: None,
+            close_finalization: None,
+            close_cancellation: None,
+            access: Vec::new(),
             control,
         })
     }

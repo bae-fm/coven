@@ -69,7 +69,11 @@ impl StoreDatabase {
                     let (stored_circle_id, state) = row.map_err(DbError::from)?;
                     let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
                     let circle_id = state.circle_id();
-                    if let Some(branches) = state.conflict_branches() {
+                    if state.is_deleted() {
+                        // A deleted Circle must remain visible to the application
+                        // as deleted rather than silently disappear from its UI.
+                        circles.push(crate::sync::circle::CircleInfo::Deleted { id: circle_id });
+                    } else if let Some(branches) = state.conflict_branches() {
                         // A forked Circle must be visible to the application as
                         // conflicted so an Owner can resolve it; omitting it
                         // would make the Circle silently disappear.
@@ -195,6 +199,19 @@ impl StoreDatabase {
             .call(move |conn| {
                 Ok(Self::circle_current_state_on(conn, circle_id)?
                     .and_then(|state| state.conflict_branches()))
+            })
+            .await
+    }
+
+    /// Whether the Circle's control history has terminated in a deletion.
+    pub(crate) async fn circle_is_deleted(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<bool, DbError> {
+        self.database
+            .call(move |conn| {
+                Ok(Self::circle_current_state_on(conn, circle_id)?
+                    .is_some_and(|state| state.is_deleted()))
             })
             .await
     }
@@ -337,6 +354,9 @@ impl StoreDatabase {
     ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
         let state = Self::circle_current_state_on(conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
+        if state.is_deleted() {
+            return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
+        }
         let access = state
             .package_access(expected_control)
             .map_err(|error| DbError::Message(error.to_string()))?
@@ -728,6 +748,35 @@ impl StoreDatabase {
             )));
         }
         Ok(state)
+    }
+
+    pub(in crate::sync::store) fn circle_current_state_is_deleted_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<bool, DbError> {
+        Ok(Self::circle_current_state_on(conn, circle_id)?.is_some_and(|state| state.is_deleted()))
+    }
+
+    /// Remove a deleted Circle's live access, roster, and metadata caches. The
+    /// authority spine — control activations and retained-replay records —
+    /// stays; only derived materialization goes.
+    pub(in crate::sync::store) fn remove_deleted_circle_caches_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<(), DbError> {
+        let circle_id = circle_id.to_string();
+        for table in [
+            "circle_access_cache",
+            "circle_roster_cache",
+            "circle_metadata_cache",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE circle_id = ?1"),
+                [&circle_id],
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {

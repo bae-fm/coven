@@ -189,6 +189,11 @@ pub enum GateError {
         circle_id: crate::sync::circle::CircleId,
         active_records: usize,
     },
+    /// A host write named a Circle whose control chain has terminated in a
+    /// deletion. The Circle accepts no further content.
+    CircleDeleted {
+        circle_id: crate::sync::circle::CircleId,
+    },
     InvalidCircleControl {
         circle_id: crate::sync::circle::CircleId,
         reason: String,
@@ -278,6 +283,9 @@ impl std::fmt::Display for GateError {
                 f,
                 "circle {circle_id} has {active_records} active local access records; expected exactly one"
             ),
+            GateError::CircleDeleted { circle_id } => {
+                write!(f, "circle {circle_id} is deleted and accepts no writes")
+            }
             GateError::InvalidCircleControl { circle_id, reason } => {
                 write!(f, "circle {circle_id} has invalid active control: {reason}")
             }

@@ -86,6 +86,18 @@ pub(crate) async fn load_applicable_circle_packages(
             );
             continue;
         }
+        if database
+            .circle_is_deleted(reference.circle_id)
+            .await
+            .map_err(PullCircleActivationError::Database)?
+        {
+            debug!(
+                circle_id = %reference.circle_id,
+                control = ?reference.control,
+                "skipping Circle package for a deleted Circle"
+            );
+            continue;
+        }
         if matches!(
             local_store_membership,
             LocalStoreMembership::IdentityNotSupplied

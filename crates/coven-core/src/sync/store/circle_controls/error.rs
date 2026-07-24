@@ -49,6 +49,10 @@ pub enum CircleOperationError {
     NotBlocked {
         operation_id: crate::sync::circle::CircleOperationId,
     },
+    #[error("circle {circle_id} has an unresolved control conflict")]
+    Conflicted { circle_id: CircleId },
+    #[error("circle {circle_id} is deleted")]
+    Deleted { circle_id: CircleId },
     #[error("circle command channel is closed")]
     CommandChannelClosed,
     #[error("circle command ended without a reply")]

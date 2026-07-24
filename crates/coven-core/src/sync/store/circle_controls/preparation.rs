@@ -756,12 +756,19 @@ pub(super) async fn prepare_circle_activation_objects(
             access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
             access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
         }
-        let leaf_hashes = draft
-            .access
-            .iter()
-            .map(|access| access.leaf.leaf_hash)
-            .collect::<Vec<_>>();
-        let (access_root, proofs) = crate::sync::circle::merkle_root_and_proofs(&leaf_hashes);
+        // A deletion carries no access material: its control inherits the
+        // predecessor's access root and publishes no leaves.
+        let (access_root, proofs) = if draft.access.is_empty() {
+            (None, Vec::new())
+        } else {
+            let leaf_hashes = draft
+                .access
+                .iter()
+                .map(|access| access.leaf.leaf_hash)
+                .collect::<Vec<_>>();
+            let (root, proofs) = crate::sync::circle::merkle_root_and_proofs(&leaf_hashes);
+            (Some(root), proofs)
+        };
 
         let mut control_frontier = draft
             .control
@@ -856,7 +863,9 @@ pub(super) async fn prepare_circle_activation_objects(
             .collect();
         access_epoch.roster = roster_state.clone();
         access_epoch.metadata = metadata_state;
-        access_epoch.common.access_root = access_root;
+        if let Some(access_root) = access_root {
+            access_epoch.common.access_root = access_root;
+        }
         access_epoch.covered_control_heads = control_frontier;
         if let (
             Some((true, _, entry, _, _)),
@@ -1137,7 +1146,8 @@ pub(super) async fn prepare_circle_activation_objects(
         .map(|object| object.reference().clone());
     stream_activations.sort();
     let close_intent = match draft.control.value.state() {
-        crate::sync::circle::CircleControlState::ActiveEpoch(_) => None,
+        crate::sync::circle::CircleControlState::ActiveEpoch(_)
+        | crate::sync::circle::CircleControlState::Deleted(_) => None,
         crate::sync::circle::CircleControlState::EpochClose(close) => Some(close.intent.clone()),
     };
     let transition = PreparedCircleTransition {
@@ -1674,6 +1684,36 @@ pub(super) async fn prepare_circle_operation_request(
                         &request.chosen.metadata,
                         keyring,
                         request.losing_heads.clone(),
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    Vec::new(),
+                )
+            }
+            CircleOperationRequest::Delete(request) => {
+                if request.circle_id != request.current.control.value.circle_id {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle deletion request differs from its current control".to_string(),
+                    ));
+                }
+                let keyring = match &request.current.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle deletion requires active local access".to_string(),
+                        ));
+                    }
+                };
+                (
+                    CircleTransitionDraft::delete(
+                        &circle_device_id,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.current.control,
+                        &request.current.roster,
+                        &request.current.metadata,
+                        keyring,
                         db.id_provider(),
                         signer,
                     )?,

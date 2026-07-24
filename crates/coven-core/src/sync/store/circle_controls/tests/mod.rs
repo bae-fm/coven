@@ -142,6 +142,19 @@ async fn rename_circle(
         .await
 }
 
+async fn delete_circle(
+    db: &Database,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    device_id: &str,
+    circle_id: CircleId,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+        .await?
+        .delete_circle(device_id, circle_id, signer)
+        .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn load_circle_activations(
     db: &Database,

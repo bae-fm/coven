@@ -317,6 +317,154 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
 }
 
 #[tokio::test]
+async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
+    let temp = tempfile::tempdir().expect("create database directory");
+    let path = temp.path().join("circle-delete-restart.sqlite3");
+    let (db, _stamper) = Database::open(
+        &path,
+        test_synced_tables(),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "creator".to_string(),
+        &test_migrations(),
+    )
+    .expect("open circle database");
+    let (store, signer, founder) = persist_merge_operation(&db, "circle-delete-restart").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+    let device_id = local_device_id(&db).await;
+
+    store.home.fail_exact_create_before_call(1);
+    let error = delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+        .await
+        .expect_err("failed exact create interrupts delete publication");
+    assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
+    let operation_id = StoreDatabase::new(&db)
+        .get_circle_operations()
+        .await
+        .expect("list interrupted delete")
+        .into_iter()
+        .find(|operation| operation.circle_id == circle_id)
+        .expect("interrupted delete is listed")
+        .operation_id;
+    let expected = StoreDatabase::new(&db)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read interrupted delete")
+        .expect("interrupted delete remains durable");
+    assert_eq!(expected.kind(), CircleOperationKind::Delete);
+    assert_eq!(expected.state(), CircleOperationState::Pending);
+    assert_eq!(activation_count(&db, circle_id).await, 1);
+    std::thread::spawn(move || drop(db))
+        .join()
+        .expect("close circle database");
+
+    let (reopened, _stamper) = Database::open(
+        &path,
+        test_synced_tables(),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "creator".to_string(),
+        &test_migrations(),
+    )
+    .expect("reopen circle database");
+    let persisted = StoreDatabase::new(&reopened)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read reopened delete")
+        .expect("delete survives restart");
+    assert_exact_operation(&expected, &persisted);
+
+    resume_circle_operations(&reopened, &store.storage, &signer)
+        .await
+        .expect("resume reopened delete");
+    assert_eq!(activation_count(&reopened, circle_id).await, 2);
+    assert_eq!(
+        StoreDatabase::new(&reopened)
+            .get_circles(
+                &keys::public_key_hex(&signer),
+                BTreeSet::from([keys::public_key_hex(&signer)]),
+            )
+            .await
+            .expect("read deleted circle"),
+        vec![crate::sync::circle::CircleInfo::Deleted { id: circle_id }]
+    );
+    assert!(StoreDatabase::new(&reopened)
+        .get_circle_operations()
+        .await
+        .expect("read completed delete operations")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_forged_deletion_control_is_held_invalid() {
+    let temp = tempfile::tempdir().expect("create database directory");
+    let path = temp.path().join("circle-delete-forged.sqlite3");
+    let (db, _stamper) = Database::open(
+        &path,
+        test_synced_tables(),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "creator".to_string(),
+        &test_migrations(),
+    )
+    .expect("open circle database");
+    let (store, signer, founder) = persist_merge_operation(&db, "circle-delete-forged").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+    let device_id = local_device_id(&db).await;
+
+    store.home.fail_exact_create_before_call(1);
+    delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+        .await
+        .expect_err("interrupt delete before its first exact upload");
+    let operation_id = StoreDatabase::new(&db)
+        .get_circle_operations()
+        .await
+        .expect("list interrupted delete")
+        .into_iter()
+        .find(|operation| operation.circle_id == circle_id)
+        .expect("interrupted delete is pending")
+        .operation_id;
+    let mut journal = StoreDatabase::new(&db)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read interrupted delete")
+        .expect("interrupted delete remains durable");
+
+    // Forge the terminal deletion control's signature. Verification rejects it
+    // exactly as it rejects any other forged control state.
+    journal.operation_mut().creation.control.value.signature = "0".repeat(128);
+    StoreDatabase::new(&db)
+        .update_circle_operation(journal)
+        .await
+        .expect("persist forged deletion");
+
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect_err("a forged deletion control is held invalid");
+    assert_eq!(activation_count(&db, circle_id).await, 1);
+    assert!(
+        matches!(
+            StoreDatabase::new(&db)
+                .get_circles(
+                    &keys::public_key_hex(&signer),
+                    BTreeSet::from([keys::public_key_hex(&signer)]),
+                )
+                .await
+                .expect("list circles after rejecting the forged deletion")
+                .as_slice(),
+            [crate::sync::circle::CircleInfo::Active { id, .. }] if *id == circle_id
+        ),
+        "the forged deletion never took effect; the Circle remains active"
+    );
+}
+
+#[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let blob_decl = crate::sync::session::BlobDecl::new(
         "files",

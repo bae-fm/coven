@@ -1314,6 +1314,18 @@ pub(crate) async fn load_circle_activations_with_prefix(
             founder_pubkey,
         ))
         .await?;
+        if control.value.state().is_deleted() {
+            // A deletion carries no access material. It activates to the
+            // terminal Deleted state with no local access; materialization
+            // prunes the Circle's rows and caches from the winning chain.
+            activations.push(VerifiedCircleReference {
+                reference: reference.clone(),
+                circle_id: reference.circle_id(),
+                control,
+                local_access: None,
+            });
+            continue;
+        }
         let Some(identity) = identity else {
             activations.push(VerifiedCircleReference {
                 reference: reference.clone(),

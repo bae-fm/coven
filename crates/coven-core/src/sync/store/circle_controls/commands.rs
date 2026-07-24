@@ -49,6 +49,18 @@ async fn ensure_not_rotation_required(
     Ok(())
 }
 
+/// A deleted Circle is terminal: every lifecycle command refuses it with a
+/// typed reason rather than a generic missing-authoring-state error.
+async fn ensure_not_deleted(
+    database: &StoreDatabase,
+    circle_id: CircleId,
+) -> Result<(), CircleOperationError> {
+    if database.circle_is_deleted(circle_id).await? {
+        return Err(CircleOperationError::Deleted { circle_id });
+    }
+    Ok(())
+}
+
 impl Store {
     pub(crate) async fn create_circle(
         &self,
@@ -100,6 +112,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_deleted(database, circle_id).await?;
         ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
@@ -179,6 +192,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_deleted(database, circle_id).await?;
         ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
@@ -277,6 +291,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_deleted(database, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)
@@ -381,6 +396,7 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        ensure_not_deleted(database, circle_id).await?;
         let branches = database
             .circle_control_conflict_branches(circle_id)
             .await?
@@ -727,6 +743,93 @@ impl Store {
         .await
     }
 
+    /// Author the terminal deletion of a Circle. It requires a resolved current
+    /// state — a conflicted Circle is refused until the Owner resolves it,
+    /// because the conflicting set may bury membership intent — and refuses a
+    /// Circle that is already deleted. It is not gated by the rotation-required
+    /// check: deletion distributes no key, so it is a terminal exit like member
+    /// removal.
+    pub(crate) async fn delete_circle(
+        &self,
+        device_id: &str,
+        circle_id: CircleId,
+        signer: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        if database
+            .circle_control_conflict_branches(circle_id)
+            .await?
+            .is_some()
+        {
+            return Err(CircleOperationError::Conflicted { circle_id });
+        }
+        if database.circle_is_deleted(circle_id).await? {
+            return Err(CircleOperationError::Deleted { circle_id });
+        }
+        let identity_pubkey = keys::public_key_hex(signer);
+        let (current, activation_commit_ref) = database
+            .circle_authoring_context(circle_id, &identity_pubkey)
+            .await?;
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let (activation_commit, _) = crate::sync::store::pull::load_commit_with_author(
+            storage,
+            &root,
+            &activation_commit_ref,
+        )
+        .await?;
+        if activation_commit.candidate_family() != current.candidate_family {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} current state differs from its activating Store commit"
+            )));
+        }
+        let reference = activation_commit
+            .circle_controls()
+            .iter()
+            .find(|reference| {
+                reference.circle_id() == circle_id && reference.control() == &current.control.coord
+            })
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} current control is absent from its activating Store commit"
+                ))
+            })?;
+        let journal = Box::pin(prepare_circle_operation_request(
+            database,
+            storage,
+            device_id,
+            CircleOperationRequest::Delete(Box::new(CircleDeleteRequest {
+                circle_id,
+                current,
+                previous_control: reference.clone(),
+            })),
+            signer,
+        ))
+        .await?;
+        if journal.circle_id() != circle_id {
+            return Err(CircleOperationError::InvalidState(
+                "prepared Circle deletion changed Circle identity".to_string(),
+            ));
+        }
+        let operation_id = journal.operation_id.clone();
+        database.insert_circle_operation(journal).await?;
+        Box::pin(publish_circle_operation(
+            database,
+            storage,
+            &operation_id,
+            signer,
+            None,
+        ))
+        .await
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
@@ -818,6 +921,12 @@ pub(super) struct CircleRemoveMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
+pub(super) struct CircleDeleteRequest {
+    pub(super) circle_id: CircleId,
+    pub(super) current: CircleAuthoringState,
+    pub(super) previous_control: CircleControlRef,
+}
+
 pub(super) struct CircleResolveControlRequest {
     pub(super) circle_id: CircleId,
     pub(super) chosen: CircleAuthoringState,
@@ -861,6 +970,7 @@ pub(super) enum CircleOperationRequest {
     AddMember(Box<CircleAddMemberRequest>),
     RemoveMember(Box<CircleRemoveMemberRequest>),
     ResolveControl(Box<CircleResolveControlRequest>),
+    Delete(Box<CircleDeleteRequest>),
     FinalizeEpochClose(Box<CircleFinalizeEpochCloseRequest>),
     CancelEpochClose(Box<CircleCancelEpochCloseRequest>),
 }
@@ -882,6 +992,7 @@ impl CircleOperationRequest {
             Self::ResolveControl(request) => CircleOperationIntent::ResolveControl {
                 chosen: request.chosen.control.coord.clone(),
             },
+            Self::Delete(_) => CircleOperationIntent::Delete,
             Self::FinalizeEpochClose(request) => CircleOperationIntent::RemoveMember {
                 member_pubkey: request.member_pubkey.clone(),
             },
@@ -904,6 +1015,9 @@ impl CircleOperationRequest {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
             Self::ResolveControl(request) => {
+                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
+            Self::Delete(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
             Self::FinalizeEpochClose(request) => {
@@ -935,7 +1049,8 @@ impl CircleOperationRequest {
             | Self::Rename(_)
             | Self::AddMember(_)
             | Self::RemoveMember(_)
-            | Self::ResolveControl(_) => None,
+            | Self::ResolveControl(_)
+            | Self::Delete(_) => None,
         }
     }
 }

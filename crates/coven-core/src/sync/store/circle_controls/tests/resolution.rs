@@ -262,6 +262,64 @@ async fn resolution_collapses_the_conflict_on_every_device() {
     );
 }
 
+#[tokio::test]
+async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
+    let fixture = conflict_fixture("delete-conflicted").await;
+    let (chosen, _losing) = fork(&fixture).await;
+
+    // A conflicted Circle refuses deletion: the conflicting set may carry
+    // membership intent the deletion would otherwise bury.
+    let refused = fixture
+        .store1()
+        .await
+        .delete_circle(&fixture.device1, fixture.circle_id, &fixture.founder)
+        .await
+        .expect_err("deleting a conflicted Circle is refused");
+    assert!(
+        matches!(&refused, CircleOperationError::Conflicted { circle_id }
+            if *circle_id == fixture.circle_id),
+        "{refused:?}"
+    );
+
+    fixture
+        .store1()
+        .await
+        .resolve_circle_control(
+            &fixture.device1,
+            fixture.circle_id,
+            chosen.clone(),
+            &fixture.founder,
+        )
+        .await
+        .expect("resolve the control conflict");
+
+    // Once resolved, deletion proceeds and the Circle surfaces as deleted.
+    fixture
+        .store1()
+        .await
+        .delete_circle(&fixture.device1, fixture.circle_id, &fixture.founder)
+        .await
+        .expect("delete the resolved Circle");
+    let device1 = fixture.circles_device1().await;
+    assert!(
+        matches!(device1.as_slice(), [CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+        "the resolving device reports the Circle as deleted: {device1:?}"
+    );
+
+    // A second deletion is refused: the Circle is already terminal.
+    let already = fixture
+        .store1()
+        .await
+        .delete_circle(&fixture.device1, fixture.circle_id, &fixture.founder)
+        .await
+        .expect_err("deleting an already-deleted Circle is refused");
+    assert!(
+        matches!(&already, CircleOperationError::Deleted { circle_id }
+            if *circle_id == fixture.circle_id),
+        "{already:?}"
+    );
+}
+
 /// Build a `ResolveControl` request for the chosen branch that names an
 /// explicit conflicting set — used to drive preparation with a set that no
 /// longer matches the retained branches.

@@ -1162,6 +1162,15 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn delete_circle(
+        &self,
+        circle_id: super::circle::CircleId,
+    ) -> Result<(), super::store::CircleOperationError> {
+        self.store
+            .delete_circle(&self.device_id, circle_id, &self.user_keypair)
+            .await
+    }
+
     pub async fn add_circle_member(
         &self,
         store_dir: &StoreDir,

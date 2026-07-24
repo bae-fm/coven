@@ -1761,3 +1761,377 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         }) if missing == second
     ));
 }
+
+async fn circle_control_activation_count(
+    database: &Database,
+    circle_id: crate::sync::circle::CircleId,
+) -> i64 {
+    let circle_id = circle_id.to_string();
+    database
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                    [circle_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("count Circle control activations")
+}
+
+async fn owner_delete_circle(fixture: &EffectiveAccessFixture) {
+    let owner_store = fixture
+        .store
+        .loaded_store(&fixture.owner_database)
+        .await
+        .expect("load owner Store for deletion");
+    let owner_device = fixture
+        .owner_database
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("load owner device id")
+        .expect("owner device is active");
+    owner_store
+        .delete_circle(&owner_device, fixture.circle_id, &fixture.owner)
+        .await
+        .expect("delete the Circle");
+}
+
+fn effective_access_members(
+    fixture: &EffectiveAccessFixture,
+) -> std::collections::BTreeSet<String> {
+    std::collections::BTreeSet::from([
+        crate::keys::public_key_hex(&fixture.owner),
+        crate::keys::public_key_hex(&fixture.member),
+    ])
+}
+
+#[tokio::test]
+async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
+    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
+    let member_path = member_temp.path().join("member.sqlite3");
+    let member_database = open_scoped_replay_database_at(&member_path);
+    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let fixture = effective_access_fixture(
+        "delete-circle-prunes",
+        &member_database,
+        &owner_store_dir,
+        &member_store_dir,
+    )
+    .await;
+
+    publish_effective_access_row(
+        &fixture,
+        &owner_store_dir,
+        "before deletion",
+        "0000000002000-0000-owner",
+    )
+    .await;
+    let membership = current_membership(&member_database, fixture.member_storage.as_ref()).await;
+    pull_scoped_with(
+        &member_database,
+        &fixture.store,
+        fixture.member_storage.as_ref(),
+        &membership,
+        &fixture.member,
+        &member_store_dir,
+    )
+    .await
+    .expect("member pulls the pre-deletion Circle row");
+    assert_eq!(
+        scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID)
+            .await
+            .row
+            .as_ref()
+            .map(|row| row.1.as_str()),
+        Some("before deletion")
+    );
+
+    // A pre-deletion Circle package the member has not yet pulled.
+    publish_effective_access_row_with_id(
+        &fixture,
+        &owner_store_dir,
+        READD_EFFECTIVE_ACCESS_ROW_ID,
+        "private before deletion",
+        "0000000002500-0000-owner",
+    )
+    .await;
+
+    owner_delete_circle(&fixture).await;
+
+    // The owner converges to Deleted: rows pruned, control spine retained.
+    assert!(
+        scoped_routing_state(&fixture.owner_database, EFFECTIVE_ACCESS_ROW_ID)
+            .await
+            .row
+            .is_none()
+    );
+    assert!(
+        circle_control_activation_count(&fixture.owner_database, fixture.circle_id).await > 0,
+        "the owner retains the control authority spine after deletion"
+    );
+    let owner_circles = StoreDatabase::new(&fixture.owner_database)
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.owner),
+            effective_access_members(&fixture),
+        )
+        .await
+        .expect("list owner Circles after deletion");
+    assert!(
+        matches!(owner_circles.as_slice(),
+            [crate::sync::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+        "the owner reports the Circle as deleted: {owner_circles:?}"
+    );
+
+    // The member pulls the deletion (and the late pre-deletion package) and
+    // converges identically: rows, routes, and the late package are gone.
+    let latest = current_membership(&member_database, fixture.member_storage.as_ref()).await;
+    pull_scoped_with(
+        &member_database,
+        &fixture.store,
+        fixture.member_storage.as_ref(),
+        &latest,
+        &fixture.member,
+        &member_store_dir,
+    )
+    .await
+    .expect("member pulls the deletion");
+    let pruned = scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID).await;
+    assert!(pruned.row.is_none(), "the member's Circle row is pruned");
+    assert!(
+        pruned.route.is_none(),
+        "the member's private route is pruned"
+    );
+    assert!(
+        scoped_routing_state(&member_database, READD_EFFECTIVE_ACCESS_ROW_ID)
+            .await
+            .row
+            .is_none(),
+        "the late pre-deletion package is omitted"
+    );
+    assert!(
+        circle_control_activation_count(&member_database, fixture.circle_id).await > 0,
+        "the member retains the control authority spine after deletion"
+    );
+    let member_circles = StoreDatabase::new(&member_database)
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.member),
+            effective_access_members(&fixture),
+        )
+        .await
+        .expect("list member Circles after deletion");
+    assert!(
+        matches!(member_circles.as_slice(),
+            [crate::sync::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+        "the member reports the Circle as deleted: {member_circles:?}"
+    );
+
+    // A new host write destined to the deleted Circle is refused at capture.
+    let tables = fixture.owner_database.synced_tables().to_vec();
+    let gates = fixture.owner_database.gates();
+    let blob_decls = fixture.owner_database.blob_decls();
+    let write_id = fixture.owner_database.new_write_id();
+    let circle_id = fixture.circle_id;
+    let error = fixture
+        .owner_database
+        .call(move |connection| {
+            let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+            StoreDatabase::run_store_write_transaction_on(
+                connection,
+                &tables,
+                &gates,
+                &blob_decls,
+                Some(&routing),
+                None,
+                write_id,
+                |transaction| {
+                    transaction
+                        .execute_batch(&format!(
+                            "INSERT INTO notes (id, audience, body, _updated_at)
+                             VALUES ('01890a5d-ac96-774b-bcce-b302099c3f99', '{circle_id}',
+                                     'after deletion', '0000000003000-0000-owner');"
+                        ))
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect_err("a host write into a deleted Circle is refused");
+    assert!(error.to_string().contains("deleted"), "{error}");
+}
+
+#[tokio::test]
+async fn a_non_owner_is_refused_circle_deletion() {
+    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
+    let member_path = member_temp.path().join("member.sqlite3");
+    let member_database = open_scoped_replay_database_at(&member_path);
+    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let fixture = effective_access_fixture(
+        "delete-non-owner",
+        &member_database,
+        &owner_store_dir,
+        &member_store_dir,
+    )
+    .await;
+
+    // The member holds active access but is not the Circle Owner.
+    let member_store = fixture
+        .store
+        .loaded_store(&member_database)
+        .await
+        .expect("load member Store");
+    let member_device = member_database
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("load member device id")
+        .expect("member device is active");
+    let refused = member_store
+        .delete_circle(&member_device, fixture.circle_id, &fixture.member)
+        .await
+        .expect_err("a non-owner cannot delete a Circle");
+    assert!(
+        format!("{refused}").to_lowercase().contains("owner"),
+        "the refusal names the missing Owner authority: {refused:?}"
+    );
+
+    // The Circle is untouched — still active on the member.
+    let circles = StoreDatabase::new(&member_database)
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.member),
+            effective_access_members(&fixture),
+        )
+        .await
+        .expect("list member Circles after the refused deletion");
+    assert!(
+        matches!(circles.as_slice(),
+            [crate::sync::circle::CircleInfo::Active { id, .. }] if *id == fixture.circle_id),
+        "the refused deletion leaves the Circle active: {circles:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_order() {
+    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
+    let member_path = member_temp.path().join("member.sqlite3");
+    let member_database = open_scoped_replay_database_at(&member_path);
+    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let fixture = effective_access_fixture(
+        "delete-two-order",
+        &member_database,
+        &owner_store_dir,
+        &member_store_dir,
+    )
+    .await;
+
+    // First arrival order: the member applies a pre-deletion package before the
+    // deletion is authored, so the row is materialized locally.
+    publish_effective_access_row(
+        &fixture,
+        &owner_store_dir,
+        "applied then pruned",
+        "0000000002000-0000-owner",
+    )
+    .await;
+    let membership = current_membership(&member_database, fixture.member_storage.as_ref()).await;
+    pull_scoped_with(
+        &member_database,
+        &fixture.store,
+        fixture.member_storage.as_ref(),
+        &membership,
+        &fixture.member,
+        &member_store_dir,
+    )
+    .await
+    .expect("member applies the pre-deletion package");
+    assert_eq!(
+        scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID)
+            .await
+            .row
+            .as_ref()
+            .map(|row| row.1.as_str()),
+        Some("applied then pruned")
+    );
+
+    // The deletion arrives later and prunes the already-applied row. The
+    // terminal state matches the order where the package arrives together with
+    // (or after) the deletion and is omitted: rows gone, Circle deleted.
+    owner_delete_circle(&fixture).await;
+    let latest = current_membership(&member_database, fixture.member_storage.as_ref()).await;
+    pull_scoped_with(
+        &member_database,
+        &fixture.store,
+        fixture.member_storage.as_ref(),
+        &latest,
+        &fixture.member,
+        &member_store_dir,
+    )
+    .await
+    .expect("member pulls the later deletion");
+    assert!(
+        scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID)
+            .await
+            .row
+            .is_none()
+    );
+    let circles = StoreDatabase::new(&member_database)
+        .get_circles(
+            &crate::keys::public_key_hex(&fixture.member),
+            effective_access_members(&fixture),
+        )
+        .await
+        .expect("list member Circles after the later deletion");
+    assert!(
+        matches!(circles.as_slice(),
+            [crate::sync::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+        "the applied-then-pruned order converges to deleted: {circles:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_circles_authority_spine_retains_historical_controls() {
+    let member_temp = tempfile::tempdir().expect("create effective-access database directory");
+    let member_path = member_temp.path().join("member.sqlite3");
+    let member_database = open_scoped_replay_database_at(&member_path);
+    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let fixture = effective_access_fixture(
+        "delete-historical-spine",
+        &member_database,
+        &owner_store_dir,
+        &member_store_dir,
+    )
+    .await;
+
+    // The control chain the deletion will terminate — the package authority a
+    // retained historical commit was published under.
+    let owner_pubkey = crate::keys::public_key_hex(&fixture.owner);
+    let (historical, _) = StoreDatabase::new(&fixture.owner_database)
+        .circle_authoring_context(fixture.circle_id, &owner_pubkey)
+        .await
+        .expect("read the pre-deletion authoring control");
+    let historical_control = historical.control.coord.clone();
+
+    owner_delete_circle(&fixture).await;
+
+    // Live materialization is gone, but the authority spine still resolves and
+    // verifies the historical control a retained old package was signed under.
+    assert!(StoreDatabase::new(&fixture.owner_database)
+        .circle_is_deleted(fixture.circle_id)
+        .await
+        .expect("read deleted state"));
+    let retained = StoreDatabase::new(&fixture.owner_database)
+        .verified_circle_activation(fixture.circle_id, historical_control.clone())
+        .await
+        .expect("query the retained activation")
+        .expect("the historical control is retained after deletion");
+    assert_eq!(retained.control.coord, historical_control);
+    assert!(
+        retained.control.verify(),
+        "the retained historical control still verifies against the authority spine"
+    );
+}

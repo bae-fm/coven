@@ -2119,6 +2119,9 @@ pub(crate) fn active_circle_control(
             reason: "current state failed verification".to_string(),
         });
     }
+    if state.is_deleted() {
+        return Err(GateError::CircleDeleted { circle_id });
+    }
     let Some((current, _access, _roster, _metadata)) = state.active() else {
         return Err(GateError::CircleAuthority {
             circle_id,

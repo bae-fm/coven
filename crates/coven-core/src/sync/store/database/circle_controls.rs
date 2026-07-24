@@ -243,6 +243,7 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
+        let gates = self.database.gates();
         self.database
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -444,6 +445,20 @@ impl StoreDatabase {
                     &operation.commit_ref,
                     &[activation],
                 )?;
+                // A deletion the local device authored prunes its own
+                // materialization in the same activation transaction — rows,
+                // routes, blob bindings, and access/roster/metadata caches — so
+                // no live state for a deleted Circle survives locally. The
+                // control activation spine recorded above is retained.
+                if StoreDatabase::circle_current_state_is_deleted_on(&tx, creation.circle_id)? {
+                    StoreDatabase::remove_deleted_circle_caches_on(&tx, creation.circle_id)?;
+                    crate::sync::gate::prune_ineligible_scoped_rows(
+                        &tx,
+                        &gates,
+                        &std::collections::BTreeSet::from([creation.circle_id]),
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                }
                 if !journal.is_finalizing()
                     && matches!(
                     journal.intent,

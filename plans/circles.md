@@ -179,6 +179,21 @@ rebuild the deleted choice.
   addition. The resolution inherits the chosen branch's epoch, key generation,
   roster, and selected metadata verbatim; a non-Owner author is refused at the
   predecessor roster.
+- An Owner-signed terminal deletion succeeds the current control with a `Deleted`
+  state that carries no roster successor, metadata successor, access material, or
+  bootstraps and freezes the epoch spine it terminated for historical
+  verification and reclamation. Activation reduces the Circle's current state to
+  `Deleted` and, in the same pull transaction, prunes its materialized rows,
+  private routes, blob bindings, and access/roster/metadata caches while
+  retaining the control activations and retained-replay spine; `get_circles`
+  reports the Circle as deleted rather than omitting it. A deletion is terminal:
+  a control descending from it is invalid, and a successor racing it from another
+  Owner device surfaces as a `ControlConflict` the Owner resolves. Deletion
+  requires a resolved current state — a conflicted Circle is refused until
+  resolved, since the conflicting set may bury membership intent — and it is not
+  gated by the rotation-required check. A Circle package addressed to a deleted
+  Circle is omitted deterministically, and host writes destined to it are refused
+  at capture.
 - A missing or corrupt Circle package for an active effective member holds its
   Store commit without partially applying rows, controls, routing, or frontier
   state.
@@ -260,13 +275,13 @@ rebuild the deleted choice.
 1. **In progress.** Create, rename, member addition, recipient bootstrap
    installation, member-removal epoch close, successor activation, close
    cancellation, the epoch-close device-exclusion slot competition, command, and
-   outcome cutoff, Store-member-removal rotation blocking, and control-conflict
-   resolution are implemented. Durable operation recovery types the block reason
-   (`AuthorityLost`), lets the initiator retry a blocked operation from its
-   captured phase, and records finalization payloads durable-first so a restart
-   resumes them byte-identically as their exact settlement kind. Finish the
-   excluded-device bootstrap reset and publication gate, verified-nonactivation
-   discard, and deletion.
+   outcome cutoff, Store-member-removal rotation blocking, control-conflict
+   resolution, and terminal deletion are implemented. Durable operation recovery
+   types the block reason (`AuthorityLost`), lets the initiator retry a blocked
+   operation from its captured phase, and records finalization payloads
+   durable-first so a restart resumes them byte-identically as their exact
+   settlement kind. Finish the excluded-device bootstrap reset and publication
+   gate, and verified-nonactivation discard.
 1. Circle acknowledgement and standalone-snapshot authoring, publication,
    bootstrap-machinery install, and snapshot acknowledgement-stability gating are
    implemented. Finish packages, pull, restore, reclamation, and blobs.

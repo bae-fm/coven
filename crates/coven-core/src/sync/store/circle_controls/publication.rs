@@ -562,6 +562,16 @@ fn expected_local_circle_activation(
     reference: &crate::sync::store_commit::CircleControlRef,
     author_pubkey: &str,
 ) -> Result<VerifiedCircleReference, CircleOperationError> {
+    if creation.control.value.state().is_deleted() {
+        // A deletion journals no access material; it activates locally to the
+        // terminal Deleted state with no local access.
+        return Ok(VerifiedCircleReference {
+            reference: reference.clone(),
+            circle_id: creation.circle_id,
+            control: creation.control.clone(),
+            local_access: None,
+        });
+    }
     let access = creation
         .access
         .iter()

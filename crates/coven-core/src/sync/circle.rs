@@ -149,12 +149,15 @@ pub enum CircleInfo {
         /// successor state.
         branches: Vec<CircleControlCoord>,
     },
+    /// The Circle's control history terminated in an Owner-signed deletion. Its
+    /// rows and access are gone locally; only the authority spine remains.
+    Deleted { id: CircleId },
 }
 
 impl CircleInfo {
     pub fn id(&self) -> CircleId {
         match self {
-            Self::Active { id, .. } | Self::Conflicted { id, .. } => *id,
+            Self::Active { id, .. } | Self::Conflicted { id, .. } | Self::Deleted { id } => *id,
         }
     }
 
@@ -163,7 +166,7 @@ impl CircleInfo {
     pub fn name(&self) -> Option<&str> {
         match self {
             Self::Active { name, .. } => Some(name),
-            Self::Conflicted { .. } => None,
+            Self::Conflicted { .. } | Self::Deleted { .. } => None,
         }
     }
 
@@ -288,6 +291,7 @@ pub enum CircleOperationKind {
     AddMember,
     RemoveMember,
     ResolveControl,
+    Delete,
 }
 
 /// Why a durable Circle operation cannot currently publish. One variant per

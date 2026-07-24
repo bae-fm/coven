@@ -677,6 +677,7 @@ pub(crate) enum CircleCurrentState {
     Active(Box<CircleAccessibleState>),
     Closing(Box<CircleAccessibleState>),
     Inactive(Box<CircleInactiveState>),
+    Deleted(Box<CircleCurrentControl>),
     ControlConflict { branches: Vec<CircleCurrentControl> },
 }
 
@@ -723,6 +724,16 @@ impl CircleCurrentState {
         activation: &VerifiedCircleReference,
     ) -> Result<Self, String> {
         let current = CircleCurrentControl::from_verified(activation);
+        // A deletion is terminal and carries no live access material; it reduces
+        // to Deleted regardless of any retained access leaf.
+        if current.control.value.state().is_deleted() {
+            let state = Self::Deleted(Box::new(current));
+            return if state.verify() {
+                Ok(state)
+            } else {
+                Err("verified Circle deletion cannot form a valid current state".to_string())
+            };
+        }
         let state = match &activation.local_access {
             None => Self::Inactive(Box::new(CircleInactiveState {
                 current,
@@ -756,6 +767,11 @@ impl CircleCurrentState {
                     crate::sync::circle::CircleControlState::EpochClose(_) => {
                         Self::Closing(accessible)
                     }
+                    crate::sync::circle::CircleControlState::Deleted(_) => {
+                        return Err(
+                            "verified Circle deletion cannot carry active access".to_string()
+                        )
+                    }
                 }
             }
         };
@@ -777,6 +793,25 @@ impl CircleCurrentState {
             Self::Active(active) => advance_resolved_control(active.current, next),
             Self::Closing(closing) => advance_resolved_control(closing.current, next),
             Self::Inactive(inactive) => advance_resolved_control(inactive.current, next),
+            // A deletion is terminal. Dependency-readiness materializes it
+            // before anything descending from it, so a control that causally
+            // covers it here is an invalid descendant and is rejected; a
+            // concurrent branch that does not cover it surfaces as the conflict
+            // the Owner must resolve, exactly like any racing successor.
+            Self::Deleted(deleted) => {
+                let next_current = next
+                    .resolved_control()
+                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+                if next_current.causally_covers(&deleted) {
+                    return Err(
+                        "Circle deletion is terminal; a control descending from it is invalid"
+                            .to_string(),
+                    );
+                }
+                let mut branches = vec![*deleted, next_current.clone()];
+                canonicalize_control_branches(&mut branches)?;
+                Ok(Self::ControlConflict { branches })
+            }
             Self::ControlConflict { mut branches } => {
                 let next_current = next
                     .resolved_control()
@@ -805,6 +840,7 @@ impl CircleCurrentState {
                 current: inactive.current,
                 access: CircleInactiveAccess::NotGranted,
             })),
+            Self::Deleted(deleted) => Self::Deleted(deleted),
             Self::ControlConflict { branches } => Self::ControlConflict { branches },
         }
     }
@@ -836,6 +872,12 @@ impl CircleCurrentState {
                         }
                     }
             }
+            Self::Deleted(deleted) => {
+                matches!(
+                    deleted.control.value.state(),
+                    crate::sync::circle::CircleControlState::Deleted(_)
+                ) && deleted.verify()
+            }
             Self::ControlConflict { branches } => {
                 branches.len() >= 2
                     && branches.iter().all(|branch| {
@@ -853,6 +895,7 @@ impl CircleCurrentState {
             Self::Active(active) => active.current.circle_id(),
             Self::Closing(closing) => closing.current.circle_id(),
             Self::Inactive(inactive) => inactive.current.circle_id(),
+            Self::Deleted(deleted) => deleted.circle_id(),
             Self::ControlConflict { branches } => branches[0].circle_id(),
         }
     }
@@ -866,7 +909,7 @@ impl CircleCurrentState {
     ) -> Option<RotationRequired> {
         let accessible = match self {
             Self::Active(accessible) | Self::Closing(accessible) => accessible,
-            Self::Inactive(_) | Self::ControlConflict { .. } => return None,
+            Self::Inactive(_) | Self::Deleted(_) | Self::ControlConflict { .. } => return None,
         };
         let removed_members: Vec<String> = accessible
             .roster
@@ -896,14 +939,17 @@ impl CircleCurrentState {
                 &active.roster,
                 &active.metadata,
             )),
-            Self::Closing(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Closing(_)
+            | Self::Inactive(_)
+            | Self::Deleted(_)
+            | Self::ControlConflict { .. } => None,
         }
     }
 
     pub(crate) fn active_record_count(&self) -> usize {
         match self {
             Self::Active(_) | Self::Closing(_) => 1,
-            Self::Inactive(_) => 0,
+            Self::Inactive(_) | Self::Deleted(_) => 0,
             Self::ControlConflict { branches } => branches.len(),
         }
     }
@@ -917,7 +963,10 @@ impl CircleCurrentState {
                 roster: active.roster.clone(),
                 metadata: active.metadata.clone(),
             }),
-            Self::Closing(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Closing(_)
+            | Self::Inactive(_)
+            | Self::Deleted(_)
+            | Self::ControlConflict { .. } => None,
         }
     }
 
@@ -930,7 +979,10 @@ impl CircleCurrentState {
                 roster: closing.roster.clone(),
                 metadata: closing.metadata.clone(),
             }),
-            Self::Active(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Active(_)
+            | Self::Inactive(_)
+            | Self::Deleted(_)
+            | Self::ControlConflict { .. } => None,
         }
     }
 
@@ -964,8 +1016,14 @@ impl CircleCurrentState {
             Self::Active(active) => Some(&active.current),
             Self::Closing(closing) => Some(&closing.current),
             Self::Inactive(inactive) => Some(&inactive.current),
+            Self::Deleted(deleted) => Some(deleted),
             Self::ControlConflict { .. } => None,
         }
+    }
+
+    /// Whether this Circle's control history has terminated in a deletion.
+    pub(crate) fn is_deleted(&self) -> bool {
+        matches!(self, Self::Deleted(_))
     }
 
     /// The retained conflicting branch coordinates, in canonical order, when
@@ -979,14 +1037,17 @@ impl CircleCurrentState {
                     .map(|branch| branch.coordinate().clone())
                     .collect(),
             ),
-            Self::Active(_) | Self::Closing(_) | Self::Inactive(_) => None,
+            Self::Active(_) | Self::Closing(_) | Self::Inactive(_) | Self::Deleted(_) => None,
         }
     }
 
     pub(crate) fn closing_control(&self) -> Option<&PreparedCircleControl> {
         match self {
             Self::Closing(closing) => Some(&closing.current.control),
-            Self::Active(_) | Self::Inactive(_) | Self::ControlConflict { .. } => None,
+            Self::Active(_)
+            | Self::Inactive(_)
+            | Self::Deleted(_)
+            | Self::ControlConflict { .. } => None,
         }
     }
 }
