@@ -3,6 +3,18 @@ use std::collections::BTreeSet;
 
 use crate::sync::cycle::{init_sync_over_storage, StoreInitialization, SyncComponents};
 
+fn circle_routing_migrations() -> Vec<crate::migration::Migration> {
+    vec![crate::migration::Migration::sql(
+        1,
+        "Circle routing schema",
+        "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+    )]
+}
+
 fn open_circle_routing_test_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
         vec![crate::sync::session::SyncedTable::new(
@@ -10,15 +22,7 @@ fn open_circle_routing_test_db() -> Database {
             crate::sync::session::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
-        vec![crate::migration::Migration::sql(
-            1,
-            "Circle routing schema",
-            "CREATE TABLE documents (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
+        circle_routing_migrations(),
     )
 }
 
@@ -784,4 +788,291 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
             .expect("read Circle write status"),
         crate::WriteStatus::Published(_)
     ));
+}
+
+#[tokio::test]
+async fn device_join_succeeds_after_a_circle_epoch_close() {
+    let fixture = rotation_fixture("device-join-after-close").await;
+
+    // Drive a Circle member-removal epoch close through to successor activation.
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+
+    // Confirm the close activated its successor.
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load successor Circle authoring state");
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+
+    // A remaining member (the owner) installs a new device through the ordinary
+    // genesis-replaying join, which reconstructs the full retained history.
+    let joined_db = open_circle_routing_test_db();
+    install_active_device_fixture(
+        &fixture.store,
+        &fixture.db,
+        &joined_db,
+        &fixture.signer,
+        "2026-07-24T00:00:00Z",
+    )
+    .await
+    .expect("device join succeeds after a Circle epoch close");
+
+    // The newly joined device pulls the Circle's post-close state, including the
+    // successor bootstrap, which triggers a retained-replay projection.
+    let (_joined_temp, joined_dir) = temp_store_dir();
+    let pull = crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &joined_db)
+        .await
+        .expect("authorize the joined device pull")
+        .pull(
+            &joined_dir,
+            &fixture.signer,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("the joined device pulls the close successor without a foreign-key violation");
+    assert!(
+        pull.held_positions.is_empty(),
+        "the joined device holds no positions after the close: {:?}",
+        pull.held_positions
+    );
+}
+
+#[tokio::test]
+async fn post_close_circle_store_snapshot_restores_and_converges() {
+    let routing = EncryptionService::from_key([42; 32]);
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) =
+        persist_merge_operation(&db, "snapshot-restore-after-close").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+
+    // A Circle member who is a Store member without an active device: the
+    // snapshot's stability quorum stays the single owner device.
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("snapshot-restore-owner".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &routing,
+        store.storage.store_id(),
+        "Restore Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let (_store_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(routing.clone()),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        signer.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        owner_storage,
+        StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(routing.clone()),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+
+    // Old-epoch Circle content, published under the initial epoch.
+    {
+        let write_id = db.new_write_id();
+        let tables = db.synced_tables().to_vec();
+        let routing = routing.clone();
+        let audience = Some(circle_id.to_string());
+        db.call(move |connection| {
+            StoreDatabase::run_internal_store_write_transaction_on(
+                connection,
+                &tables,
+                Some(&routing),
+                write_id,
+                |transaction| {
+                    transaction
+                        .execute(
+                            "INSERT INTO documents (id, audience, _updated_at)
+                             VALUES (?1, ?2, ?3)",
+                            rusqlite::params![
+                                "00000000-0000-4000-8000-000000000090",
+                                audience,
+                                "0000000002000-0000-owner"
+                            ],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("capture old-epoch Circle content");
+    }
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish old-epoch Circle content");
+
+    // Drive the member-removal epoch close through to successor activation. Its
+    // successor bootstrap covers the old-epoch content up to the accepted cutoff.
+    components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+
+    // Publish a Store snapshot covering the post-close frontier; the single owner
+    // device acknowledges it stable. Its image prunes the old-epoch retained rows
+    // now covered by the successor bootstrap.
+    let authorized = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize the post-close Store snapshot");
+    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
+    let cut = authorized
+        .capture_snapshot_cut(
+            snapshot_dir.as_ref().to_path_buf(),
+            db.synced_tables().to_vec(),
+            Some(&routing),
+        )
+        .await
+        .expect("capture the post-close Store snapshot cut");
+    let coverage = cut.coverage.clone();
+    authorized
+        .push_snapshot(
+            cut.snapshot,
+            cut.coverage,
+            db.schema_version(),
+            &signer,
+            "2026-07-24T01:00:00Z".to_string(),
+        )
+        .await
+        .expect("publish the post-close Store snapshot");
+    crate::sync::store::stage_store_acknowledgement_for_test(
+        &db,
+        &store.storage,
+        coverage.clone(),
+        "2026-07-24T01:00:01Z".to_string(),
+        &signer,
+    )
+    .await
+    .expect("stage post-close snapshot stability acknowledgement");
+    crate::sync::store::drain_store_acknowledgements_for_test(&db, &store.storage, &signer)
+        .await
+        .expect("activate post-close snapshot stability acknowledgement");
+
+    // A device is restored from the snapshot. Installation validates the image's
+    // retained inputs against the retention rule; the successor bootstrap's
+    // coverage keeps retained rows a Store snapshot of a Circle store legitimately
+    // carries, which the validator must accept.
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
+            .await
+            .expect("load membership for snapshot restore")
+            .chain
+            .expect("membership chain");
+    let destination = tempfile::tempdir().expect("snapshot restore destination");
+    let database_path = destination.path().join("store.db");
+    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &database_path,
+    )
+    .await
+    .expect("restore the post-close Store snapshot");
+    let restored = bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &database_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "restored-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+        )
+        .await
+        .expect("install the restored snapshot database");
+
+    // The restored device pulls and converges to the owner's accepted Store
+    // frontier: the installed snapshot represents the closed epoch exactly, so
+    // nothing is held and the projections agree.
+    let (_restored_temp, restored_dir) = temp_store_dir();
+    let pull = crate::sync::store::pull_store_commits(
+        &StoreDatabase::new(&restored),
+        restored.synced_tables(),
+        &*store.storage,
+        store.root.store_root_hash,
+        &restored_dir,
+        &membership,
+        Some(&signer),
+        Some(&routing),
+    )
+    .await
+    .expect("the restored device pulls the close without a foreign-key violation");
+    assert!(
+        pull.held_positions.is_empty(),
+        "the restored device holds no positions after the close: {:?}",
+        pull.held_positions
+    );
+    let owner_frontier = StoreDatabase::new(&db)
+        .materialized_frontier()
+        .await
+        .expect("read owner Store frontier");
+    let restored_frontier = StoreDatabase::new(&restored)
+        .materialized_frontier()
+        .await
+        .expect("read restored Store frontier");
+    assert_eq!(
+        restored_frontier, owner_frontier,
+        "the restored device converges to the owner's accepted Store frontier"
+    );
 }

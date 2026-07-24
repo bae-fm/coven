@@ -805,9 +805,16 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(crate) fn retain_snapshot_replay_inputs_on(
-        conn: &rusqlite::Transaction<'_>,
-    ) -> Result<(), DbError> {
+    /// The `retained_merge_materializations` commit-refs a Store snapshot image
+    /// keeps: author-exclusion activation commits (device-exclusion recovery),
+    /// Circle bootstrap-coverage activation commits, and every retained
+    /// materialization that still carries a Circle package no bootstrap cut
+    /// covers. `retain_snapshot_replay_inputs_on` keeps exactly this set, and
+    /// `validate_snapshot_retained_inputs_on` expects exactly it, so the two
+    /// share this one derivation.
+    pub(crate) fn snapshot_required_retained_refs(
+        conn: &Connection,
+    ) -> Result<BTreeSet<String>, DbError> {
         let mut statement = conn
             .prepare(
                 "SELECT DISTINCT activation_commit
@@ -885,6 +892,13 @@ impl StoreDatabase {
                 required.insert(encoded);
             }
         }
+        Ok(required)
+    }
+
+    pub(crate) fn retain_snapshot_replay_inputs_on(
+        conn: &rusqlite::Transaction<'_>,
+    ) -> Result<(), DbError> {
+        let required = Self::snapshot_required_retained_refs(conn)?;
         let mut retained = Vec::with_capacity(required.len());
         for encoded in required {
             let reference: StoreBatchCommitRef =
@@ -1064,9 +1078,9 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(crate) fn validate_snapshot_author_exclusion_activations_on(
-        conn: &Connection,
-    ) -> Result<(), DbError> {
+    pub(crate) fn validate_snapshot_retained_inputs_on(conn: &Connection) -> Result<(), DbError> {
+        // Each recorded author-exclusion activation must still match its
+        // exclusion locator, so the image's exclusion table is internally exact.
         let mut statement = conn
             .prepare(
                 "SELECT exclusion_ref, activation_commit
@@ -1082,7 +1096,6 @@ impl StoreDatabase {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(DbError::from)?;
         drop(statement);
-        let mut expected = BTreeSet::new();
         for (encoded_exclusion, activation_commit) in stored {
             let exclusion = serde_json::from_str(&encoded_exclusion).map_err(|error| {
                 DbError::Message(format!("snapshot author exclusion reference: {error}"))
@@ -1099,8 +1112,11 @@ impl StoreDatabase {
                     "snapshot author exclusion activation changed during verification".to_string(),
                 ));
             }
-            expected.insert(activation_commit);
         }
+        // The image's retained inputs must be exactly the set the retention rule
+        // keeps — an extra row is unjustified replay baseline, a missing one is
+        // coverage the Circle retained replay needs.
+        let expected = Self::snapshot_required_retained_refs(conn)?;
         let mut statement = conn
             .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
             .map_err(DbError::from)?;
@@ -1111,7 +1127,7 @@ impl StoreDatabase {
             .map_err(DbError::from)?;
         if actual != expected {
             return Err(DbError::Message(
-                "snapshot retained inputs differ from its author exclusion activations".to_string(),
+                "snapshot retained inputs differ from the retention rule".to_string(),
             ));
         }
         Ok(())

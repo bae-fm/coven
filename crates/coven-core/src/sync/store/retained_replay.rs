@@ -774,9 +774,7 @@ fn validate_snapshot_replay_image(
             "snapshot replay baseline contains materialized_commits rows".to_string(),
         ));
     }
-    crate::sync::store::database::StoreDatabase::validate_snapshot_author_exclusion_activations_on(
-        image,
-    )?;
+    crate::sync::store::database::StoreDatabase::validate_snapshot_retained_inputs_on(image)?;
     validate_replay_image_foreign_keys(image)
 }
 
