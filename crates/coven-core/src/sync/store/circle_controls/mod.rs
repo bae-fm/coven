@@ -19,6 +19,7 @@ pub(crate) use journal::{
     CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
     CircleTransitionHistory, PreparedCircleOperation,
 };
+pub(crate) use preparation::verified_circle_bootstrap_blobs;
 #[cfg(test)]
 use preparation::{
     prepare_circle_activation_objects, prepare_circle_object, prepare_circle_object_at,

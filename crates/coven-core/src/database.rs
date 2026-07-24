@@ -11,6 +11,9 @@
 pub(crate) use crate::database::blob_records::{
     load_activated_registration_on, remote_audience_to_db,
 };
+pub(crate) use crate::database::circle_snapshot_records::{
+    load_outbound_circle_snapshot_on, load_published_circle_snapshot_on,
+};
 pub(crate) use crate::database::cloud_outbox_records::consume_created_upload_handoff_on;
 use crate::database::connection_io::open_connection;
 use crate::database::connection_io::open_connection_read_only;
@@ -110,6 +113,7 @@ mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
 pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
+mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
 mod local_state;
@@ -144,9 +148,10 @@ pub(crate) use local_store_identity::{
     local_activated_registration_ref_on, local_store_authority_on,
 };
 pub(crate) use operation_models::{
-    DurableDeviceRegistration, DurableMembershipMutation, DurableSnapshotPublication,
-    LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState, MembershipMutationActivation,
-    PreparedLocalDeviceRegistrationRow, PreparedSnapshotBlob, PublishedStoreSnapshot,
+    DurableCircleSnapshotPublication, DurableDeviceRegistration, DurableMembershipMutation,
+    DurableSnapshotPublication, LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState,
+    MembershipMutationActivation, PreparedLocalDeviceRegistrationRow, PreparedSnapshotBlob,
+    PublishedCircleSnapshot, PublishedStoreSnapshot,
 };
 #[cfg(feature = "invariant-tests")]
 pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;

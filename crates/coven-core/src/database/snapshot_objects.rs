@@ -61,18 +61,14 @@ pub(crate) fn validate_snapshot_blob_plan_on(
     conn: &Connection,
     gates: &Gates,
     synced_tables: &[SyncedTable],
-    meta: &SnapshotMeta,
+    expected_owner: &crate::sync::remote_object::SnapshotObjectOwner,
     blob: &PreparedSnapshotBlob,
 ) -> Result<(), DbError> {
     blob.remote
         .validate()
         .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
-    let expected_owner = crate::sync::remote_object::SnapshotObjectOwner {
-        activation: meta.successor.activation,
-        generation: meta.generation,
-    };
     let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
-    if owners != [&expected_owner] {
+    if owners != [expected_owner] {
         return Err(DbError::Message(
             "snapshot blob owner differs from the verified snapshot stream activation".to_string(),
         ));

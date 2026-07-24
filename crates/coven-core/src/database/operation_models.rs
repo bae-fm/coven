@@ -76,3 +76,17 @@ pub(crate) struct PublishedStoreSnapshot {
     pub successor_slot: crate::storage::cloud::ObjectSlot,
     pub meta: SnapshotMeta,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableCircleSnapshotPublication {
+    pub reference: crate::sync::store_commit::CircleSnapshotRef,
+    pub meta: ExactProtocolObject<crate::sync::store_commit::CircleSnapshotMeta>,
+    pub image: ExactProtocolObject<Vec<u8>>,
+    pub blobs: Vec<PreparedSnapshotBlob>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedCircleSnapshot {
+    pub reference: crate::sync::store_commit::CircleSnapshotRef,
+    pub successor_slot: crate::storage::cloud::ObjectSlot,
+}

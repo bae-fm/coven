@@ -155,7 +155,7 @@ pub(super) fn prepare_circle_object_at(
         .map_err(CircleOperationError::from)
 }
 
-async fn verified_circle_bootstrap_blobs(
+pub(crate) async fn verified_circle_bootstrap_blobs(
     storage: &dyn SyncStorage,
     circle_id: crate::sync::circle::CircleId,
     snapshot: &crate::sync::store::snapshot::CreatedSnapshot,

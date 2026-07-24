@@ -195,6 +195,14 @@ rebuild the deleted choice.
   signature, and predecessor chain; reading an acknowledgement sealed under
   a rotated-away epoch requires resolving that epoch's key from retained
   controls, which the snapshot and reclamation coverage consumers add.
+- An active device authors a standalone Circle snapshot per Circle it holds
+  access to, sealed to the epoch key on a per-device per-Circle stream whose
+  create-once successor slot is the activation (no Store commit — a snapshot is
+  coverage evidence, not a state transition). Its installable payload is the
+  same image format a member-addition bootstrap carries, so any verified Circle
+  snapshot installs through the bootstrap machinery. Selection over Circle
+  acknowledgements chooses the maximal snapshot every active device's coverage
+  dominates; the snapshot and restore consumers read it.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -256,8 +264,9 @@ rebuild the deleted choice.
    resumes them byte-identically as their exact settlement kind. Finish the
    excluded-device bootstrap reset and publication gate, verified-nonactivation
    discard, and deletion.
-1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
-   restore, reclamation, and blobs.
+1. Circle acknowledgement and standalone-snapshot authoring, publication, and
+   bootstrap-machinery install are implemented. Finish packages, pull, snapshot
+   stability selection over acknowledgements, restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,
    and dependent application updates.
 

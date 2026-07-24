@@ -227,6 +227,24 @@ pub(crate) async fn drain_store_acknowledgements_for_test(
 }
 
 #[cfg(test)]
+pub(crate) async fn push_circle_snapshots_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    temp_dir: std::path::PathBuf,
+    schema_version: u32,
+    identity: &UserKeypair,
+    created_at: &str,
+) -> Result<(), snapshot::SnapshotError> {
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
+    store
+        .author_one_circle_snapshot_for_test(temp_dir, schema_version, identity, created_at)
+        .await
+        .map(|_| ())
+}
+
+#[cfg(test)]
 pub(crate) async fn stage_circle_acknowledgements_for_test(
     db: &Database,
     storage: &dyn SyncStorage,

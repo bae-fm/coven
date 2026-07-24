@@ -128,8 +128,18 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
+                let snapshot_owner = crate::sync::remote_object::SnapshotObjectOwner {
+                    activation: meta.successor.activation,
+                    generation: meta.generation,
+                };
                 for blob in &blobs {
-                    validate_snapshot_blob_plan_on(conn, &gates, &synced_tables, &meta, blob)?;
+                    validate_snapshot_blob_plan_on(
+                        conn,
+                        &gates,
+                        &synced_tables,
+                        &snapshot_owner,
+                        blob,
+                    )?;
                 }
                 tx.execute(
                     "INSERT INTO outbound_store_snapshot \

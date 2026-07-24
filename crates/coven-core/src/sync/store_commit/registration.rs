@@ -210,6 +210,13 @@ pub enum DeviceStreamAnchor {
         circle_id: CircleId,
         first_slot: ObjectSlot,
     },
+    /// Per-(device, Circle) snapshot stream. Like the Circle-acknowledgement
+    /// anchor, never a registration field: derived on demand to bind one
+    /// device's Circle-snapshot stream to its Circle.
+    CircleSnapshots {
+        circle_id: CircleId,
+        first_slot: ObjectSlot,
+    },
 }
 
 impl DeviceStreamAnchor {
@@ -218,7 +225,8 @@ impl DeviceStreamAnchor {
             Self::StoreAnnouncements { first_slot }
             | Self::StoreAcknowledgements { first_slot }
             | Self::StoreSnapshots { first_slot }
-            | Self::CircleAcknowledgements { first_slot, .. } => first_slot,
+            | Self::CircleAcknowledgements { first_slot, .. }
+            | Self::CircleSnapshots { first_slot, .. } => first_slot,
         }
     }
 }

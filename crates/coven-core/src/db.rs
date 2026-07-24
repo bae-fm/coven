@@ -344,6 +344,30 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            outbound_circle_snapshot,
+            "
+    circle_id TEXT PRIMARY KEY,
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
+    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
+    image_prepared TEXT NOT NULL CHECK (json_valid(image_prepared)),
+    image_bytes BLOB NOT NULL,
+    meta_bytes BLOB NOT NULL,
+    blobs TEXT NOT NULL CHECK (json_valid(blobs))
+"
+        );
+        $visit!(
+            published_circle_snapshot,
+            "
+    circle_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
+    meta_bytes BLOB NOT NULL,
+    PRIMARY KEY (circle_id, generation)
+"
+        );
+        $visit!(
             outbound_store_acks,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

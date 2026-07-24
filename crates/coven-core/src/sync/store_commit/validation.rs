@@ -343,6 +343,22 @@ pub fn circle_ack_semantic_prefix(
     )
 }
 
+pub fn circle_snapshot_slot_prefix(
+    circle_id: CircleId,
+    device_id: &str,
+    generation: u64,
+) -> String {
+    format!("circles/{circle_id}/snapshots/{device_id}/{generation}")
+}
+
+pub fn circle_snapshot_image_semantic_prefix(
+    circle_id: CircleId,
+    device_id: &str,
+    image_hash: ObjectHash,
+) -> String {
+    format!("circles/{circle_id}/snapshot-images/{device_id}/{image_hash}")
+}
+
 pub fn snapshot_slot_prefix(device_id: &str, generation: u64) -> String {
     format!("{STORE_SNAPSHOT_META_PREFIX}{device_id}/{generation}")
 }

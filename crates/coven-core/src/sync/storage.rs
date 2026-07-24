@@ -50,6 +50,8 @@ pub(crate) enum ProtectedObjectDomain {
     CircleAccessLeaf,
     CircleAccessEnvelope,
     CircleAcknowledgement,
+    CircleSnapshotMeta,
+    CircleSnapshotImage,
 }
 
 #[derive(Clone, Copy)]
@@ -484,6 +486,22 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::CircleSnapshotMeta => ProtocolObjectMetadata {
+                aad_label: b"circle-snapshot-meta",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "circles"), (2, "snapshots")],
+                }]),
+                extension: ".json",
+            },
+            Self::CircleSnapshotImage => ProtocolObjectMetadata {
+                aad_label: b"circle-snapshot-image",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "circles"), (2, "snapshot-images")],
+                }]),
+                extension: ".db",
+            },
         }
     }
 
@@ -591,6 +609,10 @@ impl ProtocolObjectDomain {
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseResponse);
     pub const CircleAcknowledgement: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleAcknowledgement);
+    pub const CircleSnapshotMeta: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleSnapshotMeta);
+    pub const CircleSnapshotImage: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleSnapshotImage);
 }
 
 /// Authenticated storage context for one immutable semantic object.

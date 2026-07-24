@@ -5,6 +5,7 @@ pub(super) mod candidate_records;
 mod circle_acknowledgements;
 mod circle_controls;
 mod circle_operations;
+mod circle_snapshot_publication;
 mod device_continuation;
 mod device_exclusion;
 mod device_join_challenges;

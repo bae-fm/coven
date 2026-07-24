@@ -79,6 +79,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     ("outbound_circle_acks", ReplayTableDisposition::Preserve),
+    ("outbound_circle_snapshot", ReplayTableDisposition::Preserve),
     ("outbound_store_acks", ReplayTableDisposition::Preserve),
     (
         "outbound_store_device_exclusion",
@@ -95,6 +96,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     ("published_circle_acks", ReplayTableDisposition::Preserve),
+    (
+        "published_circle_snapshot",
+        ReplayTableDisposition::Preserve,
+    ),
     ("published_store_acks", ReplayTableDisposition::Preserve),
     ("published_store_snapshot", ReplayTableDisposition::Preserve),
     ("reclaimed_store_packages", ReplayTableDisposition::Preserve),

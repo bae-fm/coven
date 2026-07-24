@@ -820,6 +820,18 @@ async fn complete_cycle_after_pull(
             }
             Err(e) => warn!("Failed to create snapshot: {e}"),
         }
+
+        if let Err(e) = authorization
+            .push_circle_snapshots(
+                store_dir.as_ref().to_path_buf(),
+                db.schema_version(),
+                user_keypair,
+                &sync_time,
+            )
+            .await
+        {
+            warn!("Failed to author Circle snapshots: {e}");
+        }
     }
 
     Ok(CompletedPullCycle {
