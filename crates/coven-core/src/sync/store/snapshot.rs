@@ -809,25 +809,38 @@ impl super::AuthorizedStore<'_> {
     /// Whether every device that holds active Circle access has published a
     /// Circle acknowledgement whose accepted Store frontier covers `snapshot_cut`
     /// — the point at which a snapshot at that cut is usable as coverage evidence.
-    /// The acknowledgements are read from `activated_circle_acks` and decrypted
-    /// with the epoch key resolved under the reader's current control (its keyring
-    /// retains the epochs it holds, so acknowledgements sealed under a rotated
-    /// epoch stay readable). No acknowledged device yet means not stable.
+    /// The current active-access device set is enumerated first (every active
+    /// Store device owned by a current roster member), so a device that holds
+    /// access but has never acknowledged fails the check closed rather than being
+    /// invisible. Each device's acknowledgement is decrypted with the epoch key
+    /// resolved under the reader's current control (its keyring retains the epochs
+    /// it holds, so an acknowledgement sealed under a rotated epoch stays
+    /// readable). Mirrors the Store-level `assemble_snapshot_stability`.
     pub(crate) async fn circle_snapshot_is_stable(
         &self,
         circle_id: CircleId,
         current_control: &CircleControlCoord,
         snapshot_cut: &CommitFrontier,
     ) -> Result<bool, SnapshotError> {
-        let acknowledgements = self
+        let devices = self
             .database()
-            .activated_circle_acks(circle_id)
+            .active_circle_access_devices(circle_id)
             .await
             .map_err(publication_error)?;
-        if acknowledgements.is_empty() {
+        if devices.is_empty() {
             return Ok(false);
         }
-        for reference in acknowledgements {
+        for device_id in devices {
+            let Some(reference) = self
+                .database()
+                .activated_circle_ack(circle_id, device_id)
+                .await
+                .map_err(publication_error)?
+            else {
+                // A device holding active access has never acknowledged: the
+                // snapshot is not yet usable as coverage evidence (fail closed).
+                return Ok(false);
+            };
             let acknowledgement = self
                 .load_circle_acknowledgement(&reference, current_control)
                 .await

@@ -200,9 +200,12 @@ rebuild the deleted choice.
   create-once successor slot is the activation (no Store commit — a snapshot is
   coverage evidence, not a state transition). Its installable payload is the
   same image format a member-addition bootstrap carries, so any verified Circle
-  snapshot installs through the bootstrap machinery. Selection over Circle
-  acknowledgements chooses the maximal snapshot every active device's coverage
-  dominates; the snapshot and restore consumers read it.
+  snapshot installs through the bootstrap machinery. A snapshot is
+  acknowledgement-stable only when every device that holds active access has
+  published an acknowledgement dominating its cut — a device holding access that
+  never acknowledged keeps it unstable — and authoring the next generation waits
+  on that stability; the restore and reclamation consumers select the maximal
+  stable snapshot to read.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -264,9 +267,9 @@ rebuild the deleted choice.
    resumes them byte-identically as their exact settlement kind. Finish the
    excluded-device bootstrap reset and publication gate, verified-nonactivation
    discard, and deletion.
-1. Circle acknowledgement and standalone-snapshot authoring, publication, and
-   bootstrap-machinery install are implemented. Finish packages, pull, snapshot
-   stability selection over acknowledgements, restore, reclamation, and blobs.
+1. Circle acknowledgement and standalone-snapshot authoring, publication,
+   bootstrap-machinery install, and snapshot acknowledgement-stability gating are
+   implemented. Finish packages, pull, restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,
    and dependent application updates.
 

@@ -691,7 +691,7 @@ impl StoreDatabase {
         Ok(false)
     }
 
-    fn circle_current_state_on(
+    pub(crate) fn circle_current_state_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
     ) -> Result<Option<crate::sync::store::circle_controls::activation::CircleCurrentState>, DbError>

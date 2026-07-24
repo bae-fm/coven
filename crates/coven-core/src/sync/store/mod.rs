@@ -244,6 +244,27 @@ pub(crate) async fn push_circle_snapshots_for_test(
         .map(|_| ())
 }
 
+/// Drive the resume-aware Circle snapshot publication the cycle runs: resume any
+/// pending durable publication first, then author one snapshot per active Circle.
+/// A publication failure for one Circle is logged and leaves its durable row for
+/// the next run to resume, so this returns `Ok` even when an armed upload fails.
+#[cfg(test)]
+pub(crate) async fn drive_circle_snapshot_publications_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    temp_dir: std::path::PathBuf,
+    schema_version: u32,
+    identity: &UserKeypair,
+    created_at: &str,
+) -> Result<(), snapshot::SnapshotError> {
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
+    store
+        .push_circle_snapshots(temp_dir, schema_version, identity, created_at)
+        .await
+}
+
 #[cfg(test)]
 pub(crate) async fn load_circle_snapshot_metas_for_test(
     db: &Database,

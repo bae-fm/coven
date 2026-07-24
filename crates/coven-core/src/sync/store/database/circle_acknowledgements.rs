@@ -4,9 +4,12 @@ use crate::sync::circle::{
 };
 use crate::sync::storage::PreparedExactObject;
 use crate::sync::store::circle_controls::activation::CircleCurrentState;
-use crate::sync::store_commit::{CircleAck, CircleAckRef, CommitFrontier};
+use crate::sync::store_commit::{
+    CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
+};
 use crate::KeyFingerprint;
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::StoreDatabase;
 
@@ -95,11 +98,13 @@ impl StoreDatabase {
         Ok(inputs)
     }
 
-    #[cfg(test)]
+    /// The latest activated Circle acknowledgement `device_id` published for
+    /// `circle_id`, or `None` if that device has never had an acknowledgement
+    /// activated. Snapshot stability reads this per access-holding device.
     pub(crate) async fn activated_circle_ack(
         &self,
         circle_id: CircleId,
-        device_id: crate::sync::store_commit::StoreDeviceId,
+        device_id: StoreDeviceId,
     ) -> Result<Option<CircleAckRef>, DbError> {
         self.sqlite()
             .call(move |conn| {
@@ -127,12 +132,75 @@ impl StoreDatabase {
             .await
     }
 
+    /// The device ids that currently hold active Circle access to `circle_id`:
+    /// every active Store device whose owner is a current member of the Circle's
+    /// resolved roster. Snapshot stability requires each of these devices to have
+    /// published a dominating acknowledgement, so a device that holds access but
+    /// has never acknowledged keeps the snapshot unstable (fail closed). A
+    /// `Closing`/`Inactive`/conflicted Circle authors no snapshot and returns an
+    /// empty set.
+    pub(crate) async fn active_circle_access_devices(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<BTreeSet<StoreDeviceId>, DbError> {
+        let members = self.circle_current_roster_members(circle_id).await?;
+        if members.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let frontier = CommitFrontier::from_refs(self.materialized_frontier().await?)
+            .map_err(|error| DbError::Message(format!("shape current Store frontier: {error}")))?;
+        let (_, device_state) = self
+            .store_device_state_for_history_cut(&StoreHistoryCut(frontier.0))
+            .await?;
+        let owners: BTreeMap<StoreDeviceId, String> = self
+            .activated_store_device_registration_records()
+            .await?
+            .into_iter()
+            .map(|(_, registration)| (registration.device_id, registration.author_pubkey))
+            .collect();
+        let mut devices = BTreeSet::new();
+        for (device_id, record) in device_state.devices {
+            if !matches!(record.status, StoreDeviceStatus::Active) {
+                continue;
+            }
+            let owner = owners.get(&device_id).ok_or_else(|| {
+                DbError::Message(format!(
+                    "active Store device {device_id} has no activated registration"
+                ))
+            })?;
+            if members.contains(owner) {
+                devices.insert(device_id);
+            }
+        }
+        Ok(devices)
+    }
+
+    /// The pubkeys in `circle_id`'s current resolved roster, or an empty set when
+    /// the Circle is not in an active local state (so it has no snapshot quorum).
+    async fn circle_current_roster_members(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<BTreeSet<String>, DbError> {
+        self.sqlite()
+            .call(move |conn| {
+                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} has no current state"
+                    )));
+                };
+                let Some((_current, _access, roster, _metadata)) = state.active() else {
+                    return Ok(BTreeSet::new());
+                };
+                Ok(roster.members().into_keys().collect())
+            })
+            .await
+    }
+
     /// The latest activated Circle acknowledgement each device that holds active
-    /// access to `circle_id` has published — one per device. Snapshot stability
-    /// reads this: a Circle snapshot is stable only when every such device has
-    /// acknowledged coverage past the snapshot's cut. An inactive recipient
+    /// access to `circle_id` has published — one per device. An inactive recipient
     /// holds no access and therefore publishes no acknowledgement, so it never
     /// appears here.
+    #[cfg(test)]
     pub(crate) async fn activated_circle_acks(
         &self,
         circle_id: CircleId,
