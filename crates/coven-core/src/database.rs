@@ -439,12 +439,31 @@ struct DatabaseCore {
     transfer_limits: crate::blob::TransferLimits,
 }
 
+/// One Circle's staged restore outcome, decided by selection against the
+/// restoring identity's re-resolved access. `Install` carries a verified image to
+/// project and record coverage for; `ClearCoverage` names a Circle the identity
+/// cannot decrypt, whose preserved coverage row must be deleted so replay never
+/// reconstructs an image the identity has no access to.
+pub(crate) enum StagedCircleDecision {
+    Install {
+        activation_commit: StoreBatchCommitRef,
+        image: crate::sync::store::VerifiedCircleImage,
+    },
+    ClearCoverage(crate::sync::circle::CircleId),
+}
+
 pub(crate) struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
     store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
     founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
     stability: RetainedReplaySnapshotAuthority,
     routing_key: Option<crate::sync::circle::RowRoutingKey>,
+    circle_decisions: Vec<StagedCircleDecision>,
+    /// Fail the Circle-decision step of the install transaction, after the Store
+    /// image has been installed within it — a test's stand-in for a crash between
+    /// the Store and Circle installs, exercising the single-transaction rollback.
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_circle_install: bool,
 }
 
 impl VerifiedSnapshotBootstrapInstall {
@@ -454,6 +473,7 @@ impl VerifiedSnapshotBootstrapInstall {
         founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
         stability: crate::sync::store::VerifiedStoreSnapshotStability,
         routing_encryption: Option<&EncryptionService>,
+        circle_decisions: Vec<StagedCircleDecision>,
     ) -> Result<Self, DbError> {
         if store_root.value.to_bytes() != store_root.bytes
             || store_root.value.object_hash() != store_root.semantic_hash
@@ -500,7 +520,31 @@ impl VerifiedSnapshotBootstrapInstall {
             founder,
             stability,
             routing_key,
+            circle_decisions,
+            #[cfg(any(test, feature = "test-utils"))]
+            fail_circle_install: false,
         })
+    }
+
+    /// Attach the Circle install/clear decisions selected against a throwaway
+    /// query copy opened through this same authority. Kept separate from `new` so
+    /// one verified install can first query (with no decisions) and then install
+    /// for real (with them), without re-verifying the Store authority.
+    pub(crate) fn with_circle_decisions(
+        mut self,
+        circle_decisions: Vec<StagedCircleDecision>,
+    ) -> Self {
+        self.circle_decisions = circle_decisions;
+        self
+    }
+
+    /// Arm the Circle-install failure injection: the install transaction rolls
+    /// back after the Store image is installed but before any Circle decision
+    /// commits, standing in for a crash between the two installs.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn fail_circle_install_for_test(mut self) -> Self {
+        self.fail_circle_install = true;
+        self
     }
 
     fn install_on(
@@ -508,6 +552,7 @@ impl VerifiedSnapshotBootstrapInstall {
         conn: &Connection,
         schema_version: u32,
         routing_hash: ObjectHash,
+        synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
         let root = crate::sync::store_commit::StoreRootRef {
             store_root_id: self.store_root.value.descriptor.store_root_id(),
@@ -559,7 +604,65 @@ impl VerifiedSnapshotBootstrapInstall {
             schema_version,
             routing_hash,
             self.stability.clone(),
-        )
+        )?;
+        self.install_circle_decisions_on(conn, synced_tables)
+    }
+
+    /// Apply the staged Circle decisions inside the Store install's single
+    /// transaction: each `Install` projects the verified image and records its
+    /// coverage row (accepting a strictly newer cut, refusing a regression); each
+    /// `ClearCoverage` deletes the preserved row for a Circle the restoring
+    /// identity cannot decrypt. The whole set commits or rolls back with the Store
+    /// image — a partially installed union is never exposed.
+    fn install_circle_decisions_on(
+        &self,
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+    ) -> Result<(), DbError> {
+        use crate::sync::store::StoreDatabase;
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.fail_circle_install {
+            return Err(DbError::Message(
+                "injected Circle install failure after Store install".to_string(),
+            ));
+        }
+        for decision in &self.circle_decisions {
+            match decision {
+                StagedCircleDecision::Install {
+                    activation_commit,
+                    image,
+                } => {
+                    let activation = StoreDatabase::verified_circle_activation_on(
+                        conn,
+                        image.circle_id(),
+                        image.control(),
+                    )?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "restored Circle {} image names a control absent from the installed \
+                             control indexes",
+                            image.circle_id()
+                        ))
+                    })?;
+                    crate::sync::store::install_circle_bootstrap_image_on(
+                        conn,
+                        synced_tables,
+                        activation_commit,
+                        image,
+                    )?;
+                    StoreDatabase::record_one_circle_bootstrap_coverage_on(
+                        conn,
+                        activation_commit,
+                        image,
+                        &activation.control,
+                    )?;
+                }
+                StagedCircleDecision::ClearCoverage(circle_id) => {
+                    StoreDatabase::clear_circle_bootstrap_coverage_on(conn, *circle_id)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

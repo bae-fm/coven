@@ -575,6 +575,24 @@ fn apply_circle_bootstrap_projection_on(
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
 ) -> Result<(), DbError> {
+    let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+    install_circle_bootstrap_image_on(&tx, synced_tables, activation_commit, bootstrap)?;
+    tx.commit().map_err(DbError::from)
+}
+
+/// Install one verified Circle image's rows, routes, and blob graph onto `conn`
+/// directly — no transaction of its own. `conn` is the caller's active
+/// transaction: the pull replay wraps this in a fresh throwaway transaction; the
+/// snapshot-restore installer runs it inside the single install transaction
+/// alongside the Store image, so the whole set commits or rolls back together.
+/// Foreign keys are deferred to that outer commit, matching the final
+/// foreign-key validation the install runs over the installed union.
+pub(crate) fn install_circle_bootstrap_image_on(
+    conn: &rusqlite::Connection,
+    synced_tables: &[SyncedTable],
+    activation_commit: &StoreBatchCommitRef,
+    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
+) -> Result<(), DbError> {
     let source = crate::sync::store::snapshot::open_database_image(bootstrap.image_bytes())
         .map_err(|error| {
             DbError::Message(format!("open retained Circle bootstrap image: {error}"))
@@ -589,19 +607,29 @@ fn apply_circle_bootstrap_projection_on(
     ]);
     projection_tables.sort();
     projection_tables.dedup();
-    let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-    tx.pragma_update(None, "defer_foreign_keys", "ON")
+    conn.pragma_update(None, "defer_foreign_keys", "ON")
         .map_err(DbError::from)?;
     for table in &projection_tables {
-        super::super::retained_replay::copy_table(&source, &tx, table).map_err(|error| {
+        // The audience-routing tables are preserved wholesale by a Store image, so
+        // a restore already carries their deterministic rows; skip a re-insert of a
+        // row that is already present instead of failing on its unique key. A pull
+        // installs onto an empty replay base, where nothing conflicts. Data tables
+        // carry no circle rows on a Store image, so they insert exactly once.
+        let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
+        super::super::retained_replay::copy_table_with_conflicts(
+            &source,
+            conn,
+            table,
+            ignore_existing,
+        )
+        .map_err(|error| {
             DbError::Message(format!(
                 "install exact Circle {} bootstrap table {table}: {error}",
                 bootstrap.circle_id()
             ))
         })?;
     }
-    install_circle_bootstrap_blob_graph_on(&tx, activation_commit, bootstrap)?;
-    tx.commit().map_err(DbError::from)
+    install_circle_bootstrap_blob_graph_on(conn, activation_commit, bootstrap)
 }
 
 fn install_circle_bootstrap_blob_graph_on(

@@ -12,6 +12,8 @@ pub(crate) use image::{
     verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience,
 };
 
+use tracing::warn;
+
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::sync::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
@@ -1275,7 +1277,6 @@ pub(crate) async fn load_store_snapshot_stream(
 /// reader computes from the author's device id (a per-Circle stream has no
 /// registration anchor); later generations follow the create-once successor
 /// slot. The predecessor chain is verified exact.
-#[cfg(test)]
 pub(crate) async fn load_circle_snapshot_stream(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1338,7 +1339,6 @@ pub(crate) async fn load_circle_snapshot_stream(
 /// The maximal Circle snapshot by coverage domination among candidates. Stability
 /// against Circle acknowledgements is applied by the caller; this returns the
 /// snapshot whose cut no other candidate strictly dominates.
-#[cfg(test)]
 pub(crate) fn select_maximal_circle_snapshot(
     mut candidates: Vec<CircleSnapshotMeta>,
 ) -> Option<CircleSnapshotMeta> {
@@ -1351,6 +1351,380 @@ pub(crate) fn select_maximal_circle_snapshot(
     });
     candidates.sort_by_key(|snapshot| snapshot.snapshot_hash());
     candidates.pop()
+}
+
+/// One image the restoring identity could stage for a Circle: the exact commit
+/// that activates its control, and the verified image bound to that control.
+struct StagedCircleImageCandidate {
+    activation_commit: crate::sync::store_commit::StoreBatchCommitRef,
+    image: crate::sync::store::circle_controls::VerifiedCircleImage,
+}
+
+impl StagedCircleImageCandidate {
+    fn coverage(&self) -> &CommitFrontier {
+        &self.image.reference().coverage
+    }
+}
+
+/// Decide, per retained Circle, what the restoring identity stages: install a
+/// verified image, or clear a preserved coverage row it cannot decrypt.
+///
+/// The restoring identity's access is re-resolved from the verified control chain
+/// on the just-installed Store image — never the snapshot author's preserved
+/// access caches, which belong to another identity. For each Circle the identity
+/// holds active access to, the maximal verified image whose lineage the retained
+/// controls prove and whose cut the Store frontier covers is chosen among three
+/// candidates: the preserved coverage row, the identity's own leaf-named
+/// bootstrap, and the maximal standalone snapshot across the activated devices. A
+/// Circle the identity cannot decrypt yields `ClearCoverage`, so no coverage row
+/// an inaccessible Circle could replay from survives the restore.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn select_staged_circle_decisions(
+    query_db: &crate::sync::store::StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    founder_pubkey: &str,
+    store_frontier: &CommitFrontier,
+    restorer_identity: &UserKeypair,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
+    use crate::database::StagedCircleDecision;
+    use crate::sync::store::StoreDatabase;
+
+    let sqlite = query_db.sqlite();
+    // The stream-activation index the control-stream authority resolves against is
+    // written by the pull, which has not run on a freshly restored device; seed it
+    // from the retained materializations selection reads anyway.
+    sqlite
+        .call(StoreDatabase::seed_stream_activation_index_from_retained_on)
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    let circle_index = sqlite
+        .call(StoreDatabase::circle_control_activation_index_on)
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    let preserved_rows = sqlite
+        .call(StoreDatabase::circle_bootstrap_replay_inputs_on)
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    let device_registrations = query_db
+        .activated_store_device_registration_records()
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+
+    let mut decisions = Vec::new();
+    for (circle_id, controls) in circle_index {
+        let head_control = sqlite
+            .call(move |conn| StoreDatabase::head_circle_control_on(conn, circle_id, &controls))
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        let Some(head_control) = head_control else {
+            warn!(%circle_id, "restore selection: Circle has no head control; clearing coverage");
+            decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
+            continue;
+        };
+        let head_lookup = head_control.clone();
+        let head_commit = sqlite
+            .call(move |conn| {
+                StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, &head_lookup)
+            })
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?
+            .ok_or_else(|| {
+                SnapshotError::BootstrapState(format!(
+                    "restore selection: Circle {circle_id} head control has no activating commit"
+                ))
+            })?;
+
+        let access = resolve_restorer_circle_access(
+            query_db,
+            storage,
+            root,
+            founder_pubkey,
+            restorer_identity,
+            routing_key,
+            circle_id,
+            &head_control,
+            &head_commit,
+        )
+        .await?;
+        let (epoch_encryption, leaf_bootstrap) = match access {
+            // The restoring identity cannot decrypt this Circle — delete any
+            // preserved coverage row so replay never reconstructs an image it has
+            // no access to.
+            crate::sync::store::circle_controls::activation::LocalCircleAccess::NoAccess => {
+                decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
+                continue;
+            }
+            crate::sync::store::circle_controls::activation::LocalCircleAccess::Active {
+                epoch_encryption,
+                leaf_bootstrap,
+            } => (epoch_encryption, leaf_bootstrap),
+        };
+
+        let mut candidates: Vec<StagedCircleImageCandidate> = Vec::new();
+        // The restoring identity's own leaf-named bootstrap: the baseline for a
+        // Circle whose accessible content predates the identity's join and which no
+        // forward replay reconstructs.
+        if let Some(image) = leaf_bootstrap {
+            candidates.push(StagedCircleImageCandidate {
+                activation_commit: head_commit.clone(),
+                image,
+            });
+        }
+        for (activation_commit, image) in &preserved_rows {
+            if image.circle_id() == circle_id {
+                candidates.push(StagedCircleImageCandidate {
+                    activation_commit: activation_commit.clone(),
+                    image: image.clone(),
+                });
+            }
+        }
+        // Standalone Circle snapshots are sealed under the Circle epoch key the
+        // identity's active leaf carries, not the Store routing key.
+        if let Some(candidate) = select_standalone_snapshot_candidate(
+            query_db,
+            storage,
+            root,
+            circle_id,
+            &head_control,
+            &epoch_encryption,
+            routing_key,
+            &device_registrations,
+        )
+        .await?
+        {
+            candidates.push(candidate);
+        }
+
+        match choose_maximal_installable_candidate(circle_id, store_frontier, candidates)? {
+            Some(candidate) => decisions.push(StagedCircleDecision::Install {
+                activation_commit: candidate.activation_commit,
+                image: candidate.image,
+            }),
+            None => {
+                warn!(
+                    %circle_id,
+                    "restore selection: Circle has active access but no coverage image; \
+                     it replays from live history if retained"
+                );
+            }
+        }
+    }
+    Ok(decisions)
+}
+
+/// Resolve the restoring identity's own access at a Circle's head control. The
+/// head control's activating commit is retained, so its verified materialization
+/// carries the already-verified control; only the identity's own access envelope,
+/// the Store membership checkpoint, and (if the leaf names one) its own bootstrap
+/// image are read from storage. This never re-walks the control's covered-head
+/// lineage, which a reclaimed restore may no longer retain.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_restorer_circle_access(
+    query_db: &crate::sync::store::StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    founder_pubkey: &str,
+    restorer_identity: &UserKeypair,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+    circle_id: CircleId,
+    head_control: &CircleControlCoord,
+    head_commit: &crate::sync::store_commit::StoreBatchCommitRef,
+) -> Result<crate::sync::store::circle_controls::activation::LocalCircleAccess, SnapshotError> {
+    use crate::sync::store::StoreDatabase;
+    let commit_lookup = head_commit.clone();
+    let owned = query_db
+        .sqlite()
+        .call(move |conn| {
+            StoreDatabase::load_retained_merge_materialization_by_ref_on(conn, &commit_lookup)
+        })
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    owned
+        .as_verified()
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    let commit = owned.commit().clone();
+    let reference = owned
+        .circle_activations()
+        .circles()
+        .iter()
+        .find(|reference| {
+            reference.circle_id == circle_id && reference.control.coord == *head_control
+        })
+        .ok_or_else(|| {
+            SnapshotError::BootstrapState(format!(
+                "restore selection: Circle {circle_id} head control is absent from its retained \
+                 activation"
+            ))
+        })?;
+    crate::sync::store::circle_controls::activation::resolve_local_circle_access(
+        query_db,
+        storage,
+        root,
+        &commit,
+        &reference.reference,
+        &reference.control,
+        restorer_identity,
+        founder_pubkey,
+        routing_key,
+    )
+    .await
+    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
+}
+
+/// The maximal standalone Circle snapshot across the activated devices whose
+/// lineage the retained head control proves, downloaded and verified byte-exact.
+#[allow(clippy::too_many_arguments)]
+async fn select_standalone_snapshot_candidate(
+    query_db: &crate::sync::store::StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    head_control: &CircleControlCoord,
+    encryption: &EncryptionService,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+    device_registrations: &[(
+        crate::sync::store_commit::StoreDeviceRegistrationRef,
+        crate::sync::store_commit::StoreDeviceRegistration,
+    )],
+) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
+    use crate::sync::store::StoreDatabase;
+    let mut lineage_covered = Vec::new();
+    for (registration_ref, registration) in device_registrations {
+        let stream = load_circle_snapshot_stream(
+            storage,
+            root,
+            circle_id,
+            encryption.clone(),
+            registration_ref,
+            registration,
+        )
+        .await?;
+        for snapshot in stream {
+            let snapshot_control = snapshot.control.clone();
+            let head = head_control.clone();
+            let covered = query_db
+                .sqlite()
+                .call(move |conn| {
+                    let Some(reference) =
+                        StoreDatabase::verified_circle_activation_on(conn, circle_id, &head)?
+                    else {
+                        return Ok(false);
+                    };
+                    StoreDatabase::verified_circle_control_covers_on(
+                        conn,
+                        circle_id,
+                        &reference.control,
+                        &snapshot_control,
+                    )
+                })
+                .await
+                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            if covered {
+                lineage_covered.push(snapshot);
+            }
+        }
+    }
+    let Some(selected) = select_maximal_circle_snapshot(lineage_covered) else {
+        return Ok(None);
+    };
+    let author_device = selected.author_registration.device_id.to_string();
+    let image_context = ProtocolObjectContext::circle(
+        root.store_root_hash,
+        ProtocolObjectDomain::CircleSnapshotImage,
+        encryption.clone(),
+    );
+    let image_bytes = storage
+        .read_protocol_object(
+            &image_context,
+            &selected.bootstrap.image.object,
+            &circle_snapshot_image_semantic_prefix(
+                circle_id,
+                &author_device,
+                selected.bootstrap.image.image_hash,
+            ),
+        )
+        .await
+        .map_err(SnapshotError::Bucket)?;
+    verify_circle_bootstrap_image(
+        &image_bytes,
+        &selected.bootstrap,
+        circle_id,
+        query_db.sqlite().synced_tables(),
+        routing_key,
+    )
+    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    let snapshot_control = selected.control.clone();
+    let activation_commit = query_db
+        .sqlite()
+        .call(move |conn| {
+            StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, &snapshot_control)
+        })
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?
+        .ok_or_else(|| {
+            SnapshotError::BootstrapState(format!(
+                "restore selection: Circle {circle_id} snapshot control has no activating commit"
+            ))
+        })?;
+    let image = crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
+        circle_id,
+        selected.control.clone(),
+        selected.bootstrap.clone(),
+        image_bytes,
+    )
+    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+    Ok(Some(StagedCircleImageCandidate {
+        activation_commit,
+        image,
+    }))
+}
+
+/// The candidate whose coverage dominates every other, provided the Store frontier
+/// covers its cut. A candidate cut the frontier does not cover is a Circle image
+/// newer than replayable history — a typed selection error, never a silent skip.
+/// Two incomparable coverage cuts fail loud rather than pick one arbitrarily.
+fn choose_maximal_installable_candidate(
+    circle_id: CircleId,
+    store_frontier: &CommitFrontier,
+    mut candidates: Vec<StagedCircleImageCandidate>,
+) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    candidates.sort_by(|left, right| {
+        left.image
+            .reference()
+            .image
+            .image_hash
+            .to_string()
+            .cmp(&right.image.reference().image.image_hash.to_string())
+    });
+    let mut maximal_index = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let dominates_all = candidates.iter().enumerate().all(|(other, contender)| {
+            other == index
+                || candidate.coverage() == contender.coverage()
+                || coverage_dominates(candidate.coverage(), contender.coverage())
+        });
+        if dominates_all {
+            maximal_index = Some(index);
+            break;
+        }
+    }
+    let maximal_index = maximal_index.ok_or_else(|| {
+        SnapshotError::BootstrapState(format!(
+            "restore selection: Circle {circle_id} has incomparable coverage candidates"
+        ))
+    })?;
+    let maximal = candidates.swap_remove(maximal_index);
+    if !store_frontier.covers(maximal.coverage()) {
+        return Err(SnapshotError::BootstrapState(format!(
+            "restore selection: Circle {circle_id} image cut is not covered by the Store frontier"
+        )));
+    }
+    Ok(Some(maximal))
 }
 
 pub(crate) fn select_maximal_store_snapshot(

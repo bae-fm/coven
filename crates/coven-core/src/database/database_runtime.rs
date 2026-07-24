@@ -89,7 +89,7 @@ impl Database {
 
     pub(crate) fn open_initialized_store(
         path: &Path,
-        install: VerifiedSnapshotBootstrapInstall,
+        install: &VerifiedSnapshotBootstrapInstall,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
@@ -105,7 +105,7 @@ impl Database {
             transfer_limits,
             Arc::new(hlc),
             migrations,
-            CovenMetadataOpen::VerifiedSnapshot(Box::new(install)),
+            CovenMetadataOpen::VerifiedSnapshot(install),
         )
     }
 
@@ -142,7 +142,7 @@ impl Database {
         transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-        metadata_open: CovenMetadataOpen,
+        metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
         let (core, state, stamper) = DatabaseCore::open(
             path,

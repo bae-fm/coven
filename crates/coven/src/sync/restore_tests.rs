@@ -1512,6 +1512,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         None,
         &storage.storage,
         boot,
+        &crate::keys::UserKeypair::generate(),
         &lib_b,
         &tokio::sync::watch::channel(false).1,
     )

@@ -283,8 +283,12 @@ rebuild the deleted choice.
    settlement kind. Finish the excluded-device bootstrap reset and publication
    gate, and verified-nonactivation discard.
 1. Circle acknowledgement and standalone-snapshot authoring, publication,
-   bootstrap-machinery install, and snapshot acknowledgement-stability gating are
-   implemented. Finish packages, pull, restore, reclamation, and blobs.
+   bootstrap-machinery install, snapshot acknowledgement-stability gating, and
+   mixed Store-and-Circle restore staging are implemented. Restore re-resolves the
+   restoring identity's own access from the verified control chain, selects the
+   maximal verified image per Circle it can decrypt, clears the coverage rows for
+   Circles it cannot, and installs the Store image and every Circle image in one
+   transaction. Finish packages, pull, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,
    and dependent application updates.
 

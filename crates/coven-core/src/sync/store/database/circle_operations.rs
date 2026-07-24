@@ -629,7 +629,151 @@ impl StoreDatabase {
             .await
     }
 
-    fn circle_activation_commit_ref_on(
+    /// Enumerate every retained Circle and its retained control coordinates from
+    /// the preserved control indexes — the starting point restore selection walks
+    /// to re-resolve the restoring identity's access per Circle.
+    pub(crate) fn circle_control_activation_index_on(
+        conn: &Connection,
+    ) -> Result<
+        Vec<(
+            crate::sync::circle::CircleId,
+            Vec<crate::sync::circle::CircleControlCoord>,
+        )>,
+        DbError,
+    > {
+        let mut statement = conn
+            .prepare(
+                "SELECT circle_id, control_coord FROM circle_control_activations
+                 ORDER BY circle_id, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut index: Vec<(
+            crate::sync::circle::CircleId,
+            Vec<crate::sync::circle::CircleControlCoord>,
+        )> = Vec::new();
+        for (circle_id, control_coord) in rows {
+            let circle_id: crate::sync::circle::CircleId = circle_id
+                .parse()
+                .map_err(|error| DbError::Message(format!("parse retained Circle id: {error}")))?;
+            let control: crate::sync::circle::CircleControlCoord =
+                serde_json::from_str(&control_coord).map_err(|error| {
+                    DbError::Message(format!("parse retained Circle control coordinate: {error}"))
+                })?;
+            match index.last_mut() {
+                Some((last_circle, controls)) if *last_circle == circle_id => {
+                    controls.push(control)
+                }
+                _ => index.push((circle_id, vec![control])),
+            }
+        }
+        Ok(index)
+    }
+
+    /// The head control of a Circle: the retained control whose lineage no other
+    /// retained control covers. Restore resolves the restoring identity's current
+    /// access at the head control's activating commit, so a member removed by a
+    /// later epoch close resolves against the successor control that excludes them
+    /// — never against a stale predecessor that still lists them active. A Circle
+    /// with two uncovered controls is a forked lineage and fails loud.
+    pub(crate) fn head_circle_control_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        controls: &[crate::sync::circle::CircleControlCoord],
+    ) -> Result<Option<crate::sync::circle::CircleControlCoord>, DbError> {
+        // A control whose activating commit was reclaimed is superseded by a later
+        // epoch and cannot be head; keep only controls whose commit is retained.
+        let mut retained: Vec<(
+            crate::sync::circle::CircleControlCoord,
+            crate::sync::circle::PreparedCircleControl,
+        )> = Vec::new();
+        for coord in controls {
+            if !Self::circle_activation_commit_is_retained_on(conn, circle_id, coord)? {
+                continue;
+            }
+            let reference = Self::verified_circle_activation_on(conn, circle_id, coord)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} control index lost control {coord:?}"
+                    ))
+                })?;
+            retained.push((coord.clone(), reference.control));
+        }
+        let mut head: Option<crate::sync::circle::CircleControlCoord> = None;
+        for (index, (candidate, _)) in retained.iter().enumerate() {
+            let mut covered = false;
+            for (other_index, (_, other_control)) in retained.iter().enumerate() {
+                if other_index == index {
+                    continue;
+                }
+                if Self::verified_circle_control_covers_on(
+                    conn,
+                    circle_id,
+                    other_control,
+                    candidate,
+                )? {
+                    covered = true;
+                    break;
+                }
+            }
+            if !covered {
+                if head.is_some() {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} has multiple head controls"
+                    )));
+                }
+                head = Some(candidate.clone());
+            }
+        }
+        Ok(head)
+    }
+
+    /// Whether a Circle control's activating commit is still retained. Restore
+    /// enumerates every preserved control, but a control whose commit was reclaimed
+    /// after a later epoch superseded it cannot be resolved or be the head.
+    fn circle_activation_commit_is_retained_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+        control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<bool, DbError> {
+        let control_coord = serde_json::to_string(control).map_err(|error| {
+            DbError::Message(format!("serialize Circle control coordinate: {error}"))
+        })?;
+        let stored: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT stream_id, seq FROM circle_control_activations
+                 WHERE circle_id = ?1 AND control_coord = ?2",
+                rusqlite::params![circle_id.to_string(), control_coord],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((stream_id, sequence_sql)) = stored else {
+            return Ok(false);
+        };
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retained_merge_materializations
+             WHERE device_id = ?1 AND seq = ?2)",
+            rusqlite::params![&stream_id, sequence_sql],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)
+    }
+
+    /// Resolve a Circle control's activating commit reference from the retained
+    /// authority, not the materialized ledger. The activating commit is always a
+    /// retained input (every consumer that reads it goes on to open its retained
+    /// materialization), and the materialized ledger is empty on a device restored
+    /// from a snapshot until the pull replays it — so a restore resolves the same
+    /// reference here that a live device would.
+    pub(crate) fn circle_activation_commit_ref_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
         control: &crate::sync::circle::CircleControlCoord,
@@ -653,26 +797,34 @@ impl StoreDatabase {
             )
             .optional()
             .map_err(DbError::from)?;
-        let Some((stream_id, sequence, commit_hash)) = stored else {
+        let Some((stream_id, sequence_sql, commit_hash)) = stored else {
             return Ok(None);
         };
-        let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-        let reference = Self::materialized_commit_ref_on(conn, &stream_id, sequence)?.ok_or_else(
-            || {
-                DbError::Message(format!(
-                    "Circle {circle_id} activation commit {stream_id}/{sequence} is absent from the materialized ledger"
-                ))
-            },
-        )?;
+        let sequence = Database::sequence_from_sqlite(&stream_id, sequence_sql)?;
+        let stored_ref: Option<String> = conn
+            .query_row(
+                "SELECT commit_ref FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![&stream_id, sequence_sql],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let stored_ref = stored_ref.ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} activation commit {stream_id}/{sequence} is not retained"
+            ))
+        })?;
+        let reference = Self::parse_stored_commit_ref(&stream_id, sequence, &stored_ref)?;
         if reference.commit_hash.to_string() != commit_hash {
             return Err(DbError::Message(format!(
-                "Circle {circle_id} activation index differs from its materialized commit"
+                "Circle {circle_id} activation index differs from its retained commit"
             )));
         }
         Ok(Some(reference))
     }
 
-    pub(super) fn verified_circle_activation_on(
+    pub(crate) fn verified_circle_activation_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
         control: &crate::sync::circle::CircleControlCoord,

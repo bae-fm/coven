@@ -2111,6 +2111,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             "restored-snapshot-device".to_string(),
             &test_migrations(),
             None,
+            &storage.storage,
+            &crate::keys::UserKeypair::generate(),
         )
         .await
         .expect("install snapshot-only blob bootstrap");

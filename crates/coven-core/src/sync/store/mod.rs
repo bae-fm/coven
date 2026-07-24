@@ -44,7 +44,7 @@ mod snapshot;
 pub use abandonment::MergeCandidateAbandonment;
 pub use circle_controls::CircleOperationError;
 pub(crate) use circle_controls::{
-    CircleCurrentState, CircleOperationJournal, VerifiedStreamActivations,
+    CircleCurrentState, CircleOperationJournal, VerifiedCircleImage, VerifiedStreamActivations,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use circle_controls::{
@@ -139,6 +139,7 @@ pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
 pub use owner::{Store, StoreRestoreMembership};
 #[doc(hidden)]
 pub use owner_promotion::OwnerPromotionError;
+pub(crate) use pull::install_circle_bootstrap_image_on;
 pub(crate) use pull::VerifiedStoreSnapshotStability;
 #[cfg(test)]
 pub(crate) use pull::{

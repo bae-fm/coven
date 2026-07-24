@@ -160,6 +160,31 @@ impl StoreDatabase {
                         "verified Circle bootstrap has no activating control".to_string(),
                     )
                 })?;
+            Self::record_one_circle_bootstrap_coverage_on(
+                conn,
+                activation_commit,
+                bootstrap,
+                &activation.control,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Record (or replace) one Circle's coverage row. The replacement validation
+    /// writes the durable image bytes, accepts a strictly newer coverage cut whose
+    /// control lineage the retained controls prove, and refuses a regression — the
+    /// same rule whether the image is a pull-installed recipient bootstrap or a
+    /// restore-installed standalone snapshot. `activation_control` is the verified
+    /// control that activates this image: the pull recorder resolves it from the
+    /// in-flight activation set; the restore installer resolves it from the
+    /// just-installed control indexes.
+    pub(crate) fn record_one_circle_bootstrap_coverage_on(
+        conn: &Connection,
+        activation_commit: &StoreBatchCommitRef,
+        bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
+        activation_control: &crate::sync::circle::PreparedCircleControl,
+    ) -> Result<(), DbError> {
+        {
             let circle_id = bootstrap.circle_id().to_string();
             let control_coord = serde_json::to_string(bootstrap.control()).map_err(|error| {
                 DbError::Message(format!("serialize Circle bootstrap control: {error}"))
@@ -238,7 +263,8 @@ impl StoreDatabase {
                     encoded_image_hash.as_str(),
                     &encoded_ref,
                 ) {
-                    continue;
+                    // Row already records this exact image — idempotent no-op.
+                    return Ok(());
                 }
                 let prior_control: crate::sync::circle::CircleControlCoord =
                     serde_json::from_str(&prior_control).map_err(|error| {
@@ -262,7 +288,7 @@ impl StoreDatabase {
                     || !Self::verified_circle_control_covers_on(
                         conn,
                         bootstrap.circle_id(),
-                        &activation.control,
+                        activation_control,
                         &prior_activation.control.coord,
                     )?
                 {
@@ -295,6 +321,59 @@ impl StoreDatabase {
                 ],
             )
             .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
+    /// Delete a Circle's preserved coverage row. Restore calls this for every
+    /// Circle the restoring identity cannot decrypt: a leftover coverage row would
+    /// reconstruct a replay image for a Circle the restorer has no access to,
+    /// re-arming the replay for a removed member. Deleting a row that is already
+    /// absent is not an error — the identity simply had no coverage to clear.
+    pub(crate) fn clear_circle_bootstrap_coverage_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "DELETE FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+            [circle_id.to_string()],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    /// Rebuild the stream-activation index from the retained materializations. A
+    /// device restored from a snapshot has the retained authority but not the
+    /// per-cycle stream-activation index the pull writes; restore selection must
+    /// resolve control-stream authority before any pull, so it seeds the index
+    /// from the retained inputs it will otherwise replay from. Idempotent: the
+    /// recorder re-verifies each activation against any existing row.
+    pub(crate) fn seed_stream_activation_index_from_retained_on(
+        conn: &Connection,
+    ) -> Result<(), DbError> {
+        let mut statement = conn
+            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
+            .map_err(DbError::from)?;
+        let encoded_refs = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in encoded_refs {
+            let reference: StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::Message(format!(
+                        "parse retained materialization commit ref: {error}"
+                    ))
+                })?;
+            let owned = Self::load_retained_merge_materialization_by_ref_on(conn, &reference)?;
+            owned.as_verified()?;
+            crate::database::record_verified_stream_activations_on(
+                conn,
+                owned.circle_activations().stream_activations(),
+                &encoded,
+            )?;
         }
         Ok(())
     }

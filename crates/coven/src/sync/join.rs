@@ -696,6 +696,8 @@ impl DeviceJoinClient {
                 device_id,
                 &self.migrations,
                 Some(&routing_encryption),
+                &join.storage,
+                &signer,
             )
             .await?;
         let published_at = self.clock.now().to_rfc3339();
@@ -979,6 +981,7 @@ pub(crate) async fn bootstrap_and_save_store(
             routing_encryption.as_ref(),
             storage,
             bootstrap_result,
+            context.keypair(),
             store_dir,
             cancel,
         )
@@ -1058,6 +1061,7 @@ pub(crate) async fn open_db_and_pull(
     routing_encryption: Option<&EncryptionService>,
     storage: &dyn SyncStorage,
     bootstrap: BootstrapResult,
+    restorer_identity: &UserKeypair,
     store_dir: &StoreDir,
     cancel: &watch::Receiver<bool>,
 ) -> Result<OpenDbPullOutcome, BootstrapError> {
@@ -1073,6 +1077,8 @@ pub(crate) async fn open_db_and_pull(
             device_id.to_string(),
             migrations,
             routing_encryption,
+            storage,
+            restorer_identity,
         )
         .await?;
 

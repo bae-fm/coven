@@ -1,8 +1,11 @@
 use super::*;
 
-pub(super) enum CovenMetadataOpen {
+pub(super) enum CovenMetadataOpen<'a> {
     Detect,
-    VerifiedSnapshot(Box<VerifiedSnapshotBootstrapInstall>),
+    /// A borrowed install authority. Borrowed, not owned, so one verified install
+    /// can install onto more than one connection — the restore selection queries a
+    /// throwaway copy through the same authority it later installs for real.
+    VerifiedSnapshot(&'a VerifiedSnapshotBootstrapInstall),
 }
 
 fn protocol_state_exists(conn: &Connection) -> Result<bool, DbError> {
@@ -191,7 +194,7 @@ impl DatabaseCore {
         transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-        metadata_open: CovenMetadataOpen,
+        metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), OpenError> {
         let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -259,7 +262,7 @@ impl DatabaseCore {
                         )
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     }
-                    install.install_on(&tx, schema_version, resolved.hash())?;
+                    install.install_on(&tx, schema_version, resolved.hash(), &synced_tables)?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();

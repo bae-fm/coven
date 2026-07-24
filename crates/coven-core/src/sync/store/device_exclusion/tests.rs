@@ -569,6 +569,8 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             "post-snapshot-joining-device".to_string(),
             &crate::sync::test_helpers::test_migrations(),
             None,
+            &store.storage,
+            &crate::keys::UserKeypair::generate(),
         )
         .await
         .expect("open pre-exclusion snapshot");
@@ -2612,6 +2614,8 @@ async fn open_published_exclusion_snapshot(
             device_id,
             &crate::sync::test_helpers::test_migrations(),
             None,
+            &store.storage,
+            &crate::keys::UserKeypair::generate(),
         )
         .await
         .expect("open author exclusion snapshot");

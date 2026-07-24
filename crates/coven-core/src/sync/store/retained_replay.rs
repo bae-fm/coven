@@ -542,8 +542,21 @@ pub(crate) fn replace_live_projection(
 
 pub(crate) fn copy_table(
     source: &Connection,
-    target: &rusqlite::Transaction<'_>,
+    target: &Connection,
     table: &str,
+) -> Result<(), DbError> {
+    copy_table_with_conflicts(source, target, table, false)
+}
+
+/// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
+/// unique key already exists in `target` is left untouched instead of failing —
+/// used when installing a Circle image onto a Store image that already carries the
+/// shared, deterministic audience-routing rows.
+pub(crate) fn copy_table_with_conflicts(
+    source: &Connection,
+    target: &Connection,
+    table: &str,
+    ignore_existing: bool,
 ) -> Result<(), DbError> {
     let pragma = format!(
         "PRAGMA table_info({})",
@@ -585,8 +598,13 @@ pub(crate) fn copy_table(
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let verb = if ignore_existing {
+        "INSERT OR IGNORE"
+    } else {
+        "INSERT"
+    };
     let insert = format!(
-        "INSERT INTO {} ({quoted_columns}) VALUES ({placeholders})",
+        "{verb} INTO {} ({quoted_columns}) VALUES ({placeholders})",
         crate::sync::session::quote_ident(table)
     );
     for values in rows {

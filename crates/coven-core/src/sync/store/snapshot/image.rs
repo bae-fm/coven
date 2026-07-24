@@ -174,15 +174,35 @@ pub struct BootstrapResult {
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: crate::sync::store_commit::CommitFrontier,
     stability: crate::sync::store::pull::VerifiedStoreSnapshotStability,
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_circle_install: bool,
 }
 
 impl BootstrapResult {
+    /// Arm the Circle-install failure injection carried into `open_database`'s
+    /// install transaction — a test's stand-in for a crash between the Store and
+    /// Circle installs.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_circle_install_for_test(mut self) -> Self {
+        self.fail_circle_install = true;
+        self
+    }
+
     pub fn coverage_count(&self) -> usize {
         self.coverage.position_count()
     }
 
-    /// Consume the verified bootstrap authority by opening its bound database
-    /// file and atomically installing its Store protocol root and exact signed coverage.
+    /// Consume the verified bootstrap authority by opening its bound database file
+    /// and atomically installing the Store image together with the staged Circle
+    /// images the restoring identity selects.
+    ///
+    /// Circle staging runs between the raw image landing on disk and the final
+    /// install: a throwaway copy of the raw image is opened through the same
+    /// verified install authority so the identity's own access can be re-resolved
+    /// from the verified control chain (never the snapshot author's preserved
+    /// caches), producing per-Circle install/clear decisions. The real install
+    /// then applies the Store image and every decision inside one transaction, so
+    /// a partially installed union is never exposed.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_database(
         self,
@@ -194,6 +214,8 @@ impl BootstrapResult {
         device_id: String,
         migrations: &[Migration],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
+        storage: &dyn SyncStorage,
+        restorer_identity: &crate::keys::UserKeypair,
     ) -> Result<Database, SnapshotError> {
         let bound_path = self.target_path.clone();
         let result = async {
@@ -214,17 +236,63 @@ impl BootstrapResult {
             if snapshot_db_hash(&database_bytes) != self.db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
+            // Capture the selection inputs before the authority is consumed into
+            // the install.
+            let founder_pubkey = self.store_root.value.descriptor.founder_pubkey.clone();
+            let root = crate::sync::store_commit::StoreRootRef {
+                store_root_id: self.store_root.value.descriptor.store_root_id(),
+                store_root_hash: self.store_root.semantic_hash,
+                object: self.store_root.object.clone(),
+            };
+            let store_frontier = self.coverage.clone();
             let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
                 self.snapshot,
                 self.store_root,
                 self.founder_registration,
                 self.stability,
                 routing_encryption,
+                Vec::new(),
             )
             .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+
+            let decisions = match routing_encryption {
+                // Circles exist only in a scoped (Circle-routing) Store; without
+                // routing encryption there are no Circle images to stage.
+                Some(encryption) => {
+                    let routing_key = crate::sync::circle::derive_row_routing_key(
+                        encryption,
+                        root.store_root_hash,
+                    )
+                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    stage_restore_circle_decisions(
+                        &requested,
+                        &install,
+                        &synced_tables,
+                        blob_tombstone_grace,
+                        transfer_limits,
+                        &device_id,
+                        migrations,
+                        storage,
+                        &root,
+                        &founder_pubkey,
+                        &store_frontier,
+                        restorer_identity,
+                        Some(&routing_key),
+                    )
+                    .await?
+                }
+                None => Vec::new(),
+            };
+            let install = install.with_circle_decisions(decisions);
+            #[cfg(any(test, feature = "test-utils"))]
+            let install = if self.fail_circle_install {
+                install.fail_circle_install_for_test()
+            } else {
+                install
+            };
             let (db, _stamper) = Database::open_initialized_store(
                 &requested,
-                install,
+                &install,
                 synced_tables,
                 blob_tombstone_grace,
                 transfer_limits,
@@ -246,6 +314,58 @@ impl BootstrapResult {
             },
         }
     }
+}
+
+/// Stage the Circle install/clear decisions for a restore by re-resolving the
+/// restoring identity's access against a throwaway copy of the raw Store image.
+/// The copy is installed through the same verified authority the real install
+/// uses, queried, then deleted; only the decisions cross back to the real
+/// install, which applies them in its single transaction.
+#[allow(clippy::too_many_arguments)]
+async fn stage_restore_circle_decisions(
+    raw_image_path: &Path,
+    install: &crate::database::VerifiedSnapshotBootstrapInstall,
+    synced_tables: &[SyncedTable],
+    blob_tombstone_grace: chrono::Duration,
+    transfer_limits: crate::blob::TransferLimits,
+    device_id: &str,
+    migrations: &[Migration],
+    storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    founder_pubkey: &str,
+    store_frontier: &crate::sync::store_commit::CommitFrontier,
+    restorer_identity: &crate::keys::UserKeypair,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
+    let query_path = raw_image_path.with_extension("restore-select.db");
+    remove_incomplete_database(&query_path)?;
+    std::fs::copy(raw_image_path, &query_path)?;
+    let staged = async {
+        let (query_db, _stamper) = Database::open_initialized_store(
+            &query_path,
+            install,
+            synced_tables.to_vec(),
+            blob_tombstone_grace,
+            transfer_limits,
+            device_id.to_string(),
+            migrations,
+        )
+        .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+        let store_database = crate::sync::store::StoreDatabase::from_database(query_db);
+        super::select_staged_circle_decisions(
+            &store_database,
+            storage,
+            root,
+            founder_pubkey,
+            store_frontier,
+            restorer_identity,
+            routing_key,
+        )
+        .await
+    }
+    .await;
+    remove_incomplete_database(&query_path)?;
+    staged
 }
 
 fn remove_incomplete_database(path: &Path) -> std::io::Result<()> {
@@ -1095,6 +1215,8 @@ pub async fn bootstrap_from_snapshot(
         snapshot,
         coverage,
         stability,
+        #[cfg(any(test, feature = "test-utils"))]
+        fail_circle_install: false,
     })
 }
 
@@ -1802,6 +1924,8 @@ mod tests {
                 "joining-device".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
                 Some(&routing),
+                &fixture.store.storage,
+                &crate::keys::UserKeypair::generate(),
             )
             .await
     }
@@ -2295,6 +2419,8 @@ mod tests {
                 "joining-device".to_string(),
                 &target_migrations,
                 Some(&routing),
+                &store.storage,
+                &crate::keys::UserKeypair::generate(),
             )
             .await
             .expect("migrate and validate scoped snapshot");
@@ -2577,6 +2703,8 @@ mod tests {
                 "joining-device".to_string(),
                 &crate::sync::test_helpers::test_migrations(),
                 None,
+                &store.storage,
+                &crate::keys::UserKeypair::generate(),
             )
             .await
             .expect("install bootstrap authority");

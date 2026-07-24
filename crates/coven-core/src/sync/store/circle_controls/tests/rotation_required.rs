@@ -936,6 +936,427 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     );
 }
 
+/// A stable, acknowledged Store snapshot of a Circle store with one active
+/// member, cut without an epoch close (so Circle history stays live and no
+/// coverage is reclaimed). The shared base for the restore-selection cases that
+/// differ only in who restores and what the storage provider serves.
+struct ActiveMemberCircleSnapshot {
+    db: Database,
+    store: TestStore,
+    signer: UserKeypair,
+    member: UserKeypair,
+    routing: EncryptionService,
+    circle_id: crate::sync::circle::CircleId,
+    membership: crate::sync::membership::MembershipChain,
+}
+
+/// How much Circle history the fixture builds before the Store snapshot cut.
+enum CircleFixtureMode {
+    /// Live Circle content, no epoch close — no image is reclaimed.
+    Live,
+    /// The epoch is closed by removing the member; the successor bootstrap covers
+    /// the pre-close content and the remaining owner's leaf names it.
+    Closed,
+}
+
+async fn write_circle_document(
+    db: &Database,
+    routing: &EncryptionService,
+    circle_id: crate::sync::circle::CircleId,
+    id: &str,
+    updated_at: &str,
+) {
+    let write_id = db.new_write_id();
+    let tables = db.synced_tables().to_vec();
+    let routing = routing.clone();
+    let audience = Some(circle_id.to_string());
+    let id = id.to_string();
+    let updated_at = updated_at.to_string();
+    db.call(move |connection| {
+        StoreDatabase::run_internal_store_write_transaction_on(
+            connection,
+            &tables,
+            Some(&routing),
+            write_id,
+            |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![id, audience, updated_at],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            },
+        )
+    })
+    .await
+    .expect("capture Circle content");
+}
+
+async fn setup_active_member_circle_snapshot(
+    name: &str,
+    mode: CircleFixtureMode,
+) -> ActiveMemberCircleSnapshot {
+    let routing = EncryptionService::from_key([42; 32]);
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) = persist_merge_operation(&db, name).await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new(format!("{name}-owner")),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &routing,
+        store.storage.store_id(),
+        "Restore Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let (_store_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(routing.clone()),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        signer.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        owner_storage,
+        StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(routing.clone()),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+
+    // Pre-close Circle content the member holds access to, under the live epoch.
+    write_circle_document(
+        &db,
+        &routing,
+        circle_id,
+        "00000000-0000-4000-8000-000000000090",
+        "0000000002000-0000-owner",
+    )
+    .await;
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish pre-close Circle content");
+
+    // Close the epoch by removing the member. The successor bootstrap's activating
+    // commit is retained, so the restored device resolves the head control and the
+    // remaining owner's own leaf names that successor bootstrap image (in storage)
+    // as its Circle image.
+    if matches!(mode, CircleFixtureMode::Closed) {
+        components
+            .remove_circle_member(circle_id, member_pubkey.clone())
+            .await
+            .expect("close the epoch by removing the roster member");
+        crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+            .await
+            .expect("authorize Circle close response")
+            .publish_circle_epoch_close_responses(&signer)
+            .await
+            .expect("publish local Circle epoch-close response");
+        components
+            .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+            .await
+            .expect("activate the Circle epoch-close outcome");
+    }
+
+    let authorized = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize the Store snapshot");
+    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
+    let cut = authorized
+        .capture_snapshot_cut(
+            snapshot_dir.as_ref().to_path_buf(),
+            db.synced_tables().to_vec(),
+            Some(&routing),
+        )
+        .await
+        .expect("capture the Store snapshot cut");
+    let coverage = cut.coverage.clone();
+    authorized
+        .push_snapshot(
+            cut.snapshot,
+            cut.coverage,
+            db.schema_version(),
+            &signer,
+            "2026-07-24T01:00:00Z".to_string(),
+        )
+        .await
+        .expect("publish the Store snapshot");
+    crate::sync::store::stage_store_acknowledgement_for_test(
+        &db,
+        &store.storage,
+        coverage.clone(),
+        "2026-07-24T01:00:01Z".to_string(),
+        &signer,
+    )
+    .await
+    .expect("stage snapshot stability acknowledgement");
+    crate::sync::store::drain_store_acknowledgements_for_test(&db, &store.storage, &signer)
+        .await
+        .expect("activate snapshot stability acknowledgement");
+
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
+            .await
+            .expect("load membership for snapshot restore")
+            .chain
+            .expect("membership chain");
+
+    ActiveMemberCircleSnapshot {
+        db,
+        store,
+        signer,
+        member,
+        routing,
+        circle_id,
+        membership,
+    }
+}
+
+#[tokio::test]
+async fn restore_reports_a_circle_with_no_coverage_image() {
+    let base =
+        setup_active_member_circle_snapshot("snapshot-restore-no-image", CircleFixtureMode::Live)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        signer,
+        routing,
+        circle_id,
+        membership,
+        ..
+    } = base;
+
+    // The owner restores a Circle it holds access to but which no bootstrap or
+    // snapshot ever covered — the no-coverage report path. Selection must not error
+    // on the missing image, and must not fabricate a coverage row; the Store image
+    // still restores the Circle's control indexes.
+    let destination = tempfile::tempdir().expect("no-image restore destination");
+    let database_path = destination.path().join("store.db");
+    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &database_path,
+    )
+    .await
+    .expect("restore the Store snapshot");
+    let restored = bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &database_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "no-image-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+            &*store.storage,
+            &signer,
+        )
+        .await
+        .expect("a Circle with active access but no image restores without error");
+
+    let coverage = restored
+        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .await
+        .expect("read restored Circle coverage");
+    assert!(
+        coverage.is_none(),
+        "selection stages no coverage row for a Circle it holds no image for"
+    );
+
+    let control_count: i64 = restored
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("count restored Circle control indexes");
+    assert!(
+        control_count > 0,
+        "the Store image still restores the Circle control indexes"
+    );
+}
+
+#[tokio::test]
+async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
+    let base =
+        setup_active_member_circle_snapshot("snapshot-restore-sabotage", CircleFixtureMode::Closed)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        signer,
+        routing,
+        membership,
+        ..
+    } = base;
+
+    // A hostile storage provider serves the wrong bytes for the Circle bootstrap
+    // image the owner's own access leaf names. The bytes are input to the verifier,
+    // not trusted for being served: their digest no longer matches the image hash
+    // the signed access leaf pins, so `verify_circle_bootstrap_image` rejects them
+    // and the whole restore fails with no database left behind. (An image with a
+    // wrong schema/routing contract or a row outside the audience closure changes
+    // the bytes too, so it fails this same digest check first — those reach the
+    // verifier only from a malicious author, whose defense is the verifier's own
+    // tests, not a storage provider.)
+    let sabotaged_keys: Vec<String> = store
+        .home
+        .keys()
+        .into_iter()
+        .filter(|key| key.contains("/bootstraps/"))
+        .collect();
+    assert!(
+        !sabotaged_keys.is_empty(),
+        "the Circle bootstrap image was uploaded to storage"
+    );
+    for key in &sabotaged_keys {
+        store
+            .home
+            .insert_exact_object(key, b"sabotaged Circle bootstrap image".to_vec());
+    }
+
+    let destination = tempfile::tempdir().expect("sabotage restore destination");
+    let database_path = destination.path().join("store.db");
+    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &database_path,
+    )
+    .await
+    .expect("the Store snapshot itself verifies; only the Circle image is sabotaged");
+    let outcome = bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &database_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "sabotaged-restore-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+            &*store.storage,
+            &signer,
+        )
+        .await;
+    let error = match outcome {
+        Ok(_) => panic!("a sabotaged Circle image must fail the whole restore"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("image")
+            || error.to_string().contains("hash")
+            || error.to_string().contains("digest"),
+        "the restore fails on image verification: {error}"
+    );
+    assert!(
+        !database_path.exists(),
+        "a failed restore exposes no database at the target path"
+    );
+}
+
+#[tokio::test]
+async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
+    let base =
+        setup_active_member_circle_snapshot("snapshot-restore-crash", CircleFixtureMode::Live)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        member,
+        routing,
+        membership,
+        ..
+    } = base;
+
+    // The member restore selects its own leaf bootstrap as a Circle image to
+    // install. A failure injected into the Circle-decision step — the stand-in for
+    // a crash after the Store image is installed but before the Circle image is —
+    // must roll the whole install transaction back, leaving no database at all: not
+    // even the Store image on its own.
+    let destination = tempfile::tempdir().expect("crash restore destination");
+    let database_path = destination.path().join("store.db");
+    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &database_path,
+    )
+    .await
+    .expect("restore the Store snapshot")
+    .fail_circle_install_for_test();
+    let outcome = bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &database_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "crash-restore-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+            &*store.storage,
+            &member,
+        )
+        .await;
+    match outcome {
+        Ok(_) => panic!("an injected Circle-install failure must fail the whole restore"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("injected Circle install failure"),
+            "the restore fails at the Circle-install step: {error}"
+        ),
+    }
+    assert!(
+        !database_path.exists(),
+        "the rolled-back restore exposes no database — the Store image did not commit \
+         separately from the Circle install"
+    );
+}
+
 #[tokio::test]
 async fn post_close_circle_store_snapshot_restores_and_converges() {
     let routing = EncryptionService::from_key([42; 32]);
@@ -1119,6 +1540,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             "restored-device".to_string(),
             &circle_routing_migrations(),
             Some(&routing),
+            &*store.storage,
+            &signer,
         )
         .await
         .expect("install the restored snapshot database");
@@ -1155,6 +1578,79 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     assert_eq!(
         restored_frontier, owner_frontier,
         "the restored device converges to the owner's accepted Store frontier"
+    );
+
+    // The same snapshot, restored by the REMOVED member, must not resurrect the
+    // Circle. The Store image carries the owner's preserved coverage row, but the
+    // removed member cannot decrypt the Circle, so selection clears it — and a
+    // forced full replay then materializes none of the Circle's content. If the
+    // clear were skipped, the preserved row would reconstruct the image and hand
+    // the removed member the very rows the epoch close took away.
+    let removed_destination = tempfile::tempdir().expect("removed-member restore destination");
+    let removed_path = removed_destination.path().join("store.db");
+    let removed_bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &removed_path,
+    )
+    .await
+    .expect("restore the post-close Store snapshot as the removed member");
+    let removed_db = removed_bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &removed_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "removed-member-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+            &*store.storage,
+            &member,
+        )
+        .await
+        .expect("install the removed-member restore database");
+
+    let removed_coverage = removed_db
+        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .await
+        .expect("read removed-member Circle coverage");
+    assert!(
+        removed_coverage.is_none(),
+        "the removed member retains no Circle coverage row"
+    );
+
+    let control_count: i64 = removed_db
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("count restored Circle control indexes");
+    assert!(
+        control_count > 0,
+        "the removed member still restores the Circle control indexes"
+    );
+
+    // The exact input a full replay reconstructs Circle images from carries no
+    // entry for this Circle: with the coverage row cleared there is nothing to
+    // rebuild, so no replay can hand the removed member the content the epoch close
+    // took away. Were the clear skipped, the preserved row would reappear here and
+    // re-arm the replay — this assertion is what makes the clear load-bearing.
+    let replay_inputs = removed_db
+        .call(StoreDatabase::circle_bootstrap_replay_inputs_on)
+        .await
+        .expect("read removed-member Circle replay inputs");
+    assert!(
+        replay_inputs.is_empty(),
+        "the removed member has no Circle image to replay"
     );
 }
 
