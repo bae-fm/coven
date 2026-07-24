@@ -141,7 +141,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         )
                         .await
                         .expect("read activated circle"),
-                    vec![crate::sync::circle::CircleInfo {
+                    vec![crate::sync::circle::CircleInfo::Active {
                         id: expected.circle_id(),
                         name: "Household".to_string(),
                         role: crate::sync::circle::CircleRole::Owner,
@@ -302,7 +302,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
             )
             .await
             .expect("read renamed circle"),
-        vec![crate::sync::circle::CircleInfo {
+        vec![crate::sync::circle::CircleInfo::Active {
             id: circle_id,
             name: "Household money".to_string(),
             role: crate::sync::circle::CircleRole::Owner,

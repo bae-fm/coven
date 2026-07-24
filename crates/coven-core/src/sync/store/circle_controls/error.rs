@@ -29,6 +29,10 @@ pub enum CircleOperationError {
         circle_id: CircleId,
         removed_members: Vec<String>,
     },
+    #[error("circle {circle_id} has no retained control conflict to resolve")]
+    NotConflicted { circle_id: CircleId },
+    #[error("circle {circle_id} control conflict does not retain the chosen branch")]
+    ChosenBranchNotRetained { circle_id: CircleId },
     #[error("circle command channel is closed")]
     CommandChannelClosed,
     #[error("circle command ended without a reply")]

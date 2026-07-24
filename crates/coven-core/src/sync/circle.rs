@@ -125,15 +125,60 @@ pub enum CircleRole {
     Member,
 }
 
+/// One Circle as the local application sees it. A Circle with a single resolved
+/// control is `Active`; a Circle whose control history forked into concurrent
+/// valid successors is `Conflicted` and carries no name, role, or key until an
+/// Owner resolves it. A conflicted Circle refuses authoring and package
+/// publication, so it has no single resolved roster or metadata to report.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CircleInfo {
-    pub id: CircleId,
-    pub name: String,
-    pub role: CircleRole,
-    /// The resolved roster names a Store identity that is no longer an active
-    /// Store member. Publishing new Circle content is blocked until an Owner
-    /// closes the epoch and activates a successor roster without that identity.
-    pub rotation_required: bool,
+pub enum CircleInfo {
+    Active {
+        id: CircleId,
+        name: String,
+        role: CircleRole,
+        /// The resolved roster names a Store identity that is no longer an
+        /// active Store member. Publishing new Circle content is blocked until
+        /// an Owner closes the epoch and activates a successor roster without
+        /// that identity.
+        rotation_required: bool,
+    },
+    Conflicted {
+        id: CircleId,
+        /// Every retained concurrent control successor, in canonical order. The
+        /// Owner resolves the conflict by naming this complete set and a chosen
+        /// successor state.
+        branches: Vec<CircleControlCoord>,
+    },
+}
+
+impl CircleInfo {
+    pub fn id(&self) -> CircleId {
+        match self {
+            Self::Active { id, .. } | Self::Conflicted { id, .. } => *id,
+        }
+    }
+
+    /// The Circle's display name, or `None` while its control is conflicted and
+    /// has no single resolved metadata.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Active { name, .. } => Some(name),
+            Self::Conflicted { .. } => None,
+        }
+    }
+
+    /// Whether publishing new content is blocked because the resolved roster
+    /// names a removed Store member. Always `false` for a conflicted Circle,
+    /// which blocks all authoring until it is resolved.
+    pub fn rotation_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Active {
+                rotation_required: true,
+                ..
+            }
+        )
+    }
 }
 
 /// Why publishing new content into a Circle is refused. Carried as the durable
@@ -229,6 +274,7 @@ pub enum CircleOperationKind {
     Rename,
     AddMember,
     RemoveMember,
+    ResolveControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1208,7 +1254,7 @@ mod tests {
             .expect("list Circle from its derived current state");
         assert_eq!(
             circles,
-            vec![CircleInfo {
+            vec![CircleInfo::Active {
                 id: creation.circle_id,
                 name: creation.metadata.name.clone(),
                 role: CircleRole::Owner,

@@ -68,8 +68,16 @@ impl StoreDatabase {
                 for row in rows {
                     let (stored_circle_id, state) = row.map_err(DbError::from)?;
                     let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
-                    if let Some((_current, access, roster, metadata)) = state.active() {
-                        let circle_id = state.circle_id();
+                    let circle_id = state.circle_id();
+                    if let Some(branches) = state.conflict_branches() {
+                        // A forked Circle must be visible to the application as
+                        // conflicted so an Owner can resolve it; omitting it
+                        // would make the Circle silently disappear.
+                        circles.push(crate::sync::circle::CircleInfo::Conflicted {
+                            id: circle_id,
+                            branches,
+                        });
+                    } else if let Some((_current, access, roster, metadata)) = state.active() {
                         if access.recipient_pubkey != identity_pubkey {
                             return Err(DbError::Message(format!(
                                 "active circle {circle_id} belongs to another local identity"
@@ -85,7 +93,7 @@ impl StoreDatabase {
                                         "activated circle {circle_id} excludes the local identity"
                                     ))
                                 })?;
-                        circles.push(crate::sync::circle::CircleInfo {
+                        circles.push(crate::sync::circle::CircleInfo::Active {
                             id: circle_id,
                             name: metadata.name.clone(),
                             role,
@@ -172,6 +180,21 @@ impl StoreDatabase {
                     ))
                 })?;
                 Ok((authoring, activated_commit))
+            })
+            .await
+    }
+
+    /// The retained conflicting branch coordinates for a Circle whose control
+    /// history forked, in canonical order. `None` when the Circle has no
+    /// current state or its control is resolved.
+    pub(crate) async fn circle_control_conflict_branches(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Option<Vec<crate::sync::circle::CircleControlCoord>>, DbError> {
+        self.database
+            .call(move |conn| {
+                Ok(Self::circle_current_state_on(conn, circle_id)?
+                    .and_then(|state| state.conflict_branches()))
             })
             .await
     }

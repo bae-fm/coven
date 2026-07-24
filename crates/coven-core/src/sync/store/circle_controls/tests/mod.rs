@@ -446,5 +446,6 @@ mod journal;
 mod local_validation;
 mod publication;
 mod remote_validation;
+mod resolution;
 mod retained;
 mod rotation_required;

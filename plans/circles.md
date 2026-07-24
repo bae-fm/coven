@@ -136,6 +136,21 @@ rebuild the deleted choice.
   current control rather than the capture-time one. The ordinary Store snapshot
   cut keeps its write-free precondition, because its coverage claims include the
   device's own writes.
+- Concurrent valid control successors are retained as a `ControlConflict` and
+  surfaced to the application: `get_circles` reports a conflicted Circle with
+  its complete retained branch set instead of silently omitting it. The Owner
+  resolves it with `resolve_circle_control(circle_id, chosen)`, which authors a
+  successor of the chosen branch that names every branch as a causal dependency
+  so the reduction collapses the conflict to that successor deterministically on
+  every device in either arrival order. The command captures the complete
+  retained branch set; preparation refuses if that set no longer equals the
+  retained branches, so a branch discovered since the command resurfaces as a
+  new conflict rather than being silently dropped. Resolution is callable
+  regardless of rotation state — it is the exit path out of the conflict, so it
+  is never gated by the rotation-required check that blocks rename and member
+  addition. The resolution inherits the chosen branch's epoch, key generation,
+  roster, and selected metadata verbatim; a non-Owner author is refused at the
+  predecessor roster.
 - A missing or corrupt Circle package for an active effective member holds its
   Store commit without partially applying rows, controls, routing, or frontier
   state.
@@ -205,9 +220,9 @@ rebuild the deleted choice.
    Recipient Circle bootstrap images use and verify that boundary atomically.
 1. **In progress.** Create, rename, member addition, recipient bootstrap
    installation, member-removal epoch close, successor activation, and
-   Store-member-removal rotation blocking are implemented. Finish control
-   resolution, close cancellation, device exclusion, deletion, and restart
-   coverage.
+   Store-member-removal rotation blocking, and control-conflict resolution are
+   implemented. Finish close cancellation, device exclusion, deletion, and
+   restart coverage.
 1. Finish Circle packages, pull, acknowledgement, standalone snapshots,
    restore, reclamation, and blobs.
 1. Finish application APIs, integration tests, fault injection, documentation,

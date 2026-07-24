@@ -203,18 +203,18 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
     let circles = list_circles(&fixture).await;
     let affected = circles
         .iter()
-        .find(|circle| circle.id == fixture.circle_id)
+        .find(|circle| circle.id() == fixture.circle_id)
         .expect("affected Circle is listed");
     assert!(
-        affected.rotation_required,
+        affected.rotation_required(),
         "removing a roster member makes the Circle rotation-required"
     );
     let other = circles
         .iter()
-        .find(|circle| circle.id == unaffected)
+        .find(|circle| circle.id() == unaffected)
         .expect("unaffected Circle is listed");
     assert!(
-        !other.rotation_required,
+        !other.rotation_required(),
         "a Circle without the removed member is not rotation-required"
     );
 
@@ -330,14 +330,12 @@ async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
 async fn re_adding_the_store_member_clears_rotation_required() {
     let fixture = rotation_fixture("rotation-readd-clears").await;
     remove_store_member(&fixture).await;
-    assert!(
-        list_circles(&fixture)
-            .await
-            .iter()
-            .find(|circle| circle.id == fixture.circle_id)
-            .expect("affected Circle listed after removal")
-            .rotation_required
-    );
+    assert!(list_circles(&fixture)
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("affected Circle listed after removal")
+        .rotation_required());
 
     crate::sync::store::invite_member(
         &fixture.store.storage,
@@ -364,9 +362,9 @@ async fn re_adding_the_store_member_clears_rotation_required() {
         !list_circles(&fixture)
             .await
             .iter()
-            .find(|circle| circle.id == fixture.circle_id)
+            .find(|circle| circle.id() == fixture.circle_id)
             .expect("affected Circle listed after re-add")
-            .rotation_required,
+            .rotation_required(),
         "a re-added Store member's roster entry is active again, clearing rotation"
     );
 }
@@ -375,14 +373,12 @@ async fn re_adding_the_store_member_clears_rotation_required() {
 async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
     let fixture = rotation_fixture("rotation-close-clears").await;
     remove_store_member(&fixture).await;
-    assert!(
-        list_circles(&fixture)
-            .await
-            .iter()
-            .find(|circle| circle.id == fixture.circle_id)
-            .expect("affected Circle listed after removal")
-            .rotation_required
-    );
+    assert!(list_circles(&fixture)
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("affected Circle listed after removal")
+        .rotation_required());
 
     // Removing the roster member closes the old epoch and activates a successor
     // roster without the removed identity.
@@ -417,9 +413,9 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         !list_circles(&fixture)
             .await
             .iter()
-            .find(|circle| circle.id == fixture.circle_id)
+            .find(|circle| circle.id() == fixture.circle_id)
             .expect("Circle listed after close")
-            .rotation_required,
+            .rotation_required(),
         "the successor roster omits the removed identity, clearing rotation"
     );
     // Publication context succeeds under the successor control.
@@ -509,14 +505,12 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .roster
         .members()
         .contains_key(&fixture.member_pubkey));
-    assert!(
-        !list_circles(&fixture)
-            .await
-            .iter()
-            .find(|circle| circle.id == fixture.circle_id)
-            .expect("Circle listed after close")
-            .rotation_required
-    );
+    assert!(!list_circles(&fixture)
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("Circle listed after close")
+        .rotation_required());
     // The blocked write survives the close as a durable write; the rows it holds
     // were never surrendered.
     assert!(matches!(
@@ -764,9 +758,9 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         !list_circles(&fixture)
             .await
             .iter()
-            .find(|circle| circle.id == fixture.circle_id)
+            .find(|circle| circle.id() == fixture.circle_id)
             .expect("Circle listed after unrelated removal")
-            .rotation_required,
+            .rotation_required(),
         "removing a Store member in no roster leaves every Circle running"
     );
 

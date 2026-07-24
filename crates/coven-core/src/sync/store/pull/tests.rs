@@ -678,7 +678,7 @@ async fn newly_discovered_store_admission_activates_circle_access() {
             .await
             .expect("list Circles after newly discovered Store admission")
             .into_iter()
-            .map(|circle| circle.name)
+            .map(|circle| circle.name().expect("listed Circle is active").to_string())
             .collect::<Vec<_>>(),
         vec!["Effective Access".to_string()]
     );
@@ -1117,7 +1117,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
             .await
             .expect("list restored Circles")
             .into_iter()
-            .map(|circle| circle.name)
+            .map(|circle| circle.name().expect("listed Circle is active").to_string())
             .collect::<Vec<_>>(),
         vec!["Effective Access Restored".to_string()]
     );

@@ -132,7 +132,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
             )
             .await
             .expect("read successor circles"),
-        vec![crate::sync::circle::CircleInfo {
+        vec![crate::sync::circle::CircleInfo::Active {
             id: later.circle_id(),
             name: "Later Circle".to_string(),
             role: CircleRole::Owner,

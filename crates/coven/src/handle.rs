@@ -1319,7 +1319,9 @@ impl CovenHandle {
         manager.rename_circle(circle_id, name).await
     }
 
-    /// Return circles with a locally verified active access record.
+    /// Return each Circle the local identity can see: an active Circle it holds
+    /// access to, or a conflicted Circle whose control history has forked and
+    /// awaits Owner resolution.
     pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.get_circles().await
@@ -2722,7 +2724,7 @@ mod tests {
 
             assert_eq!(
                 handle.get_circles().await.expect("read active circles"),
-                vec![crate::CircleInfo {
+                vec![crate::CircleInfo::Active {
                     id: circle_id,
                     name: "Household money".to_string(),
                     role: crate::CircleRole::Owner,

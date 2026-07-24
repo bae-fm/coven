@@ -52,6 +52,9 @@ pub(crate) enum CircleOperationIntent {
     RemoveMember {
         member_pubkey: String,
     },
+    ResolveControl {
+        chosen: crate::sync::circle::CircleControlCoord,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +437,7 @@ impl CircleOperationJournal {
             CircleOperationIntent::Rename { .. } => CircleOperationKind::Rename,
             CircleOperationIntent::AddMember { .. } => CircleOperationKind::AddMember,
             CircleOperationIntent::RemoveMember { .. } => CircleOperationKind::RemoveMember,
+            CircleOperationIntent::ResolveControl { .. } => CircleOperationKind::ResolveControl,
         }
     }
 }

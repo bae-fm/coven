@@ -360,6 +360,96 @@ impl Store {
         Ok(operation_id)
     }
 
+    /// Resolve a Circle whose control history forked into concurrent valid
+    /// successors by authoring a covering successor of the chosen branch. This
+    /// is callable on a conflicted Circle regardless of rotation state — it is
+    /// deliberately not gated by `ensure_not_rotation_required`, because
+    /// resolution is the exit path out of the conflict and a conflicted Circle
+    /// has no single resolved roster to evaluate rotation against. A
+    /// rotation-required Circle re-derives that state from the resolved
+    /// successor and blocks new content afterward.
+    pub(crate) async fn resolve_circle_control(
+        &self,
+        device_id: &str,
+        circle_id: CircleId,
+        chosen: crate::sync::circle::CircleControlCoord,
+        signer: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let branches = database
+            .circle_control_conflict_branches(circle_id)
+            .await?
+            .ok_or(CircleOperationError::NotConflicted { circle_id })?;
+        if !branches.contains(&chosen) {
+            return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
+        }
+        let identity_pubkey = keys::public_key_hex(signer);
+        let chosen_activation = database
+            .verified_circle_activation(circle_id, chosen.clone())
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} conflict omits retained authority for the chosen branch"
+                ))
+            })?;
+        let chosen_state =
+            chosen_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
+        let previous_control = chosen_activation.reference.clone();
+        let mut losing_heads = Vec::new();
+        for branch in &branches {
+            if *branch == chosen {
+                continue;
+            }
+            let activation = database
+                .verified_circle_activation(circle_id, branch.clone())
+                .await?
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(format!(
+                        "Circle {circle_id} conflict omits retained authority for a losing branch"
+                    ))
+                })?;
+            losing_heads.push(crate::sync::circle::MergeCircleControlHeadRef {
+                coord: activation.reference.control.clone(),
+                head_hash: activation.reference.head_hash,
+                object: activation.reference.head_object.clone(),
+            });
+        }
+        let journal = Box::pin(prepare_circle_operation_request(
+            database,
+            storage,
+            device_id,
+            CircleOperationRequest::ResolveControl(Box::new(CircleResolveControlRequest {
+                circle_id,
+                chosen: chosen_state,
+                previous_control,
+                losing_heads,
+                conflicting_branches: branches,
+            })),
+            signer,
+        ))
+        .await?;
+        if journal.circle_id() != circle_id {
+            return Err(CircleOperationError::InvalidState(
+                "prepared Circle control resolution changed Circle identity".to_string(),
+            ));
+        }
+        let operation_id = journal.operation_id.clone();
+        database.insert_circle_operation(journal).await?;
+        Box::pin(publish_circle_operation(
+            database,
+            storage,
+            &operation_id,
+            signer,
+            None,
+        ))
+        .await
+    }
+
     pub(crate) async fn resume_circle_operations(
         &self,
         identity: &UserKeypair,
@@ -391,6 +481,40 @@ impl Store {
     }
 }
 
+/// Materialize the chosen conflicting branch's authoring inputs from its
+/// retained verified activation. A conflicted Circle exposes no single
+/// `authoring_state`, so the resolution reads the chosen branch's roster,
+/// metadata, keyring, and access leaf directly from that branch's retained
+/// activation.
+fn chosen_branch_authoring_state(
+    circle_id: CircleId,
+    identity_pubkey: &str,
+    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
+) -> Result<CircleAuthoringState, CircleOperationError> {
+    let access = activation.local_access.as_ref().ok_or_else(|| {
+        CircleOperationError::InvalidState(format!(
+            "Circle {circle_id} chosen branch has no retained local access"
+        ))
+    })?;
+    let active = access.active.as_ref().ok_or_else(|| {
+        CircleOperationError::InvalidState(format!(
+            "Circle {circle_id} control resolution requires active access to the chosen branch"
+        ))
+    })?;
+    if access.leaf.value.recipient_pubkey != identity_pubkey {
+        return Err(CircleOperationError::InvalidState(format!(
+            "Circle {circle_id} chosen branch belongs to another local identity"
+        )));
+    }
+    Ok(CircleAuthoringState {
+        candidate_family: access.leaf.value.candidate_family,
+        control: activation.control.clone(),
+        access: access.leaf.value.clone(),
+        roster: active.roster.clone(),
+        metadata: active.metadata.clone(),
+    })
+}
+
 pub(super) struct CircleRenameRequest {
     pub(super) circle_id: CircleId,
     pub(super) name: String,
@@ -417,6 +541,19 @@ pub(super) struct CircleRemoveMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
+pub(super) struct CircleResolveControlRequest {
+    pub(super) circle_id: CircleId,
+    pub(super) chosen: CircleAuthoringState,
+    pub(super) previous_control: CircleControlRef,
+    pub(super) losing_heads: Vec<crate::sync::circle::MergeCircleControlHeadRef>,
+    /// Every retained branch coordinate, in canonical order, as captured when
+    /// the command ran. Preparation verifies this still equals the currently
+    /// retained conflict set inside the journal transaction, so a branch
+    /// discovered between command and activation resurfaces as a new conflict
+    /// rather than being silently swallowed.
+    pub(super) conflicting_branches: Vec<crate::sync::circle::CircleControlCoord>,
+}
+
 pub(super) struct CircleFinalizeEpochCloseRequest {
     pub(super) operation_id: crate::sync::circle::CircleOperationId,
     pub(super) circle_id: CircleId,
@@ -438,6 +575,7 @@ pub(super) enum CircleOperationRequest {
     Rename(Box<CircleRenameRequest>),
     AddMember(Box<CircleAddMemberRequest>),
     RemoveMember(Box<CircleRemoveMemberRequest>),
+    ResolveControl(Box<CircleResolveControlRequest>),
     FinalizeEpochClose(Box<CircleFinalizeEpochCloseRequest>),
 }
 
@@ -454,6 +592,9 @@ impl CircleOperationRequest {
             },
             Self::RemoveMember(request) => CircleOperationIntent::RemoveMember {
                 member_pubkey: request.member_pubkey.clone(),
+            },
+            Self::ResolveControl(request) => CircleOperationIntent::ResolveControl {
+                chosen: request.chosen.control.coord.clone(),
             },
             Self::FinalizeEpochClose(request) => CircleOperationIntent::RemoveMember {
                 member_pubkey: request.member_pubkey.clone(),
@@ -473,6 +614,9 @@ impl CircleOperationRequest {
             Self::RemoveMember(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
+            Self::ResolveControl(request) => {
+                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
+            }
             Self::FinalizeEpochClose(request) => {
                 CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
             }
@@ -482,9 +626,11 @@ impl CircleOperationRequest {
     pub(super) fn operation_id(&self) -> Option<&crate::sync::circle::CircleOperationId> {
         match self {
             Self::FinalizeEpochClose(request) => Some(&request.operation_id),
-            Self::Create { .. } | Self::Rename(_) | Self::AddMember(_) | Self::RemoveMember(_) => {
-                None
-            }
+            Self::Create { .. }
+            | Self::Rename(_)
+            | Self::AddMember(_)
+            | Self::RemoveMember(_)
+            | Self::ResolveControl(_) => None,
         }
     }
 }

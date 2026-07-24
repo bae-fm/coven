@@ -968,6 +968,21 @@ impl CircleCurrentState {
         }
     }
 
+    /// The retained conflicting branch coordinates, in canonical order, when
+    /// this Circle's control history forked into concurrent valid successors.
+    /// `None` for every resolved state.
+    pub(crate) fn conflict_branches(&self) -> Option<Vec<CircleControlCoord>> {
+        match self {
+            Self::ControlConflict { branches } => Some(
+                branches
+                    .iter()
+                    .map(|branch| branch.coordinate().clone())
+                    .collect(),
+            ),
+            Self::Active(_) | Self::Closing(_) | Self::Inactive(_) => None,
+        }
+    }
+
     pub(crate) fn closing_control(&self) -> Option<&PreparedCircleControl> {
         match self {
             Self::Closing(closing) => Some(&closing.current.control),

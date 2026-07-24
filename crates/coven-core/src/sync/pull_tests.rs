@@ -4235,9 +4235,10 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
             .await
             .expect("read ordered Circle result")
             .into_iter()
-            .find(|circle| circle.id == circle_id)
+            .find(|circle| circle.id() == circle_id)
             .expect("Circle exists after ordered pull")
-            .name,
+            .name()
+            .expect("ordered Circle is active"),
         "Renamed readers"
     );
 }

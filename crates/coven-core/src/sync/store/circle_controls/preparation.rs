@@ -1588,6 +1588,58 @@ pub(super) async fn prepare_circle_operation_request(
                     vec![("epoch-close-intent".to_string(), intent_prepared)],
                 )
             }
+            CircleOperationRequest::ResolveControl(request) => {
+                if request.circle_id != request.chosen.control.value.circle_id {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle control-resolution request differs from its chosen branch"
+                            .to_string(),
+                    ));
+                }
+                // The conflicting set the command captured must still equal the
+                // currently retained branches inside this journal transaction. A
+                // branch discovered since the command fails the resolution loud
+                // so it is never silently dropped; the Owner resolves the
+                // complete new set.
+                let retained = database
+                    .circle_control_conflict_branches(request.circle_id)
+                    .await?
+                    .ok_or(CircleOperationError::NotConflicted {
+                        circle_id: request.circle_id,
+                    })?;
+                if retained != request.conflicting_branches {
+                    return Err(CircleOperationError::InvalidState(
+                        "Circle control conflict changed since the resolution was requested"
+                            .to_string(),
+                    ));
+                }
+                let keyring = match &request.chosen.access.disposition {
+                    CircleAccessDisposition::Active { keyring, .. } => keyring,
+                    CircleAccessDisposition::Inactive => {
+                        return Err(CircleOperationError::InvalidState(
+                            "Circle control resolution requires active local access to the chosen \
+                             branch"
+                                .to_string(),
+                        ));
+                    }
+                };
+                (
+                    CircleTransitionDraft::resolve(
+                        candidate_family,
+                        &circle_device_id,
+                        membership_state.clone(),
+                        membership_authority.clone(),
+                        members,
+                        &request.chosen.control,
+                        &request.chosen.roster,
+                        &request.chosen.metadata,
+                        keyring,
+                        request.losing_heads.clone(),
+                        db.id_provider(),
+                        signer,
+                    )?,
+                    Vec::new(),
+                )
+            }
             CircleOperationRequest::FinalizeEpochClose(request) => {
                 if request.circle_id != request.current.control.value.circle_id {
                     return Err(CircleOperationError::InvalidState(

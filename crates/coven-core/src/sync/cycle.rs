@@ -1140,6 +1140,16 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn resolve_circle_control(
+        &self,
+        circle_id: super::circle::CircleId,
+        chosen: super::circle::CircleControlCoord,
+    ) -> Result<(), super::store::CircleOperationError> {
+        self.store
+            .resolve_circle_control(&self.device_id, circle_id, chosen, &self.user_keypair)
+            .await
+    }
+
     pub async fn add_circle_member(
         &self,
         store_dir: &StoreDir,

@@ -2992,6 +2992,169 @@ impl CircleTransitionDraft {
             control,
         })
     }
+
+    /// Build a successor of the chosen conflicting branch that causally covers
+    /// every branch, collapsing a retained `ControlConflict` to a single
+    /// resolved control. The successor inherits the chosen branch's epoch, key
+    /// generation, roster, and selected metadata verbatim — it changes no
+    /// membership, keys, or deletion intent; it only names the complete
+    /// conflicting set so `advance` reduces to it deterministically on every
+    /// device. `losing_heads` are the retained branches other than `chosen`;
+    /// preparation adds the chosen branch head, so the resolved control's causal
+    /// dependencies and predecessor together name every branch.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve(
+        candidate_family: super::store_commit::CandidateFamilyId,
+        device_id: &str,
+        store_membership: StoreMembershipStateRef,
+        membership_authority: MembershipGrantCreationAuthority,
+        store_members: Vec<(String, MemberRole)>,
+        chosen_control: &PreparedCircleControl,
+        chosen_roster: &CircleMaterializedRoster,
+        chosen_metadata: &CircleMetadata,
+        keyring: &str,
+        losing_heads: Vec<MergeCircleControlHeadRef>,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let context = circle_successor_context(
+            store_members,
+            chosen_control,
+            chosen_roster,
+            chosen_metadata,
+            keyring,
+            signer,
+        )?;
+        let CircleSuccessorContext {
+            store_members,
+            author_pubkey,
+            active_epoch,
+            grant_id: _,
+            author_authority,
+            key_fingerprint,
+        } = context;
+        let store_root_hash = chosen_control.value.store_root_hash;
+        let circle_id = chosen_control.value.circle_id;
+        let epoch_id = chosen_control.value.epoch_id();
+        let roster_state = chosen_control.value.roster_state_ref();
+
+        // The resolved control's frontier is the chosen branch's own frontier
+        // extended by every losing branch head; a losing successor on a stream
+        // the chosen branch already covered replaces the older head there.
+        // Preparation adds the chosen branch head and derives the predecessor
+        // and dependencies from this frontier, so the resolved control directly
+        // names every branch.
+        let mut covered_control_heads = active_epoch.covered_control_heads.clone();
+        for head in losing_heads {
+            covered_control_heads
+                .retain(|existing| existing.coord.stream_key() != head.coord.stream_key());
+            covered_control_heads.push(head);
+        }
+        covered_control_heads.sort_by_key(|head| head.coord.stream_key());
+
+        let mut control_value = CircleControl {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            circle_id,
+            value: CircleControlValue {
+                order: MergeCircleControlOrder {
+                    device_id: device_id.to_string(),
+                    stream_id: active_epoch
+                        .covered_control_heads
+                        .iter()
+                        .find(|head| head.coord.stream_key().author_pubkey == author_pubkey)
+                        .map_or_else(
+                            || {
+                                AuthorStreamId::from_digest(generated_id_digest(
+                                    ids,
+                                    b"coven.circle-transition-draft-stream.v1\0",
+                                ))
+                            },
+                            |head| head.coord.stream_id,
+                        ),
+                    author_owner_grant: chosen_metadata.author_owner_grant.clone(),
+                    seq: chosen_control
+                        .value
+                        .ordinal()
+                        .checked_add(1)
+                        .ok_or(CircleTransitionError::SequenceOverflow)?,
+                    previous_control_hash: Some(chosen_control.coord.control_hash()),
+                    dependencies: vec![chosen_control.coord.clone()],
+                },
+                state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
+                    common: active_epoch.common.clone(),
+                    metadata: active_epoch.metadata.clone(),
+                    roster: active_epoch.roster.clone(),
+                    store_membership,
+                    covered_control_heads,
+                }),
+                author_authority,
+                membership_authority,
+            },
+            author_pubkey,
+            signature: String::new(),
+        };
+        let leaves = prepare_access_material(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            epoch_id,
+            keyring,
+            key_fingerprint,
+            &roster_state,
+            &chosen_roster.members(),
+            &control_value
+                .value
+                .state
+                .active_epoch()
+                .expect("control resolution constructs an active epoch")
+                .store_membership,
+            &store_members,
+            &std::collections::BTreeMap::new(),
+            ids,
+            signer,
+        )?;
+        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
+        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
+        control_value
+            .value
+            .state
+            .active_epoch_mut()
+            .expect("control resolution constructs an active epoch")
+            .common
+            .access_root = access_root;
+        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control_value.coord(),
+            bytes: serde_json::to_vec(&control_value)
+                .expect("circle control serialization cannot fail"),
+            value: control_value,
+        };
+        let access = prepare_access_envelopes(
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            &control,
+            leaves,
+            proofs,
+            signer,
+        );
+        Ok(Self {
+            circle_id,
+            epoch_id,
+            keyring: keyring.to_string(),
+            roster: chosen_roster.clone(),
+            policy: CircleTransitionDraftPolicy {
+                roster: CircleRosterDraftPolicy::Inherited,
+                metadata_successor: false,
+            },
+            metadata: chosen_metadata.clone(),
+            close_intent: None,
+            close_finalization: None,
+            access,
+            control,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
