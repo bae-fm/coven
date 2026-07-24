@@ -133,6 +133,19 @@ rebuild the deleted choice.
 - A missing or corrupt Circle package for an active effective member holds its
   Store commit without partially applying rows, controls, routing, or frontier
   state.
+- Each active device stages one Circle acknowledgement per Circle it holds
+  active access to, sealed to the exact epoch key, on an immutable
+  per-device per-Circle stream. One Store commit per cycle names the Store
+  acknowledgement and every pending Circle acknowledgement in its signed
+  body; materialization records the activated set durably. An inactive
+  recipient holds no package access and therefore stages nothing, by
+  construction.
+- Circle acknowledgements name the device's exact Store frontier, control,
+  epoch, key fingerprint, and the bootstrap coverage its projection was
+  seeded from. Readers verify through the naming commit's exact reference,
+  signature, and predecessor chain; reading an acknowledgement sealed under
+  a rotated-away epoch requires resolving that epoch's key from retained
+  controls, which the snapshot and reclamation coverage consumers add.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host

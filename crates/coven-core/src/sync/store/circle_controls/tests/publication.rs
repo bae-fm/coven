@@ -1817,6 +1817,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         },
         crate::sync::store_commit::StoreCommitOperationsInput {
             acknowledgement: None,
+            circle_acknowledgements: Vec::new(),
             control: None,
             device_join_attempt_decisions: Vec::new(),
             device_join_outcomes: Vec::new(),

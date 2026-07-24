@@ -27,6 +27,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
         StoreOperationBatch::Acknowledgement {
             reference: acknowledgement,
             value: _,
+            circle_acknowledgements,
         } => StoreBatchCommit::signed_operations(
             store_root_hash,
             db.new_write_id(),
@@ -39,6 +40,10 @@ pub(crate) async fn prepare_store_operation_candidate_common(
             plan.membership_authority.clone(),
             StoreCommitOperationsInput {
                 acknowledgement: Some(acknowledgement),
+                circle_acknowledgements: circle_acknowledgements
+                    .iter()
+                    .map(|circle| circle.reference.clone())
+                    .collect(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -222,6 +227,7 @@ pub(crate) async fn prepare_store_operation_candidate_common(
             plan.membership_authority.clone(),
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: Some(StoreControl { transition }),
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),

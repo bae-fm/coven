@@ -125,6 +125,7 @@ pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use operations::load_local_store_authority as load_local_store_authority_for_test;
+pub(crate) use operations::CircleAckActivation;
 pub(crate) use operations::PreparedStoreOperationCommit;
 #[cfg(test)]
 pub(crate) use operations::{
@@ -223,6 +224,35 @@ pub(crate) async fn drain_store_acknowledgements_for_test(
         .await
         .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
     store.drain_acknowledgements(identity).await
+}
+
+#[cfg(test)]
+pub(crate) async fn stage_circle_acknowledgements_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    frontier: &CommitFrontier,
+    sync_time: &str,
+    identity: &UserKeypair,
+) -> Result<(), acknowledgements::StoreAckError> {
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
+    store
+        .stage_circle_acknowledgements(frontier, sync_time, identity)
+        .await
+}
+
+#[cfg(test)]
+pub(crate) async fn load_circle_acknowledgement_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    reference: &super::store_commit::CircleAckRef,
+    control: &super::circle::CircleControlCoord,
+) -> Result<super::store_commit::CircleAck, acknowledgements::StoreAckError> {
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
+    store.load_circle_acknowledgement(reference, control).await
 }
 
 #[cfg(test)]

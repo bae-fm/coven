@@ -123,6 +123,7 @@ async fn persist_candidate(
         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
             reference: outbound.reference.clone(),
             value: outbound.ack.value.clone(),
+            circle_acknowledgements: Vec::new(),
         },
     )
     .await
@@ -890,5 +891,267 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
             .await
             .unwrap(),
         Some(outbound.reference)
+    );
+}
+
+async fn local_device_id(db: &Database) -> crate::sync::store_commit::StoreDeviceId {
+    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .unwrap()
+        .expect("local Store device id")
+        .parse()
+        .expect("parse local Store device id")
+}
+
+async fn current_frontier(db: &Database) -> CommitFrontier {
+    CommitFrontier::from_refs(
+        store_database(db)
+            .materialized_frontier()
+            .await
+            .expect("read frontier"),
+    )
+    .expect("shape frontier")
+}
+
+#[tokio::test]
+async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
+    let directory = tempfile::tempdir().expect("acknowledgement database directory");
+    let path = directory.path().join("store.sqlite3");
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let db = open(&path, "circle-ack-device");
+    initialize(&db, &storage, &signer).await;
+    let (circle_id, control) = db
+        .call(|conn| {
+            Ok(crate::sync::test_helpers::install_test_active_circle(
+                conn,
+                "ack-circle",
+            ))
+        })
+        .await
+        .expect("install active Circle");
+    let (_, key_fingerprint) = store_database(&db)
+        .circle_publication_context(circle_id, control.clone())
+        .await
+        .expect("resolve Circle publication context");
+
+    let frontier = current_frontier(&db).await;
+    stage(&db, &storage, &signer).await;
+    crate::sync::store::stage_circle_acknowledgements_for_test(
+        &db,
+        &storage,
+        &frontier,
+        "2026-07-16T00:00:00Z",
+        &signer,
+    )
+    .await
+    .expect("stage Circle acknowledgements");
+    assert_eq!(drain(&db, &storage, &signer).await.unwrap(), 1);
+
+    let device_id = local_device_id(&db).await;
+    let reference = store_database(&db)
+        .activated_circle_ack(circle_id, device_id)
+        .await
+        .expect("read activated Circle acknowledgement")
+        .expect("Circle acknowledgement activated with the Store commit");
+    assert_eq!(reference.circle_id, circle_id);
+    assert_eq!(reference.sequence, 1);
+
+    let ack = crate::sync::store::load_circle_acknowledgement_for_test(
+        &db, &storage, &reference, &control,
+    )
+    .await
+    .expect("read and verify Circle acknowledgement");
+    assert_eq!(ack.circle_id, circle_id);
+    assert_eq!(ack.control, control);
+    assert_eq!(ack.key_fingerprint, key_fingerprint);
+    assert_eq!(&ack.store_cut, &frontier);
+    // A source device whose projection never came from an image names no seed.
+    assert!(ack.seeded_from.is_none());
+
+    // A reader that cannot resolve an active epoch key for the Circle — a Store
+    // member outside it — cannot open the acknowledgement's contents.
+    let mut outside_control = control.clone();
+    outside_control.seq += 1;
+    let denied = crate::sync::store::load_circle_acknowledgement_for_test(
+        &db,
+        &storage,
+        &reference,
+        &outside_control,
+    )
+    .await;
+    assert!(denied.is_err());
+}
+
+#[tokio::test]
+async fn inactive_circle_stages_no_acknowledgement() {
+    let directory = tempfile::tempdir().expect("acknowledgement database directory");
+    let path = directory.path().join("store.sqlite3");
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let db = open(&path, "inactive-circle-device");
+    initialize(&db, &storage, &signer).await;
+    let (circle_id, _control) = db
+        .call(|conn| {
+            Ok(crate::sync::test_helpers::install_test_inactive_circle(
+                conn,
+                "inactive-circle",
+            ))
+        })
+        .await
+        .expect("install inactive Circle");
+
+    let frontier = current_frontier(&db).await;
+    stage(&db, &storage, &signer).await;
+    crate::sync::store::stage_circle_acknowledgements_for_test(
+        &db,
+        &storage,
+        &frontier,
+        "2026-07-16T00:00:00Z",
+        &signer,
+    )
+    .await
+    .expect("stage Circle acknowledgements");
+    assert_eq!(drain(&db, &storage, &signer).await.unwrap(), 1);
+
+    let device_id = local_device_id(&db).await;
+    assert_eq!(
+        store_database(&db)
+            .activated_circle_ack(circle_id, device_id)
+            .await
+            .expect("read activated Circle acknowledgement"),
+        None,
+        "an inactive recipient publishes no Circle acknowledgement"
+    );
+}
+
+#[tokio::test]
+async fn circle_acknowledgement_resumes_idempotently_across_restart() {
+    let directory = tempfile::tempdir().expect("acknowledgement database directory");
+    let path = directory.path().join("store.sqlite3");
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let db = open(&path, "circle-ack-restart");
+    initialize(&db, &storage, &signer).await;
+    let (circle_id, control) = db
+        .call(|conn| {
+            Ok(crate::sync::test_helpers::install_test_active_circle(
+                conn,
+                "restart-circle",
+            ))
+        })
+        .await
+        .expect("install active Circle");
+
+    let frontier = current_frontier(&db).await;
+    stage(&db, &storage, &signer).await;
+    crate::sync::store::stage_circle_acknowledgements_for_test(
+        &db,
+        &storage,
+        &frontier,
+        "2026-07-16T00:00:00Z",
+        &signer,
+    )
+    .await
+    .expect("stage Circle acknowledgements");
+    // Crash between staging and draining: the outbound Circle acknowledgement is
+    // durable and its object is not yet activated.
+    let device_id = local_device_id(&db).await;
+    assert_eq!(
+        store_database(&db)
+            .activated_circle_ack(circle_id, device_id)
+            .await
+            .unwrap(),
+        None
+    );
+    drop(db);
+
+    let reopened = open(&path, "circle-ack-restart");
+    assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 1);
+    let device_id = local_device_id(&reopened).await;
+    let reference = store_database(&reopened)
+        .activated_circle_ack(circle_id, device_id)
+        .await
+        .unwrap()
+        .expect("resumed drain activates the Circle acknowledgement exactly once");
+    assert_eq!(reference.sequence, 1);
+    // A repeat drain is a no-op: nothing remains queued.
+    assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 0);
+    let ack = crate::sync::store::load_circle_acknowledgement_for_test(
+        &reopened, &storage, &reference, &control,
+    )
+    .await
+    .expect("resumed Circle acknowledgement stays readable");
+    assert_eq!(ack.circle_id, circle_id);
+}
+
+#[tokio::test]
+async fn circle_acknowledgement_slot_collision_fails_loud() {
+    let directory = tempfile::tempdir().expect("acknowledgement database directory");
+    let path = directory.path().join("store.sqlite3");
+    let home = InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let storage = storage(&home, &signer);
+    let db = open(&path, "circle-ack-collision");
+    initialize(&db, &storage, &signer).await;
+    db.call(|conn| {
+        Ok(crate::sync::test_helpers::install_test_active_circle(
+            conn,
+            "collision-circle",
+        ))
+    })
+    .await
+    .expect("install active Circle");
+
+    let frontier = current_frontier(&db).await;
+    stage(&db, &storage, &signer).await;
+    crate::sync::store::stage_circle_acknowledgements_for_test(
+        &db,
+        &storage,
+        &frontier,
+        "2026-07-16T00:00:00Z",
+        &signer,
+    )
+    .await
+    .expect("stage Circle acknowledgements");
+
+    // Read the exact slot the staged Circle acknowledgement reserved, then occupy
+    // it with different bytes before the drain uploads its object.
+    let prepared_object: String = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT prepared_object FROM outbound_circle_acks",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("read staged Circle acknowledgement object");
+    let prepared: crate::sync::storage::PreparedExactObject =
+        serde_json::from_str(&prepared_object).expect("parse staged Circle acknowledgement object");
+    let sabotage = b"different bytes at the reserved Circle acknowledgement slot".to_vec();
+    let sabotage_ref = crate::sync::storage::ExactObjectRef::new(
+        prepared.reference().slot().clone(),
+        sabotage.len() as u64,
+        crate::sync::store_commit::ObjectHash::digest(&sabotage),
+    );
+    assert_ne!(&sabotage_ref, prepared.reference());
+    let sabotage_prepared = crate::sync::storage::PreparedExactObject::new(sabotage_ref, sabotage)
+        .expect("build sabotage object");
+    storage
+        .create_protocol_object(&sabotage_prepared)
+        .await
+        .expect("occupy the reserved Circle acknowledgement slot");
+
+    // Create-once refuses the different bytes: the drain fails loud rather than
+    // silently adopting a foreign object on this device's per-Circle stream.
+    let result = drain(&db, &storage, &signer).await;
+    assert!(
+        matches!(result, Err(StoreAckError::InvalidOutbound(_))),
+        "unexpected drain outcome: {result:?}"
     );
 }

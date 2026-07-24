@@ -42,6 +42,18 @@ impl StoreDatabase {
                         "Merge Store acknowledgement activation object",
                     )?;
                 }
+                for circle in &outbound.circle_acknowledgements {
+                    for remote in candidate
+                        .circle_acknowledgement_remote_objects(&circle.ack)
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                    {
+                        persist_exact_remote_object_on(
+                            &tx,
+                            &remote,
+                            "Merge Circle acknowledgement activation object",
+                        )?;
+                    }
+                }
                 let activation =
                     serde_json::to_string(&OutboundStoreAckActivation::Prepared(candidate))
                         .map_err(|error| {

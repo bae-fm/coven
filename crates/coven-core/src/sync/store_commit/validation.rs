@@ -327,6 +327,22 @@ pub fn ack_semantic_prefix(device_id: &str, revision: u64, ack_hash: ObjectHash)
     format!("{}/{ack_hash}", ack_slot_prefix(device_id, revision))
 }
 
+pub fn circle_ack_slot_prefix(circle_id: CircleId, device_id: &str, sequence: u64) -> String {
+    format!("circles/{circle_id}/acks/{device_id}/{sequence}")
+}
+
+pub fn circle_ack_semantic_prefix(
+    circle_id: CircleId,
+    device_id: &str,
+    sequence: u64,
+    ack_hash: ObjectHash,
+) -> String {
+    format!(
+        "{}/{ack_hash}",
+        circle_ack_slot_prefix(circle_id, device_id, sequence)
+    )
+}
+
 pub fn snapshot_slot_prefix(device_id: &str, generation: u64) -> String {
     format!("{STORE_SNAPSHOT_META_PREFIX}{device_id}/{generation}")
 }

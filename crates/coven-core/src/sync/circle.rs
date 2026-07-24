@@ -1111,6 +1111,7 @@ mod tests {
             },
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1272,6 +1273,7 @@ mod tests {
             },
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),

@@ -211,6 +211,7 @@ pub(crate) enum MergeAbandonmentState {
 pub(crate) struct OutboundStoreAck {
     pub reference: StoreAckRef,
     pub ack: ExactProtocolObject<StoreAck>,
+    pub circle_acknowledgements: Vec<crate::sync::store::CircleAckActivation>,
     pub activation: OutboundStoreAckActivation,
 }
 

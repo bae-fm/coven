@@ -37,6 +37,7 @@ enum ReplayTableDisposition {
 }
 
 const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
+    ("activated_circle_acks", ReplayTableDisposition::Replace),
     ("activated_store_acks", ReplayTableDisposition::Replace),
     ("blob_locators", ReplayTableDisposition::Replace),
     ("blob_make_remote_intents", ReplayTableDisposition::Preserve),
@@ -77,6 +78,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "outbound_membership_mutation",
         ReplayTableDisposition::Preserve,
     ),
+    ("outbound_circle_acks", ReplayTableDisposition::Preserve),
     ("outbound_store_acks", ReplayTableDisposition::Preserve),
     (
         "outbound_store_device_exclusion",
@@ -92,6 +94,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         "published_blob_drop_intents",
         ReplayTableDisposition::Preserve,
     ),
+    ("published_circle_acks", ReplayTableDisposition::Preserve),
     ("published_store_acks", ReplayTableDisposition::Preserve),
     ("published_store_snapshot", ReplayTableDisposition::Preserve),
     ("reclaimed_store_packages", ReplayTableDisposition::Preserve),

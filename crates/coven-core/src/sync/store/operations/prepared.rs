@@ -367,6 +367,41 @@ impl PreparedStoreOperationCommit {
         self.retained_authority_remote_objects(vec![authority])
     }
 
+    pub(crate) fn circle_acknowledgement_remote_objects(
+        &self,
+        acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::CircleAck>,
+    ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
+        let reference = self
+            .commit
+            .circle_acknowledgements()
+            .iter()
+            .find(|reference| reference.object == acknowledgement.object)
+            .ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "prepared activation does not name its Circle acknowledgement object"
+                        .to_string(),
+                )
+            })?;
+        if reference.circle_id != acknowledgement.value.circle_id
+            || reference.ack_hash != acknowledgement.value.ack_hash()
+            || acknowledgement.value.to_bytes() != acknowledgement.bytes
+        {
+            return Err(StoreError::InvalidOutbound(
+                "prepared Circle acknowledgement differs from its exact acknowledgement object"
+                    .to_string(),
+            ));
+        }
+        let authority =
+            super::remote_object::RemoteObjectRecord::candidate_activated_circle_acknowledgement(
+                reference.clone(),
+                acknowledgement.bytes.clone(),
+                acknowledgement.prepared.stored_bytes().to_vec(),
+                self.reference.clone(),
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        self.retained_authority_remote_objects(vec![authority])
+    }
+
     pub(crate) fn retained_authority_remote_objects(
         &self,
         authorities: Vec<super::remote_object::RemoteObjectRecord>,

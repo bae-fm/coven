@@ -4,7 +4,9 @@ pub(crate) enum StoreOperationBatch {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
         value: super::store_commit::StoreAck,
+        circle_acknowledgements: Vec<CircleAckActivation>,
     },
+
     ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
     Attempt(DeviceJoinAttemptRef),
     Abandonment(super::device_join::DeviceJoinAbandonmentRef),
@@ -22,6 +24,15 @@ pub(crate) enum StoreOperationBatch {
         transition: super::membership::MergeMembershipHeadTransition,
         stream_activations: Vec<super::store_commit::StreamActivation>,
     },
+}
+
+/// One Circle acknowledgement object riding an activating Store commit: its
+/// exact reference (named in the signed commit body) and the exact object the
+/// commit uploads and takes ownership of.
+#[derive(Debug, Clone)]
+pub(crate) struct CircleAckActivation {
+    pub reference: super::store_commit::CircleAckRef,
+    pub ack: crate::database::ExactProtocolObject<super::store_commit::CircleAck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

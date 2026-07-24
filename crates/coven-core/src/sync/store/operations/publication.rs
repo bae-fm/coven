@@ -188,6 +188,12 @@ pub(crate) fn retained_store_operation_objects(
         .into_iter()
         .chain(
             commit
+                .circle_acknowledgements()
+                .iter()
+                .map(|reference| reference.object.clone()),
+        )
+        .chain(
+            commit
                 .device_exclusion_proposals()
                 .iter()
                 .map(|reference| reference.object.clone()),

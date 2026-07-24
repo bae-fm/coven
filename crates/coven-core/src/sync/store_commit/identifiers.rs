@@ -333,6 +333,7 @@ pub(crate) enum StreamAnchorDomain {
     CircleControl { circle_id: CircleId },
     CircleRoster { circle_id: CircleId },
     CircleMetadata { circle_id: CircleId },
+    CircleAcknowledgements { circle_id: CircleId },
     StoreAnnouncements,
     StoreAcknowledgements,
     StoreSnapshots,
@@ -362,6 +363,11 @@ impl DeviceStreamAnchor {
             Self::StoreAnnouncements { .. } => StreamAnchorDomain::StoreAnnouncements,
             Self::StoreAcknowledgements { .. } => StreamAnchorDomain::StoreAcknowledgements,
             Self::StoreSnapshots { .. } => StreamAnchorDomain::StoreSnapshots,
+            Self::CircleAcknowledgements { circle_id, .. } => {
+                StreamAnchorDomain::CircleAcknowledgements {
+                    circle_id: *circle_id,
+                }
+            }
         }
     }
 }

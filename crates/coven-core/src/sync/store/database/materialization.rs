@@ -8,10 +8,11 @@ use super::store_device_state::{
 use super::{StoreDatabase, StoreDatabaseTransaction};
 use crate::database::{
     install_store_founder_state_on, load_activated_registration_on, load_remote_object_on,
-    record_activated_store_ack_on, record_store_reclaim_activation_on,
-    record_verified_stream_activations_on, required_store_root_authority_on,
-    store_reclaim_journal_error, update_remote_object_on, Database, DbError,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
+    record_activated_circle_acks_on, record_activated_store_ack_on,
+    record_store_reclaim_activation_on, record_verified_stream_activations_on,
+    required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
+    Database, DbError, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    VerifiedMergeMaterialization,
 };
 use crate::sync::audience_package::AudiencePackage;
 use crate::sync::remote_object::RemoteObjectRecord;
@@ -505,6 +506,7 @@ impl StoreDatabaseTransaction<'_, '_> {
         let device_state =
             self.derive_materialized_store_device_state(&root, commit, device_operations)?;
         record_activated_store_ack_on(conn, commit, commit_ref)?;
+        record_activated_circle_acks_on(conn, commit, commit_ref)?;
         let seq = Database::sequence_to_sqlite(&stream_id, commit.seq())?;
         let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::Message(format!("serialize exact Store commit ref: {error}"))

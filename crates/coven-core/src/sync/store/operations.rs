@@ -142,9 +142,9 @@ pub(crate) async fn prepare_candidate(
 ) -> Result<PreparedStoreOperationCommit, StoreError> {
     let db = database.sqlite();
     let acknowledgement_evidence = match &batch {
-        StoreOperationBatch::Acknowledgement { reference, value } => {
-            Some((reference.clone(), value.clone()))
-        }
+        StoreOperationBatch::Acknowledgement {
+            reference, value, ..
+        } => Some((reference.clone(), value.clone())),
         _ => None,
     };
     let retained_registration_evidence = match &batch {

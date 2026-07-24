@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::circle::CircleId;
 use super::storage::ExactObjectRef;
-use super::store_commit::{CandidateFamilyId, ObjectHash, StoreBatchCommitRef, StreamActivationId};
+use super::store_commit::{
+    CandidateFamilyId, CircleAckRef, ObjectHash, StoreBatchCommitRef, StreamActivationId,
+};
 
 const REMOTE_OBJECT_ID_DOMAIN: &[u8] = b"coven.remote-object-id.v1\0";
 
@@ -117,6 +119,23 @@ impl RemoteObjectRecord {
             ObjectHash::digest(&canonical_signed_bytes),
             object,
             canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_circle_acknowledgement(
+        reference: CircleAckRef,
+        canonical_semantic_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::CircleAcknowledgement { reference },
+            ObjectHash::digest(&canonical_semantic_bytes),
+            object,
+            canonical_semantic_bytes,
             stored_bytes,
             owner,
         )
@@ -3070,6 +3089,9 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
     },
+    CircleAcknowledgement {
+        reference: CircleAckRef,
+    },
     MergeMembershipWrappedStoreKey {
         reference: super::wrapped_store_key::WrappedStoreKeyRef,
     },
@@ -3149,6 +3171,19 @@ fn validate_retained_authority_identity(
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
             if acknowledgement.registration != reference.registration
+                || acknowledgement.sequence != reference.sequence
+                || acknowledgement.ack_hash() != reference.ack_hash
+                || reference.object != identity.object
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::CircleAcknowledgement { reference } => {
+            let acknowledgement: super::store_commit::CircleAck =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if acknowledgement.registration != reference.registration
+                || acknowledgement.circle_id != reference.circle_id
                 || acknowledgement.sequence != reference.sequence
                 || acknowledgement.ack_hash() != reference.ack_hash
                 || reference.object != identity.object

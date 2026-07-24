@@ -655,6 +655,7 @@ impl DeviceJoinAttemptDecisionRef {
 #[serde(deny_unknown_fields)]
 pub struct StoreCommitOperations {
     pub acknowledgement: Option<StoreAckRef>,
+    pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
@@ -678,6 +679,7 @@ impl StoreCommitOperations {
 
     pub(crate) fn is_circle_control_activation_only(&self) -> bool {
         self.acknowledgement.is_none()
+            && self.circle_acknowledgements.is_empty()
             && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
             && self.device_join_outcomes.is_empty()
@@ -693,7 +695,8 @@ impl StoreCommitOperations {
     }
 
     fn has_no_other_operations(&self) -> bool {
-        self.control.is_none()
+        self.circle_acknowledgements.is_empty()
+            && self.control.is_none()
             && self.device_join_attempt_decisions.is_empty()
             && self.device_join_outcomes.is_empty()
             && self.device_join_cleanup_receipts.is_empty()
@@ -729,6 +732,7 @@ pub enum StoreCommitBody {
 
 pub struct StoreCommitOperationsInput<'a> {
     pub acknowledgement: Option<StoreAckRef>,
+    pub circle_acknowledgements: Vec<CircleAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,

@@ -2,6 +2,7 @@ mod acknowledgements;
 mod audience_blob_staging;
 mod candidate_lifecycle;
 pub(super) mod candidate_records;
+mod circle_acknowledgements;
 mod circle_controls;
 mod circle_operations;
 mod device_continuation;

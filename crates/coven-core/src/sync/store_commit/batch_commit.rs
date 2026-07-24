@@ -1,9 +1,9 @@
 use super::identifiers::commit_stream_id;
 use super::operation_refs::{
-    validate_commit_acknowledgement, validate_device_exclusion_refs,
-    validate_device_join_attempt_decision_refs, validate_device_join_cleanup_receipt_refs,
-    validate_device_join_outcome_refs, validate_device_registration_refs,
-    validate_provider_access_refs,
+    validate_commit_acknowledgement, validate_commit_circle_acknowledgements,
+    validate_device_exclusion_refs, validate_device_join_attempt_decision_refs,
+    validate_device_join_cleanup_receipt_refs, validate_device_join_outcome_refs,
+    validate_device_registration_refs, validate_provider_access_refs,
 };
 use super::validation::{
     require_version, validate_commit_order, validate_commit_predecessor_states,
@@ -103,6 +103,12 @@ impl StoreBatchCommit {
     pub fn acknowledgement(&self) -> Option<&StoreAckRef> {
         self.operations()
             .and_then(|operations| operations.acknowledgement.as_ref())
+    }
+
+    pub fn circle_acknowledgements(&self) -> &[CircleAckRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.circle_acknowledgements.as_slice()
+        })
     }
 
     pub fn abandoned_candidates(&self) -> &[CandidateCleanupManifest] {
@@ -330,6 +336,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -375,6 +382,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -419,6 +427,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -558,6 +567,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: attempts
                     .into_iter()
@@ -606,6 +616,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes,
@@ -650,6 +661,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: abandonments
                     .into_iter()
@@ -697,6 +709,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -742,6 +755,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -789,6 +803,7 @@ impl StoreBatchCommit {
             membership_authority,
             StoreCommitOperationsInput {
                 acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
                 control: None,
                 device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -835,6 +850,7 @@ impl StoreBatchCommit {
         )?;
         let StoreCommitOperationsInput {
             acknowledgement,
+            circle_acknowledgements,
             control,
             device_join_attempt_decisions,
             device_join_outcomes,
@@ -856,6 +872,7 @@ impl StoreBatchCommit {
             control.as_ref(),
         )?;
         validate_commit_acknowledgement(&acknowledgement, &author_registration)?;
+        validate_commit_circle_acknowledgements(&circle_acknowledgements, &author_registration)?;
         let stream_id = commit_stream_id(&coord);
         let seq = order.seq();
         let candidate_family =
@@ -920,6 +937,7 @@ impl StoreBatchCommit {
         validate_circle_control_refs(&circle_controls)?;
         let operations = StoreCommitOperations {
             acknowledgement,
+            circle_acknowledgements,
             control,
             device_join_attempt_decisions,
             device_join_outcomes,
@@ -1212,6 +1230,7 @@ fn validate_commit_body(
             }
             validate_circle_control_refs(&operations.circle_controls)?;
             validate_commit_acknowledgement(&operations.acknowledgement, author)?;
+            validate_commit_circle_acknowledgements(&operations.circle_acknowledgements, author)?;
             validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
             validate_device_join_cleanup_receipt_refs(&operations.device_join_cleanup_receipts)?;

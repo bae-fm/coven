@@ -17,9 +17,9 @@ use super::storage::{ExactObjectRef, ProviderDeviceBinding};
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::ObjectSlot;
 use crate::sync::circle::{
-    AccessLeafId, CircleControlCoord, CircleEpochId, CircleId, CircleMetadataCoord,
-    CircleMetadataHeadRef, CircleRosterConflictResolutionRef, CircleRosterCoord,
-    CircleRosterHeadRef,
+    AccessLeafId, CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
+    CircleMetadataCoord, CircleMetadataHeadRef, CircleRosterConflictResolutionRef,
+    CircleRosterCoord, CircleRosterHeadRef,
 };
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::KeyFingerprint;
@@ -27,6 +27,7 @@ use crate::WriteId;
 
 mod ack_snapshot;
 mod batch_commit;
+mod circle_ack;
 mod device_join;
 mod device_state;
 mod heads;
@@ -40,6 +41,7 @@ mod validation;
 
 pub use ack_snapshot::*;
 pub use batch_commit::*;
+pub use circle_ack::*;
 pub use device_join::*;
 pub use device_state::*;
 pub use heads::*;
@@ -122,6 +124,7 @@ const DEVICE_EXCLUSION_CANCELLATION_DOMAIN: &[u8] =
     b"coven.store-device-exclusion-cancellation.v1\0";
 const OWNER_RECOVERY_NODE_DOMAIN: &[u8] = b"coven.owner-recovery-node.v1\0";
 const ACK_DOMAIN: &[u8] = b"coven.store-ack.v1\0";
+const CIRCLE_ACK_DOMAIN: &[u8] = b"coven.circle-ack.v1\0";
 const SNAPSHOT_DOMAIN: &[u8] = b"coven.snapshot-meta.v1\0";
 const CANDIDATE_FAMILY_DOMAIN: &[u8] = b"coven.candidate-family.v1\0";
 const STREAM_ACTIVATION_ID_DOMAIN: &[u8] = b"coven.stream-activation-id.v1\0";

@@ -1407,6 +1407,7 @@ fn sign_exact_commit_with_package(
         membership_authority,
         crate::sync::store_commit::StoreCommitOperationsInput {
             acknowledgement: None,
+            circle_acknowledgements: Vec::new(),
             control: graph.commit.control().cloned(),
             device_join_attempt_decisions: graph.commit.device_join_attempt_decisions().to_vec(),
             device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),

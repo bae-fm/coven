@@ -194,9 +194,22 @@ impl StoreDeviceRegistrationOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceStreamAnchor {
-    StoreAnnouncements { first_slot: ObjectSlot },
-    StoreAcknowledgements { first_slot: ObjectSlot },
-    StoreSnapshots { first_slot: ObjectSlot },
+    StoreAnnouncements {
+        first_slot: ObjectSlot,
+    },
+    StoreAcknowledgements {
+        first_slot: ObjectSlot,
+    },
+    StoreSnapshots {
+        first_slot: ObjectSlot,
+    },
+    /// Per-(device, Circle) acknowledgement stream. Unlike the three permanent
+    /// anchors above, this is never a registration field: it is derived on
+    /// demand to bind one device's Circle-acknowledgement stream to its Circle.
+    CircleAcknowledgements {
+        circle_id: CircleId,
+        first_slot: ObjectSlot,
+    },
 }
 
 impl DeviceStreamAnchor {
@@ -204,7 +217,8 @@ impl DeviceStreamAnchor {
         match self {
             Self::StoreAnnouncements { first_slot }
             | Self::StoreAcknowledgements { first_slot }
-            | Self::StoreSnapshots { first_slot } => first_slot,
+            | Self::StoreSnapshots { first_slot }
+            | Self::CircleAcknowledgements { first_slot, .. } => first_slot,
         }
     }
 }

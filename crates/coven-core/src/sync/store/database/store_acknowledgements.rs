@@ -223,6 +223,7 @@ impl StoreDatabase {
                     &accepted,
                     &outbound.ack.value.successor.next_slot,
                 )?;
+                finish_outbound_circle_acks_on(&tx, &outbound.circle_acknowledgements)?;
                 tx.commit().map_err(DbError::from)
             })
             .await

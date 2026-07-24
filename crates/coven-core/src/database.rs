@@ -44,8 +44,9 @@ pub(crate) use crate::database::snapshot_records::{
     load_outbound_store_snapshot_on, load_published_store_snapshot_on,
 };
 pub(crate) use crate::database::store_ack_records::{
-    finish_outbound_store_ack_on, load_outbound_store_ack_on, load_published_store_ack_on,
-    record_activated_store_ack_on, store_snapshot_first_slot, verify_next_local_store_ack_on,
+    finish_outbound_circle_acks_on, finish_outbound_store_ack_on, load_outbound_store_ack_on,
+    load_published_store_ack_on, record_activated_circle_acks_on, record_activated_store_ack_on,
+    store_snapshot_first_slot, verify_next_local_store_ack_on,
 };
 pub(crate) use crate::database::store_authority_records::install_store_founder_state_on;
 pub(crate) use crate::database::store_reclaim_records::{

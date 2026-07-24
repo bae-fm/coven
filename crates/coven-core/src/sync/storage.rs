@@ -49,6 +49,7 @@ pub(crate) enum ProtectedObjectDomain {
     CircleEpochCloseResponse,
     CircleAccessLeaf,
     CircleAccessEnvelope,
+    CircleAcknowledgement,
 }
 
 #[derive(Clone, Copy)]
@@ -475,6 +476,14 @@ impl ProtectedObjectDomain {
                 },
                 extension: ".json",
             },
+            Self::CircleAcknowledgement => ProtocolObjectMetadata {
+                aad_label: b"circle-acknowledgement",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "circles"), (2, "acks")],
+                }]),
+                extension: ".json",
+            },
         }
     }
 
@@ -580,6 +589,8 @@ impl ProtocolObjectDomain {
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseOutcome);
     pub const CircleEpochCloseResponse: StoreEncryptedProtocolObjectDomain =
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleEpochCloseResponse);
+    pub const CircleAcknowledgement: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleAcknowledgement);
 }
 
 /// Authenticated storage context for one immutable semantic object.

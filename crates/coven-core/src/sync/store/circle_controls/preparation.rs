@@ -102,6 +102,7 @@ pub(super) fn signed_circle_commit(
         membership_authority,
         StoreCommitOperationsInput {
             acknowledgement: None,
+            circle_acknowledgements: Vec::new(),
             control: None,
             device_join_attempt_decisions: Vec::new(),
             device_join_outcomes: Vec::new(),

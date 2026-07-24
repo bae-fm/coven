@@ -71,6 +71,38 @@ pub(super) fn validate_commit_acknowledgement(
     Ok(())
 }
 
+pub(super) fn validate_commit_circle_acknowledgements(
+    circle_acknowledgements: &[CircleAckRef],
+    author: &StoreDeviceRegistrationRef,
+) -> Result<(), StoreProtocolError> {
+    let mut seen = BTreeSet::new();
+    for acknowledgement in circle_acknowledgements {
+        let expected = format!(
+            "{}.json",
+            circle_ack_slot_prefix(
+                acknowledgement.circle_id,
+                &author.device_id.to_string(),
+                acknowledgement.sequence,
+            )
+        );
+        if acknowledgement.registration != *author
+            || acknowledgement.sequence == 0
+            || acknowledgement.object.slot().logical_key() != expected
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store commit Circle acknowledgement is not the author's exact acknowledgement"
+                    .to_string(),
+            ));
+        }
+        if !seen.insert(acknowledgement.circle_id) {
+            return Err(StoreProtocolError::Malformed(
+                "Store commit carries two Circle acknowledgements for one Circle".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_device_join_attempt_decision_refs(
     decisions: &[DeviceJoinAttemptDecisionRef],
 ) -> Result<(), StoreProtocolError> {

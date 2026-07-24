@@ -2,8 +2,8 @@ use super::database::StoreDatabase;
 use super::*;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store_commit::{
-    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreHistoryCut,
-    SuccessorLink,
+    ack_slot_prefix, circle_ack_slot_prefix, CircleAck, DeviceStreamAnchor, StoreAck,
+    StoreAckExclusionState, StoreHistoryCut, StreamActivation, SuccessorLink,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -125,6 +125,43 @@ async fn stage_resolved_store_ack(
     Ok(acknowledgement)
 }
 
+/// Create every pending Circle acknowledgement object at its reserved slot and
+/// record it uploaded so its activating Store commit owns it. The ciphertext was
+/// sealed at staging and `create_protocol_object` verifies the exact stored
+/// bytes, so no epoch key is needed here. A slot occupied by different bytes is a
+/// create-once violation on this device's per-Circle stream; it fails loud to the
+/// drain, which retries the whole publication.
+async fn publish_circle_acknowledgement_objects(
+    storage: &dyn SyncStorage,
+    database: &StoreDatabase,
+    outbound: &crate::database::OutboundStoreAck,
+    candidate: &operations::PreparedStoreOperationCommit,
+) -> Result<(), StoreAckError> {
+    for circle in &outbound.circle_acknowledgements {
+        if let Err(error) = storage.create_protocol_object(&circle.ack.prepared).await {
+            if matches!(error, crate::sync::storage::StorageError::SlotCollision(_)) {
+                return Err(StoreAckError::InvalidOutbound(format!(
+                    "Circle acknowledgement slot {} holds different bytes",
+                    circle.reference.object.slot().logical_key()
+                )));
+            }
+            return Err(StoreObjectError::from(error).into());
+        }
+        let remote = candidate
+            .circle_acknowledgement_remote_objects(&circle.ack)?
+            .into_iter()
+            .find(|remote| remote.object() == &circle.reference.object)
+            .ok_or_else(|| {
+                StoreAckError::InvalidOutbound(
+                    "prepared activation does not own its Circle acknowledgement object"
+                        .to_string(),
+                )
+            })?;
+        database.mark_remote_object_uploaded(remote).await?;
+    }
+    Ok(())
+}
+
 async fn publish_acknowledgement_object(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -234,13 +271,190 @@ impl AuthorizedStore<'_> {
                 .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?,
         )
         .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-        Box::pin(self.stage_acknowledgement(frontier, sync_time.to_owned(), identity))
+        Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned(), identity))
             .await
             .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+        Box::pin(self.stage_circle_acknowledgements(&frontier, sync_time, identity))
+            .await
+            .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
         Box::pin(self.drain_acknowledgements(identity))
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
         Ok(())
+    }
+
+    /// Stage one Circle acknowledgement for every Circle whose private state this
+    /// device currently holds active access to. Each names the device's exact
+    /// accepted Store frontier, the activated control/epoch its projection
+    /// derives from, and the retained bootstrap coverage it was seeded from,
+    /// sealed to the Circle epoch key. Re-staging is skipped when neither the
+    /// accepted frontier nor the control advanced past the last published
+    /// acknowledgement. The Circle acknowledgements ride the same activating
+    /// Store commit as the Store acknowledgement through the shared drain.
+    pub(crate) async fn stage_circle_acknowledgements(
+        &self,
+        frontier: &CommitFrontier,
+        sync_time: &str,
+        identity: &UserKeypair,
+    ) -> Result<(), StoreAckError> {
+        let inputs = self
+            .database()
+            .circle_acknowledgement_publication_inputs()
+            .await?;
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let device_id = self
+            .db()
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await?
+            .ok_or(StoreAckError::MissingState(
+                crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+            ))?;
+        let (root, registration_ref, _, device_signer) =
+            crate::sync::store::operations::load_local_store_authority(
+                self.database(),
+                &device_id,
+                identity,
+            )
+            .await
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+        for input in inputs {
+            let previous = self
+                .database()
+                .latest_published_circle_ack(input.circle_id)
+                .await?;
+            if previous.as_ref().is_some_and(|previous| {
+                &previous.store_cut == frontier && previous.control == input.control
+            }) {
+                tracing::debug!(
+                    circle_id = %input.circle_id,
+                    "skip Circle acknowledgement: accepted frontier and control unchanged"
+                );
+                continue;
+            }
+            let (sequence, predecessor) = match &previous {
+                Some(previous) => (
+                    previous.reference.sequence.checked_add(1).ok_or_else(|| {
+                        StoreAckError::InvalidOutbound(
+                            "Circle acknowledgement sequence overflow".to_string(),
+                        )
+                    })?,
+                    Some(previous.reference.object.clone()),
+                ),
+                None => (1, None),
+            };
+            let context = ProtocolObjectContext::circle(
+                root.store_root_hash,
+                ProtocolObjectDomain::CircleAcknowledgement,
+                input.encryption,
+            );
+            let semantic_prefix = circle_ack_slot_prefix(input.circle_id, &device_id, sequence);
+            let current_slot = match &previous {
+                Some(previous) => previous.successor_slot.clone(),
+                None => self
+                    .storage()
+                    .allocate_protocol_slot(&context, &semantic_prefix, ".json")
+                    .await
+                    .map_err(StoreObjectError::from)?,
+            };
+            let next_slot = self
+                .storage()
+                .allocate_protocol_slot(
+                    &context,
+                    &circle_ack_slot_prefix(
+                        input.circle_id,
+                        &device_id,
+                        sequence.checked_add(1).ok_or_else(|| {
+                            StoreAckError::InvalidOutbound(
+                                "Circle acknowledgement sequence overflow".to_string(),
+                            )
+                        })?,
+                    ),
+                    ".json",
+                )
+                .await
+                .map_err(StoreObjectError::from)?;
+            let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+                "{}.json",
+                circle_ack_slot_prefix(input.circle_id, &device_id, 1)
+            ))
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+            let activation = StreamActivation::device_authorized(
+                root.store_root_hash,
+                registration_ref.clone(),
+                DeviceStreamAnchor::CircleAcknowledgements {
+                    circle_id: input.circle_id,
+                    first_slot: stream_first_slot,
+                },
+            )
+            .activation_id();
+            let ack = CircleAck::signed(
+                root.store_root_hash,
+                input.circle_id,
+                registration_ref.clone(),
+                sequence,
+                frontier.clone(),
+                input.control,
+                input.epoch_id,
+                input.key_fingerprint,
+                input.seeded_from,
+                sync_time.to_owned(),
+                SuccessorLink {
+                    activation,
+                    predecessor,
+                    next_slot,
+                },
+                &device_signer,
+            )
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+            let prepared = self
+                .storage()
+                .prepare_protocol_object(&context, current_slot, &semantic_prefix, ack.to_bytes())
+                .map_err(StoreObjectError::from)?;
+            self.database().stage_circle_ack(ack, prepared).await?;
+        }
+        Ok(())
+    }
+
+    /// Read and verify one exact Circle acknowledgement authored by `author`,
+    /// decrypting it with the epoch key resolved from the reader's active access
+    /// under `control` — the resolved keyring retains the epoch keys a member
+    /// holds, so an acknowledgement sealed under a rotated epoch key stays
+    /// readable. A Store member without Circle access resolves no key and cannot
+    /// read it.
+    #[cfg(test)]
+    pub(crate) async fn load_circle_acknowledgement(
+        &self,
+        reference: &crate::sync::store_commit::CircleAckRef,
+        control: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<CircleAck, StoreAckError> {
+        let (encryption, _) = self
+            .database()
+            .circle_publication_context(reference.circle_id, control.clone())
+            .await?;
+        let author = self
+            .database()
+            .activated_store_device_registration(reference.registration.clone())
+            .await?;
+        let root = self.store_root();
+        let context = ProtocolObjectContext::circle(
+            root.store_root_hash,
+            ProtocolObjectDomain::CircleAcknowledgement,
+            encryption,
+        );
+        let semantic_prefix = circle_ack_slot_prefix(
+            reference.circle_id,
+            &author.device_id.to_string(),
+            reference.sequence,
+        );
+        let bytes = self
+            .storage()
+            .read_protocol_object(&context, &reference.object, &semantic_prefix)
+            .await
+            .map_err(StoreObjectError::from)?;
+        CircleAck::parse_at(&bytes, root, reference, &author)
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) async fn stage_acknowledgement(
@@ -394,6 +608,7 @@ impl AuthorizedStore<'_> {
                         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
                             reference: outbound.reference.clone(),
                             value: outbound.ack.value.clone(),
+                            circle_acknowledgements: outbound.circle_acknowledgements.clone(),
                         },
                     ))
                     .await?;
@@ -427,6 +642,13 @@ impl AuthorizedStore<'_> {
             {
                 continue;
             }
+            publish_circle_acknowledgement_objects(
+                self.storage(),
+                self.database(),
+                &outbound,
+                &candidate,
+            )
+            .await?;
             match Box::pin(operations::publish_prepared(
                 self.database(),
                 self.storage(),

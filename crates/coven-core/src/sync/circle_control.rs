@@ -16,8 +16,9 @@ use super::membership::{MemberRole, MembershipGrantCreationAuthority, Membership
 use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef};
 use super::storage::ExactObjectRef;
 use super::store_commit::{
-    CommitFrontier, ObjectHash, OwnerRecoveryCursor, SnapshotImageRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, SuccessorLink, STORE_PROTOCOL_VERSION,
+    CommitFrontier, ObjectHash, OwnerRecoveryCursor, SnapshotImageRef, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, SuccessorLink,
+    STORE_PROTOCOL_VERSION,
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -479,6 +480,20 @@ impl CircleBootstrapRef {
         );
         self.image.object.slot().logical_key() == format!("{semantic_prefix}.db")
     }
+}
+
+/// The exact retained bootstrap coverage a recipient device's live Circle
+/// projection was seeded from: the activating Store commit, the control it
+/// activated under, and the bootstrap reference (its exact cut and image hash
+/// live inside that reference, not re-declared here). Names one row of
+/// `circle_bootstrap_coverage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleBootstrapCoverageRef {
+    pub circle_id: CircleId,
+    pub control: CircleControlCoord,
+    pub activation_commit: StoreBatchCommitRef,
+    pub bootstrap: CircleBootstrapRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -362,6 +362,35 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            outbound_circle_acks,
+            "
+    circle_id TEXT PRIMARY KEY,
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    ack_bytes BLOB NOT NULL,
+    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object))
+"
+        );
+        $visit!(
+            published_circle_acks,
+            "
+    circle_id TEXT PRIMARY KEY,
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
+    store_cut TEXT NOT NULL CHECK (json_valid(store_cut)),
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord))
+"
+        );
+        $visit!(
+            activated_circle_acks,
+            "
+    circle_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    activating_commit TEXT NOT NULL CHECK (json_valid(activating_commit)),
+    PRIMARY KEY (circle_id, device_id)
+"
+        );
+        $visit!(
             activated_store_acks,
             "
     device_id TEXT PRIMARY KEY,

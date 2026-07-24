@@ -287,6 +287,40 @@ impl StoreDatabase {
         Ok(())
     }
 
+    pub(crate) fn circle_bootstrap_coverage_ref_on(
+        conn: &Connection,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Option<crate::sync::circle::CircleBootstrapCoverageRef>, DbError> {
+        let row: Option<(String, String, Vec<u8>)> = conn
+            .query_row(
+                "SELECT control_coord, activation_commit, bootstrap_ref
+                 FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((control, activation_commit, bootstrap_ref)) = row else {
+            return Ok(None);
+        };
+        let control: crate::sync::circle::CircleControlCoord = serde_json::from_str(&control)
+            .map_err(|error| DbError::Message(format!("parse Circle coverage control: {error}")))?;
+        let activation_commit: StoreBatchCommitRef = serde_json::from_str(&activation_commit)
+            .map_err(|error| {
+                DbError::Message(format!("parse Circle coverage activation: {error}"))
+            })?;
+        let bootstrap: crate::sync::circle::CircleBootstrapRef =
+            serde_json::from_slice(&bootstrap_ref).map_err(|error| {
+                DbError::Message(format!("parse Circle coverage bootstrap: {error}"))
+            })?;
+        Ok(Some(crate::sync::circle::CircleBootstrapCoverageRef {
+            circle_id,
+            control,
+            activation_commit,
+            bootstrap,
+        }))
+    }
+
     pub(crate) fn circle_bootstrap_replay_inputs_on(
         conn: &Connection,
     ) -> Result<
