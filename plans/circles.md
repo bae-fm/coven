@@ -706,9 +706,13 @@ outcome slot. The accepted final outcome activates:
 - a successor bootstrap; and
 - the successor active control.
 
-Packages beyond the accepted old-epoch cutoff are invalid. No later pass repairs
-an incomplete close; every step is retained for idempotent retry or fails to its
-initiator.
+Packages beyond the accepted old-epoch cutoff are invalid: receivers omit them
+deterministically without materializing any of their content, and a commit at
+an accepted cutoff coordinate that differs from the accepted commit fails
+loud. Local authoring beyond the cutoff fails typed to its initiator; a
+receiver never holds a whole stream hostage to one device that raced the
+close. No later pass repairs an incomplete close; every step is retained for
+idempotent retry or fails to its initiator.
 
 ### Delete
 
@@ -755,7 +759,17 @@ head: the enclosing Store commit coordinate orders and activates them.
 
 Every package is encrypted for its audience, signed by the author, bound to the
 schema-routing contract and audience key fingerprint, and addressed by an
-immutable exact locator.
+immutable exact locator. The author's signature and the contract and
+fingerprint bindings are transitive where the object layering already makes
+them exact: the signed commit pins each package's ciphertext size and content
+hash, the sealed object names its key fingerprint in its authenticated header,
+and Circle package refs additionally carry the fingerprint in the signed
+commit body. No separate per-package signature exists or is required. The author's signature and the contract and
+fingerprint bindings are transitive where the object layering already makes
+them exact: the signed commit pins each package's ciphertext size and content
+hash, the sealed object names its key fingerprint in its authenticated header,
+and Circle package refs additionally carry the fingerprint in the signed
+commit body. No separate per-package signature exists or is required.
 
 ### Candidate ownership
 
