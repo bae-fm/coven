@@ -319,6 +319,148 @@ async fn merge_local_only_scoped_write_is_not_pending() {
     assert_local_only_scoped_write("merge-local-only").await;
 }
 
+/// A transaction whose rows are all Circle-scoped emits one package per Circle
+/// plus a Store package carrying only the audience mirror — never an empty Store
+/// package. The Store partition exists so a peer without the Circle still learns
+/// each row's routing (`_coven_audience`), but it must carry that mirror and no
+/// scoped row bytes; an empty Store changeset would be a Store commit activating
+/// nothing.
+#[tokio::test]
+async fn circle_only_write_emits_a_mirror_only_store_package() {
+    let tables = vec![
+        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
+            .scoped_by("audience"),
+    ];
+    let (db, _) = Database::open(
+        Path::new(":memory:"),
+        tables.clone(),
+        BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "circle-only-device".to_string(),
+        &[Migration::sql(
+            1,
+            "accounts",
+            "CREATE TABLE accounts (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+    .expect("open Circle-only Store");
+    crate::sync::test_helpers::TestStore::create(
+        &db,
+        "circle-only",
+        crate::keys::UserKeypair::generate(),
+    )
+    .await
+    .expect("install scoped Store authority");
+    let (first, second) = db
+        .call(|conn| {
+            let (first, _) =
+                crate::sync::test_helpers::install_test_active_circle(conn, "circle-only-first");
+            let (second, _) =
+                crate::sync::test_helpers::install_test_active_circle(conn, "circle-only-second");
+            Ok((first, second))
+        })
+        .await
+        .expect("install two Circles");
+
+    let routing = EncryptionService::from_key([7; 32]);
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let write_id = db.new_write_id();
+    let stored_write_id = write_id.clone();
+    let write_tables = tables.clone();
+    let (first_audience, second_audience) = (first.to_string(), second.to_string());
+    let (write_first, write_second) = (first_audience.clone(), second_audience.clone());
+    db.call(move |conn| {
+        StoreDatabase::run_store_write_transaction_on(
+            conn,
+            &write_tables,
+            &gates,
+            &blob_decls,
+            Some(&routing),
+            None,
+            write_id,
+            |tx| {
+                tx.execute(
+                    "INSERT INTO accounts VALUES ('first-account', ?1, '0000000001000-0000-circle')",
+                    [&write_first],
+                )?;
+                tx.execute(
+                    "INSERT INTO accounts VALUES ('second-account', ?1, '0000000001001-0000-circle')",
+                    [&write_second],
+                )?;
+                Ok::<_, DbError>(())
+            },
+        )
+    })
+    .await
+    .expect("capture Circle-only partitions");
+
+    let partitions = db
+        .call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT audience, changeset FROM store_write_partitions
+                     WHERE write_id = ?1 ORDER BY audience",
+                )
+                .map_err(DbError::from)?;
+            let partitions = statement
+                .query_map([stored_write_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            Ok(partitions)
+        })
+        .await
+        .expect("read Circle-only partitions");
+
+    let mut audiences = partitions
+        .iter()
+        .map(|(audience, _)| audience.clone())
+        .collect::<Vec<_>>();
+    audiences.sort();
+    let mut expected = vec![first.to_string(), second.to_string(), "store".to_string()];
+    expected.sort();
+    assert_eq!(
+        audiences, expected,
+        "a Circle-only write emits one package per Circle plus one Store package",
+    );
+
+    let store_changeset = &partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("Circle-only write emits a Store package")
+        .1;
+    let store_rows = crate::changeset::walk(store_changeset).expect("walk Store partition");
+    assert!(
+        !store_rows.is_empty(),
+        "the Store package is not empty — an empty Store commit would activate nothing",
+    );
+    assert!(
+        store_rows.iter().all(|row| row.table == "_coven_audience"),
+        "the Store package carries only the audience mirror, no scoped rows: {:?}",
+        store_rows.iter().map(|row| &row.table).collect::<Vec<_>>(),
+    );
+
+    for (circle, audience) in [(first, &first_audience), (second, &second_audience)] {
+        let circle_changeset = &partitions
+            .iter()
+            .find(|(partition_audience, _)| partition_audience == audience)
+            .unwrap_or_else(|| panic!("Circle {circle} package is present"))
+            .1;
+        let circle_rows = crate::changeset::walk(circle_changeset).expect("walk Circle partition");
+        assert!(
+            circle_rows.iter().any(|row| row.table == "accounts"),
+            "each Circle package carries its scoped rows",
+        );
+    }
+}
+
 #[tokio::test]
 async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     let tables = vec![
