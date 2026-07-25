@@ -574,6 +574,25 @@ fn unique_note_db() -> crate::database::Database {
     )
 }
 
+fn uuid_note_db() -> crate::database::Database {
+    open_test_db_schema(
+        vec![SyncedTable::new(
+            "uuid_notes",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )],
+        vec![Migration::run(1, "uuid-note-schema", |conn| {
+            conn.execute_batch(
+                "CREATE TABLE uuid_notes (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    _updated_at TEXT NOT NULL
+                ) STRICT;",
+            )
+            .map_err(crate::database::DbError::from)
+        })],
+    )
+}
+
 fn mixed_constraint_db() -> crate::database::Database {
     open_test_db_schema(
         vec![
@@ -2674,6 +2693,159 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
 }
 
+/// A package whose changeset carries a non-canonical primary key for an
+/// `IndependentUuid` table (SQLite accepts any TEXT id, and the session capture
+/// does not validate identity) is held on the pull path — not applied, not
+/// hard-failed — so the stream stalls at the tampered position instead of
+/// admitting an id the local contract forbids.
+#[tokio::test]
+async fn pull_holds_a_non_canonical_uuid_row_identity() {
+    let db1 = uuid_note_db();
+    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let cs = capture_bytes(
+        &db1,
+        &["INSERT INTO uuid_notes (id, title, _updated_at) \
+             VALUES ('NOT-A-CANONICAL-UUID', 'Forged', '0000000001000-0000-dev1')"],
+    )
+    .await;
+    let commit = storage
+        .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
+        .await
+        .expect("publish exact Store changeset");
+    let stream_id = commit_stream_id(&commit);
+
+    let db2 = uuid_note_db();
+    let (_tmp, ld) = temp_store_dir();
+    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0].reason,
+        HeldStorePositionReason::InvalidRowIdentity { table, .. } if table == "uuid_notes"
+    ));
+    assert!(
+        !row_exists(
+            &db2,
+            "SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'"
+        )
+        .await
+    );
+    assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
+}
+
+/// The converged state of `n1` (`Some(title)` if present, `None` if deleted)
+/// after a receiver pulls a concurrent delete and edit of the row in the given
+/// arrival order. The delete is authored by the founder (sequence 2, following
+/// the shared insert); the edit is authored by a concurrent second device with a
+/// strictly later stamp. Only two devices participate so the device-join observer
+/// is unambiguously the founder (the provider administrator).
+async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
+    let source = open_test_db();
+    let storage = create_store(&source, UserKeypair::generate()).await;
+
+    let insert = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage
+        .publish_changeset("founder", 1, &insert, SCHEMA_VERSION)
+        .await
+        .expect("publish shared row");
+
+    // The founder's own delete (captured from a private db so its old image is the
+    // shared row) and a concurrent second device's later edit.
+    let deleter = open_test_db();
+    exec(
+        &deleter,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
+    )
+    .await;
+    let delete = capture_bytes(&deleter, &["DELETE FROM notes WHERE id = 'n1'"]).await;
+
+    let editor = open_test_db();
+    exec(
+        &editor,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
+    )
+    .await;
+    let edit = capture_bytes(
+        &editor,
+        &["UPDATE notes SET title = 'edited', \
+           _updated_at = '0000000009000-0000-editor' WHERE id = 'n1'"],
+    )
+    .await;
+
+    let target = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    pull_into(&target, &storage, &ld).await;
+
+    // Deliver the two concurrent commits one at a time, in the chosen arrival order.
+    // The founder stream advances through Store setup and the editor's device join,
+    // so its delete sequence is resolved live rather than hard-coded.
+    if delete_first {
+        let delete_seq = storage
+            .next_commit_sequence("founder")
+            .await
+            .expect("read founder delete sequence");
+        storage
+            .publish_changeset("founder", delete_seq, &delete, SCHEMA_VERSION)
+            .await
+            .expect("publish founder delete");
+        pull_into(&target, &storage, &ld).await;
+        storage
+            .publish_changeset("editor", 1, &edit, SCHEMA_VERSION)
+            .await
+            .expect("publish concurrent editor edit");
+    } else {
+        storage
+            .publish_changeset("editor", 1, &edit, SCHEMA_VERSION)
+            .await
+            .expect("publish concurrent editor edit");
+        pull_into(&target, &storage, &ld).await;
+        let delete_seq = storage
+            .next_commit_sequence("founder")
+            .await
+            .expect("read founder delete sequence");
+        storage
+            .publish_changeset("founder", delete_seq, &delete, SCHEMA_VERSION)
+            .await
+            .expect("publish founder delete");
+    }
+    let (_updated, result) = pull_into(&target, &storage, &ld).await;
+    assert!(
+        result.held_positions.is_empty(),
+        "neither concurrent commit is held: {:?}",
+        result.held_positions,
+    );
+
+    if row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await {
+        Some(query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await)
+    } else {
+        None
+    }
+}
+
+/// A concurrent delete and edit of one row must converge to the same result
+/// whichever the receiver pulls first. Store canonical replay is what has to
+/// compensate for arrival order; a divergence here would be a real convergence
+/// bug, not a test artifact.
+#[tokio::test]
+async fn delete_and_edit_conflict_converges_across_arrival_orders() {
+    let delete_first = delete_edit_converged_state(true).await;
+    let edit_first = delete_edit_converged_state(false).await;
+    assert_eq!(
+        delete_first, edit_first,
+        "a delete/edit conflict converges to one state regardless of arrival order",
+    );
+}
+
 #[tokio::test]
 async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let db1 = unique_note_db();
@@ -4240,6 +4412,225 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
             .name()
             .expect("ordered Circle is active"),
         "Renamed readers"
+    );
+}
+
+fn scoped_fk_circle_db() -> crate::database::Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
+                .scoped_by("audience"),
+            SyncedTable::new(
+                "categories",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            )
+            .scoped_by("audience"),
+            SyncedTable::new(
+                "comments",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            )
+            .inherits_audience_through("note_id"),
+        ],
+        vec![crate::migration::Migration::sql(
+            1,
+            "scoped foreign-key schema",
+            "CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE categories (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE comments (
+                 id TEXT PRIMARY KEY,
+                 note_id TEXT NOT NULL REFERENCES notes(id),
+                 category_id TEXT NOT NULL REFERENCES categories(id),
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
+async fn author_scoped_write(store: &TestStore, db: &crate::database::Database, sql: String) {
+    let tables = db.synced_tables().to_vec();
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
+    let write_id = db.new_write_id();
+    db.call(move |conn| {
+        let routing = EncryptionService::from_key([42; 32]);
+        crate::sync::store::StoreDatabase::run_store_write_transaction_on(
+            conn,
+            &tables,
+            &gates,
+            &blob_decls,
+            Some(&routing),
+            None,
+            write_id,
+            |tx| {
+                tx.execute_batch(&sql)
+                    .map_err(crate::database::DbError::from)
+            },
+        )
+    })
+    .await
+    .expect("commit scoped host transaction");
+    let (_temp, dir) = temp_store_dir();
+    store
+        .publish_pending(db, &dir)
+        .await
+        .expect("publish scoped write");
+}
+
+async fn pull_scoped(
+    store: &TestStore,
+    db: &crate::database::Database,
+    owner: &UserKeypair,
+) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError> {
+    let membership = store.open_into(db).await.map_err(|error| {
+        crate::sync::store::StorePullError::Membership(
+            crate::sync::store::StorePullMembershipError::Message(error),
+        )
+    })?;
+    let (_temp, dir) = temp_store_dir();
+    let routing_encryption = EncryptionService::from_key([42; 32]);
+    crate::sync::store::pull_store_commits(
+        &store_database(db),
+        db.synced_tables(),
+        &store.storage,
+        store.root.store_root_hash,
+        &dir,
+        &membership,
+        Some(owner),
+        Some(&routing_encryption),
+    )
+    .await
+}
+
+/// A receiver holds a category only because a comment it owns references it as an
+/// unchanged foreign-key ancestor. A concurrent device — which never saw the
+/// comment — moves that category into another Circle. When the receiver applies
+/// the move, the comment (still in the first Circle) would point at a category in
+/// a second Circle: an FK-invalid connected component the final-component
+/// validation must refuse, leaving the receiver's category where it was.
+#[tokio::test]
+async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component() {
+    let owner = UserKeypair::generate();
+    let founder = scoped_fk_circle_db();
+    let storage = TestStore::create(&founder, "receiver-final-component", owner.clone())
+        .await
+        .expect("create scoped Store");
+
+    // A second owner device that will hold the comment the mover never sees.
+    let receiver = scoped_fk_circle_db();
+    install_active_device_fixture(
+        &storage,
+        &founder,
+        &receiver,
+        &owner,
+        "2026-07-19T00:00:00Z",
+    )
+    .await
+    .expect("install receiver device");
+
+    let founder_device = founder
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read founder device")
+        .expect("founder device exists");
+    let loaded = storage
+        .loaded_store(&founder)
+        .await
+        .expect("load founder Store");
+    let circle_a = loaded
+        .create_circle(&founder_device, "0000000001000-0000-owner", "First", &owner)
+        .await
+        .expect("create first Circle");
+    let circle_b = loaded
+        .create_circle(
+            &founder_device,
+            "0000000001001-0000-owner",
+            "Second",
+            &owner,
+        )
+        .await
+        .expect("create second Circle");
+
+    let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
+    let category_id = "01890a5d-ac96-774b-bcce-b302099c3f75";
+    let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    // Founder publishes a note and a category, both in the first Circle. It never
+    // authors the comment.
+    author_scoped_write(
+        &storage,
+        &founder,
+        format!(
+            "INSERT INTO notes VALUES ('{note_id}', '{circle_a}', 'body', '0000000002000-0000-owner');
+             INSERT INTO categories VALUES ('{category_id}', '{circle_a}', '0000000002001-0000-owner');"
+        ),
+    )
+    .await;
+
+    // Receiver pulls the note and category, then authors a comment that references
+    // both — the only place the category is held as a foreign-key ancestor.
+    pull_scoped(&storage, &receiver, &owner)
+        .await
+        .expect("receiver pulls the valid relationship");
+    assert!(
+        row_exists(
+            &receiver,
+            &format!("SELECT 1 FROM categories WHERE id = '{category_id}'")
+        )
+        .await,
+        "receiver holds the category before the concurrent move",
+    );
+    author_scoped_write(
+        &storage,
+        &receiver,
+        format!(
+            "INSERT INTO comments VALUES \
+             ('{comment_id}', '{note_id}', '{category_id}', 'child', '0000000003000-0000-owner');"
+        ),
+    )
+    .await;
+
+    // Founder — which never saw the comment — moves the category into the second
+    // Circle. Its own component stays valid, so the move publishes.
+    author_scoped_write(
+        &storage,
+        &founder,
+        format!(
+            "UPDATE categories SET audience = '{circle_b}', \
+             _updated_at = '0000000004000-0000-owner' WHERE id = '{category_id}';"
+        ),
+    )
+    .await;
+
+    // The receiver applies the move against its comment: the resulting component
+    // crosses Circles, so the final-component validation refuses it.
+    let outcome = pull_scoped(&storage, &receiver, &owner).await;
+    let refusal = match &outcome {
+        Err(error) => error.to_string(),
+        Ok(result) => panic!("the cross-Circle move must be refused, not applied: {result:?}"),
+    };
+    assert!(
+        refusal.contains("relationship through category_id"),
+        "the receiver refuses the move by its final-component FK validation: {refusal}",
+    );
+    let category_audience = query_text(
+        &receiver,
+        &format!("SELECT audience FROM categories WHERE id = '{category_id}'"),
+    )
+    .await;
+    assert_eq!(
+        category_audience,
+        circle_a.to_string(),
+        "the refused move leaves the receiver's category in its original Circle",
     );
 }
 
