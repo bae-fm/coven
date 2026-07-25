@@ -2910,8 +2910,50 @@ async fn assert_cancellation_reopened(fixture: &ClosingFounderCircle) {
         .contains_key(&fixture.member_pubkey));
 }
 
+// Runs `flow` on a thread whose stack is capped at 1 MiB — below the 2 MiB
+// default thread stack, above the ~0.5 MiB an optimized build of these Circle
+// operations actually needs. An unoptimized (`opt-level = 0`) build of the same
+// flow needs ~2 MiB and overflows here; `[profile.test.package.coven-core]
+// opt-level = 1` in the workspace `Cargo.toml` is what keeps the poll-frame
+// scratch small enough to fit. This guards that profile setting on every
+// platform: drop the optimization (or regrow the operation graph past 1 MiB of
+// optimized frames) and this thread overflows and aborts the test binary, so
+// macOS/Windows CI catch the regression, not only the tighter-stacked Linux job.
+fn run_circle_flow_on_a_one_megabyte_stack<Flow, Fut>(flow: Flow)
+where
+    Flow: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .name("circle-bounded-stack".to_string())
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build bounded-stack Circle runtime")
+                .block_on(flow());
+        })
+        .expect("spawn bounded-stack Circle thread")
+        .join()
+        .expect("Circle cancellation flow completes on a 1 MiB stack without overflow");
+}
+
 #[tokio::test]
 async fn interrupted_cancellation_resumes_idempotently() {
+    interrupted_cancellation_flow().await;
+}
+
+// A regression guard for the deep, non-recursive async frames of the Circle
+// resume/prepare path: it runs the same flow on a 1 MiB stack (see
+// `run_circle_flow_on_a_one_megabyte_stack`). Optimized, the flow fits with room
+// to spare; unoptimized it needs ~2 MiB and this overflows.
+#[test]
+fn interrupted_cancellation_resumes_within_a_one_megabyte_stack() {
+    run_circle_flow_on_a_one_megabyte_stack(interrupted_cancellation_flow);
+}
+
+async fn interrupted_cancellation_flow() {
     // A crash between beginning the cancellation's finalization and publishing it:
     // the durable operation resumes and completes exactly once. Its distinct write
     // identity keeps it from being re-derived as a finalization.

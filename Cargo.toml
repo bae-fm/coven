@@ -18,3 +18,15 @@ dead_code = "deny"
 too_many_arguments = "allow"
 new_without_default = "allow"
 large_enum_variant = "allow"
+
+# Debug (unoptimized) builds of the async Circle/membership operations spend
+# several times more stack per `poll` frame than optimized builds — each poll
+# reserves scratch sized to its whole generator, and these operations compose
+# many large generators into one deep, non-recursive call graph. Release builds
+# of the same flows fit in well under 512 KiB of stack; unoptimized they needed
+# ~2 MiB, over the 2 MiB default thread stack on Linux (whose usable per-thread
+# stack is slightly smaller than macOS), so CI's debug `cargo test` overflowed
+# deterministically. Optimizing coven-core's test build collapses the poll-frame
+# scratch (the flows fit in <512 KiB again) and speeds its crypto-heavy tests.
+[profile.test.package.coven-core]
+opt-level = 1
