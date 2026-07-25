@@ -2451,6 +2451,110 @@ mod tests {
     }
 
     #[test]
+    fn inbound_circle_filter_rejects_a_private_route_delete() {
+        let source = Connection::open_in_memory().expect("open source");
+        routing_schema(&source);
+        source
+            .execute(
+                "INSERT INTO _coven_row_routes VALUES ('route', 'notes', 'row', '1')",
+                [],
+            )
+            .expect("seed private route");
+        let mut session = Session::new(&source).expect("create source session");
+        session
+            .attach(Some("_coven_row_routes"))
+            .expect("attach private routes");
+        source
+            .execute(
+                "DELETE FROM _coven_row_routes WHERE routing_id = 'route'",
+                [],
+            )
+            .expect("delete private route");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract route delete");
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let circle = CircleId::from_bytes([1; 16]);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES ('route', ?1, '2')",
+                [circle.to_string()],
+            )
+            .expect("install winning mirror");
+
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            circle,
+            &StoreAudienceTransitions::default(),
+            &note_gates(&target),
+            &routing_key(),
+        )
+        .expect_err("private routes must be complete INSERT images");
+        assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
+    }
+
+    #[test]
+    fn inbound_circle_filter_rejects_a_duplicate_private_route() {
+        let key = routing_key();
+        let routing_id = row_routing_id(&key, "notes", "row").to_string();
+        // Two authenticated INSERT images for the same (table, row_id). A session
+        // cannot capture both — the UNIQUE(table_name, row_id) constraint refuses
+        // the second — so concatenate two single-route changesets to forge the
+        // duplicate a malicious package could carry on the wire.
+        let mut changeset = private_route_insert_changeset(&[(
+            routing_id.clone(),
+            "notes".to_string(),
+            "row".to_string(),
+            "1".to_string(),
+        )])
+        .expect("build first route image");
+        changeset.extend(
+            private_route_insert_changeset(&[(
+                routing_id.clone(),
+                "notes".to_string(),
+                "row".to_string(),
+                "1".to_string(),
+            )])
+            .expect("build second route image"),
+        );
+
+        let target = Connection::open_in_memory().expect("open target");
+        routing_schema(&target);
+        let circle = CircleId::from_bytes([1; 16]);
+        target
+            .execute(
+                "INSERT INTO _coven_audience VALUES (?1, ?2, '1')",
+                (&routing_id, circle.to_string()),
+            )
+            .expect("install winning mirror");
+        let transitions = store_transitions([(
+            routing_id.clone(),
+            Audience::Circle(circle),
+            "1".to_string(),
+        )]);
+
+        let error = filter_inbound_circle_changeset(
+            &target,
+            &changeset,
+            circle,
+            &transitions,
+            &note_gates(&target),
+            &key,
+        )
+        .expect_err("a package must not carry two routes for one row");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate private route for notes.row"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn inbound_private_route_must_authenticate_its_table_and_row() {
         let source = Connection::open_in_memory().expect("open source");
         routing_schema(&source);
