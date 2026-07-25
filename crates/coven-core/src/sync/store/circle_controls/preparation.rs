@@ -227,6 +227,7 @@ pub(super) async fn prepare_circle_activation_objects(
     root: &StoreRootRef,
     mut draft: CircleTransitionDraft,
     history: &CircleTransitionHistory,
+    merged_branch_objects: &[CircleActivationObjects],
     candidate_family: CandidateFamilyId,
     author_registration: &StoreDeviceRegistrationRef,
     author: &StoreDeviceRegistration,
@@ -284,12 +285,42 @@ pub(super) async fn prepare_circle_activation_objects(
     } else {
         draft.control.value.access_epoch().roster.heads.clone()
     };
-    let roster_resolutions =
+    let mut roster_resolutions =
         previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_resolutions.clone());
     let mut metadata_entries =
         previous_objects.map_or_else(BTreeMap::new, |objects| objects.metadata_entries.clone());
     let mut metadata_heads =
         previous_objects.map_or_else(Vec::new, |objects| objects.metadata_heads.clone());
+    // A control-conflict resolution covers the losing branches too: union their
+    // already-published heads and entries into the seed so the resolution's
+    // activation objects carry the merged frontier the resolved control names.
+    // Heads collapse to one per author stream at its deepest position, matching
+    // the control frontier the draft built; entries and resolutions merge by
+    // coordinate. `roster_frontier` already reflects the merged frontier — it is
+    // read from the draft control the resolution shaped.
+    for branch in merged_branch_objects {
+        roster_entries.extend(branch.roster_entries.clone());
+        roster_resolutions.extend(branch.roster_resolutions.clone());
+        metadata_entries.extend(branch.metadata_entries.clone());
+        for head in &branch.roster_heads {
+            crate::sync::circle::merge_frontier_head(
+                &mut roster_heads,
+                head.clone(),
+                |head| head.coord.stream_key(),
+                |head| head.coord.seq,
+            );
+        }
+        for head in &branch.metadata_heads {
+            crate::sync::circle::merge_frontier_head(
+                &mut metadata_heads,
+                head.clone(),
+                |head| head.coord.stream_key(),
+                |head| head.coord.seq,
+            );
+        }
+    }
+    roster_heads.sort();
+    metadata_heads.sort_by_key(|head| head.coord.stream_key());
     let mut prepared = BTreeMap::new();
     let mut stream_activations = Vec::new();
     let mut close_outcome = None;
@@ -1297,6 +1328,11 @@ pub(super) async fn prepare_circle_operation_request(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+        // A control-conflict resolution covers the losing branches' frontiers by
+        // carrying their already-published activation objects (metadata and roster
+        // heads and entries) into its own commit, so activation can verify the
+        // merged frontier. Empty for every other operation.
+        let mut merged_branch_objects: Vec<CircleActivationObjects> = Vec::new();
         let (creation, additional_prepared) = match &request {
             CircleOperationRequest::Create {
                 name,
@@ -1672,6 +1708,20 @@ pub(super) async fn prepare_circle_operation_request(
                         ));
                     }
                 };
+                let mut losing_branches = Vec::with_capacity(request.losing_branches.len());
+                for branch in &request.losing_branches {
+                    losing_branches.push(crate::sync::circle::ResolvedConflictBranch {
+                        control_head: crate::sync::circle::MergeCircleControlHeadRef {
+                            coord: branch.reference.control().clone(),
+                            head_hash: branch.reference.head_hash(),
+                            object: branch.reference.head_object().clone(),
+                        },
+                        metadata_heads: branch.reference.objects().metadata_heads.clone(),
+                        roster_heads: branch.reference.objects().roster_heads.clone(),
+                        selected_metadata: branch.selected_metadata.clone(),
+                    });
+                    merged_branch_objects.push(branch.reference.objects().clone());
+                }
                 (
                     CircleTransitionDraft::resolve(
                         candidate_family,
@@ -1683,7 +1733,7 @@ pub(super) async fn prepare_circle_operation_request(
                         &request.chosen.roster,
                         &request.chosen.metadata,
                         keyring,
-                        request.losing_heads.clone(),
+                        losing_branches,
                         db.id_provider(),
                         signer,
                     )?,
@@ -1856,6 +1906,7 @@ pub(super) async fn prepare_circle_operation_request(
                 &root,
                 creation,
                 &history,
+                &merged_branch_objects,
                 candidate_family,
                 &author_registration,
                 &author,

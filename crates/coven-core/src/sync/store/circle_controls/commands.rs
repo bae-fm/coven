@@ -487,10 +487,22 @@ impl Store {
                     "Circle {circle_id} conflict omits retained authority for the chosen branch"
                 ))
             })?;
+        // Resolving to a closing branch would author a new control coordinate
+        // carrying the close. Participant responses bind to the closing control's
+        // coordinate at create-once slots, so a resolution successor strands any
+        // response already made against the original closing control, with no way
+        // to re-respond. Refuse it: the Owner resolves to a non-closing branch to
+        // discard the close, or lets the close settle before resolving.
+        if matches!(
+            chosen_activation.control.value.state(),
+            crate::sync::circle::CircleControlState::EpochClose(_)
+        ) {
+            return Err(CircleOperationError::ResolveToClosingBranch { circle_id });
+        }
         let chosen_state =
             chosen_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
         let previous_control = chosen_activation.reference.clone();
-        let mut losing_heads = Vec::new();
+        let mut losing_branches = Vec::new();
         for branch in &branches {
             if *branch == chosen {
                 continue;
@@ -503,10 +515,10 @@ impl Store {
                         "Circle {circle_id} conflict omits retained authority for a losing branch"
                     ))
                 })?;
-            losing_heads.push(crate::sync::circle::MergeCircleControlHeadRef {
-                coord: activation.reference.control.clone(),
-                head_hash: activation.reference.head_hash,
-                object: activation.reference.head_object.clone(),
+            let selected_metadata = losing_branch_selected_metadata(circle_id, &activation)?;
+            losing_branches.push(CircleResolveLosingBranch {
+                reference: activation.reference.clone(),
+                selected_metadata,
             });
         }
         let journal = Box::pin(prepare_circle_operation_request(
@@ -517,7 +529,7 @@ impl Store {
                 circle_id,
                 chosen: chosen_state,
                 previous_control,
-                losing_heads,
+                losing_branches,
                 conflicting_branches: branches,
             })),
             signer,
@@ -1077,6 +1089,27 @@ fn chosen_branch_authoring_state(
     })
 }
 
+/// The metadata entry a losing conflict branch selected, read from its retained
+/// active access. The resolution's name is the canonical maximum across every
+/// branch's selection, so the resolver — an Owner holding the epoch key, and thus
+/// active access to every branch — reads each losing branch's selected metadata
+/// directly from its retained activation.
+fn losing_branch_selected_metadata(
+    circle_id: CircleId,
+    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
+) -> Result<crate::sync::circle::CircleMetadata, CircleOperationError> {
+    activation
+        .local_access
+        .as_ref()
+        .and_then(|access| access.active.as_ref())
+        .map(|active| active.metadata.clone())
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} control resolution requires active access to every branch"
+            ))
+        })
+}
+
 pub(super) struct CircleRenameRequest {
     pub(super) circle_id: CircleId,
     pub(super) name: String,
@@ -1113,13 +1146,26 @@ pub(super) struct CircleResolveControlRequest {
     pub(super) circle_id: CircleId,
     pub(super) chosen: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
-    pub(super) losing_heads: Vec<crate::sync::circle::MergeCircleControlHeadRef>,
+    /// The retained branches other than `chosen`. The resolution merges each
+    /// one's control, metadata, and roster head frontiers into its own so no
+    /// author-stream head slot is re-allocated once the conflict collapses.
+    pub(super) losing_branches: Vec<CircleResolveLosingBranch>,
     /// Every retained branch coordinate, in canonical order, as captured when
     /// the command ran. Preparation verifies this still equals the currently
     /// retained conflict set inside the journal transaction, so a branch
     /// discovered between command and activation resurfaces as a new conflict
     /// rather than being silently swallowed.
     pub(super) conflicting_branches: Vec<crate::sync::circle::CircleControlCoord>,
+}
+
+pub(super) struct CircleResolveLosingBranch {
+    /// The losing branch's exact activation reference: its control head plus the
+    /// full activation objects (metadata and roster head frontiers and their
+    /// entries) the resolution covers.
+    pub(super) reference: CircleControlRef,
+    /// The metadata entry this branch selected — one input to the resolution's
+    /// deterministic name selection over the merged frontier.
+    pub(super) selected_metadata: crate::sync::circle::CircleMetadata,
 }
 
 pub(super) struct CircleFinalizeEpochCloseRequest {

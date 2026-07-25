@@ -1728,6 +1728,43 @@ pub struct MergeCircleControlHeadRef {
     pub object: ExactObjectRef,
 }
 
+/// One losing branch of a resolved control conflict, carried so the resolution
+/// can cover every branch's frontier rather than only the chosen branch's: the
+/// branch's control head, its metadata and roster head frontiers, and the
+/// metadata entry that branch selected. The resolution unions these into its own
+/// frontier so no author-stream head is re-allocated once the conflict collapses,
+/// and re-derives its name as the deterministic metadata selection across the
+/// union.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedConflictBranch {
+    pub control_head: MergeCircleControlHeadRef,
+    pub metadata_heads: Vec<CircleMetadataHeadRef>,
+    pub roster_heads: Vec<CircleRosterHeadRef>,
+    pub selected_metadata: CircleMetadata,
+}
+
+/// Insert `head` into a frontier keyed by author stream, keeping the deeper
+/// (higher-sequence) head when the stream already carries one. Merging every
+/// conflicting branch's heads this way yields the union frontier: each stream is
+/// covered at its deepest position across all branches, so a device that authored
+/// on that stream continues from its own head instead of re-allocating it.
+pub(crate) fn merge_frontier_head<H>(
+    frontier: &mut Vec<H>,
+    head: H,
+    stream_key: impl Fn(&H) -> CircleAuthorStreamKey,
+    seq: impl Fn(&H) -> u64,
+) {
+    let key = stream_key(&head);
+    match frontier
+        .iter_mut()
+        .find(|existing| stream_key(existing) == key)
+    {
+        Some(existing) if seq(&head) > seq(existing) => *existing = head,
+        Some(_) => {}
+        None => frontier.push(head),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MergeCircleOwnerAuthorityRef {
@@ -3623,12 +3660,17 @@ impl CircleTransitionDraft {
     /// Build a successor of the chosen conflicting branch that causally covers
     /// every branch, collapsing a retained `ControlConflict` to a single
     /// resolved control. The successor inherits the chosen branch's epoch, key
-    /// generation, roster, and selected metadata verbatim — it changes no
-    /// membership, keys, or deletion intent; it only names the complete
-    /// conflicting set so `advance` reduces to it deterministically on every
-    /// device. `losing_heads` are the retained branches other than `chosen`;
-    /// preparation adds the chosen branch head, so the resolved control's causal
-    /// dependencies and predecessor together name every branch.
+    /// generation, and roster contents verbatim — it changes no membership, keys,
+    /// or deletion intent. It merges the control, metadata, and roster head
+    /// frontiers across every branch (the union of covered heads), so a device
+    /// that authored a losing branch continues its own author streams instead of
+    /// re-allocating their head slots. The name is not inherited from the chosen
+    /// branch but re-derived as the deterministic metadata selection over the
+    /// merged frontier: the metadata layer resolves its own conflict — the
+    /// canonical maximum across every covered head — independent of which control
+    /// branch the Owner chose. `losing_branches` are the retained branches other
+    /// than `chosen`; preparation adds the chosen branch head, so the resolved
+    /// control's causal dependencies and predecessor together name every branch.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve(
         candidate_family: super::store_commit::CandidateFamilyId,
@@ -3640,7 +3682,7 @@ impl CircleTransitionDraft {
         chosen_roster: &CircleMaterializedRoster,
         chosen_metadata: &CircleMetadata,
         keyring: &str,
-        losing_heads: Vec<MergeCircleControlHeadRef>,
+        losing_branches: Vec<ResolvedConflictBranch>,
         ids: &dyn crate::id_provider::IdProvider,
         signer: &UserKeypair,
     ) -> Result<Self, CircleTransitionError> {
@@ -3665,19 +3707,66 @@ impl CircleTransitionDraft {
         let epoch_id = chosen_control.value.epoch_id();
         let roster_state = chosen_control.value.roster_state_ref();
 
-        // The resolved control's frontier is the chosen branch's own frontier
-        // extended by every losing branch head; a losing successor on a stream
-        // the chosen branch already covered replaces the older head there.
-        // Preparation adds the chosen branch head and derives the predecessor
-        // and dependencies from this frontier, so the resolved control directly
-        // names every branch.
+        // Merge the control, metadata, and roster head frontiers across every
+        // branch: the chosen branch's frontiers extended by each losing branch's,
+        // one head per author stream at its deepest position. Every branch's
+        // heads become covered, so no author-stream head is re-allocated once the
+        // conflict collapses. Preparation adds the chosen branch head and derives
+        // the predecessor and dependencies from the control frontier, so the
+        // resolved control directly names every branch.
         let mut covered_control_heads = active_epoch.covered_control_heads.clone();
-        for head in losing_heads {
-            covered_control_heads
-                .retain(|existing| existing.coord.stream_key() != head.coord.stream_key());
-            covered_control_heads.push(head);
+        let mut metadata = active_epoch.metadata.clone();
+        let mut roster = active_epoch.roster.clone();
+        for branch in &losing_branches {
+            merge_frontier_head(
+                &mut covered_control_heads,
+                branch.control_head.clone(),
+                |head| head.coord.stream_key(),
+                |head| head.coord.seq,
+            );
+            for head in &branch.metadata_heads {
+                merge_frontier_head(
+                    &mut metadata.heads,
+                    head.clone(),
+                    |head| head.coord.stream_key(),
+                    |head| head.coord.seq,
+                );
+            }
+            for head in &branch.roster_heads {
+                merge_frontier_head(
+                    &mut roster.heads,
+                    head.clone(),
+                    |head| head.coord.stream_key(),
+                    |head| head.coord.seq,
+                );
+            }
         }
         covered_control_heads.sort_by_key(|head| head.coord.stream_key());
+        metadata.heads.sort_by_key(|head| head.coord.stream_key());
+        roster.heads.sort_by_key(|head| head.coord.stream_key());
+
+        // The name is the deterministic metadata selection across the merged
+        // frontier. Each branch's selected metadata is already the canonical
+        // maximum over its own covered history, so the maximum across the branch
+        // selections is the canonical selection over their union.
+        let selected_metadata = std::iter::once(chosen_metadata)
+            .chain(
+                losing_branches
+                    .iter()
+                    .map(|branch| &branch.selected_metadata),
+            )
+            .max_by_key(|entry| {
+                (
+                    entry.metadata_stamp.clone(),
+                    entry.author_pubkey.clone(),
+                    entry.device_id.clone(),
+                    entry.metadata_hash(),
+                )
+            })
+            .expect("a resolution names at least the chosen branch's metadata")
+            .clone();
+        metadata.selected = selected_metadata.coord();
+        metadata.state_hash = selected_metadata.metadata_hash();
 
         let mut control_value = CircleControl {
             version: STORE_PROTOCOL_VERSION,
@@ -3710,8 +3799,8 @@ impl CircleTransitionDraft {
                 },
                 state: CircleControlState::ActiveEpoch(MergeActiveCircleEpoch {
                     common: active_epoch.common.clone(),
-                    metadata: active_epoch.metadata.clone(),
-                    roster: active_epoch.roster.clone(),
+                    metadata,
+                    roster,
                     store_membership,
                     covered_control_heads,
                 }),
@@ -3775,7 +3864,7 @@ impl CircleTransitionDraft {
                 roster: CircleRosterDraftPolicy::Inherited,
                 metadata_successor: false,
             },
-            metadata: chosen_metadata.clone(),
+            metadata: selected_metadata,
             close_intent: None,
             close_finalization: None,
             close_cancellation: None,

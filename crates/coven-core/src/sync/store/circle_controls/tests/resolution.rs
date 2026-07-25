@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
-use super::super::commands::{CircleOperationRequest, CircleResolveControlRequest};
+use super::super::commands::{
+    CircleOperationRequest, CircleResolveControlRequest, CircleResolveLosingBranch,
+};
 use super::*;
-use crate::sync::circle::{CircleControlCoord, CircleInfo};
+use crate::sync::circle::{CircleControlCoord, CircleInfo, CircleRole};
 use crate::sync::store::Store;
 
 const ROUTING_KEY: [u8; 32] = [42; 32];
@@ -263,6 +265,67 @@ async fn resolution_collapses_the_conflict_on_every_device() {
 }
 
 #[tokio::test]
+async fn resolving_to_another_devices_branch_merges_head_frontiers() {
+    let fixture = conflict_fixture("resolve-frontier-merge").await;
+    // `fork` renames on each device; device 2's stamp sorts after device 1's, so
+    // device 2's metadata ("Beta") is the deterministic canonical selection.
+    let (device1_branch, device2_branch) = fork(&fixture).await;
+
+    // Device 1 resolves the conflict to the branch device 2 authored. The
+    // resolution inherits the chosen branch's state — its name stays "Beta" — but
+    // must cover every branch's metadata head, not only the chosen branch's.
+    fixture
+        .store1()
+        .await
+        .resolve_circle_control(
+            &fixture.device1,
+            fixture.circle_id,
+            device2_branch.clone(),
+            &fixture.founder,
+        )
+        .await
+        .expect("resolve the control conflict to device 2's branch");
+    assert_eq!(
+        fixture.circles_device1().await,
+        vec![CircleInfo::Active {
+            id: fixture.circle_id,
+            name: "Beta".to_string(),
+            role: CircleRole::Owner,
+            rotation_required: false,
+        }],
+        "the resolution inherits the chosen branch's name verbatim"
+    );
+
+    // The losing branch (device 1's own) advanced device 1's metadata stream.
+    // Authoring again on device 1 must continue that stream from the head the
+    // losing branch left — the resolution covers it — rather than re-deriving a
+    // sequence whose head slot the losing branch already created.
+    let _ = &device1_branch;
+    fixture
+        .store1()
+        .await
+        .rename_circle(
+            &fixture.device1,
+            "0000000001500-0000-device1",
+            fixture.circle_id,
+            "Gamma",
+            &fixture.founder,
+        )
+        .await
+        .expect("device 1 authoring resumes without a metadata head-slot collision");
+    assert_eq!(
+        fixture.circles_device1().await,
+        vec![CircleInfo::Active {
+            id: fixture.circle_id,
+            name: "Gamma".to_string(),
+            role: CircleRole::Owner,
+            rotation_required: false,
+        }],
+        "the resumed rename takes effect over the merged metadata frontier"
+    );
+}
+
+#[tokio::test]
 async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     let fixture = conflict_fixture("delete-conflicted").await;
     let (chosen, _losing) = fork(&fixture).await;
@@ -334,7 +397,7 @@ async fn resolve_request(
         .await
         .expect("read chosen branch activation")
         .expect("chosen branch is retained");
-    let mut losing_heads = Vec::new();
+    let mut losing_branches = Vec::new();
     for branch in fixture.conflict_branches_device1().await {
         if branch == *chosen {
             continue;
@@ -344,10 +407,16 @@ async fn resolve_request(
             .await
             .expect("read losing branch activation")
             .expect("losing branch is retained");
-        losing_heads.push(crate::sync::circle::MergeCircleControlHeadRef {
-            coord: activation.reference.control.clone(),
-            head_hash: activation.reference.head_hash,
-            object: activation.reference.head_object.clone(),
+        let selected_metadata = activation
+            .local_access
+            .as_ref()
+            .and_then(|access| access.active.as_ref())
+            .expect("losing branch active")
+            .metadata
+            .clone();
+        losing_branches.push(CircleResolveLosingBranch {
+            reference: activation.reference.clone(),
+            selected_metadata,
         });
     }
     let access = chosen_activation
@@ -365,7 +434,7 @@ async fn resolve_request(
             metadata: active.metadata.clone(),
         },
         previous_control: chosen_activation.reference.clone(),
-        losing_heads,
+        losing_branches,
         conflicting_branches,
     }))
 }
@@ -442,6 +511,181 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
             id: fixture.circle_id,
             branches: resurfaced,
         }]
+    );
+}
+
+/// A Store + Circle carrying one member, on the founder's first device, with the
+/// owner's production sync components (to add the member and close over its
+/// removal) and a registered second founder device that can author a concurrent
+/// successor.
+fn open_routing_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::sync::session::SyncedTable::new(
+            "documents",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")],
+        vec![crate::migration::Migration::sql(
+            1,
+            "Circle routing schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
+#[tokio::test]
+async fn resolving_to_a_closing_branch_is_refused_typed() {
+    use crate::sync::cycle::{init_sync_over_storage, StoreInitialization};
+    use crate::sync::membership::MemberRole;
+
+    let db1 = open_routing_db();
+    let (store, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
+    let circle_id = journal.circle_id();
+    let device1 = local_device_id(&db1).await;
+    resume_circle_operations(&db1, &store.storage, &founder)
+        .await
+        .expect("activate founder transition");
+
+    // Invite and add a Circle member so a removal has something to close over.
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &founder,
+        &crate::sync::hlc::Hlc::new("resolve-closing-owner".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &routing(),
+        store.storage.store_id(),
+        "Resolve closing Store",
+        &StoreDatabase::new(&db1),
+    )
+    .await
+    .expect("invite Store member");
+    let member_db = open_routing_db();
+    install_active_device_fixture(
+        &store,
+        &db1,
+        &member_db,
+        &member,
+        "0000000001100-0000-member",
+    )
+    .await
+    .expect("activate Store member device");
+
+    let (_store_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(routing()),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        founder.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = init_sync_over_storage(
+        &StoreDatabase::new(&db1),
+        owner_storage,
+        StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(routing()),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+
+    // The founder's second device pulls the with-member Circle so it can author a
+    // successor concurrent with the removal.
+    let db2 = open_routing_db();
+    install_active_device_fixture(&store, &db1, &db2, &founder, "0000000001100-0000-device2")
+        .await
+        .expect("register the founder's second device");
+    let device2 = local_device_id(&db2).await;
+    let (_dir2, dir2) = temp_store_dir();
+    Store::authorize_borrowed(&*store.storage, &db2)
+        .await
+        .expect("authorize device 2 pull")
+        .pull(&dir2, &founder, Some(&routing()))
+        .await
+        .expect("device 2 pulls the with-member Circle");
+
+    // Device 1 removes the member — an epoch close. Device 2 concurrently renames
+    // from the same pre-removal control, so the close and the rename fork.
+    components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("activate Circle epoch close");
+    Store::load(StoreDatabase::new(&db2), store.storage.clone())
+        .await
+        .expect("load device 2 Store")
+        .rename_circle(
+            &device2,
+            "0000000001300-0000-device2",
+            circle_id,
+            "Renamed",
+            &founder,
+        )
+        .await
+        .expect("device 2 authors a concurrent successor");
+
+    let (_dir1, dir1) = temp_store_dir();
+    Store::authorize_borrowed(&*store.storage, &db1)
+        .await
+        .expect("authorize device 1 pull")
+        .pull(&dir1, &founder, Some(&routing()))
+        .await
+        .expect("device 1 pulls the concurrent rename");
+    let branches = StoreDatabase::new(&db1)
+        .circle_control_conflict_branches(circle_id)
+        .await
+        .expect("read conflict branches")
+        .expect("the close and the rename conflict");
+    assert_eq!(branches.len(), 2, "the close and the rename conflict");
+
+    let mut closing = None;
+    for branch in &branches {
+        let activation = StoreDatabase::new(&db1)
+            .verified_circle_activation(circle_id, branch.clone())
+            .await
+            .expect("read branch activation")
+            .expect("branch is retained");
+        if matches!(
+            activation.control.value.state(),
+            crate::sync::circle::CircleControlState::EpochClose(_)
+        ) {
+            closing = Some(branch.clone());
+        }
+    }
+    let closing = closing.expect("one conflicting branch is the epoch close");
+
+    // Resolving to the closing branch is refused with the typed reason: a
+    // resolution successor under a new control coordinate would strand the close's
+    // participant responses, which bind to the closing control at create-once
+    // slots.
+    let error = Store::load(StoreDatabase::new(&db1), store.storage.clone())
+        .await
+        .expect("load device 1 Store")
+        .resolve_circle_control(&device1, circle_id, closing, &founder)
+        .await
+        .expect_err("resolving to the closing branch is refused");
+    assert!(
+        matches!(&error, CircleOperationError::ResolveToClosingBranch { circle_id: id }
+            if *id == circle_id),
+        "{error}"
     );
 }
 

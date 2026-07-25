@@ -36,6 +36,8 @@ pub enum CircleOperationError {
     NotConflicted { circle_id: CircleId },
     #[error("circle {circle_id} control conflict does not retain the chosen branch")]
     ChosenBranchNotRetained { circle_id: CircleId },
+    #[error("circle {circle_id} control conflict cannot be resolved to its closing branch: an epoch close binds its participant responses to the closing control, so a resolution successor under a new control coordinate would strand them; resolve to a non-closing branch to discard the close instead")]
+    ResolveToClosingBranch { circle_id: CircleId },
     #[error("circle {circle_id} has no local epoch close waiting for cancellation")]
     NoCloseToCancel { circle_id: CircleId },
     #[error("circle {circle_id} has no local epoch close waiting for device exclusion")]
