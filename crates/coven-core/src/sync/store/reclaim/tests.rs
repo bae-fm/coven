@@ -323,10 +323,10 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         .clone();
     let evidence = ReclaimEvidence::signed(
         store.root.store_root_hash,
-        StorePackageReclaimClaim {
+        ReclaimClaim::StorePackage(StorePackageReclaimClaim {
             target: StorePackageReclaimTarget {
                 package: package.clone(),
-                activation,
+                activation: activation.clone(),
             },
             covering_snapshot: StoreSnapshotLocator {
                 author_registration: founder_ref.clone(),
@@ -342,7 +342,7 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
                 ack_hash: ObjectHash::digest(b"acknowledgement"),
                 object: proof_object("store-v1/acks/founder/1.json"),
             }],
-        },
+        }),
         &store.signer,
     )
     .expect("sign reclaim evidence");
@@ -374,7 +374,10 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         ReclaimEvidenceRef::from_evidence(&evidence, prepared_evidence.reference().clone());
     let authorization = ReclaimAuthorization::signed(
         store.root.store_root_hash,
-        package,
+        ReclaimTarget::StorePackage(StorePackageReclaimTarget {
+            package,
+            activation,
+        }),
         evidence_ref,
         StoreReclaimAuthority {
             membership: activated.membership_state,
@@ -423,7 +426,10 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
     assert_eq!(opened.authorization.value, authorization);
     assert_eq!(opened.evidence.value, evidence);
     let mut relocated = authorization.clone();
-    relocated.target.object =
+    let ReclaimTarget::StorePackage(relocated_target) = &mut relocated.target else {
+        unreachable!("Store package reclaim target");
+    };
+    relocated_target.package.object =
         proof_object("store-v1/candidates/family/packages/device/1/another-package.pkg");
     assert!(authorization
         .verify(&keys::public_key_hex(&store.signer))
@@ -506,7 +512,7 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
     })
     .await
     .expect("release retained replay package ownership");
-    let mut authorization_activation = opened.evidence.value.claim.target.activation.clone();
+    let mut authorization_activation = opened.evidence.value.claim.target().activation().clone();
     authorization_activation.coord = StoreCommitCoord {
         stream_id: authorization_activation.coord.stream_id,
         sequence: authorization_activation.coord.sequence() + 1,
@@ -530,7 +536,10 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         deletion.is_err(),
         "nonexistent snapshot and acknowledgement refs must not authorize deletion"
     );
-    let target = &opened.evidence.value.claim.target;
+    let resolved_target = opened.evidence.value.claim.target();
+    let ReclaimTarget::StorePackage(target) = &resolved_target else {
+        unreachable!("Store package reclaim target");
+    };
     let StoreCommitCoord { stream_id, .. } = target.activation.coord;
     store
         .storage
@@ -645,7 +654,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         &signer,
         reclaim_membership,
         &store.root,
-        StorePackageReclaimClaim {
+        ReclaimClaim::StorePackage(StorePackageReclaimClaim {
             target: StorePackageReclaimTarget {
                 package: target_package.clone(),
                 activation: target_activation.clone(),
@@ -655,7 +664,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
                 snapshot: snapshot.reference.clone(),
             },
             acknowledgements: vec![acknowledgement],
-        },
+        }),
     )
     .await
     .expect("prepare reclaim authorization");

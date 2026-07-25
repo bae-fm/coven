@@ -253,6 +253,86 @@ pub(super) async fn finish_nonactivating_acknowledgement(
     Ok(())
 }
 
+/// Read and verify one exact Circle acknowledgement, decrypting it with the epoch
+/// key resolved from active access under `control` — the resolved keyring retains
+/// the epoch keys a member holds, so an acknowledgement sealed under a rotated-away
+/// epoch stays readable. A Store member without Circle access resolves no key and
+/// cannot read it.
+pub(crate) async fn load_circle_acknowledgement_on(
+    database: &StoreDatabase,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    root: &StoreRootRef,
+    reference: &crate::sync::store_commit::CircleAckRef,
+    control: &crate::sync::circle::CircleControlCoord,
+) -> Result<CircleAck, StoreAckError> {
+    let access = database
+        .circle_package_access(reference.circle_id, control.clone())
+        .await?
+        .ok_or_else(|| {
+            StoreAckError::InvalidOutbound(format!(
+                "Circle {} acknowledgement key is not resolvable from retained controls",
+                reference.circle_id
+            ))
+        })?;
+    let encryption = access.encryption;
+    let author = database
+        .activated_store_device_registration(reference.registration.clone())
+        .await?;
+    let context = ProtocolObjectContext::circle(
+        root.store_root_hash,
+        ProtocolObjectDomain::CircleAcknowledgement,
+        encryption,
+    );
+    let semantic_prefix = circle_ack_slot_prefix(
+        reference.circle_id,
+        &author.device_id.to_string(),
+        reference.sequence,
+    );
+    let bytes = storage
+        .read_protocol_object(&context, &reference.object, &semantic_prefix)
+        .await
+        .map_err(StoreObjectError::from)?;
+    CircleAck::parse_at(&bytes, root, reference, &author)
+        .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
+}
+
+/// The activated Circle acknowledgement of every device that currently holds
+/// active Circle access, when all of them dominate `snapshot_cut` — the exact
+/// per-device references, sorted. `None` when the Circle has no active-access
+/// device, when a device holding access has never acknowledged, or when any
+/// acknowledgement's accepted Store frontier does not cover the cut, so a
+/// snapshot at that cut is not yet usable as coverage evidence (fail closed).
+/// Each acknowledgement is decrypted under `current_control`, whose retained
+/// keyring resolves epochs a member holds even after rotation.
+pub(crate) async fn stable_circle_acks_dominating_on(
+    database: &StoreDatabase,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    root: &StoreRootRef,
+    circle_id: crate::sync::circle::CircleId,
+    current_control: &crate::sync::circle::CircleControlCoord,
+    snapshot_cut: &CommitFrontier,
+) -> Result<Option<Vec<crate::sync::store_commit::CircleAckRef>>, StoreAckError> {
+    let devices = database.active_circle_access_devices(circle_id).await?;
+    if devices.is_empty() {
+        return Ok(None);
+    }
+    let mut acknowledgements = Vec::new();
+    for device_id in devices {
+        let Some(reference) = database.activated_circle_ack(circle_id, device_id).await? else {
+            return Ok(None);
+        };
+        let acknowledgement =
+            load_circle_acknowledgement_on(database, storage, root, &reference, current_control)
+                .await?;
+        if !acknowledgement.store_cut.covers(snapshot_cut) {
+            return Ok(None);
+        }
+        acknowledgements.push(reference);
+    }
+    acknowledgements.sort();
+    Ok(Some(acknowledgements))
+}
+
 impl AuthorizedStore<'_> {
     pub(crate) async fn stage_and_publish_ack(
         &self,
@@ -415,56 +495,6 @@ impl AuthorizedStore<'_> {
             self.database().stage_circle_ack(ack, prepared).await?;
         }
         Ok(())
-    }
-
-    /// Read and verify one exact Circle acknowledgement authored by `author`,
-    /// decrypting it with the epoch key resolved from the reader's active access
-    /// under `control` — the resolved keyring retains the epoch keys a member
-    /// holds, so an acknowledgement sealed under a rotated epoch key stays
-    /// readable. A Store member without Circle access resolves no key and cannot
-    /// read it.
-    pub(crate) async fn load_circle_acknowledgement(
-        &self,
-        reference: &crate::sync::store_commit::CircleAckRef,
-        control: &crate::sync::circle::CircleControlCoord,
-    ) -> Result<CircleAck, StoreAckError> {
-        // Resolve the epoch key from the retained activation of the exact control
-        // the acknowledgement was sealed under — not the current publication
-        // control — so an acknowledgement sealed under a rotated-away epoch stays
-        // readable to a member that still retains that control's activation.
-        let access = self
-            .database()
-            .circle_package_access(reference.circle_id, control.clone())
-            .await?
-            .ok_or_else(|| {
-                StoreAckError::InvalidOutbound(format!(
-                    "Circle {} acknowledgement key is not resolvable from retained controls",
-                    reference.circle_id
-                ))
-            })?;
-        let encryption = access.encryption;
-        let author = self
-            .database()
-            .activated_store_device_registration(reference.registration.clone())
-            .await?;
-        let root = self.store_root();
-        let context = ProtocolObjectContext::circle(
-            root.store_root_hash,
-            ProtocolObjectDomain::CircleAcknowledgement,
-            encryption,
-        );
-        let semantic_prefix = circle_ack_slot_prefix(
-            reference.circle_id,
-            &author.device_id.to_string(),
-            reference.sequence,
-        );
-        let bytes = self
-            .storage()
-            .read_protocol_object(&context, &reference.object, &semantic_prefix)
-            .await
-            .map_err(StoreObjectError::from)?;
-        CircleAck::parse_at(&bytes, root, reference, &author)
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) async fn stage_acknowledgement(

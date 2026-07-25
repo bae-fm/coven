@@ -102,6 +102,54 @@ impl StoreDatabase {
             .await
     }
 
+    pub(in crate::sync::store) async fn circle_package_is_retained_for_replay(
+        &self,
+        target: crate::sync::store_commit::CirclePackageRef,
+        activation: StoreBatchCommitRef,
+    ) -> Result<bool, DbError> {
+        self.database
+            .call(move |conn| {
+                let object_id = remote_object_id(&target.package.object);
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                        [object_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if !exists {
+                    return Ok(false);
+                }
+                let remote = load_remote_object_on(conn, object_id)?;
+                let retained = remote
+                    .circle_package_is_retained_for_replay(&target, &activation)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "validate Circle package {object_id} replay ownership: {error}"
+                        ))
+                    })?;
+                if !retained {
+                    return Ok(false);
+                }
+                for owner in remote.retained_replay_owners() {
+                    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+                    let StoreCommitCoord {
+                        stream_id,
+                        sequence,
+                    } = &commit.coord;
+                    crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_on(
+                        conn,
+                        &stream_id.to_string(),
+                        *sequence,
+                        commit,
+                        &input_hash.to_string(),
+                    )?;
+                }
+                Ok(true)
+            })
+            .await
+    }
+
     pub(in crate::sync::store) async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
@@ -188,7 +236,7 @@ impl StoreDatabase {
     pub(in crate::sync::store) async fn mark_store_reclaim_target_absent(
         &self,
         expected: DurableStoreReclaimOperation,
-        target: crate::sync::store_commit::StorePackageRef,
+        target: crate::sync::store::ReclaimTarget,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::Authorized {
             authorization,

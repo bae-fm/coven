@@ -2527,3 +2527,360 @@ async fn pending_circle_snapshot(
         .await
         .expect("read pending Circle snapshot publication")
 }
+
+/// Release every retained-replay ownership record, as a superseding coverage cut
+/// would in production, so a covered package becomes reclaim-eligible.
+async fn release_retained_replay_ownership(fixture: &RotationFixture) {
+    fixture
+        .db
+        .call(|connection| {
+            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+            StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
+            transaction.commit().map_err(DbError::from)
+        })
+        .await
+        .expect("release retained replay ownership");
+}
+
+/// Publish one Circle package and drive both devices to acknowledge coverage past
+/// the Circle snapshot the owner's cycle authored over it, returning the package
+/// and its exact activating commit. After this every active-access device's latest
+/// acknowledgement dominates the snapshot cut, so the snapshot is stable.
+async fn publish_covered_circle_package(
+    fixture: &RotationFixture,
+    member_storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    member_store_dir: &crate::store_dir::StoreDir,
+    row_id: &str,
+) -> (
+    crate::sync::store_commit::CirclePackageRef,
+    crate::sync::store_commit::StoreBatchCommitRef,
+) {
+    let write_id = capture_document(
+        fixture,
+        row_id,
+        Some(fixture.circle_id),
+        "2026-07-23T00:10:00Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the Circle package");
+    let published = match fixture
+        .db
+        .write_status(&write_id)
+        .await
+        .expect("read Circle write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("the Circle write must publish: {status:?}"),
+    };
+    let package_commit = crate::sync::store::pull::load_commit_with_author(
+        &fixture.store.storage,
+        &fixture.store.root,
+        &published,
+    )
+    .await
+    .expect("load the Circle package commit")
+    .0;
+    let [circle_package] = package_commit.circle_packages() else {
+        panic!("the Circle write carries exactly one Circle package");
+    };
+    let circle_package = circle_package.clone();
+
+    // The member pulls the package so its acknowledgement can dominate a cut that
+    // covers it. Author a Circle snapshot whose cut covers the package activation.
+    member_pull(fixture, member_storage, member_store_dir).await;
+    let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+    crate::sync::store::push_circle_snapshots_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        snapshot_temp.path().to_path_buf(),
+        fixture.db.schema_version(),
+        &fixture.signer,
+        "2026-07-23T00:15:00Z",
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await
+    .expect("author the Circle snapshot covering the package");
+
+    // Both active-access devices acknowledge a frontier dominating the snapshot cut,
+    // so the snapshot becomes acknowledgement-stable coverage evidence.
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("owner acknowledges the snapshot cut");
+    member_pull(fixture, member_storage, member_store_dir).await;
+    member_publish_acknowledgements(fixture, member_storage, "2026-07-23T00:20:00Z").await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("owner activates the member acknowledgement");
+    (circle_package, published)
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
+    let fixture = rotation_fixture("circle-package-reclaim").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let (circle_package, published) = publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000c1",
+    )
+    .await;
+
+    // A freshly published Circle package is a retained replay input: reclamation
+    // refuses it until a superseding cut releases that ownership.
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .circle_package_is_retained_for_replay(circle_package.clone(), published.clone())
+            .await
+            .expect("read Circle package replay retention"),
+        "a freshly published Circle package is retained for replay"
+    );
+    release_retained_replay_ownership(&fixture).await;
+
+    let result = crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the covered Circle package");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation deleted the snapshot-covered Circle package"
+    );
+
+    // The delete counted above required the production readback-absence check to
+    // pass, so the ciphertext is gone from storage. Its ownership record is retired
+    // and the materialized row is untouched.
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_package_is_retained_for_replay(circle_package.clone(), published.clone())
+            .await
+            .expect("read Circle package replay retention after reclaim"),
+        "the reclaimed Circle package no longer has an ownership record"
+    );
+    let row_present = fixture
+        .db
+        .call(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE id = '00000000-0000-4000-8000-0000000000c1')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read the owner's documents projection");
+    assert!(
+        row_present,
+        "reclamation leaves the materialized row intact"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_refuses_a_replay_retained_package() {
+    let fixture = rotation_fixture("circle-package-replay-retained").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let (circle_package, published) = publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000c2",
+    )
+    .await;
+
+    // The snapshot covers the package and every device acknowledged its cut, but
+    // the package is still a retained replay input: the per-Circle guard refuses
+    // reclamation and the object survives.
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .circle_package_is_retained_for_replay(circle_package.clone(), published.clone())
+            .await
+            .expect("read Circle package replay retention"),
+        "the Circle package is retained for replay"
+    );
+    let result = crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation with the package still retained");
+    assert_eq!(
+        result.packages_deleted, 0,
+        "the replay-retained Circle package is not reclaimed"
+    );
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .circle_package_is_retained_for_replay(circle_package, published)
+            .await
+            .expect("read Circle package replay retention after refused reclaim"),
+        "the replay-retained Circle package still owns its object"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement() {
+    let fixture = rotation_fixture("circle-package-seeded-ack").await;
+    let circle_id = fixture.circle_id;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    // The member's projection seeds from a real bootstrap coverage row the install
+    // recorded — the coverage its acknowledgements will name.
+    let member_coverage = fixture
+        .member_db
+        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .await
+        .expect("read member Circle bootstrap coverage")
+        .expect("the member's projection seeded from a real bootstrap coverage row");
+
+    let (circle_package, published) = publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000c3",
+    )
+    .await;
+
+    // The member's activated acknowledgement names its exact seed coverage — the
+    // cross-device evidence the owner reads and dominates to prove stability.
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+    let control = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("owner Circle authoring context")
+        .0
+        .control
+        .coord;
+    let member_device_id = local_device_id(&fixture.member_db).await;
+    let member_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, member_device_id)
+        .await
+        .expect("read activated member acknowledgement")
+        .expect("the owner activated the member acknowledgement");
+    let member_ack = crate::sync::store::load_circle_acknowledgement_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &member_ack_ref,
+        &control,
+    )
+    .await
+    .expect("owner reads the member acknowledgement");
+    assert_eq!(
+        member_ack.seeded_from.as_ref(),
+        Some(&member_coverage),
+        "the member's acknowledgement names its exact seed coverage row"
+    );
+
+    // Reclamation proceeds only because the owner could read and dominate that
+    // seed-anchored cross-device acknowledgement.
+    release_retained_replay_ownership(&fixture).await;
+    let result = crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim after cross-device verifying the seeded acknowledgement");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation proceeded on the strength of the member's seeded acknowledgement"
+    );
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_package_is_retained_for_replay(circle_package, published)
+            .await
+            .expect("read Circle package replay retention after reclaim"),
+        "the reclaimed Circle package no longer owns its object"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_epoch() {
+    // Reclaim reads each device's acknowledgement under the Circle's CURRENT control.
+    // After the epoch rotates, a pre-rotation acknowledgement stays readable because
+    // the current control's retained keyring resolves the rotated-away epoch key —
+    // the exact resolution the reclaim stability check depends on.
+    let fixture = rotation_fixture("circle-reclaim-rotated-ack").await;
+    let circle_id = fixture.circle_id;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // The owner publishes its Circle acknowledgement under the current (soon-rotated)
+    // epoch.
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("owner acknowledges under the pre-rotation epoch");
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("pre-rotation Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+    let owner_device_id = local_device_id(&fixture.db).await;
+    let owner_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, owner_device_id)
+        .await
+        .expect("read owner activated acknowledgement")
+        .expect("the owner published a Circle acknowledgement");
+
+    // Rotate the epoch: remove the roster member and finalize the close.
+    remove_store_member(&fixture).await;
+    fixture
+        .components
+        .remove_circle_member(circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the successor epoch");
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("successor Circle authoring context");
+    let new_control = new_authoring.control.coord.clone();
+    assert_ne!(new_control, old_control, "the epoch rotated");
+
+    // The reclaim ack reader resolves each acknowledgement's epoch key from the
+    // retained activation of the control it names — not from a live keyring. After
+    // the epoch rotates, the old control stays retained, so the reader (the exact
+    // path reclaim stability uses) still reads the pre-rotation acknowledgement.
+    let acknowledgement = crate::sync::store::load_circle_acknowledgement_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &owner_ack_ref,
+        &old_control,
+    )
+    .await
+    .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");
+    assert_eq!(
+        acknowledgement.epoch_id, old_epoch,
+        "the acknowledgement was sealed under the rotated-away epoch"
+    );
+}

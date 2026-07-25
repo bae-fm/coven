@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef,
+    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
 };
 use crate::sync::remote_object::{
     CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
@@ -65,7 +65,7 @@ impl DurableStoreReclaimObject {
                     || authorization_prepared.reference() != &authorization_ref.object
                     || authorization_ref.evidence != *evidence_ref
                     || authorization.evidence != *evidence_ref
-                    || authorization.target != evidence.claim.target.package
+                    || authorization.target != evidence.claim.target()
                     || authorization.store_root_hash != evidence.store_root_hash
                 {
                     return Err(StoreReclaimJournalError::Invalid(
@@ -323,7 +323,7 @@ impl ReclaimedStorePackage {
     }
 
     pub(crate) fn object_id(&self) -> ObjectHash {
-        crate::sync::remote_object::remote_object_id(&self.authorization().target().object)
+        crate::sync::remote_object::remote_object_id(self.authorization().target().object())
     }
 
     pub(crate) fn validate(&self) -> Result<(), StoreReclaimJournalError> {
@@ -332,9 +332,9 @@ impl ReclaimedStorePackage {
         validate_reclaim_identity(authorization, authorization_activation)?;
         let target = authorization.target();
         let target_activation = authorization.target_activation();
-        if target.object == authorization.object
-            || target.object == authorization.evidence.object
-            || target.object == target_activation.object
+        if *target.object() == authorization.object
+            || *target.object() == authorization.evidence.object
+            || *target.object() == target_activation.object
         {
             return Err(StoreReclaimJournalError::Invalid(
                 "reclaimed package aliases authority or crosses Store histories".to_string(),
@@ -348,7 +348,7 @@ impl ReclaimedStorePackage {
         {
             receipt_activation.validate()?;
             if &receipt.authorization != authorization
-                || receipt.object == authorization.target().object
+                || receipt.object == *authorization.target().object()
                 || receipt_activation.commit() == authorization_activation.commit()
             {
                 return Err(StoreReclaimJournalError::Invalid(
@@ -388,7 +388,7 @@ pub(crate) enum DurableStoreReclaimOperation {
     AbsentVerified {
         authorization: ReclaimAuthorizationRef,
         authorization_activation: ReclaimCommitActivation,
-        target: crate::sync::store_commit::StorePackageRef,
+        target: ReclaimTarget,
     },
     ReceiptCandidate {
         authorization: ReclaimAuthorizationRef,

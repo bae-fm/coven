@@ -79,10 +79,12 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
         evidence: crate::sync::store::ReclaimEvidenceRef {
             evidence_hash: ObjectHash::digest(b"closed reclaim evidence"),
-            target: Box::new(crate::sync::store::StorePackageReclaimTarget {
-                package: target,
-                activation: target_activation,
-            }),
+            target: Box::new(crate::sync::store::ReclaimTarget::StorePackage(
+                crate::sync::store::StorePackageReclaimTarget {
+                    package: target,
+                    activation: target_activation,
+                },
+            )),
             object: reclaim_test_object("store-v1/reclaim/evidence/closed.json"),
         },
         object: reclaim_test_object("store-v1/reclaim/authorizations/closed.json"),

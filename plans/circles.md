@@ -221,6 +221,18 @@ rebuild the deleted choice.
   never acknowledged keeps it unstable — and authoring the next generation waits
   on that stability; the restore and reclamation consumers select the maximal
   stable snapshot to read.
+- Circle package reclamation reuses the Store reclaim evidence → authorization →
+  receipt pipeline with a Circle-aware target and claim. A Circle package is
+  eligible when the maximal acknowledgement-stable Circle snapshot's cut covers
+  its activating commit, every active-access device's Circle acknowledgement
+  dominates that cut, and the package is no longer a retained replay input (a
+  per-Circle analogue of the Store retained-replay guard, honouring
+  `circle_bootstrap_coverage` cuts). The Owner signs the authorization; physical
+  deletion and readback-absence complete before the terminal receipt. Acknowledgement
+  reads resolve each epoch key from retained controls, so coverage stays verifiable
+  across an epoch rotation. Bootstrap-image, superseded-snapshot-generation, and
+  audience-blob-ciphertext reclamation, and the beyond-epoch-cutoff eligibility
+  arm, are not yet implemented.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -292,7 +304,10 @@ rebuild the deleted choice.
    restoring identity's own access from the verified control chain, selects the
    maximal verified image per Circle it can decrypt, clears the coverage rows for
    Circles it cannot, and installs the Store image and every Circle image in one
-   transaction. Finish packages, pull, reclamation, and blobs.
+   transaction. Circle package reclamation is implemented on the shared Store
+   reclaim pipeline. Finish the remaining reclamation target kinds (bootstrap
+   images, superseded snapshot generations, audience blob ciphertext, and the
+   beyond-epoch-cutoff arm), packages, pull, and blobs.
 1. **In progress.** The application API is implemented: the `coven.circles()`
    namespace (create, rename, add and remove member, resolve control, cancel and
    exclude-device on a close, delete, retry and discard operation, list, members,

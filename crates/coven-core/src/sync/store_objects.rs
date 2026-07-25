@@ -699,7 +699,7 @@ pub async fn load_reclaim_authorization_ref(
         },
     )
     .await?;
-    if authorization.value.target != evidence.value.claim.target.package {
+    if authorization.value.target != evidence.value.claim.target() {
         return Err(StoreObjectError::InvalidObject {
             semantic_prefix: authorization_prefix,
             key: reference.object.slot().logical_key().to_string(),

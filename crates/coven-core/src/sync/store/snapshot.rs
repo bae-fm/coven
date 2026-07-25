@@ -837,34 +837,17 @@ impl super::AuthorizedStore<'_> {
         current_control: &CircleControlCoord,
         snapshot_cut: &CommitFrontier,
     ) -> Result<bool, SnapshotError> {
-        let devices = self
-            .database()
-            .active_circle_access_devices(circle_id)
-            .await
-            .map_err(publication_error)?;
-        if devices.is_empty() {
-            return Ok(false);
-        }
-        for device_id in devices {
-            let Some(reference) = self
-                .database()
-                .activated_circle_ack(circle_id, device_id)
-                .await
-                .map_err(publication_error)?
-            else {
-                // A device holding active access has never acknowledged: the
-                // snapshot is not yet usable as coverage evidence (fail closed).
-                return Ok(false);
-            };
-            let acknowledgement = self
-                .load_circle_acknowledgement(&reference, current_control)
-                .await
-                .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-            if !acknowledgement.store_cut.covers(snapshot_cut) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        Ok(super::acknowledgements::stable_circle_acks_dominating_on(
+            self.database(),
+            self.storage(),
+            self.store_root(),
+            circle_id,
+            current_control,
+            snapshot_cut,
+        )
+        .await
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+        .is_some())
     }
 }
 
@@ -1299,6 +1282,36 @@ pub(crate) async fn load_circle_snapshot_stream(
     registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
     registration: &crate::sync::store_commit::StoreDeviceRegistration,
 ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
+    Ok(load_circle_snapshot_stream_refs(
+        storage,
+        root,
+        circle_id,
+        encryption,
+        registration_ref,
+        registration,
+    )
+    .await?
+    .into_iter()
+    .map(|(_, meta)| meta)
+    .collect())
+}
+
+/// Each Circle snapshot in the per-(device, Circle) stream paired with its exact
+/// reference — the reference a reclaim locator or restore selection binds.
+pub(crate) async fn load_circle_snapshot_stream_refs(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    encryption: EncryptionService,
+    registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
+    registration: &crate::sync::store_commit::StoreDeviceRegistration,
+) -> Result<
+    Vec<(
+        crate::sync::store_commit::CircleSnapshotRef,
+        CircleSnapshotMeta,
+    )>,
+    SnapshotError,
+> {
     if registration_ref.device_id != registration.device_id {
         return Err(SnapshotError::Parse(
             "Circle snapshot registration reference names another device".to_string(),
@@ -1341,8 +1354,8 @@ pub(crate) async fn load_circle_snapshot_stream(
             ));
         }
         slot = meta.successor.next_slot.clone();
-        predecessor = Some(reference);
-        snapshots.push(meta);
+        predecessor = Some(reference.clone());
+        snapshots.push((reference, meta));
         generation = generation.checked_add(1).ok_or_else(|| {
             SnapshotError::Parse("Circle snapshot generation overflow".to_string())
         })?;
@@ -1947,7 +1960,7 @@ pub(crate) async fn select_store_snapshot(
     Ok((verified_root, chosen, image, stability))
 }
 
-fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
+pub(crate) fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
     let left = left.clone().into_refs();
     let right = right.clone().into_refs();
     let mut strictly_ahead = left.len() > right.len();

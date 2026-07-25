@@ -296,12 +296,14 @@ async fn validate_commit_reclaim_authorization(
                 .to_string(),
         ));
     }
+    let target = evidence.claim.target();
+    let target_activation = target.activation().clone();
     let activation = Box::pin(predecessor_commit_matching_at_root(
         storage,
         root,
         root_value,
         &commit.order,
-        Box::new(|candidate, _| candidate == &evidence.claim.target.activation),
+        Box::new(move |candidate, _| candidate == &target_activation),
     ))
     .await?
     .ok_or_else(|| {
@@ -309,7 +311,15 @@ async fn validate_commit_reclaim_authorization(
             "reclaim evidence package activation is absent from predecessor history".to_string(),
         )
     })?;
-    if activation.1.store_package() != Some(&authorization.target) {
+    let names_target = match &target {
+        super::store_reclaim::ReclaimTarget::StorePackage(store) => {
+            activation.1.store_package() == Some(&store.package)
+        }
+        super::store_reclaim::ReclaimTarget::CirclePackage(circle) => {
+            activation.1.circle_packages().contains(&circle.package)
+        }
+    };
+    if !names_target {
         return Err(RegistrationLoadError::Invalid(
             "reclaim evidence target differs from its exact package activation".to_string(),
         ));

@@ -159,8 +159,9 @@ pub(crate) use reclaim::journal::{
 };
 pub use reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef,
+    reclaim_receipt_semantic_prefix, CirclePackageReclaimClaim, CirclePackageReclaimTarget,
+    CircleSnapshotLocator, ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimClaim,
+    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
     StorePackageReclaimClaim, StorePackageReclaimTarget, StoreReclaimError, StoreReclaimResult,
 };
 pub(crate) use registration::{
@@ -414,6 +415,23 @@ pub(crate) async fn stage_circle_acknowledgements_for_test(
 }
 
 #[cfg(test)]
+pub(crate) async fn reclaim_packages_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    identity: &UserKeypair,
+) -> Result<reclaim::StoreReclaimResult, reclaim::StoreReclaimError> {
+    let device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read local device id")
+        .expect("local device id is installed");
+    let store = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| reclaim::StoreReclaimError::Authorization(error.to_string()))?;
+    store.reclaim_packages(&device_id, identity).await
+}
+
+#[cfg(test)]
 pub(crate) async fn load_circle_acknowledgement_for_test(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -423,7 +441,14 @@ pub(crate) async fn load_circle_acknowledgement_for_test(
     let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
-    store.load_circle_acknowledgement(reference, control).await
+    acknowledgements::load_circle_acknowledgement_on(
+        store.database(),
+        store.storage(),
+        store.store_root(),
+        reference,
+        control,
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -313,6 +313,26 @@ impl StoreDatabase {
             .await
     }
 
+    /// The Circle's currently activated authoring control, or `None` when the
+    /// Circle is not in an active local state. Its retained keyring resolves
+    /// acknowledgements sealed under rotated-away epochs.
+    pub(crate) async fn current_circle_control(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Option<crate::sync::circle::CircleControlCoord>, DbError> {
+        self.database
+            .call(move |conn| {
+                Ok(
+                    Self::circle_current_state_on(conn, circle_id)?.and_then(|state| {
+                        state
+                            .authoring_state()
+                            .map(|authoring| authoring.control.coord.clone())
+                    }),
+                )
+            })
+            .await
+    }
+
     pub(crate) async fn closing_circle_controls(
         &self,
     ) -> Result<Vec<crate::sync::circle::PreparedCircleControl>, DbError> {

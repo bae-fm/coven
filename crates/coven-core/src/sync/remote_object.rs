@@ -764,6 +764,18 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
+    pub(crate) fn validate_reclaimable_circle_package(
+        &self,
+        target: &super::store_commit::CirclePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let ownership = self.activated_circle_package_ownership(target, activation)?;
+        if !ownership.pending.is_empty() || ownership.activated.len() != 1 {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
+    }
+
     pub(crate) fn store_package_is_retained_for_replay(
         &self,
         target: &super::store_commit::StorePackageRef,
@@ -800,6 +812,54 @@ impl RemoteObjectRecord {
             || package.candidate_family() != target.candidate_family
             || package.schema_version() != target.schema_version
             || expected_size != target.changeset_size
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !ownership.activated.contains(&expected_owner) {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(ownership)
+    }
+
+    pub(crate) fn circle_package_is_retained_for_replay(
+        &self,
+        target: &super::store_commit::CirclePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<bool, RemoteObjectRecordError> {
+        let ownership = self.activated_circle_package_ownership(target, activation)?;
+        Ok(ownership
+            .activated
+            .iter()
+            .any(|owner| matches!(owner, SharedObjectOwner::RetainedReplay(_))))
+    }
+
+    fn activated_circle_package_ownership<'a>(
+        &'a self,
+        target: &super::store_commit::CirclePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<&'a SharedObjectOwnership, RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        let package = super::audience_package::AudiencePackage::parse(
+            record.bytes.canonical_semantic_bytes(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
+        let expected_size = u64::try_from(record.bytes.canonical_semantic_bytes().len())
+            .map_err(|_| RemoteObjectRecordError::InvalidReclaim)?;
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::CirclePackage { reference } if reference == target
+        ) || record.identity.semantic_hash != target.package.content_hash
+            || record.identity.object != target.package.object
+            || package.candidate_family() != target.package.candidate_family
+            || package.schema_version() != target.package.schema_version
+            || expected_size != target.package.changeset_size
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }

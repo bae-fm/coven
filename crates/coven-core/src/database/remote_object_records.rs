@@ -341,16 +341,17 @@ pub(crate) fn record_reclaimed_store_package_on(
         .map_err(DbError::from)?;
     if remote_exists {
         let remote = load_remote_object_on(conn, object_id)?;
-        remote
-            .validate_reclaimable_store_package(
-                reclaimed.authorization().target(),
-                reclaimed.authorization().target_activation(),
-            )
-            .map_err(|error| {
-                DbError::Message(format!(
-                    "close reclaimed Store package {object_id}: {error}"
-                ))
-            })?;
+        match reclaimed.authorization().target() {
+            crate::sync::store::ReclaimTarget::StorePackage(target) => {
+                remote.validate_reclaimable_store_package(&target.package, &target.activation)
+            }
+            crate::sync::store::ReclaimTarget::CirclePackage(target) => {
+                remote.validate_reclaimable_circle_package(&target.package, &target.activation)
+            }
+        }
+        .map_err(|error| {
+            DbError::Message(format!("close reclaimed package {object_id}: {error}"))
+        })?;
         let deleted = conn
             .execute(
                 "DELETE FROM remote_objects WHERE object_id = ?1",
