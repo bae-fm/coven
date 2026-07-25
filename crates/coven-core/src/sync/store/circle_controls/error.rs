@@ -49,6 +49,10 @@ pub enum CircleOperationError {
     NotBlocked {
         operation_id: crate::sync::circle::CircleOperationId,
     },
+    #[error("circle operation {operation_id} discard requires verified permanent nonactivation; it never assumes an unseen candidate failed to activate")]
+    DiscardRequiresNonactivation {
+        operation_id: crate::sync::circle::CircleOperationId,
+    },
     #[error("circle {circle_id} has an unresolved control conflict")]
     Conflicted { circle_id: CircleId },
     #[error("circle {circle_id} is deleted")]

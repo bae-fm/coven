@@ -67,6 +67,11 @@ pub enum CircleError {
     /// Retry was requested for a durable operation that is not blocked.
     #[error("circle operation {operation_id} is not blocked")]
     NotBlocked { operation_id: CircleOperationId },
+    /// Discard was requested without proof the candidate can never activate. The
+    /// operation stays durable; it never assumes an unseen candidate failed to
+    /// activate.
+    #[error("circle operation {operation_id} discard requires verified permanent nonactivation")]
+    DiscardRequiresNonactivation { operation_id: CircleOperationId },
     /// A durable operation cannot publish because its author lost signed
     /// authority; the initiator may retry it once authority is restored.
     #[error("circle operation for {circle_id} is blocked: {block}")]
@@ -113,6 +118,9 @@ impl From<CircleOperationError> for CircleError {
                 device_id,
             },
             CircleOperationError::NotBlocked { operation_id } => Self::NotBlocked { operation_id },
+            CircleOperationError::DiscardRequiresNonactivation { operation_id } => {
+                Self::DiscardRequiresNonactivation { operation_id }
+            }
             CircleOperationError::Blocked { circle_id, block } => {
                 Self::Blocked { circle_id, block }
             }
@@ -239,6 +247,16 @@ impl<'a> Circles<'a> {
         self.manager()?.retry_circle_operation(operation_id).await
     }
 
+    /// Discard a durable operation that can provably never activate, deleting its
+    /// candidate-exclusive objects and clearing its journal row. Refused typed
+    /// without a verified permanent-nonactivation proof.
+    pub async fn discard_operation(
+        &self,
+        operation_id: CircleOperationId,
+    ) -> Result<(), CircleError> {
+        self.manager()?.discard_circle_operation(operation_id).await
+    }
+
     /// Every Circle the local identity can see, with its derived
     /// [`CircleState`](crate::CircleState).
     pub async fn list(&self) -> Result<Vec<Circle>, CircleError> {
@@ -343,6 +361,17 @@ mod tests {
         assert!(
             matches!(chosen, CircleError::ChosenBranchNotRetained { circle_id } if circle_id == circle)
         );
+
+        let operation_id = CircleOperationId::placeholder("discard-map-seed");
+        let discard: CircleError = CircleOperationError::DiscardRequiresNonactivation {
+            operation_id: operation_id.clone(),
+        }
+        .into();
+        assert!(matches!(
+            discard,
+            CircleError::DiscardRequiresNonactivation { operation_id: mapped }
+                if mapped == operation_id
+        ));
 
         // The channel-closed plumbing variants collapse to LoopNotRunning; other
         // internal failures collapse to the Protocol catch-all.

@@ -209,6 +209,7 @@ impl StoreDatabase {
                         &candidate,
                         nonactivation,
                         true,
+                        &[],
                     )?;
                     StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
                         &root,
@@ -477,6 +478,7 @@ impl StoreDatabase {
                         &publication,
                         publication_nonactivation,
                         false,
+                        &[],
                     )?;
                     if winner_commit != prepared_candidate.reference {
                         let candidate_nonactivation = nonactivations
@@ -493,6 +495,7 @@ impl StoreDatabase {
                             &prepared_candidate,
                             candidate_nonactivation,
                             true,
+                            &[],
                         )?;
                     }
                     let mut lost_preparation = prepared.clone();
@@ -535,6 +538,7 @@ impl StoreDatabase {
                         &prepared_candidate,
                         candidate_nonactivation,
                         true,
+                        &[],
                     )?;
                 }
                 let blocked = WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {

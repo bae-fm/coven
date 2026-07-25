@@ -1274,6 +1274,13 @@ impl SyncComponents {
             .await
     }
 
+    pub async fn discard_circle_operation(
+        &self,
+        operation_id: &super::circle::CircleOperationId,
+    ) -> Result<(), super::store::CircleOperationError> {
+        self.store.discard_circle_operation(operation_id).await
+    }
+
     pub async fn circle_close_status(
         &self,
         circle_id: super::circle::CircleId,

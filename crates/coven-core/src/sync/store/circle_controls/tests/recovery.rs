@@ -244,6 +244,135 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     );
 }
 
+/// Discard refuses an operation with no verified nonactivation proof: an
+/// unpublished founder operation whose author is still authorized and whose
+/// successor slot is empty. It never assumes the unseen candidate failed to
+/// activate — the journal row stays durable.
+#[tokio::test]
+async fn discard_without_nonactivation_proof_is_refused() {
+    let db = open_test_db();
+    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-refusal").await;
+    let operation_id = journal.operation_id.clone();
+
+    let refusal = discard_circle_operation(&db, &store.storage, &operation_id)
+        .await
+        .expect_err("discard without a nonactivation proof is refused");
+    assert!(
+        matches!(
+            &refusal,
+            CircleOperationError::DiscardRequiresNonactivation { operation_id: refused }
+                if *refused == operation_id
+        ),
+        "{refusal:?}"
+    );
+    assert!(
+        StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read operation after refused discard")
+            .is_some(),
+        "a refused discard leaves the operation durable"
+    );
+    let _ = signer;
+}
+
+/// A different verified winner claims the operation's device-stream successor
+/// slot. Discard proves the Merge winner, exact-deletes the loser's
+/// candidate-exclusive objects with absence verified, leaves the winner's
+/// published objects untouched, and clears the journal row.
+#[tokio::test]
+async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_objects() {
+    let db = open_test_db();
+    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-winner").await;
+    let operation_id = journal.operation_id.clone();
+    let candidate_commit = journal.operation().commit_ref.object.clone();
+
+    let (winner_commit, winner_head) =
+        publish_competing_store_head(&db, &store.storage, &signer, &journal).await;
+
+    // Publishing the operation uploads its candidate graph, then loses the head
+    // slot to the winner already occupying it.
+    publish_circle_operation(&db, &store.storage, &operation_id, &signer)
+        .await
+        .expect_err("publication loses the successor slot to the winner");
+    assert!(
+        exact_object_present(&store.home, &candidate_commit).await,
+        "the candidate commit reached cloud storage before the slot was lost"
+    );
+
+    discard_circle_operation(&db, &store.storage, &operation_id)
+        .await
+        .expect("the verified winner permits discard");
+
+    assert!(
+        StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read discarded operation")
+            .is_none(),
+        "discard clears the journal row"
+    );
+    assert_exact_object_absent(&store.home, &candidate_commit).await;
+    assert!(
+        !remote_object_exists(&db, &candidate_commit).await,
+        "the candidate commit's remote-object row is deleted"
+    );
+    assert!(
+        exact_object_present(&store.home, &winner_commit).await,
+        "the winner's commit is untouched"
+    );
+    assert!(
+        exact_object_present(&store.home, &winner_head).await,
+        "the winner's activation head is untouched"
+    );
+}
+
+/// A crash during cleanup — the first exact deletion fails after the proof and
+/// `Discarding` state are already durable — leaves the operation resumable.
+/// Resume re-runs the idempotent cleanup and clears the journal exactly once.
+#[tokio::test]
+async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
+    let db = open_test_db();
+    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-crash").await;
+    let operation_id = journal.operation_id.clone();
+    let candidate_commit = journal.operation().commit_ref.object.clone();
+
+    publish_competing_store_head(&db, &store.storage, &signer, &journal).await;
+    publish_circle_operation(&db, &store.storage, &operation_id, &signer)
+        .await
+        .expect_err("publication loses the successor slot to the winner");
+
+    // Fail the first candidate-exclusive deletion, after the transaction that
+    // recorded the proof and moved the row into `Discarding` has committed.
+    store.home.fail_exact_delete_on_call(1);
+    discard_circle_operation(&db, &store.storage, &operation_id)
+        .await
+        .expect_err("the injected delete failure interrupts cleanup");
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read interrupted operation")
+            .expect("interrupted discard stays durable")
+            .state(),
+        CircleOperationState::Discarding,
+        "the interrupted discard is durably resumable"
+    );
+
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("resume completes the interrupted discard");
+    assert!(
+        StoreDatabase::new(&db)
+            .circle_operation(&operation_id)
+            .await
+            .expect("read resumed operation")
+            .is_none(),
+        "resume clears the discarded operation's journal row"
+    );
+    assert_exact_object_absent(&store.home, &candidate_commit).await;
+}
+
 #[tokio::test]
 async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     let db = open_test_db();

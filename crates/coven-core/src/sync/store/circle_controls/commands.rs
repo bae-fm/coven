@@ -818,6 +818,67 @@ impl Store {
         .await
     }
 
+    /// Discard a durable Circle operation that can provably never activate,
+    /// exact-deleting its candidate-exclusive objects and clearing its journal
+    /// row. Legal only with one of the three direct nonactivation proofs — a
+    /// different verified winner already occupies the candidate's successor slot,
+    /// the author was permanently excluded, or a membership revocation forecloses
+    /// activation. Without proof it refuses typed: it never assumes an unseen
+    /// candidate failed to activate. Idempotent and restart-safe — a crash between
+    /// the recorded proof and the cleared row resumes the same cleanup from the
+    /// durable `Discarding` state.
+    pub(crate) async fn discard_circle_operation(
+        &self,
+        operation_id: &crate::sync::circle::CircleOperationId,
+    ) -> Result<(), CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        let database = self.database();
+        let storage = &**self.storage();
+        crate::sync::store::ensure_active_registration(database, storage).await?;
+        let journal = database
+            .circle_operation(operation_id)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+            })?;
+        if !journal.is_discarding() {
+            let candidate = database
+                .circle_operation_blocked_candidate(operation_id)
+                .await?;
+            let Some(nonactivation) = Box::pin(
+                crate::sync::store::abandonment::discard_candidate_nonactivation(
+                    database, storage, &candidate,
+                ),
+            )
+            .await?
+            else {
+                return Err(CircleOperationError::DiscardRequiresNonactivation {
+                    operation_id: operation_id.clone(),
+                });
+            };
+            database
+                .begin_circle_operation_discard(operation_id, nonactivation)
+                .await?;
+        }
+        crate::sync::store::pull::cleanup_circle_operation_candidate(
+            database,
+            storage,
+            operation_id,
+        )
+        .await
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "Circle operation {operation_id} discard cleanup: {error}"
+            ))
+        })?;
+        database
+            .finish_circle_operation_discard(operation_id)
+            .await?;
+        Ok(())
+    }
+
     /// Author the terminal deletion of a Circle. It requires a resolved current
     /// state — a conflicted Circle is refused until the Owner resolves it,
     /// because the conflicting set may bury membership intent — and refuses a
@@ -929,6 +990,10 @@ impl Store {
     ) -> Result<(), CircleOperationError> {
         let database = self.database();
         let storage = &**self.storage();
+        // Interrupted discards resume first: a durable `Discarding` row plus the
+        // per-object cleanup states carry an unfinished discard to completion
+        // before any pending operation republishes.
+        Box::pin(resume_discarding_circle_operations(database, storage)).await?;
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
             if !journal.is_publishable() {
                 return Err(CircleOperationError::Journal(format!(
@@ -951,6 +1016,31 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Complete every Circle operation left durably mid-discard, re-running its
+/// idempotent candidate-exclusive cleanup and clearing its journal row.
+async fn resume_discarding_circle_operations(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+) -> Result<(), CircleOperationError> {
+    for operation_id in database.discarding_circle_operations().await? {
+        crate::sync::store::pull::cleanup_circle_operation_candidate(
+            database,
+            storage,
+            &operation_id,
+        )
+        .await
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "Circle operation {operation_id} discard cleanup: {error}"
+            ))
+        })?;
+        database
+            .finish_circle_operation_discard(&operation_id)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Materialize the chosen conflicting branch's authoring inputs from its

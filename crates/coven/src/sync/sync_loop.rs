@@ -161,6 +161,10 @@ enum SyncCommand {
         operation_id: crate::CircleOperationId,
         reply: CircleReply<()>,
     },
+    DiscardCircleOperation {
+        operation_id: crate::CircleOperationId,
+        reply: CircleReply<()>,
+    },
 }
 
 impl SyncLoopHandle {
@@ -640,6 +644,17 @@ impl SyncLoopHandle {
         .await
     }
 
+    pub(crate) async fn discard_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::DiscardCircleOperation {
+            operation_id,
+            reply,
+        })
+        .await
+    }
+
     /// Inspect a Circle's in-flight epoch close. A read, so it runs directly on the
     /// components rather than serializing behind the write-command channel.
     pub(crate) async fn circle_close_status(
@@ -734,6 +749,18 @@ async fn execute_command(inner: &SyncLoopInner, store_dir: &StoreDir, command: S
             reply_circle_command(
                 reply,
                 inner.components.retry_circle_operation(&operation_id).await,
+            );
+        }
+        SyncCommand::DiscardCircleOperation {
+            operation_id,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner
+                    .components
+                    .discard_circle_operation(&operation_id)
+                    .await,
             );
         }
     }

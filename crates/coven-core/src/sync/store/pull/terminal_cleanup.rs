@@ -27,6 +27,40 @@ pub(crate) async fn cleanup_merge_candidate(
     Ok(())
 }
 
+/// Delete a discarding Circle operation's candidate-exclusive objects with the
+/// same absence-verified machine Merge candidate cleanup uses, sourcing the
+/// candidate and its durable home from the `circle_operations` journal. Idempotent
+/// and restart-safe: the durable `Discarding` row plus the per-object cleanup
+/// states drive an interrupted run to completion on resume.
+pub(crate) async fn cleanup_circle_operation_candidate(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    operation_id: &crate::sync::circle::CircleOperationId,
+) -> Result<(), StorePullError> {
+    let db = database.sqlite();
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
+        StorePullError::Database("Circle operation discard has no Store root".to_string())
+    })?;
+    for verification in database
+        .circle_operation_discard_terminal_verifications(operation_id)
+        .await?
+    {
+        let nonactivation =
+            verify_terminal_cleanup_candidate(database, storage, &root, &verification).await?;
+        database
+            .reconcile_circle_operation_terminal_head(operation_id, nonactivation)
+            .await?;
+    }
+    let targets = database
+        .circle_operation_discard_cleanup_targets(operation_id)
+        .await?;
+    for target in targets {
+        super::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    Ok(())
+}
+
 async fn verify_terminal_cleanup_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,

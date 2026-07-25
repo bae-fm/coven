@@ -4,6 +4,7 @@ mod candidate_lifecycle;
 pub(super) mod candidate_records;
 mod circle_acknowledgements;
 mod circle_controls;
+mod circle_operation_discard;
 mod circle_operations;
 mod circle_snapshot_publication;
 mod device_continuation;

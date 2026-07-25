@@ -213,6 +213,7 @@ impl StoreDatabase {
                     &candidate,
                     &nonactivation,
                     true,
+                    &[],
                 )?;
                 tx.commit().map_err(DbError::from)
             })
@@ -281,6 +282,7 @@ impl StoreDatabase {
                     &candidate,
                     &candidate_nonactivation,
                     true,
+                    &[],
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
@@ -288,6 +290,7 @@ impl StoreDatabase {
                     &authority,
                     &authority_nonactivation,
                     false,
+                    &[],
                 )?;
                 *outcome = MergeAbandonmentOutcome::AuthorExcluded;
                 let replacement = serde_json::to_string(&prepared).map_err(|error| {
@@ -606,8 +609,9 @@ impl StoreDatabase {
                     &authority_commit,
                     &authority_head,
                 )?;
-                if !merge_candidate_cleanup_targets_on(&tx, &write_id, &candidate, true)?.is_empty()
-                    || !merge_candidate_cleanup_targets_on(&tx, &write_id, &authority, false)?
+                if !merge_candidate_cleanup_targets_on(&tx, &write_id, &candidate, true, &[])?
+                    .is_empty()
+                    || !merge_candidate_cleanup_targets_on(&tx, &write_id, &authority, false, &[])?
                         .is_empty()
                 {
                     return Err(DbError::Message(
@@ -771,7 +775,9 @@ impl StoreDatabase {
                             "Merge retraction cleanup names another write".to_string(),
                         ));
                     }
-                    return merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, false);
+                    return merge_candidate_cleanup_targets_on(
+                        conn, &write_id, &candidate, false, &[],
+                    );
                 }
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(format!(
@@ -788,7 +794,7 @@ impl StoreDatabase {
                 let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
                 match &prepared {
                     PreparedStoreWriteState::Publication { .. } => {
-                        merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, true)
+                        merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, true, &[])
                     }
                     PreparedStoreWriteState::MergeAbandonment {
                         outcome,
@@ -810,25 +816,25 @@ impl StoreDatabase {
                             }
                             MergeAbandonmentOutcome::Accepted { .. } => {
                                 targets.extend(merge_candidate_cleanup_targets_on(
-                                    conn, &write_id, &candidate, true,
+                                    conn, &write_id, &candidate, true, &[],
                                 )?);
                             }
                             MergeAbandonmentOutcome::AuthorExcluded => {
                                 targets.extend(merge_candidate_cleanup_targets_on(
-                                    conn, &write_id, &candidate, true,
+                                    conn, &write_id, &candidate, true, &[],
                                 )?);
                                 targets.extend(merge_candidate_cleanup_targets_on(
-                                    conn, &write_id, &authority, false,
+                                    conn, &write_id, &authority, false, &[],
                                 )?);
                             }
                             MergeAbandonmentOutcome::Lost { winner_commit, .. } => {
                                 if winner_commit != &candidate.reference {
                                     targets.extend(merge_candidate_cleanup_targets_on(
-                                        conn, &write_id, &candidate, true,
+                                        conn, &write_id, &candidate, true, &[],
                                     )?);
                                 }
                                 targets.extend(merge_candidate_cleanup_targets_on(
-                                    conn, &write_id, &authority, false,
+                                    conn, &write_id, &authority, false, &[],
                                 )?);
                             }
                         }
@@ -989,6 +995,7 @@ impl StoreDatabase {
                     &prepared.commit.write_id,
                     &prepared,
                     false,
+                    &[],
                 )
             })
             .await
@@ -1140,51 +1147,9 @@ impl StoreDatabase {
             }
             let mut verifications = Vec::new();
             for candidate in candidates {
-                let remote =
-                    load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-                let Some(proof) = remote
-                    .candidate_nonactivation_proof(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                else {
-                    continue;
-                };
-                let authority = match proof {
-                    crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                        exclusion,
-                        ..
-                    } => TerminalCandidateAuthority::AuthorExclusion(
-                        load_author_exclusion_activation_locator_on(conn, exclusion)?,
-                    ),
-                    crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
-                        grant_id,
-                        membership,
-                        activation_commit,
-                        activation_head,
-                    } => TerminalCandidateAuthority::MembershipGrantRevocation {
-                        grant_id: grant_id.clone(),
-                        membership: membership.clone(),
-                        activation_commit: activation_commit.clone(),
-                        activation_head: activation_head.clone(),
-                    },
-                    crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
-                        let durable = crate::sync::remote_object::CandidateNonactivation::from_durable_parts(
-                            &candidate.reference,
-                            &candidate.commit,
-                            proof.clone(),
-                        )
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                        validate_terminal_nonactivation_authority_on(conn, &durable)?;
-                        TerminalCandidateAuthority::DependencyRetraction(
-                            crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
-                                .map_err(|error| DbError::Message(error.to_string()))?,
-                        )
-                    }
-                    crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => continue,
-                };
-                verifications.push(TerminalCandidateCleanupVerification {
-                    authority,
-                    candidate: blocked_merge_candidate_from_prepared(candidate),
-                });
+                if let Some(verification) = terminal_candidate_verification_on(conn, candidate)? {
+                    verifications.push(verification);
+                }
             }
             Ok(verifications)
         })

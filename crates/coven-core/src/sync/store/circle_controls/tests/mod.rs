@@ -126,6 +126,38 @@ async fn retry_circle_operation(
         .await
 }
 
+async fn discard_circle_operation(
+    db: &Database,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    operation_id: &CircleOperationId,
+) -> Result<(), CircleOperationError> {
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+        .await?
+        .discard_circle_operation(operation_id)
+        .await
+}
+
+async fn remote_object_exists(db: &Database, object: &ExactObjectRef) -> bool {
+    let object_id = crate::sync::remote_object::remote_object_id(object);
+    db.call(move |conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("check stored remote object")
+}
+
+async fn exact_object_present(home: &InMemoryCloudHome, reference: &ExactObjectRef) -> bool {
+    let storage = Arc::new(home.clone())
+        .exact_slot_storage()
+        .expect("in-memory storage supports exact slots");
+    storage.read_at(reference.slot()).await.is_ok()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn rename_circle(
     db: &Database,
@@ -183,6 +215,173 @@ async fn load_circle_activations(
         Some(&routing_key),
     )
     .await
+}
+
+/// Publish a valid, different Store commit and activation head at a prepared
+/// Circle operation's exact device-stream successor slot, so the operation's
+/// candidate loses that slot to a verified Merge winner. Returns the winner's
+/// commit and head objects so a test can assert they survive the loser's
+/// candidate-exclusive cleanup.
+async fn publish_competing_store_head(
+    db: &Database,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    signer: &UserKeypair,
+    journal: &CircleOperationJournal,
+) -> (ExactObjectRef, ExactObjectRef) {
+    let database = StoreDatabase::new(db);
+    let root = database
+        .local_store_root_ref()
+        .await
+        .expect("read Store root")
+        .expect("Store root installed");
+    let candidate = journal.commit().expect("parse candidate Store commit");
+    let coord = journal.operation().commit_ref.coord.clone();
+    let head = &journal.operation().policy.head;
+    let registration = database
+        .activated_store_device_registration(candidate.author_registration.clone())
+        .await
+        .expect("load candidate author registration");
+    let device_signer = registration
+        .device_signer(signer)
+        .expect("derive candidate device signer");
+    let package = crate::sync::audience_package::AudiencePackage::store(
+        root.store_root_hash,
+        candidate.candidate_family(),
+        candidate.write_id.clone(),
+        coord.clone(),
+        db.schema_version(),
+        b"competing valid package".to_vec(),
+        Vec::new(),
+    )
+    .expect("construct competing package");
+    let package_bytes = package.to_bytes();
+    let package_prefix = crate::sync::store_commit::package_semantic_prefix(
+        candidate.candidate_family(),
+        &coord.stream_id.to_string(),
+        candidate.seq(),
+        ObjectHash::digest(&package_bytes),
+    );
+    let package_context = ProtocolObjectContext::store_encrypted(
+        root.store_root_hash,
+        ProtocolObjectDomain::StorePackage,
+    );
+    let package_slot = storage
+        .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
+        .await
+        .expect("reserve competing package slot");
+    let package_prepared = storage
+        .prepare_protocol_object(
+            &package_context,
+            package_slot,
+            &package_prefix,
+            package_bytes.clone(),
+        )
+        .expect("prepare competing package");
+    storage
+        .create_protocol_object(&package_prepared)
+        .await
+        .expect("publish competing package");
+    let membership = crate::sync::store::pull::load_cycle_membership(storage.as_ref(), &database)
+        .await
+        .expect("load competing commit membership")
+        .chain
+        .expect("test Store has membership");
+    let predecessor = membership
+        .write_grant_authority(&registration.author_pubkey)
+        .expect("competing author has an active write grant");
+    let winner = StoreBatchCommit::signed(
+        root.store_root_hash,
+        candidate.write_id.clone(),
+        coord.clone(),
+        candidate.author_registration.clone(),
+        &registration,
+        candidate.order.clone(),
+        candidate.membership_state.clone(),
+        candidate.device_state.clone(),
+        crate::sync::store_commit::StoreOperationMembershipAuthority { predecessor },
+        crate::sync::store_commit::StorePackageInput {
+            candidate_family: candidate.candidate_family(),
+            schema_version: db.schema_version(),
+            bytes: &package_bytes,
+            object: package_prepared.reference().clone(),
+        },
+        &device_signer,
+    )
+    .expect("sign competing commit");
+    let commit_prefix = commit_semantic_prefix(
+        winner.candidate_family(),
+        &coord.stream_id.to_string(),
+        winner.seq(),
+        winner.commit_hash(),
+    );
+    let commit_context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let commit_slot = storage
+        .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
+        .await
+        .expect("reserve competing commit slot");
+    let commit_prepared = storage
+        .prepare_protocol_object(
+            &commit_context,
+            commit_slot,
+            &commit_prefix,
+            winner.to_bytes(),
+        )
+        .expect("prepare competing commit");
+    storage
+        .create_protocol_object(&commit_prepared)
+        .await
+        .expect("publish competing commit");
+    let winner_ref = StoreBatchCommitRef::from_commit(
+        &winner,
+        coord.clone(),
+        commit_prepared.reference().clone(),
+    )
+    .expect("reference competing commit");
+    assert_ne!(winner_ref, journal.operation().commit_ref);
+    let winner_head = StoreDeviceHead::signed(
+        root.store_root_hash,
+        candidate.author_registration.clone(),
+        winner_ref,
+        head.history_summary,
+        head.successor.clone(),
+        &device_signer,
+    )
+    .expect("sign competing head");
+    let head_context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
+    let head_slot = journal
+        .operation()
+        .prepared_objects
+        .get("store-head")
+        .expect("candidate carries a prepared Store head")
+        .reference()
+        .slot()
+        .clone();
+    let head_prefix = head_slot_prefix(
+        &candidate.author_registration.device_id.to_string(),
+        candidate.seq(),
+    );
+    let head_prepared = storage
+        .prepare_protocol_object(
+            &head_context,
+            head_slot,
+            &head_prefix,
+            winner_head.to_bytes(),
+        )
+        .expect("prepare competing head");
+    storage
+        .create_protocol_object(&head_prepared)
+        .await
+        .expect("publish competing head");
+    (
+        commit_prepared.reference().clone(),
+        head_prepared.reference().clone(),
+    )
 }
 
 async fn assert_exact_object_absent(home: &InMemoryCloudHome, reference: &ExactObjectRef) {

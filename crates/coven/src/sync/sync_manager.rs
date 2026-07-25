@@ -939,6 +939,19 @@ impl SyncManager {
             .map_err(crate::CircleError::from)
     }
 
+    pub(crate) async fn discard_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .discard_circle_operation(operation_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
     pub(crate) async fn circle_close_status(
         &self,
         circle_id: crate::CircleId,

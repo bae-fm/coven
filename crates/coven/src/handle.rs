@@ -2874,6 +2874,15 @@ mod tests {
                 "retry_operation forwards the operation id: {retry:?}"
             );
 
+            let discard = circles
+                .discard_operation(crate::CircleOperationId::placeholder("dispatch-op-seed"))
+                .await;
+            assert!(
+                matches!(&discard, Err(crate::CircleError::Protocol(message))
+                    if message.contains("dispatch-op-seed")),
+                "discard_operation forwards the operation id: {discard:?}"
+            );
+
             let absent_circle = crate::CircleId::from_bytes([9u8; 16]);
             let remove = circles.remove_member(absent_circle, &member).await;
             assert!(

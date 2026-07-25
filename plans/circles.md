@@ -278,10 +278,14 @@ rebuild the deleted choice.
    outcome cutoff, Store-member-removal rotation blocking, control-conflict
    resolution, and terminal deletion are implemented. Durable operation recovery
    types the block reason (`AuthorityLost`), lets the initiator retry a blocked
-   operation from its captured phase, and records finalization payloads
+   operation from its captured phase, records finalization payloads
    durable-first so a restart resumes them byte-identically as their exact
-   settlement kind. Finish the excluded-device bootstrap reset and publication
-   gate, and verified-nonactivation discard.
+   settlement kind, and discards an operation only with a verified
+   permanent-nonactivation proof — a different verified winner already holds the
+   candidate's successor slot, or the author was excluded — exact-deleting the
+   candidate-exclusive objects and clearing the journal row, resumable from a
+   durable `Discarding` state. Finish the excluded-device bootstrap reset and
+   publication gate.
 1. Circle acknowledgement and standalone-snapshot authoring, publication,
    bootstrap-machinery install, snapshot acknowledgement-stability gating, and
    mixed Store-and-Circle restore staging are implemented. Restore re-resolves the
@@ -291,8 +295,8 @@ rebuild the deleted choice.
    transaction. Finish packages, pull, reclamation, and blobs.
 1. **In progress.** The application API is implemented: the `coven.circles()`
    namespace (create, rename, add and remove member, resolve control, cancel and
-   exclude-device on a close, delete, retry operation, list, members, operations,
-   close_status), the public derived `CircleState` mapped once from the current
+   exclude-device on a close, delete, retry and discard operation, list, members,
+   operations, close_status), the public derived `CircleState` mapped once from the current
    state, durable operation inspection with the typed block, read-only
    `close_status`, and the typed public `CircleError` mapping the internal typed
    refusals one-to-one with stable identifiers. Write-path status stays on

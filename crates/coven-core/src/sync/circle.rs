@@ -396,7 +396,13 @@ pub enum CircleOperationState {
     Pending,
     WaitingForCloseResponses,
     Finalizing,
-    Blocked { block: CircleOperationBlock },
+    Blocked {
+        block: CircleOperationBlock,
+    },
+    /// A verified nonactivation proof was accepted; the candidate's exclusive
+    /// objects are being exact-deleted and the durable row cleared. Restart
+    /// resumes the same cleanup from this state.
+    Discarding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

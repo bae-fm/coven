@@ -562,7 +562,7 @@ fn update_circle_operation_on(
     Ok(())
 }
 
-fn persist_circle_operation_row_on(
+pub(super) fn persist_circle_operation_row_on(
     conn: &Connection,
     journal: CircleOperationJournal,
 ) -> Result<(), DbError> {

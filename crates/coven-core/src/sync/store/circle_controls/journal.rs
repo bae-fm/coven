@@ -69,6 +69,11 @@ pub(crate) enum CircleOperationProgress {
         phase: CircleOperationPhase,
         operation: Box<PreparedCircleOperation>,
     },
+    /// A verified nonactivation proof was accepted. The candidate's exclusive
+    /// objects are being exact-deleted and the durable row cleared in the
+    /// completing transaction. The retained payload identifies the candidate
+    /// graph so a restart resumes the exact same cleanup.
+    Discarding(Box<PreparedCircleOperation>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +102,8 @@ impl CircleOperationJournal {
             CircleOperationProgress::Ready(operation)
             | CircleOperationProgress::WaitingForCloseResponses(operation)
             | CircleOperationProgress::Finalizing(operation)
-            | CircleOperationProgress::Blocked { operation, .. } => operation,
+            | CircleOperationProgress::Blocked { operation, .. }
+            | CircleOperationProgress::Discarding(operation) => operation,
         }
     }
 
@@ -106,7 +112,8 @@ impl CircleOperationJournal {
             CircleOperationProgress::Ready(operation)
             | CircleOperationProgress::WaitingForCloseResponses(operation)
             | CircleOperationProgress::Finalizing(operation)
-            | CircleOperationProgress::Blocked { operation, .. } => operation,
+            | CircleOperationProgress::Blocked { operation, .. }
+            | CircleOperationProgress::Discarding(operation) => operation,
         }
     }
 
@@ -358,7 +365,33 @@ impl CircleOperationJournal {
             CircleOperationProgress::Blocked { block, .. } => CircleOperationState::Blocked {
                 block: block.clone(),
             },
+            CircleOperationProgress::Discarding(_) => CircleOperationState::Discarding,
         }
+    }
+
+    /// Enter cleanup after a verified nonactivation proof was accepted. Legal
+    /// from any state whose candidate has not activated — a ready or blocked
+    /// initial candidate, or a finalization candidate. A candidate that already
+    /// won its slot has no journal row in these states, so no path reaches here.
+    pub(crate) fn begin_discard(&mut self) -> Result<(), CircleOperationError> {
+        let operation = match &self.progress {
+            CircleOperationProgress::Ready(operation)
+            | CircleOperationProgress::Finalizing(operation)
+            | CircleOperationProgress::Blocked { operation, .. } => operation.clone(),
+            CircleOperationProgress::WaitingForCloseResponses(_)
+            | CircleOperationProgress::Discarding(_) => {
+                return Err(CircleOperationError::Journal(format!(
+                    "Circle operation {} cannot enter discard from its current state",
+                    self.operation_id
+                )));
+            }
+        };
+        self.progress = CircleOperationProgress::Discarding(operation);
+        Ok(())
+    }
+
+    pub(crate) fn is_discarding(&self) -> bool {
+        matches!(&self.progress, CircleOperationProgress::Discarding(_))
     }
 
     pub(crate) fn block(
@@ -373,7 +406,8 @@ impl CircleOperationJournal {
                 (CircleOperationPhase::Finalization, operation.clone())
             }
             CircleOperationProgress::WaitingForCloseResponses(_)
-            | CircleOperationProgress::Blocked { .. } => {
+            | CircleOperationProgress::Blocked { .. }
+            | CircleOperationProgress::Discarding(_) => {
                 return Err(CircleOperationError::Journal(format!(
                     "Circle operation {} is not publishable",
                     self.operation_id

@@ -296,7 +296,51 @@ async fn finish_merge_abandonment(
     }
 }
 
-async fn excluded_candidate_nonactivation(
+/// The nonactivation proof for discarding a candidate whose slot is already
+/// resolved. Unlike Merge abandonment, discard never publishes an abandonment
+/// commit to race for the slot — it is invoked after the slot is lost, so it
+/// observes the outcome directly. A different verified winner occupying the
+/// successor slot is a standalone proof (the candidate is bound to that
+/// create-once slot and can never take it), independent of the author's status.
+/// Falling back to the author-exclusion proof covers a slot the author was
+/// excluded from before anyone claimed it.
+pub(crate) async fn discard_candidate_nonactivation(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    candidate: &crate::database::BlockedMergeCandidate,
+) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
+        StoreError::InvalidOutbound("discard candidate has no Store root".to_string())
+    })?;
+    if let ExcludedCandidateHeadObservation::MergeWinner(observation) =
+        observe_excluded_candidate_head(
+            database,
+            storage,
+            root.store_root_hash,
+            &candidate.head.value,
+            &candidate.commit.value,
+            &candidate.head.object,
+        )
+        .await?
+    {
+        let registration = database
+            .activated_store_device_registration(candidate.commit.value.author_registration.clone())
+            .await?;
+        let target = StoreBatchCommitDeletionTarget {
+            coord: candidate.head.value.commit.coord.clone(),
+            object: candidate.commit.object.clone(),
+            canonical_signed_bytes: candidate.commit.bytes.clone(),
+        };
+        return Ok(Some(
+            observation
+                .verified_nonactivation(target, &registration)
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+        ));
+    }
+    excluded_candidate_nonactivation(database, storage, candidate).await
+}
+
+pub(crate) async fn excluded_candidate_nonactivation(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     candidate: &crate::database::BlockedMergeCandidate,

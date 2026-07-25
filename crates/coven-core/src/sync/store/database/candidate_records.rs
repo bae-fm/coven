@@ -384,6 +384,7 @@ pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
     candidate: &PreparedMergeCandidate,
     nonactivation: &BlockedMergeCandidateNonactivation,
     include_indexed_blobs: bool,
+    extra_objects: &[ExactObjectRef],
 ) -> Result<(), DbError> {
     if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
         validate_terminal_candidate_authority_on(tx, candidate, durable)?;
@@ -396,6 +397,7 @@ pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
                 candidate,
                 durable,
                 include_indexed_blobs,
+                extra_objects,
             )
         }
         BlockedMergeCandidateNonactivation::Terminal {
@@ -407,6 +409,7 @@ pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
             candidate,
             durable,
             include_indexed_blobs,
+            extra_objects,
             head_nonactivation,
         ),
     }
@@ -418,6 +421,7 @@ pub(crate) fn begin_merge_candidate_nonactivation_on(
     candidate: &PreparedMergeCandidate,
     nonactivation: &crate::sync::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
+    extra_objects: &[ExactObjectRef],
 ) -> Result<(), DbError> {
     begin_merge_candidate_nonactivation_with_head_evidence_on(
         conn,
@@ -425,6 +429,7 @@ pub(crate) fn begin_merge_candidate_nonactivation_on(
         candidate,
         nonactivation,
         include_indexed_blobs,
+        extra_objects,
         MergeCandidateHeadEvidence::OccupiedByProof,
     )
 }
@@ -435,6 +440,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_verified_head_on(
     candidate: &PreparedMergeCandidate,
     nonactivation: &crate::sync::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
+    extra_objects: &[ExactObjectRef],
     head_nonactivation: &crate::sync::remote_object::VerifiedCandidateHeadNonactivation,
 ) -> Result<(), DbError> {
     begin_merge_candidate_nonactivation_with_head_evidence_on(
@@ -443,6 +449,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_verified_head_on(
         candidate,
         nonactivation,
         include_indexed_blobs,
+        extra_objects,
         MergeCandidateHeadEvidence::Verified(head_nonactivation),
     )
 }
@@ -453,6 +460,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
     candidate: &PreparedMergeCandidate,
     nonactivation: &crate::sync::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
+    extra_objects: &[ExactObjectRef],
     head_evidence: MergeCandidateHeadEvidence<'_>,
 ) -> Result<(), DbError> {
     if nonactivation
@@ -484,6 +492,11 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
         drop(statement);
         object_ids.extend(indexed);
     }
+    object_ids.extend(
+        extra_objects
+            .iter()
+            .map(|object| remote_object_id(object).to_string()),
+    );
     for encoded in object_ids {
         let object_id: ObjectHash = encoded.parse().map_err(|error| {
             DbError::Message(format!("Merge conflict remote object id: {error}"))
@@ -511,11 +524,69 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
     Ok(())
 }
 
+/// Read a prepared candidate's durable nonactivation proof and lift it into the
+/// terminal cleanup authority it names. Returns `None` when the candidate has no
+/// proof yet or its proof is a non-terminal Merge-winner (whose head is cleaned
+/// by occupation, not terminal reconciliation). Shared by Merge cleanup and
+/// Circle-operation discard so both derive the authority identically.
+pub(super) fn terminal_candidate_verification_on(
+    conn: &Connection,
+    candidate: PreparedMergeCandidate,
+) -> Result<Option<TerminalCandidateCleanupVerification>, DbError> {
+    let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
+    let Some(proof) = remote
+        .candidate_nonactivation_proof(&candidate.reference)
+        .map_err(|error| DbError::Message(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let authority = match proof {
+        crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
+            exclusion,
+            ..
+        } => TerminalCandidateAuthority::AuthorExclusion(
+            load_author_exclusion_activation_locator_on(conn, exclusion)?,
+        ),
+        crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+            grant_id,
+            membership,
+            activation_commit,
+            activation_head,
+        } => TerminalCandidateAuthority::MembershipGrantRevocation {
+            grant_id: grant_id.clone(),
+            membership: membership.clone(),
+            activation_commit: activation_commit.clone(),
+            activation_head: activation_head.clone(),
+        },
+        crate::sync::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+            let durable = crate::sync::remote_object::CandidateNonactivation::from_durable_parts(
+                &candidate.reference,
+                &candidate.commit,
+                proof.clone(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            validate_terminal_nonactivation_authority_on(conn, &durable)?;
+            TerminalCandidateAuthority::DependencyRetraction(
+                crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            )
+        }
+        crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
+            return Ok(None)
+        }
+    };
+    Ok(Some(TerminalCandidateCleanupVerification {
+        authority,
+        candidate: blocked_merge_candidate_from_prepared(candidate),
+    }))
+}
+
 pub(super) fn merge_candidate_cleanup_targets_on(
     conn: &Connection,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
     include_indexed_blobs: bool,
+    extra_objects: &[ExactObjectRef],
 ) -> Result<Vec<CandidateCleanupObject>, DbError> {
     let commit_remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
     if !matches!(
@@ -556,6 +627,11 @@ pub(super) fn merge_candidate_cleanup_targets_on(
             drop(statement);
             encoded.extend(indexed);
         }
+        encoded.extend(
+            extra_objects
+                .iter()
+                .map(|object| remote_object_id(object).to_string()),
+        );
         for encoded in encoded {
             let object_id: ObjectHash = encoded.parse().map_err(|error| {
                 DbError::Message(format!("Merge cleanup remote object id: {error}"))
@@ -592,7 +668,10 @@ pub(super) fn merge_candidate_cleanup_targets_on(
         ));
     }
     let mut targets = Vec::new();
-    for object in candidate_graph_exact_objects(&candidate.commit)? {
+    for object in candidate_graph_exact_objects(&candidate.commit)?
+        .into_iter()
+        .chain(extra_objects.iter().cloned())
+    {
         if let Some(target) = cleanup.remove(&object) {
             targets.push(target);
         }
@@ -621,7 +700,7 @@ pub(super) fn finish_merge_retraction_cleanup_on(
     tx: &rusqlite::Transaction<'_>,
     candidate: &PreparedMergeCandidate,
 ) -> Result<(), DbError> {
-    if !merge_candidate_cleanup_targets_on(tx, &candidate.commit.write_id, candidate, false)?
+    if !merge_candidate_cleanup_targets_on(tx, &candidate.commit.write_id, candidate, false, &[])?
         .is_empty()
     {
         return Err(DbError::Message(
