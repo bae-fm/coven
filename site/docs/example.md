@@ -15,17 +15,16 @@ coven owns the connections. The host opens one handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
 that sync and the [migration ladder](/docs/schema-evolution) that creates the
 app's own tables. On the first open of a database, coven creates its complete
-bookkeeping schema, the selected write policy, and its initialization marker in
-one SQLite transaction. Every later writer and read-only open requires that
-marker and validates the requested policy against the persisted value; missing,
-invalid, or different metadata refuses the open. The writer then runs any host
+bookkeeping schema and its initialization marker in one SQLite transaction.
+Every later writer and read-only open requires that marker; missing or invalid
+metadata refuses the open. The writer then runs any host
 migration rungs above the database's version, seeds its clock off the rows
 already on disk, attaches the change-capture session to the synced tables, and
 spawns the threads that own the connections — a writer, and a read-only
 companion that backs `handle.sql_read`.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable, WritePolicy};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 const SCHEMA: &str = "
 CREATE TABLE workspaces (
@@ -50,7 +49,6 @@ CREATE TABLE todos (
 ";
 
 let handle = Coven::builder(config)
-    .write_policy(WritePolicy::MergeConcurrent)
     .synced_tables(vec![
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
@@ -111,10 +109,8 @@ let receipt = handle.sql(move |sql| {
 
 `receipt.value` is the closure's result. `receipt.write_id` remains stable across
 restart, and `receipt.status` is `LocalOnly` when no shared rows changed or
-`Pending` when this transaction awaits publication. In a `Serial` store,
-`receipt.pending_branch_id` names the ordered provisional branch containing the
-write; MergeConcurrent and local-only receipts carry `None`. One successful
-`sql` or `write` call creates one write id and one Store commit.
+`Pending` when this transaction awaits publication. One successful `sql` or
+`write` call creates one write id and one Store commit.
 
 Don't read the stamp as a wall-clock time or compare two of them as dates. It is
 an opaque clock value coven advances past pulled rows so a later local write
@@ -222,10 +218,6 @@ tokio::spawn(async move {
             coven::SyncLoopStatus::Failed { error } => {
                 // Show the whole-cycle failure.
             }
-            coven::SyncLoopStatus::Conflict { success, branch } => {
-                // Refresh from success, then ask the user to discard or rerun the
-                // stale Serial branch against the current global state.
-            }
             coven::SyncLoopStatus::Blocked { success, writes } => {
                 // Refresh from success, then show the prerequisite each write names.
             }
@@ -247,17 +239,11 @@ with affected table/primary-key identities. `handle.write_status(&write_id)` and
 `handle.subscribe_write_status(&write_id)` expose its current durable state,
 including its exact published device position or a typed semantic block.
 `handle.blocked_writes()` lists only blocked records. After the prerequisite is
-repaired, `handle.retry_blocked_write(&write_id)` requeues them and wakes sync;
-a Serial retry revalidates the complete ordered branch, including writes that
-remained pending. `handle.discard_blocked_write(&write_id)` atomically reverses
-that write and every later unpublished write whose local rows depend on it.
-For a `Serial` store, `handle.pending_branches()` returns the stale branch after
-a serialization conflict. The branch id on each Serial `WriteReceipt` also lets
-the host discard a provisional local branch before publication. If candidate
-objects may already exist remotely, discard publishes signed nonactivation
-authority and verifies exact cleanup before reversing local rows.
-`handle.replace_pending_branch(...)` reruns a stale branch's host intent against
-the current global state and commits the replacement atomically.
+repaired, `handle.retry_blocked_write(&write_id)` requeues them and wakes sync.
+`handle.discard_blocked_write(&write_id)` atomically reverses that write and
+every later unpublished write whose local rows depend on it. If candidate objects
+may already exist remotely, discard publishes signed nonactivation authority and
+verifies exact cleanup before reversing local rows.
 
 ## Attachments
 
@@ -320,3 +306,28 @@ readiness proof, and installed `Config`. The owner handles the other side with
 the device-join methods on `CovenHandle`. `handle.remove_member(...)` appends a
 fresh key generation the removed member never receives. The signed membership
 chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).
+
+## Keep some rows to a subset of the store
+
+Membership grants the whole store. To keep a subset of rows private to some
+members inside it, use a [Circle](/docs/circles): a named audience whose rows
+only its members receive. Declare an audience column on the root, then address
+rows to a Circle by updating that column.
+
+```rust
+// declared: SyncedTable::new("lists", RowIdentity::IndependentUuid).scoped_by("audience")
+let family = handle.circles().create("Family").await?;
+handle.circles().add_member(family, &housemate_pubkey_hex).await?;
+
+handle.sql(move |sql| {
+    sql.execute(
+        "UPDATE lists SET audience = ?1 WHERE id = ?2",
+        params![family.to_string(), list_id],
+    )?;
+    Ok(())
+}).await?;
+```
+
+The whole Circle lifecycle — states, epoch close on member removal, control
+conflict resolution, deletion, and the privacy limits — is on the
+[Circles](/docs/circles) page.

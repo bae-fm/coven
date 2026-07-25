@@ -127,6 +127,7 @@ export default defineConfig({
                         { text: 'Blobs', link: '/docs/blobs' },
                         { text: 'Cache', link: '/docs/cache' },
                         { text: 'Sharing', link: '/docs/sharing' },
+                        { text: 'Circles', link: '/docs/circles' },
                         { text: 'Bootstrap', link: '/docs/bootstrap' },
                         { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Keys', link: '/docs/keys' },

@@ -84,10 +84,9 @@ internal schema, runs your ladder, and returns one handle. Tables you don't
 list stay local to the device.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable, WritePolicy};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(config)
-    .write_policy(WritePolicy::MergeConcurrent)
     .synced_tables(vec![
         SyncedTable::new("todos", RowIdentity::IndependentUuid),
         SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
@@ -182,6 +181,8 @@ In reading order; each page builds on the ones before it:
 - [Cache](/docs/cache): the device-local copies of remote files: budgets,
   pinning, eviction.
 - [Sharing](/docs/sharing): membership, roles, invite, join, revoke.
+- [Circles](/docs/circles): private audiences inside one store: who receives
+  which rows, and the Circle lifecycle.
 - [Bootstrap](/docs/bootstrap): snapshots and how a new device joins or
   restores.
 - [Encryption](/docs/encryption): the keys, what is encrypted, what the

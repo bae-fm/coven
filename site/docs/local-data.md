@@ -73,7 +73,7 @@ remember it, and the first one that forgot would leak the row. Instead the
 host *gates* the table: privacy becomes a property of the schema, and coven
 enforces it everywhere a row can travel. The host declares the gate per table on
 the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
-it passes to `Coven::builder(config).write_policy(...).synced_tables(...)`, and coven enforces
+it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset
 and the bootstrap snapshot.
 
@@ -81,7 +81,7 @@ Examples: a `workspace` holds `lists`, a `list` holds `todos`, and a list has
 a boolean `shared` column. A private list, and the todos under it, should stay
 on the device that made it.
 
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has four
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has these
 gate forms:
 
 ```rust
@@ -89,6 +89,7 @@ SyncedTable::new("todos", RowIdentity::IndependentUuid) // no gate of its own
 SyncedTable::new("attachments", RowIdentity::IndependentUuid).remote_root()
 SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared")
 SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendants()
+SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
 ```
 
 - `new(name, row_identity)` declares the table synced with no gate of its own. With a foreign
@@ -100,8 +101,13 @@ SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendant
   boolean `column` is true.
 - `gated_by_descendants()` marks an *ancestor* that should sync only while a
   gated descendant of it survives.
+- `scoped_by(column)` makes the table an *audience root*: a `TEXT` column selects
+  whether each row reaches the whole store, one [Circle](/docs/circles), or only
+  this device. It is the general form of `gated_by` (which chooses only between
+  the store and this device). Audience roots require an opaque cloud home and are
+  covered on the [Circles](/docs/circles#declaring-audience-routing) page.
 
-A table is one of the four, never two at once. Two further properties are
+A table is one of these, never two at once. Two further properties are
 orthogonal to the gate and covered in [Blobs](/docs/blobs): a table may *carry
 a blob* (`carries_blob`), and it may be an *asset*, a decoration like a cover
 image that rides its subject's gate but never keeps that subject alive.

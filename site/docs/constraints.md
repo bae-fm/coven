@@ -43,15 +43,18 @@ so several controls a server-backed system offers do not exist:
   [setting access to absent](/docs/storage#granting-and-revoking-access) reports it as
   unrevocable and removal proceeds on the [key rotation](#revocation-withholds-new-secrets-it-cannot-un-send-old-ones)
   alone. Even where cloud access *is* cut, it does not un-see already-synced data.
-- **No per-row or per-field filtering between members.** Membership grants the
-  whole store: a new member receives the [store keyring](/docs/sharing#the-store-keyring)
-  and can decrypt every object in the store's access scope. There is no server to
-  hand member A some rows and member B others, or to hide a column from one
-  member. Confidentiality is between the store's members and the outside world
-  (non-members and the storage provider), not among the members. The
-  [gate](/docs/local-data) that keeps some rows on one device is the owner's
-  device holding its own rows back, not the store partitioning data across
-  members.
+- **No per-field filtering, and only coarse per-row filtering.** Membership
+  grants the whole store keyring: a new member can decrypt every Store-audience
+  object. [Circles](/docs/circles) narrow this — a row addressed to a Circle is
+  encrypted for that Circle's members only, so a store can hold rows some members
+  never receive — but a Circle is not a server-side row filter. It leaks
+  pseudonymous row counts, move timing, and which identities administer each
+  Circle to every store member (see
+  [the Circle privacy limits](/docs/circles#security-and-privacy-limits)), and it
+  cannot hide a *column* from a member who receives the row. When two sets of
+  people must learn nothing about each other, that is two stores, not two Circles
+  in one store. The [gate](/docs/local-data) that keeps some rows on one device is
+  a different thing again: the owner's device holding its own rows back.
 - **No tamper-proof access log.** coven signs append-only
   [membership state](/docs/sharing#membership-records), so who may *write* is
   recorded and forgery-evident. But a *read* is just a download of ciphertext from
@@ -81,27 +84,26 @@ a limit on confidentiality *within* a store: sharing a store is sharing all of
 it. When two sets of people should not see each other's data, that is two stores,
 not one store with internal walls.
 
-## Consistency follows the write policy
+## Consistency is convergent, not global
 
-Devices are not consistent at every instant. `MergeConcurrent` allows offline
-branches and [merges](/docs/merge) them locally. `Serial` gives published
-commits one global order through a conditional storage head, but a local replica
-may lag that head and stale offline work becomes an explicit branch conflict.
-Neither policy offers a transaction spanning devices. The consequences:
+Devices are not consistent at every instant. Each device commits offline and
+publishes to its own stream; peers [merge](/docs/merge) the independent streams
+when they pull. coven converges — every device that holds the same accepted
+history lands on the same rows — but it does not claim global serializability or
+linearizability, and it offers no transaction spanning devices. The
+consequences:
 
-- **`MergeConcurrent` uses column-wise last-writer-wins.** Concurrent edits to different columns of one
+- **Column-wise last-writer-wins.** Concurrent edits to different columns of one
   row both survive; concurrent edits to the *same* column resolve to the later
   writer, ordered by a [hybrid logical clock](/docs/merge#the-clock) rather than
   wall-clock time. The loser's value is overwritten, not queued for review.
-- **`MergeConcurrent` uses delete-wins, and only after sync.** A delete beats a concurrent edit
+- **Delete-wins, and only after sync.** A delete beats a concurrent edit
   ([`arbitrate_row_conflict`](rustdoc:fn:coven::sync::conflict::arbitrate_row_conflict)),
   but a delete only takes effect on a device once that device pulls it. Until
   then, the row is still live there.
 - **No cross-device transactions.** A transaction is atomic on the device that
-  writes it, but coven does not offer a transaction that spans devices. Under
-  `MergeConcurrent`, two offline commits meet and merge. Under `Serial`, only
-  one branch can advance a given global head; another remains local until the
-  host discards it or reruns its intent against the current state.
+  writes it, but coven does not offer a transaction that spans devices: two
+  offline commits meet and merge, they do not serialize behind one another.
 - **No globally-enforced uniqueness or foreign keys.** SQLite enforces a
   `UNIQUE` or `CHECK` constraint within one device, but coven cannot enforce one
   across the store: two offline devices can each insert a row that is locally

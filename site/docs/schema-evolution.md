@@ -40,7 +40,6 @@ verifying its one current internal schema:
 
 ```rust
 let handle = Coven::builder(config)
-    .write_policy(coven::WritePolicy::MergeConcurrent)
     .synced_tables(synced_tables)
     .migrations(vec![
         Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),

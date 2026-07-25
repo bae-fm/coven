@@ -8,12 +8,10 @@ plaintext, never assigns sequence numbers, and never coordinates concurrent
 writers. It reads, writes, lists, and deletes objects addressed by a flat string
 key.
 
-That byte interface is sufficient for `MergeConcurrent`. `Serial` uses a
-second, deliberately separate
-[`CoordinationStorage`](rustdoc:trait:coven::sync::storage::CoordinationStorage)
-capability for one mutable global head. Keeping it separate makes provider
-eligibility explicit: a `CloudHome` implementation cannot accidentally claim
-conditional-write semantics by returning a runtime error from optional methods.
+That byte interface is the whole boundary. coven's protocol writes only
+immutable objects and never overwrites one, so a `CloudHome` never assigns
+sequence numbers, coordinates concurrent writers, or offers a conditional write
+— there is no mutable global head anywhere for it to guard.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
@@ -112,33 +110,6 @@ pub trait CloudHome: Send + Sync {
   is safe to retry after an unknown outcome. It is provider-shaped and
   described below.
 
-## Serial coordination
-
-`CoordinationStorage` requires four operations: read a head with its provider
-version, create only if absent, replace only when that exact version still
-matches, and delete a reserved probe head. Setup exercises two independent
-clients against a fresh reserved key and requires one winner for both the
-create race and the replace race, followed by authoritative readback and
-cleanup.
-
-CloudKit and AWS S3 expose this capability. An S3-compatible endpoint is not
-assumed to have AWS's conditional writes and strong reads: the host must set
-`CloudHomeConfig::s3_serial` to
-`CustomS3Serial::ConditionalPutAndStrongReads`. Google Drive, Dropbox, and
-OneDrive have no Serial coordination adapter. Creating, joining, restoring, or
-starting Serial sync on those providers is refused before provider access or
-local mutation.
-
-The choice belongs to the signed Store, not to the local connection. A store
-can be opened and used locally with either policy while no provider is
-configured; the coordination requirement begins when `Serial` sync connects.
-
-The signed global head is an authoritative chain selector, not a filename
-winner. Pull opens every visible physical candidate in the head slot, requires
-copies under one semantic hash to contain identical plaintext, rejects multiple
-valid hashes as a fork, and follows only the exact predecessor chain named by
-the accepted head. Provider listing order never selects a Serial history.
-
 ## Granting and revoking access
 
 Membership is cryptographic, but a new member still has to *reach* the bytes:
@@ -230,9 +201,6 @@ only places a provider deviates from "write opaque bytes by key".
   parts. An optional key prefix is prepended to every key (trailing slashes
   normalized), so `changes/dev1/42.enc` can become
   `libs/abc/changes/dev1/42.enc`.
-  AWS S3 also supplies the conditional global-head adapter used by `Serial`.
-  A custom endpoint supplies it only with the explicit `s3_serial` assertion
-  described above.
 
 - **Google Drive**
   ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))
@@ -241,20 +209,17 @@ only places a provider deviates from "write opaque bytes by key".
   list; the encoding is exact and reversible, never a lossy substitution. Large
   files use a resumable upload session in 8 MiB chunks (Drive requires 256
   KiB alignment).
-  It supports `MergeConcurrent`, not `Serial`.
 
 - **OneDrive**
   ([`OneDriveCloudHome`](rustdoc:struct:coven::storage::cloud::onedrive::OneDriveCloudHome))
   uses the same hex filename encoding and a Microsoft Graph resumable
   upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
-  It supports `MergeConcurrent`, not `Serial`.
 
 - **Dropbox**
   ([`DropboxCloudHome`](rustdoc:struct:coven::storage::cloud::dropbox::DropboxCloudHome))
   uses native Dropbox paths under the store folder (for example
   `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
   needed. Sharing goes through `share_folder` to get a `shared_folder_id`.
-  It supports `MergeConcurrent`, not `Serial`.
 
 - **CloudKit**
   ([`CloudKitCloudHome`](rustdoc:struct:coven::storage::cloud::cloudkit::CloudKitCloudHome))
@@ -267,8 +232,6 @@ only places a provider deviates from "write opaque bytes by key".
   [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
   cannot build this one from Rust alone and returns a `Storage` error directing
   you to construct it through your Swift layer.
-  Its record versions supply the conditional global-head adapter used by
-  `Serial`.
 
 - **In-memory**
   ([`InMemoryCloudHome`](rustdoc:struct:coven::storage::cloud::test_utils::InMemoryCloudHome),

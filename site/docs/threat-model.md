@@ -21,10 +21,9 @@ them:
   cipher is authenticated: a flipped byte fails to open. The associated data of
   each sealed object binds it to its `(store_id, cloud_key)` position, so an
   object copied to a different key fails to open there.
-- **Signed membership.** `MergeConcurrent` uses causal, per-author membership
-  streams. `Serial` puts exact-state membership changes into its global commit
-  chain. Both begin at the founder bound into the signed Store protocol root
-  (see [Sharing](/docs/sharing)). Heads, snapshot metadata, and wrapped keys are
+- **Signed membership.** Causal, per-author membership streams beginning at the
+  founder bound into the signed Store protocol root (see
+  [Sharing](/docs/sharing)). Heads, snapshot metadata, and wrapped keys are
   signed, so the provider holding them cannot forge membership.
 
 ## Non-member with read access to the bucket
@@ -75,6 +74,27 @@ to grant themselves a role they were never given. What a current member *can* do
 — they hold the store key and a valid identity — is exactly what membership
 grants: write store data. Removing that capability is the next section.
 
+## Current member, against another member's Circle
+
+A current store member asking what they learn about a [Circle](/docs/circles)
+they are not in.
+
+**Circle contents are defended; the Circle's existence and administration are
+not.** A Circle package is encrypted to that Circle's key, which a non-member
+never receives, so its rows, roster, and display name stay confidential. What a
+store member *does* see, because it is Store-encrypted control state they must be
+able to verify: that the Circle exists, the Owner public keys and head author
+coordinates that administer it, and — through the Store-visible routing mirror —
+pseudonymous per-Circle row counts and the timing of every audience move. The
+administrator visibility is deliberate: verifying a Circle's close outcome,
+conflict resolution, or deletion requires reading the Owner authority that signed
+it. A store member who holds the routing key can also test guesses for
+predictable table-and-primary-key combinations against the mirror. These are
+stated protocol properties, listed in full under
+[the Circle privacy limits](/docs/circles#security-and-privacy-limits); the
+boundary that hides even counts and administrators is a separate store, not a
+Circle.
+
 ## Revoked member with residual bucket access
 
 A former member who has been removed from the chain but still holds a bucket
@@ -119,12 +139,10 @@ the provider cannot read plaintext or forge a membership decision. What it
 retains is scheduling power over what it serves: it can withhold an object,
 serve an older version, or reorder what a reader sees.
 
-Rollback of *membership* is bounded by the write policy. `MergeConcurrent`
-readers persist per-author-stream head watermarks and refuse regressions. `Serial`
-readers verify the signed global head and its complete predecessor chain. Invite
-and restore codes carry the corresponding causal frontier or exact global
-position, so a fresh device refuses membership older than the code it received
-(see [Bootstrap](/docs/bootstrap)).
+Rollback of *membership* is bounded: readers persist per-author-stream head
+watermarks and refuse regressions. Invite and restore codes carry the
+corresponding causal frontier, so a fresh device refuses membership older than
+the code it received (see [Bootstrap](/docs/bootstrap)).
 
 Withholding is *not* defendable from inside the artifact. A provider that stops
 serving new objects presents a reader with a stale-but-internally-consistent
@@ -191,8 +209,7 @@ rather than gaps to close later.
 Removing a member records the prior provider access and wrapped-key objects,
 then publishes the membership removal with its replacement key generation. If
 activation loses its expected head or another step fails, coven restores those
-exact prior objects and access grants and reports the failure. A `Serial`
-removal activates membership and generation in one global control commit.
+exact prior objects and access grants and reports the failure.
 
 **A peer's tombstone GC can outrace a re-upload's cancel.** When a blob is
 re-uploaded to a cloud key whose deletion tombstone has already passed its grace
