@@ -741,11 +741,26 @@ fn remove_file_if_present(path: &Path) -> CovenResult<()> {
     }
 }
 
+#[cfg(not(windows))]
 fn sync_parent_dir(path: &Path) -> CovenResult<()> {
     let parent = path.parent().ok_or_else(|| {
         CovenError::MalformedPath(format!("path has no parent directory: {}", path.display()))
     })?;
     std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Windows has no POSIX parent-directory fsync: opening a directory handle for
+/// `FlushFileBuffers` needs write access a read-only `File::open` lacks, so
+/// `sync_all` fails with `ERROR_ACCESS_DENIED` (os error 5). NTFS journals its
+/// own metadata, so a rename's durability doesn't hang on a directory flush —
+/// which is why storage engines skip it on Windows. The parent-presence check
+/// stays so a malformed path is still rejected the same way everywhere.
+#[cfg(windows)]
+fn sync_parent_dir(path: &Path) -> CovenResult<()> {
+    path.parent().ok_or_else(|| {
+        CovenError::MalformedPath(format!("path has no parent directory: {}", path.display()))
+    })?;
     Ok(())
 }
 

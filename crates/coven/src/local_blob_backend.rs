@@ -318,6 +318,7 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
             .map_err(|e| format!("create dir tree {}: {e}", path.display()))
     }
 
+    #[cfg(not(windows))]
     async fn sync_parent_dir(&self, path: &Path) -> Result<(), String> {
         let parent = path
             .parent()
@@ -328,6 +329,18 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         dir.sync_all()
             .await
             .map_err(|e| format!("fsync parent dir {}: {e}", parent.display()))
+    }
+
+    // Windows has no POSIX parent-directory fsync: opening a directory handle
+    // for `FlushFileBuffers` needs write access a read-only open lacks, so it
+    // fails with `ERROR_ACCESS_DENIED` (os error 5). NTFS journals its own
+    // metadata, so rename durability doesn't hang on a directory flush. The
+    // parent-presence check stays for parity with the POSIX path.
+    #[cfg(windows)]
+    async fn sync_parent_dir(&self, path: &Path) -> Result<(), String> {
+        path.parent()
+            .ok_or_else(|| format!("path has no parent dir: {}", path.display()))?;
+        Ok(())
     }
 
     async fn walk_files(&self, dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
