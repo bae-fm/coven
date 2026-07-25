@@ -330,6 +330,18 @@ async fn verify_epoch_close_outcome(
             "Circle epoch-close outcome has no active successor".to_string(),
         )
     })?;
+    // An epoch's origin describes how the epoch was born, not what each control in
+    // it does. Only the control whose exact predecessor is the `EpochClose`
+    // finalizes the close and carries the outcome; every later control in the same
+    // epoch (a re-add, a further add) inherits the already-settled epoch. Dispatch
+    // on the retained predecessor's kind, not on the origin alone.
+    let epoch_predecessor = retained_predecessor(database, control).await?;
+    let predecessor_is_close = epoch_predecessor.as_ref().is_some_and(|predecessor| {
+        matches!(
+            predecessor.control.value.state(),
+            CircleControlState::EpochClose(_)
+        )
+    });
     let crate::sync::circle::CircleEpochOrigin::Closed {
         closed_epoch_id,
         close_control,
@@ -349,13 +361,41 @@ async fn verify_epoch_close_outcome(
         // or a reopen cancellation (dispatched before this function). Reaching here
         // over an `EpochClose` predecessor is the forged reopen the cancellation
         // dispatch key closes: reject it rather than trusting the `Founder` origin.
-        if predecessor_is_epoch_close(database, control).await? {
+        if predecessor_is_close {
             return Err(CircleOperationError::InvalidState(
                 "Circle active successor of an epoch close carries no settlement".to_string(),
             ));
         }
         return Ok(());
     };
+    if !predecessor_is_close {
+        // A closed-origin control whose exact predecessor is already an active
+        // epoch operates within an epoch a prior finalize established — the re-add
+        // the plan defines as "the same operation with a new active access leaf and
+        // current bootstrap." The outcome was verified once, at that finalize; this
+        // control neither carries nor re-proves it. Bind it to the retained
+        // predecessor's exact epoch so a forged origin (a fabricated cutoff or
+        // close reference) cannot ride in on an in-epoch add.
+        if objects.close_outcome.is_some() {
+            return Err(CircleOperationError::InvalidState(
+                "in-epoch Circle control carries a close outcome".to_string(),
+            ));
+        }
+        let epoch_predecessor = epoch_predecessor.ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "closed-origin in-epoch Circle control retained no exact predecessor".to_string(),
+            )
+        })?;
+        if control.value.epoch_id() != epoch_predecessor.control.value.epoch_id()
+            || control.value.key_fingerprint() != epoch_predecessor.control.value.key_fingerprint()
+            || active.common.origin != epoch_predecessor.control.value.active_common().origin
+        {
+            return Err(CircleOperationError::InvalidState(
+                "closed-origin in-epoch Circle control differs from its retained epoch".to_string(),
+            ));
+        }
+        return Ok(());
+    }
     let outcome_ref = objects.close_outcome.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(
             "closed Circle epoch omits its exact outcome".to_string(),
@@ -546,26 +586,23 @@ fn reopen_predecessor_coord(
         })
 }
 
-/// Whether the active successor's exact predecessor is an `EpochClose`. Used to
-/// reject a founder-origin active successor that carries no close settlement.
-async fn predecessor_is_epoch_close(
+/// The active successor's exact predecessor as a retained activation, or `None`
+/// when the control opens its own stream (founder seq 1) or the predecessor is
+/// not retained. Its kind distinguishes the two active successors of a closed
+/// epoch — the finalize (predecessor is the `EpochClose`, carries the outcome)
+/// from every later in-epoch control (predecessor is already active, inherits the
+/// settled epoch) — and rejects a founder-origin successor of an epoch close.
+async fn retained_predecessor(
     database: &StoreDatabase,
     control: &PreparedCircleControl,
-) -> Result<bool, CircleOperationError> {
+) -> Result<Option<VerifiedCircleReference>, CircleOperationError> {
     if control.value.previous_control_hash().is_none() {
-        return Ok(false);
+        return Ok(None);
     }
     let coord = reopen_predecessor_coord(control)?;
-    let Some(predecessor) = database
+    Ok(database
         .verified_circle_activation(control.value.circle_id, coord)
-        .await?
-    else {
-        return Ok(false);
-    };
-    Ok(matches!(
-        predecessor.control.value.state(),
-        CircleControlState::EpochClose(_)
-    ))
+        .await?)
 }
 
 /// Verify an `EpochClose → ActiveEpoch` reopen. The reopen is valid only when the

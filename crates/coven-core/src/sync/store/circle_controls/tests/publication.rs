@@ -2733,6 +2733,216 @@ async fn cancelling_a_finalized_close_is_refused() {
         .contains_key(&fixture.member_pubkey));
 }
 
+/// Publish one scoped Circle row as the owner and drive the cycle that commits it.
+async fn publish_owner_circle_row(fixture: &ClosingFounderCircle, row_id: &str, stamp: &str) {
+    let tables = fixture.db.synced_tables().to_vec();
+    let write_id = fixture.db.new_write_id();
+    let captured_write_id = write_id.clone();
+    let routing = EncryptionService::from_key([42; 32]);
+    let circle_id = fixture.circle_id;
+    let row_id = row_id.to_string();
+    let stamp = stamp.to_string();
+    fixture
+        .db
+        .call(move |connection| {
+            StoreDatabase::run_internal_store_write_transaction_on(
+                connection,
+                &tables,
+                Some(&routing),
+                captured_write_id,
+                |transaction| {
+                    transaction
+                        .execute(
+                            "INSERT INTO documents (id, audience, _updated_at)
+                             VALUES (?1, ?2, ?3)",
+                            rusqlite::params![row_id, circle_id.to_string(), stamp],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("capture owner Circle row");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish owner Circle row");
+    match fixture
+        .db
+        .write_status(&write_id)
+        .await
+        .expect("read owner Circle write status")
+    {
+        crate::WriteStatus::Published(_) => {}
+        status => panic!("owner Circle write was not published: {status:?}"),
+    }
+}
+
+/// Whether the member's materialized `documents` table holds a row with `row_id`.
+async fn member_has_row(fixture: &ClosingFounderCircle, row_id: &str) -> bool {
+    let row_id = row_id.to_string();
+    fixture
+        .member_db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                    rusqlite::params![row_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read member Circle row presence")
+}
+
+/// Re-adding a Circle-roster member after a member-removal epoch close activates a
+/// new active leaf and current-epoch bootstrap against the closed-origin
+/// successor. Prior possession of the old epoch key grants no current authority,
+/// and content authored while the member was removed stays unreadable to it until
+/// the re-add restores its access to the Circle's current state.
+#[tokio::test]
+async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf() {
+    let fixture = setup_closing_founder_circle("circle-readd-after-close").await;
+
+    // The member holds the Circle bootstrap and current content from before the
+    // removal.
+    member_pull(&fixture).await;
+
+    // Finalize the close: publish the owner-device response and drive the cycle
+    // that activates the closed-origin successor without the removed member.
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load closed-origin successor authoring state");
+    let successor_epoch = successor.control.value.epoch_id();
+    let successor_fingerprint = successor.control.value.key_fingerprint();
+    assert_ne!(successor_epoch, fixture.prior_epoch);
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    let crate::sync::circle::CircleControlState::ActiveEpoch(active) =
+        successor.control.value.state()
+    else {
+        panic!("closed-origin successor must be active");
+    };
+    assert!(
+        matches!(
+            active.common.origin,
+            crate::sync::circle::CircleEpochOrigin::Closed { .. }
+        ),
+        "successor epoch carries a closed origin"
+    );
+
+    // While the member is removed, the owner publishes a package into the
+    // closed-origin successor epoch — content authored during the removed interval.
+    let interval_row = "00000000-0000-4000-8000-0000000000a1";
+    publish_owner_circle_row(&fixture, interval_row, "0000000004000-0000-owner").await;
+
+    // The removed member pulls the close and the successor content. The removal
+    // prunes its Circle access, and it has no leaf in the successor epoch: the
+    // removed-interval package stays unreadable to it.
+    member_pull(&fixture).await;
+    assert!(
+        StoreDatabase::new(&fixture.member_db)
+            .circle_authoring_context(fixture.circle_id, &fixture.member_pubkey)
+            .await
+            .is_err(),
+        "the removed member holds no active Circle access after the close"
+    );
+    assert!(
+        !member_has_row(&fixture, interval_row).await,
+        "content authored during the removed interval is unreadable to the removed member"
+    );
+
+    // Re-add the removed member. This is the operation the bug broke: the add path
+    // re-verified the closed-origin successor and demanded a close outcome the
+    // re-add never carries.
+    fixture
+        .components
+        .add_circle_member(
+            &fixture.store_dir,
+            fixture.circle_id,
+            fixture.member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("re-add the removed Circle member after the close");
+
+    // The re-add operates within the same closed-origin epoch: same epoch id and
+    // key, and no close outcome of its own — the outcome was settled once, at
+    // finalization.
+    let (readded, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load re-added authoring state");
+    assert_eq!(readded.control.value.epoch_id(), successor_epoch);
+    assert_eq!(
+        readded.control.value.key_fingerprint(),
+        successor_fingerprint
+    );
+    assert!(readded
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    let readded_activation = StoreDatabase::new(&fixture.db)
+        .verified_circle_activation(fixture.circle_id, readded.control.coord.clone())
+        .await
+        .expect("read re-add activation")
+        .expect("re-add activation is retained");
+    assert!(
+        readded_activation
+            .reference
+            .objects()
+            .close_outcome
+            .is_none(),
+        "an in-epoch re-add carries no close outcome of its own"
+    );
+
+    // The owner publishes current content after the re-add.
+    let current_row = "00000000-0000-4000-8000-0000000000b2";
+    publish_owner_circle_row(&fixture, current_row, "0000000005000-0000-owner").await;
+
+    // The re-added member installs its current-epoch bootstrap and pulls: its own
+    // leaf is active under the current epoch and it reads the Circle's current
+    // state.
+    member_pull(&fixture).await;
+    let (member_current, _) = StoreDatabase::new(&fixture.member_db)
+        .circle_authoring_context(fixture.circle_id, &fixture.member_pubkey)
+        .await
+        .expect("re-added member resolves its current authoring state");
+    assert_eq!(member_current.control.value.epoch_id(), successor_epoch);
+    assert!(
+        matches!(
+            member_current.access.disposition,
+            crate::sync::circle::CircleAccessDisposition::Active {
+                bootstrap: Some(_),
+                ..
+            }
+        ),
+        "the re-add leaf is active with a current-epoch bootstrap"
+    );
+    assert!(
+        member_has_row(&fixture, current_row).await,
+        "the re-added member reads Circle content published after the re-add"
+    );
+}
+
 #[tokio::test]
 async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let fixture = setup_closing_founder_circle("circle-cancel-sabotage").await;
