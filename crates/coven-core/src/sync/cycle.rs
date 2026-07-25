@@ -827,6 +827,7 @@ async fn complete_cycle_after_pull(
                 db.schema_version(),
                 user_keypair,
                 &sync_time,
+                routing_encryption,
             )
             .await
         {

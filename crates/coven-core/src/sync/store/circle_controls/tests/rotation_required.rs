@@ -1754,6 +1754,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         fixture.db.schema_version(),
         &fixture.signer,
         "2026-07-23T00:00:00Z",
+        &EncryptionService::from_key([42; 32]),
     )
     .await
     .expect("author Circle snapshot");
@@ -1826,6 +1827,7 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
         fixture.db.schema_version(),
         &fixture.signer,
         "2026-07-23T00:00:00Z",
+        &EncryptionService::from_key([42; 32]),
     )
     .await
     .expect("author Circle snapshot");
@@ -1871,6 +1873,135 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
         .find(|meta| meta.epoch_id == old_epoch)
         .expect("the pre-rotation snapshot remains readable");
     assert_eq!(old.control, old_control);
+}
+
+/// A standalone Circle snapshot carries row-routing ids in its image, and those
+/// ids must be derived from the Store generation-one key — the key that routed
+/// the rows when the host captured them — not the per-Circle epoch key that only
+/// seals the published objects. This authors a snapshot over Circle content and
+/// checks that a recipient authenticates its routing state against the true Store
+/// routing key. When authoring derived routing from the Circle epoch key instead,
+/// the projection's routes failed to authenticate against the Store-keyed rows and
+/// no image could be authored at all.
+#[tokio::test]
+async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_key() {
+    let fixture = rotation_fixture("standalone-snapshot-true-routing").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // Circle content captured through the host write path, routed with the Store key.
+    capture_document(
+        &fixture,
+        "00000000-0000-4000-8000-000000000099",
+        Some(fixture.circle_id),
+        "0000000002000-0000-owner",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish Circle content");
+
+    let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+    crate::sync::store::push_circle_snapshots_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        snapshot_temp.path().to_path_buf(),
+        fixture.db.schema_version(),
+        &fixture.signer,
+        "2026-07-24T00:00:00Z",
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await
+    .expect("author the standalone Circle snapshot");
+
+    // A recipient reads the image with the Circle epoch key and authenticates its
+    // routing state against the true Store routing key.
+    let (authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("Circle authoring context");
+    let (epoch_encryption, _) = StoreDatabase::new(&fixture.db)
+        .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
+        .await
+        .expect("Circle publication context");
+    crate::sync::store::verify_standalone_circle_snapshot_image_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        fixture.circle_id,
+        epoch_encryption,
+        &EncryptionService::from_key([42; 32]),
+        &fixture.signer,
+    )
+    .await
+    .expect("standalone Circle snapshot authenticates under the true Store routing key");
+}
+
+/// Removing a roster member closes the Circle epoch and rotates its key away from
+/// the generation-one founding key, so the rotated Circle key has no generation-one
+/// entry to derive a row-routing key from. Standalone snapshot authoring must still
+/// succeed, because it derives routing from the Store generation-one key — which an
+/// epoch close never touches. Deriving routing from the rotated Circle key errored
+/// `MissingGenerationOne`, killing snapshot authoring for the Circle every cycle
+/// after the close.
+#[tokio::test]
+async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
+    let fixture = rotation_fixture("standalone-snapshot-rotation").await;
+
+    capture_document(
+        &fixture,
+        "00000000-0000-4000-8000-000000000099",
+        Some(fixture.circle_id),
+        "0000000002000-0000-owner",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish pre-close Circle content");
+
+    // Close the epoch by removing the roster member, rotating the Circle key.
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+
+    // Authoring derives routing from the Store generation-one key, so the rotated
+    // Circle key having no generation-one entry no longer aborts the capture.
+    let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+    crate::sync::store::push_circle_snapshots_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        snapshot_temp.path().to_path_buf(),
+        fixture.db.schema_version(),
+        &fixture.signer,
+        "2026-07-24T00:00:00Z",
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await
+    .expect("author the standalone Circle snapshot after the epoch rotated");
+
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .latest_local_circle_snapshot(fixture.circle_id)
+            .await
+            .expect("read the published Circle snapshot")
+            .is_some(),
+        "a standalone Circle snapshot is published after the rotation"
+    );
 }
 
 #[tokio::test]
@@ -2029,6 +2160,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
         baseline.db.schema_version(),
         &baseline.signer,
         "2026-07-23T00:00:00Z",
+        Some(&EncryptionService::from_key([42; 32])),
     )
     .await
     .expect("clean Circle snapshot publication");
@@ -2138,6 +2270,7 @@ async fn drive_circle_snapshots(
         fixture.db.schema_version(),
         &fixture.signer,
         stamp,
+        Some(&EncryptionService::from_key([42; 32])),
     )
     .await
 }

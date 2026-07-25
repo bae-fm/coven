@@ -235,12 +235,19 @@ pub(crate) async fn push_circle_snapshots_for_test(
     schema_version: u32,
     identity: &UserKeypair,
     created_at: &str,
+    store_routing: &crate::encryption::EncryptionService,
 ) -> Result<(), snapshot::SnapshotError> {
     let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
     store
-        .author_one_circle_snapshot_for_test(temp_dir, schema_version, identity, created_at)
+        .author_one_circle_snapshot_for_test(
+            temp_dir,
+            schema_version,
+            identity,
+            created_at,
+            store_routing,
+        )
         .await
         .map(|_| ())
 }
@@ -257,12 +264,19 @@ pub(crate) async fn drive_circle_snapshot_publications_for_test(
     schema_version: u32,
     identity: &UserKeypair,
     created_at: &str,
+    store_routing: Option<&crate::encryption::EncryptionService>,
 ) -> Result<(), snapshot::SnapshotError> {
     let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
     store
-        .push_circle_snapshots(temp_dir, schema_version, identity, created_at)
+        .push_circle_snapshots(
+            temp_dir,
+            schema_version,
+            identity,
+            created_at,
+            store_routing,
+        )
         .await
 }
 
@@ -295,6 +309,77 @@ pub(crate) async fn load_circle_snapshot_metas_for_test(
         &registration,
     )
     .await
+}
+
+/// Perform the recipient-side verification a restoring device runs against a
+/// published standalone Circle snapshot: decrypt the image with the Circle epoch
+/// key, then authenticate its row-routing state against the key derived from
+/// `store_routing`. This is the check `select_standalone_snapshot_candidate` runs
+/// during restore, isolated so a test can assert an authored image authenticates
+/// under the *true* Store routing key rather than the author's epoch key.
+#[cfg(test)]
+pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    circle_id: crate::sync::circle::CircleId,
+    epoch_encryption: crate::encryption::EncryptionService,
+    store_routing: &crate::encryption::EncryptionService,
+    signer: &UserKeypair,
+) -> Result<(), snapshot::SnapshotError> {
+    let database = StoreDatabase::new(db);
+    let device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .ok_or_else(|| {
+            snapshot::SnapshotError::PublicationState("local device id absent".to_string())
+        })?;
+    let (root, registration_ref, registration, _) =
+        operations::load_local_store_authority(&database, &device_id, signer)
+            .await
+            .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
+    let stream = snapshot::load_circle_snapshot_stream(
+        storage,
+        &root,
+        circle_id,
+        epoch_encryption.clone(),
+        &registration_ref,
+        &registration,
+    )
+    .await?;
+    let selected = snapshot::select_maximal_circle_snapshot(stream).ok_or_else(|| {
+        snapshot::SnapshotError::PublicationState(
+            "no standalone Circle snapshot to verify".to_string(),
+        )
+    })?;
+    let author_device = selected.author_registration.device_id.to_string();
+    let image_context = crate::sync::storage::ProtocolObjectContext::circle(
+        root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::CircleSnapshotImage,
+        epoch_encryption,
+    );
+    let image = storage
+        .read_protocol_object(
+            &image_context,
+            &selected.bootstrap.image.object,
+            &crate::sync::store_commit::circle_snapshot_image_semantic_prefix(
+                circle_id,
+                &author_device,
+                selected.bootstrap.image.image_hash,
+            ),
+        )
+        .await
+        .map_err(snapshot::SnapshotError::Bucket)?;
+    let routing_key =
+        crate::sync::circle::derive_row_routing_key(store_routing, root.store_root_hash)
+            .map_err(|error| snapshot::SnapshotError::BootstrapState(error.to_string()))?;
+    snapshot::verify_circle_bootstrap_image(
+        &image,
+        &selected.bootstrap,
+        circle_id,
+        db.synced_tables(),
+        Some(&routing_key),
+    )
 }
 
 #[cfg(test)]

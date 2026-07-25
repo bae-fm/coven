@@ -713,12 +713,25 @@ impl super::AuthorizedStore<'_> {
         schema_version: u32,
         keypair: &UserKeypair,
         created_at: &str,
+        store_routing: Option<&crate::encryption::EncryptionService>,
     ) -> Result<(), SnapshotError> {
         let inputs = self
             .database()
             .circle_acknowledgement_publication_inputs()
             .await
             .map_err(publication_error)?;
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        // Circle row routing ids are derived from the Store generation-one key, not
+        // the per-Circle epoch key each input seals with. A scoped Store that holds
+        // Circles always carries this routing service; its absence here is a
+        // structural contradiction, not a per-Circle skip.
+        let store_routing = store_routing.ok_or_else(|| {
+            SnapshotError::PublicationState(
+                "Circle snapshot authoring requires the Store routing key".to_string(),
+            )
+        })?;
         for input in inputs {
             // Resume a pending publication for this Circle before authoring
             // another — finishing a durable operation needs no fresh capture.
@@ -766,7 +779,7 @@ impl super::AuthorizedStore<'_> {
             let circle_temp = temp_dir.join(format!("circle-snapshot-{}", input.circle_id));
             std::fs::create_dir_all(&circle_temp).map_err(SnapshotError::Io)?;
             let cut = match self
-                .capture_circle_snapshot_cut(circle_temp, &input.encryption, input.circle_id)
+                .capture_circle_snapshot_cut(circle_temp, store_routing, input.circle_id)
                 .await
             {
                 Ok(cut) => cut,
@@ -785,7 +798,7 @@ impl super::AuthorizedStore<'_> {
                 input.control,
                 input.epoch_id,
                 input.key_fingerprint,
-                input.encryption,
+                input.epoch_encryption,
                 cut.snapshot,
                 cut.coverage,
                 schema_version,
@@ -863,6 +876,7 @@ impl super::AuthorizedStore<'_> {
         schema_version: u32,
         keypair: &UserKeypair,
         created_at: &str,
+        store_routing: &crate::encryption::EncryptionService,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
         let input = self
             .database()
@@ -876,7 +890,7 @@ impl super::AuthorizedStore<'_> {
             })?;
         std::fs::create_dir_all(&temp_dir).map_err(SnapshotError::Io)?;
         let cut = self
-            .capture_circle_snapshot_cut(temp_dir, &input.encryption, input.circle_id)
+            .capture_circle_snapshot_cut(temp_dir, store_routing, input.circle_id)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         push_circle_snapshot(
@@ -886,7 +900,7 @@ impl super::AuthorizedStore<'_> {
             input.control,
             input.epoch_id,
             input.key_fingerprint,
-            input.encryption,
+            input.epoch_encryption,
             cut.snapshot,
             cut.coverage,
             schema_version,
@@ -1590,7 +1604,10 @@ async fn select_standalone_snapshot_candidate(
     )],
 ) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
     use crate::sync::store::StoreDatabase;
-    let mut lineage_covered = Vec::new();
+    let mut installable: Vec<(
+        CircleSnapshotMeta,
+        crate::sync::store_commit::StoreBatchCommitRef,
+    )> = Vec::new();
     for (registration_ref, registration) in device_registrations {
         let stream = load_circle_snapshot_stream(
             storage,
@@ -1602,6 +1619,33 @@ async fn select_standalone_snapshot_candidate(
         )
         .await?;
         for snapshot in stream {
+            // A control reclaimed after an epoch close leaves its standalone snapshot
+            // superseded by the successor bootstrap the other candidates provide.
+            // Resolve retention before the lineage walk: the walk itself reads every
+            // covered control's retained activation, so it must not descend into a
+            // reclaimed control.
+            let retained_control = snapshot.control.clone();
+            let activation_commit = query_db
+                .sqlite()
+                .call(move |conn| {
+                    StoreDatabase::retained_circle_activation_commit_ref_on(
+                        conn,
+                        circle_id,
+                        &retained_control,
+                    )
+                })
+                .await
+                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            let Some(activation_commit) = activation_commit else {
+                tracing::debug!(
+                    %circle_id,
+                    snapshot = %snapshot.snapshot_hash(),
+                    "restore selection: standalone Circle snapshot control was reclaimed; \
+                     superseded by the retained lineage"
+                );
+                continue;
+            };
+            // The head control must prove the snapshot control's lineage.
             let snapshot_control = snapshot.control.clone();
             let head = head_control.clone();
             let covered = query_db
@@ -1622,13 +1666,23 @@ async fn select_standalone_snapshot_candidate(
                 .await
                 .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             if covered {
-                lineage_covered.push(snapshot);
+                installable.push((snapshot, activation_commit));
             }
         }
     }
-    let Some(selected) = select_maximal_circle_snapshot(lineage_covered) else {
+    let Some(selected) = select_maximal_circle_snapshot(
+        installable
+            .iter()
+            .map(|(snapshot, _)| snapshot.clone())
+            .collect(),
+    ) else {
         return Ok(None);
     };
+    let activation_commit = installable
+        .into_iter()
+        .find(|(snapshot, _)| snapshot.snapshot_hash() == selected.snapshot_hash())
+        .map(|(_, activation_commit)| activation_commit)
+        .expect("the selected standalone snapshot is one of the installable candidates");
     let author_device = selected.author_registration.device_id.to_string();
     let image_context = ProtocolObjectContext::circle(
         root.store_root_hash,
@@ -1655,19 +1709,6 @@ async fn select_standalone_snapshot_candidate(
         routing_key,
     )
     .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-    let snapshot_control = selected.control.clone();
-    let activation_commit = query_db
-        .sqlite()
-        .call(move |conn| {
-            StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, &snapshot_control)
-        })
-        .await
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?
-        .ok_or_else(|| {
-            SnapshotError::BootstrapState(format!(
-                "restore selection: Circle {circle_id} snapshot control has no activating commit"
-            ))
-        })?;
     let image = crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
         circle_id,
         selected.control.clone(),
@@ -2491,6 +2532,7 @@ mod tests {
             db.schema_version(),
             &signer,
             "2026-07-16T00:00:00Z",
+            &crate::encryption::EncryptionService::from_key([42; 32]),
         )
         .await
         .expect("author Circle snapshots");
@@ -2587,6 +2629,7 @@ mod tests {
             db.schema_version(),
             &signer,
             "2026-07-16T00:00:00Z",
+            &crate::encryption::EncryptionService::from_key([42; 32]),
         )
         .await
         .expect("author Circle snapshots");

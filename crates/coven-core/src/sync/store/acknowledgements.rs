@@ -347,7 +347,7 @@ impl AuthorizedStore<'_> {
             let context = ProtocolObjectContext::circle(
                 root.store_root_hash,
                 ProtocolObjectDomain::CircleAcknowledgement,
-                input.encryption,
+                input.epoch_encryption,
             );
             let semantic_prefix = circle_ack_slot_prefix(input.circle_id, &device_id, sequence);
             let current_slot = match &previous {

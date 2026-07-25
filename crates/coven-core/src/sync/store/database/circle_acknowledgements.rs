@@ -22,7 +22,10 @@ pub(crate) struct CircleAckPublicationInput {
     pub control: CircleControlCoord,
     pub epoch_id: CircleEpochId,
     pub key_fingerprint: KeyFingerprint,
-    pub encryption: crate::encryption::EncryptionService,
+    /// The Circle epoch key that *seals* this Circle's published acknowledgement
+    /// and snapshot objects. It is never the row-routing key: routing ids are
+    /// derived from the Store generation-one key, which this epoch key is not.
+    pub epoch_encryption: crate::encryption::EncryptionService,
     pub seeded_from: Option<CircleBootstrapCoverageRef>,
 }
 
@@ -83,7 +86,7 @@ impl StoreDatabase {
             };
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
-            let (encryption, key_fingerprint) =
+            let (epoch_encryption, key_fingerprint) =
                 Self::circle_publication_context_on(conn, circle_id, &control)?;
             let seeded_from = Self::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
@@ -91,7 +94,7 @@ impl StoreDatabase {
                 control,
                 epoch_id,
                 key_fingerprint,
-                encryption,
+                epoch_encryption,
                 seeded_from,
             });
         }
