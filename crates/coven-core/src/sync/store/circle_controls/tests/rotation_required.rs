@@ -399,9 +399,15 @@ async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
         )
         .await
         .expect_err("adding a member is refused while rotation is required");
+    // Returned typed (not wrapped), so the public API surfaces it with its ids.
     assert!(
-        add.to_string().contains("requires rotation"),
-        "add-member failure must name the rotation requirement: {add}"
+        matches!(
+            &add,
+            crate::sync::store::CircleOperationError::RotationRequired { circle_id, removed_members }
+                if *circle_id == fixture.circle_id
+                    && removed_members == &vec![fixture.member_pubkey.clone()]
+        ),
+        "add-member is refused with the typed rotation error: {add:?}"
     );
 
     fixture

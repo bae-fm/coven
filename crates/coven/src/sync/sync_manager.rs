@@ -798,54 +798,186 @@ impl SyncManager {
             .map_err(SyncError::from)
     }
 
-    pub(crate) async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {
-        let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        sync_loop.create_circle(name).await.map_err(SyncError::from)
+    /// The local identity's pubkey and the current active Store member set — the
+    /// inputs the Circle read queries share.
+    async fn circle_query_inputs(
+        &self,
+    ) -> Result<(String, std::collections::BTreeSet<String>), crate::CircleError> {
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())
+            .map_err(|error| crate::CircleError::Identity(error.to_string()))?;
+        let identity_pubkey = crate::keys::public_key_hex(&identity);
+        let store_members = self
+            .get_members()
+            .await
+            .map_err(crate::CircleError::from)?
+            .into_iter()
+            .map(|member| member.pubkey)
+            .collect();
+        Ok((identity_pubkey, store_members))
+    }
+
+    pub(crate) async fn create_circle(
+        &self,
+        name: &str,
+    ) -> Result<crate::CircleId, crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .create_circle(name)
+            .await
+            .map_err(crate::CircleError::from)
     }
 
     pub(crate) async fn rename_circle(
         &self,
-        circle_id: &crate::CircleId,
+        circle_id: crate::CircleId,
         name: &str,
-    ) -> Result<(), SyncError> {
-        let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
         sync_loop
-            .rename_circle(*circle_id, name)
+            .rename_circle(circle_id, name)
             .await
-            .map_err(SyncError::from)
+            .map_err(crate::CircleError::from)
     }
 
-    pub(crate) async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let identity_pubkey = crate::keys::public_key_hex(&identity);
-        let store_members = self
-            .get_members()
-            .await?
-            .into_iter()
-            .map(|member| member.pubkey)
-            .collect();
-        self.database
-            .get_circles(&identity_pubkey, store_members)
-            .await
-            .map_err(SyncError::from)
-    }
-
-    pub(crate) async fn get_circle_members(
+    pub(crate) async fn add_circle_member(
         &self,
-        circle_id: &crate::CircleId,
-    ) -> Result<Vec<crate::CircleMemberInfo>, SyncError> {
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let identity_pubkey = crate::keys::public_key_hex(&identity);
-        let store_members = self
-            .get_members()
-            .await?
-            .into_iter()
-            .map(|member| member.pubkey)
-            .collect();
-        self.database
-            .get_circle_members(*circle_id, &identity_pubkey, store_members)
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+        role: crate::CircleRole,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .add_circle_member(circle_id, member_pubkey, role)
             .await
-            .map_err(SyncError::from)
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn remove_circle_member(
+        &self,
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+    ) -> Result<crate::CircleOperationId, crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .remove_circle_member(circle_id, member_pubkey)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn resolve_circle_control(
+        &self,
+        circle_id: crate::CircleId,
+        chosen: crate::CircleControlCoord,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .resolve_circle_control(circle_id, chosen)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn cancel_circle_epoch_close(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleOperationId, crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .cancel_circle_epoch_close(circle_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn exclude_circle_close_device(
+        &self,
+        circle_id: crate::CircleId,
+        excluded_device_id: crate::StoreDeviceId,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .exclude_circle_close_device(circle_id, excluded_device_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn delete_circle(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .delete_circle(circle_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn retry_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .retry_circle_operation(operation_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn circle_close_status(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(crate::CircleError::LoopNotRunning)?;
+        sync_loop
+            .circle_close_status(circle_id)
+            .await
+            .map_err(crate::CircleError::from)
+    }
+
+    pub(crate) async fn list_circles(&self) -> Result<Vec<crate::Circle>, crate::CircleError> {
+        let (identity_pubkey, store_members) = self.circle_query_inputs().await?;
+        self.database
+            .circle_states(&identity_pubkey, store_members)
+            .await
+            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
+    }
+
+    pub(crate) async fn circle_members(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<Vec<crate::CircleMemberInfo>, crate::CircleError> {
+        let (identity_pubkey, store_members) = self.circle_query_inputs().await?;
+        self.database
+            .get_circle_members(circle_id, &identity_pubkey, store_members)
+            .await
+            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
+    }
+
+    pub(crate) async fn circle_operations(
+        &self,
+    ) -> Result<Vec<crate::CircleOperationInfo>, crate::CircleError> {
+        self.database
+            .get_circle_operations()
+            .await
+            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
     }
 }
 

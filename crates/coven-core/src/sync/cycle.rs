@@ -1178,15 +1178,20 @@ impl SyncComponents {
         circle_id: super::circle::CircleId,
         member_pubkey: String,
         role: super::circle::CircleRole,
-    ) -> Result<(), SyncCycleFailure> {
-        let routing_encryption = self.current_encryption().ok_or_else(|| {
-            SyncCycleFailure::operation(
-                "add Circle member",
-                super::store::CircleOperationError::BrowsableStorage,
-            )
-        })?;
+    ) -> Result<(), super::store::CircleOperationError> {
+        use super::store::CircleOperationError;
+        // A member addition captures a bootstrap over the scoped routing graph, so
+        // an unscoped (browsable) Store cannot author one — the same refusal
+        // `Store::add_circle_member` raises, surfaced here before the setup work.
+        let routing_encryption = self
+            .current_encryption()
+            .ok_or(CircleOperationError::BrowsableStorage)?;
         let operation_stamp = self.hlc.now().to_string();
-        let authorization = self.store.authorize().await?;
+        let authorization = self
+            .store
+            .authorize()
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authorization
             .prepare_pending_store_write(
                 &self.device_id,
@@ -1194,27 +1199,21 @@ impl SyncComponents {
                 &self.user_keypair,
                 store_dir,
             )
-            .await?;
-        authorization.drain_store_writes().await.map_err(|error| {
-            SyncCycleFailure::operation("publish pending writes before Circle bootstrap", error)
-        })?;
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        authorization.drain_store_writes().await?;
         let bootstrap = authorization
             .capture_circle_snapshot_cut(
                 store_dir.as_ref().to_path_buf(),
                 &routing_encryption,
                 circle_id,
             )
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("capture Circle member bootstrap", error)
-            })?;
+            .await?;
         let routing_key = super::circle::derive_row_routing_key(
             &routing_encryption,
             self.store.store_root().store_root_hash,
         )
-        .map_err(|error| {
-            SyncCycleFailure::operation("derive Circle bootstrap routing key", error)
-        })?;
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         self.store
             .add_circle_member(
                 &self.device_id,
@@ -1226,7 +1225,6 @@ impl SyncComponents {
                 &self.user_keypair,
             )
             .await
-            .map_err(|error| SyncCycleFailure::operation("add Circle member", error))
     }
 
     pub async fn remove_circle_member(
@@ -1273,6 +1271,15 @@ impl SyncComponents {
                 self.routing_encryption.as_ref(),
                 &self.user_keypair,
             )
+            .await
+    }
+
+    pub async fn circle_close_status(
+        &self,
+        circle_id: super::circle::CircleId,
+    ) -> Result<super::circle::CircleCloseStatus, super::store::CircleOperationError> {
+        self.store
+            .circle_close_status(circle_id, &self.user_keypair)
             .await
     }
 

@@ -3,12 +3,19 @@ use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
 use crate::keys::{self, UserKeypair};
-use crate::sync::circle::{CircleId, CirclePublicationBlocked, CircleRole, CircleRosterChain};
+use crate::sync::circle::{
+    circle_epoch_close_response_semantic_prefix, CircleCloseParticipant, CircleCloseSettlement,
+    CircleCloseStatus, CircleControlState, CircleEpochCloseResponseSlotValue, CircleId,
+    CirclePublicationBlocked, CircleRole, CircleRosterChain,
+};
 use crate::sync::cloud_storage::BlobPathScheme;
-use crate::sync::storage::SyncStorage;
+use crate::sync::storage::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::Store;
 use crate::sync::store_commit::CircleControlRef;
+use crate::sync::store_objects::StoreObjectError;
 
 /// Refuse a transition that would distribute or rename the current key while a
 /// Store-removed identity still holds it. Renaming or adding a member before the
@@ -62,6 +69,73 @@ async fn ensure_not_deleted(
 }
 
 impl Store {
+    /// The read-only settlement status of a Circle's in-flight epoch close: for
+    /// each participant device, whether its create-once response slot holds a
+    /// response, an Owner exclusion, or is still empty. Reports each slot's
+    /// declared settlement; the finalize path verifies each slot before acting on
+    /// it. A read, so it does not require Owner authorization — any participant
+    /// resolving the closing control can inspect it.
+    pub(crate) async fn circle_close_status(
+        &self,
+        circle_id: CircleId,
+        identity: &UserKeypair,
+    ) -> Result<CircleCloseStatus, CircleOperationError> {
+        let identity_pubkey = keys::public_key_hex(identity);
+        let (current, _) = self
+            .database()
+            .circle_closing_context(circle_id, &identity_pubkey)
+            .await?;
+        let CircleControlState::EpochClose(close) = current.control.value.state() else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle close-status inspection received an active control".to_string(),
+            ));
+        };
+        let context = ProtocolObjectContext::store_encrypted(
+            current.control.value.store_root_hash,
+            ProtocolObjectDomain::CircleEpochCloseResponse,
+        );
+        let storage = self.storage();
+        let mut participants = Vec::with_capacity(close.participants.len());
+        for participant in &close.participants {
+            let prefix = circle_epoch_close_response_semantic_prefix(
+                current.control.value.circle_id,
+                close.close_id,
+                participant.registration.device_id,
+            );
+            let settlement = match storage
+                .read_protocol_slot(&context, &participant.response_slot, &prefix)
+                .await
+            {
+                Ok((bytes, _)) => match CircleEpochCloseResponseSlotValue::parse(&bytes).map_err(
+                    |error| {
+                        CircleOperationError::InvalidState(format!(
+                            "Circle epoch-close response slot for device {} failed to parse: {error}",
+                            participant.registration.device_id
+                        ))
+                    },
+                )? {
+                    CircleEpochCloseResponseSlotValue::Response(_) => {
+                        CircleCloseSettlement::Responded
+                    }
+                    CircleEpochCloseResponseSlotValue::Exclusion(_) => {
+                        CircleCloseSettlement::Excluded
+                    }
+                },
+                Err(StorageError::NotFound(_)) => CircleCloseSettlement::Pending,
+                Err(error) => return Err(StoreObjectError::from(error).into()),
+            };
+            participants.push(CircleCloseParticipant {
+                device_id: participant.registration.device_id,
+                settlement,
+            });
+        }
+        Ok(CircleCloseStatus {
+            circle_id,
+            close_id: close.close_id,
+            participants,
+        })
+    }
+
     pub(crate) async fn create_circle(
         &self,
         device_id: &str,

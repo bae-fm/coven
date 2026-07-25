@@ -184,6 +184,69 @@ impl CircleInfo {
     }
 }
 
+/// The public derived state of one Circle. Mapped once from the internal current
+/// state; `Circles::list` reports it per Circle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CircleState {
+    /// A single resolved active-epoch control whose roster names only current
+    /// Store members.
+    Active,
+    /// The local identity holds no active access — never granted, or revoked by a
+    /// removal it has not re-joined past.
+    Inactive,
+    /// An epoch close is in flight; new-content authoring under the old epoch is
+    /// frozen until the successor activates.
+    Closing,
+    /// The resolved roster names Store identities that are no longer active Store
+    /// members. New Circle content is refused until an Owner closes the epoch and
+    /// activates a successor roster without them.
+    RotationRequired { removed_members: Vec<String> },
+    /// The control history forked into concurrent valid successors awaiting Owner
+    /// resolution. Carries the complete retained branch set.
+    ControlConflict { branches: Vec<CircleControlCoord> },
+    /// The control history terminated in an Owner-signed deletion.
+    Deleted,
+}
+
+/// One Circle as `Circles::list` reports it: its id, display name, the local
+/// identity's role when it holds active access, and the derived state. The name
+/// is absent for a Circle with no resolved metadata (inactive, conflicted, or
+/// deleted); the role is present only when the local identity holds active roster
+/// membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Circle {
+    pub id: CircleId,
+    pub name: Option<String>,
+    pub role: Option<CircleRole>,
+    pub state: CircleState,
+}
+
+/// The settlement of one participant device's create-once epoch-close response
+/// slot: it published its own applied frontier, an Owner excluded it, or the slot
+/// is still empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircleCloseSettlement {
+    Responded,
+    Excluded,
+    Pending,
+}
+
+/// One participant in an in-flight epoch close and its slot settlement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircleCloseParticipant {
+    pub device_id: crate::sync::store_commit::StoreDeviceId,
+    pub settlement: CircleCloseSettlement,
+}
+
+/// The read-only status of a Circle's in-flight epoch close: which participant
+/// slots hold responses, exclusions, or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircleCloseStatus {
+    pub circle_id: CircleId,
+    pub close_id: CircleEpochCloseId,
+    pub participants: Vec<CircleCloseParticipant>,
+}
+
 /// Why publishing new content into a Circle is refused. Carried as the durable
 /// typed reason on a blocked host write and on a refused Circle lifecycle
 /// operation.
@@ -225,6 +288,13 @@ impl CircleOperationId {
         Self(write_id)
     }
 
+    /// A well-formed operation id that names no real operation, for API dispatch
+    /// tests that only need a value to send through the command channel.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn placeholder(seed: &str) -> Self {
+        Self::from_write_id(crate::WriteId::from_generated(seed.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -262,6 +332,10 @@ impl fmt::Display for CircleOperationId {
     }
 }
 
+/// The stable identity of one Circle epoch close, derived from the durable
+/// operation that opened it. It names the close a `Circles::close_status` inspects
+/// and the reserved response and outcome slots that settle it; a close's identity
+/// is fixed for its lifetime and survives cancellation and retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CircleEpochCloseId(ObjectHash);

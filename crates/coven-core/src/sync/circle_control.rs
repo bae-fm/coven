@@ -65,6 +65,21 @@ impl CircleControlCoord {
             author_owner_grant: self.author_owner_grant.clone(),
         }
     }
+
+    /// A well-formed coordinate that names no real control, for API dispatch tests
+    /// that only need a value to send through the command channel.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn placeholder(seed: u8) -> Self {
+        let hash = ObjectHash::digest(&[seed]);
+        Self {
+            device_id: format!("device-{seed}"),
+            stream_id: AuthorStreamId::from_digest(hash),
+            author_pubkey: format!("pubkey-{seed}"),
+            author_owner_grant: MembershipGrantId(hash),
+            seq: 1,
+            control_hash: hash,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

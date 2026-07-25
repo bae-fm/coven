@@ -90,6 +90,66 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     }
 }
 
+/// The operation-inspection surface (`Circles::operations`) reports a blocked
+/// operation's full shape — id, circle, intent kind, and the typed
+/// `AuthorityLost` block — and `retry` refuses an operation that is not blocked
+/// with the typed `NotBlocked`.
+#[tokio::test]
+async fn operation_inspection_surface_reports_the_typed_block() {
+    let revoked = prepare_and_revoke_operation("recovery-inspection-surface").await;
+    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+        .await
+        .expect("resume blocks the revoked operation without failing");
+
+    let operations = StoreDatabase::new(&revoked.db)
+        .get_circle_operations()
+        .await
+        .expect("read the operation-inspection surface");
+    let info = operations
+        .iter()
+        .find(|info| info.operation_id == revoked.operation_id)
+        .expect("the blocked operation is inspectable");
+    assert_eq!(info.kind, crate::sync::circle::CircleOperationKind::Create);
+    assert_eq!(
+        info.state,
+        CircleOperationState::Blocked {
+            block: crate::sync::circle::CircleOperationBlock::AuthorityLost {
+                grant_id: revoked.author_grant_id.clone(),
+            },
+        },
+    );
+
+    // Retrying an operation that is not blocked is refused with the typed reason
+    // the public `NotBlocked` error carries.
+    let db = open_test_db();
+    let founder = UserKeypair::generate();
+    let store =
+        create_test_store_in_its_own_task(&db, "recovery-inspection-notblocked", &founder).await;
+    let device_id = local_device_id(&db).await;
+    let journal = prepare_circle_operation(
+        &db,
+        &store.storage,
+        &device_id,
+        "0000000001000-0000-founder",
+        "Ready Circle",
+        &founder,
+    )
+    .await
+    .expect("prepare a ready operation");
+    let ready_id = journal.operation_id.clone();
+    StoreDatabase::new(&db)
+        .insert_circle_operation(journal)
+        .await
+        .expect("persist the ready operation");
+    let refusal = retry_circle_operation(&db, &store.storage, &ready_id, &founder)
+        .await
+        .expect_err("a non-blocked operation is not retriable");
+    assert!(
+        matches!(&refusal, CircleOperationError::NotBlocked { operation_id } if *operation_id == ready_id),
+        "{refusal:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_blocked_operation_reports_typed_authority_lost() {
     let revoked = prepare_and_revoke_operation("recovery-typed-block").await;

@@ -3427,6 +3427,89 @@ async fn owner_exclusion_completes_a_stalled_close() {
     );
 }
 
+#[tokio::test]
+async fn close_status_reports_a_response_and_an_exclusion() {
+    let fixture = setup_closing_with_silent_participant("circle-close-status").await;
+    let silent_device_id = silent_participant_device_id(&fixture).await;
+
+    // The Owner responds; the silent participant does not. Its slot is empty.
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish Owner close response");
+
+    let status = fixture
+        .components
+        .circle_close_status(fixture.circle_id)
+        .await
+        .expect("read the close status after the Owner responds");
+    assert_eq!(status.circle_id, fixture.circle_id);
+    let settlement_of = |device_id: crate::sync::store_commit::StoreDeviceId| {
+        status
+            .participants
+            .iter()
+            .find(|participant| participant.device_id == device_id)
+            .unwrap_or_else(|| panic!("close status omits participant {device_id}"))
+            .settlement
+    };
+    assert_eq!(
+        settlement_of(silent_device_id),
+        crate::sync::circle::CircleCloseSettlement::Pending,
+        "the silent participant's slot is still empty"
+    );
+    let owner_device_id = fixture
+        .components
+        .circle_close_status(fixture.circle_id)
+        .await
+        .expect("re-read the close status")
+        .participants
+        .iter()
+        .map(|participant| participant.device_id)
+        .find(|device_id| *device_id != silent_device_id)
+        .expect("the Owner participant device id");
+    assert_eq!(
+        settlement_of(owner_device_id),
+        crate::sync::circle::CircleCloseSettlement::Responded,
+        "the Owner has responded"
+    );
+
+    // The Owner excludes the silent participant; its slot now holds the exclusion.
+    fixture
+        .components
+        .exclude_circle_close_device(fixture.circle_id, silent_device_id)
+        .await
+        .expect("exclude the silent participant");
+    let status = fixture
+        .components
+        .circle_close_status(fixture.circle_id)
+        .await
+        .expect("read the close status after the exclusion");
+    assert_eq!(
+        settlement_of_in(&status, silent_device_id),
+        crate::sync::circle::CircleCloseSettlement::Excluded,
+        "the excluded participant's slot holds its exclusion"
+    );
+    assert_eq!(
+        settlement_of_in(&status, owner_device_id),
+        crate::sync::circle::CircleCloseSettlement::Responded,
+        "the Owner's response is unchanged"
+    );
+}
+
+fn settlement_of_in(
+    status: &crate::sync::circle::CircleCloseStatus,
+    device_id: crate::sync::store_commit::StoreDeviceId,
+) -> crate::sync::circle::CircleCloseSettlement {
+    status
+        .participants
+        .iter()
+        .find(|participant| participant.device_id == device_id)
+        .unwrap_or_else(|| panic!("close status omits participant {device_id}"))
+        .settlement
+}
+
 /// Pull the epoch close onto the silent participant's device, then publish its
 /// own device-signed close response from that device.
 async fn silent_publish_response(fixture: &SilentParticipantClose) {

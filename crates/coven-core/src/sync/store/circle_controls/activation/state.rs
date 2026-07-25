@@ -950,6 +950,57 @@ impl CircleCurrentState {
         }
     }
 
+    /// Map this internal current state to the public [`crate::sync::circle::CircleState`].
+    /// This is the single place the derivation lives.
+    ///
+    /// Rotation-required is surfaced only for an `Active` Circle. A `Closing`
+    /// Circle whose roster still names a removed Store member stays `Closing`
+    /// rather than reporting `RotationRequired`: an epoch close is already the
+    /// exit path a rotation drives toward, so once a close is in flight the close
+    /// is the operative state to show. `Inactive`, `Deleted`, and
+    /// `ControlConflict` carry no roster to make a rotation judgment from.
+    pub(crate) fn derived_state(
+        &self,
+        active_store_members: &BTreeSet<String>,
+    ) -> crate::sync::circle::CircleState {
+        use crate::sync::circle::CircleState;
+        match self {
+            Self::Active(_) => match self.rotation_required(active_store_members) {
+                Some(RotationRequired { removed_members }) => {
+                    CircleState::RotationRequired { removed_members }
+                }
+                None => CircleState::Active,
+            },
+            Self::Closing(_) => CircleState::Closing,
+            Self::Inactive(_) => CircleState::Inactive,
+            Self::Deleted(_) => CircleState::Deleted,
+            Self::ControlConflict { branches } => CircleState::ControlConflict {
+                branches: branches
+                    .iter()
+                    .map(|branch| branch.coordinate().clone())
+                    .collect(),
+            },
+        }
+    }
+
+    /// The Circle's display name and the local identity's role, for the public
+    /// list item. Both come from the resolved roster and metadata an accessible
+    /// state carries (`Active` or `Closing`); an `Inactive`, `Deleted`, or
+    /// conflicted Circle resolves neither.
+    pub(crate) fn display(
+        &self,
+        identity_pubkey: &str,
+    ) -> (Option<String>, Option<crate::sync::circle::CircleRole>) {
+        let accessible = match self {
+            Self::Active(accessible) | Self::Closing(accessible) => accessible,
+            Self::Inactive(_) | Self::Deleted(_) | Self::ControlConflict { .. } => {
+                return (None, None)
+            }
+        };
+        let role = accessible.roster.members().get(identity_pubkey).copied();
+        (Some(accessible.metadata.name.clone()), role)
+    }
+
     pub(crate) fn active(
         &self,
     ) -> Option<(
@@ -1148,4 +1199,136 @@ fn roster_matches_control(roster: &CircleMaterializedRoster, control: &CircleCon
 fn metadata_matches_control(metadata: &CircleMetadata, control: &CircleControl) -> bool {
     let state = control.metadata_state_ref();
     state.selected == metadata.coord() && state.state_hash == metadata.metadata_hash()
+}
+
+#[cfg(test)]
+mod derived_state_tests {
+    use super::*;
+    use crate::sync::circle::{CircleRole, CircleState};
+    use std::collections::BTreeSet;
+
+    /// An installed `Active` current state and its owner pubkey.
+    async fn installed_active_state() -> (CircleCurrentState, String) {
+        let owner = crate::sync::test_helpers::test_circle_owner_keypair();
+        let owner_pubkey = crate::keys::public_key_hex(&owner);
+        let db = crate::sync::test_helpers::open_test_db();
+        let state = db
+            .call(|conn| {
+                crate::db::apply_coven_routing_schema(conn)
+                    .map_err(crate::database::DbError::from)?;
+                let (circle_id, _) =
+                    crate::sync::test_helpers::install_test_active_circle(conn, "derived-state");
+                crate::sync::store::database::StoreDatabase::circle_current_state_on(
+                    conn, circle_id,
+                )?
+                .ok_or_else(|| {
+                    crate::database::DbError::Message(
+                        "installed active circle has no current state".to_string(),
+                    )
+                })
+            })
+            .await
+            .expect("install and read the active current state");
+        (state, owner_pubkey)
+    }
+
+    async fn installed_inactive_state() -> CircleCurrentState {
+        let db = crate::sync::test_helpers::open_test_db();
+        db.call(|conn| {
+            crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)?;
+            let (circle_id, _) = crate::sync::test_helpers::install_test_inactive_circle(
+                conn,
+                "derived-state-inactive",
+            );
+            crate::sync::store::database::StoreDatabase::circle_current_state_on(conn, circle_id)?
+                .ok_or_else(|| {
+                    crate::database::DbError::Message(
+                        "installed inactive circle has no current state".to_string(),
+                    )
+                })
+        })
+        .await
+        .expect("install and read the inactive current state")
+    }
+
+    fn accessible(state: &CircleCurrentState) -> Box<CircleAccessibleState> {
+        match state {
+            CircleCurrentState::Active(accessible) => accessible.clone(),
+            other => panic!("expected an active current state, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_maps_by_rotation_over_the_membership() {
+        let (state, owner_pubkey) = installed_active_state().await;
+
+        // Owner still a Store member: Active.
+        let members = BTreeSet::from([owner_pubkey.clone()]);
+        assert_eq!(state.derived_state(&members), CircleState::Active);
+
+        // Owner no longer a Store member: RotationRequired naming it.
+        let empty = BTreeSet::new();
+        assert_eq!(
+            state.derived_state(&empty),
+            CircleState::RotationRequired {
+                removed_members: vec![owner_pubkey.clone()],
+            }
+        );
+
+        // Display resolves the name and the local role.
+        let (name, role) = state.display(&owner_pubkey);
+        assert!(name.is_some());
+        assert_eq!(role, Some(CircleRole::Owner));
+    }
+
+    #[tokio::test]
+    async fn closing_maps_to_closing_regardless_of_rotation() {
+        let (active, owner_pubkey) = installed_active_state().await;
+        let closing = CircleCurrentState::Closing(accessible(&active));
+        // A closing Circle whose roster still names the (removed) member stays
+        // Closing rather than reporting RotationRequired.
+        assert_eq!(
+            closing.derived_state(&BTreeSet::new()),
+            CircleState::Closing
+        );
+        assert_eq!(
+            closing.derived_state(&BTreeSet::from([owner_pubkey])),
+            CircleState::Closing
+        );
+    }
+
+    #[tokio::test]
+    async fn inactive_maps_to_inactive_with_no_name_or_role() {
+        let state = installed_inactive_state().await;
+        assert_eq!(state.derived_state(&BTreeSet::new()), CircleState::Inactive);
+        let (name, role) = state.display("anyone");
+        assert_eq!(name, None);
+        assert_eq!(role, None);
+    }
+
+    #[tokio::test]
+    async fn deleted_maps_to_deleted() {
+        let (active, _) = installed_active_state().await;
+        let deleted = CircleCurrentState::Deleted(Box::new(accessible(&active).current.clone()));
+        assert_eq!(
+            deleted.derived_state(&BTreeSet::new()),
+            CircleState::Deleted
+        );
+        assert_eq!(deleted.display("anyone"), (None, None));
+    }
+
+    #[tokio::test]
+    async fn control_conflict_maps_to_its_retained_branches() {
+        let (active, _) = installed_active_state().await;
+        let current = accessible(&active).current.clone();
+        let expected = vec![current.coordinate().clone()];
+        let conflict = CircleCurrentState::ControlConflict {
+            branches: vec![current],
+        };
+        assert_eq!(
+            conflict.derived_state(&BTreeSet::new()),
+            CircleState::ControlConflict { branches: expected }
+        );
+        assert_eq!(conflict.display("anyone"), (None, None));
+    }
 }

@@ -169,8 +169,10 @@ pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the public handle.
 pub use sync::circle::{
-    Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationId, CircleOperationInfo,
-    CircleOperationKind, CircleOperationState, CircleRole,
+    Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
+    CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
+    CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleOperationKind,
+    CircleOperationState, CircleRole, CircleState,
 };
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{
@@ -231,6 +233,7 @@ pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
 pub use sync::store_commit::{
     CommitFrontier, ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder,
+    StoreDeviceId,
 };
 
 // In-memory cloud home for host integration tests.

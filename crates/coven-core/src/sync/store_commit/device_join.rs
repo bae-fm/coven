@@ -3,6 +3,10 @@ use super::*;
 
 const STORE_DEVICE_ID_DOMAIN: &[u8] = b"coven.store-device-id.v1\0";
 
+/// The stable identity of one device in a Store, derived from the Store root and
+/// the device's registration origin. It names a device across the protocol — in
+/// membership, commit authorship, and epoch-close participation — and is what
+/// `Circles::exclude_close_device` and `Circles::close_status` address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StoreDeviceId(ObjectHash);

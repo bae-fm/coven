@@ -289,8 +289,15 @@ rebuild the deleted choice.
    maximal verified image per Circle it can decrypt, clears the coverage rows for
    Circles it cannot, and installs the Store image and every Circle image in one
    transaction. Finish packages, pull, reclamation, and blobs.
-1. Finish application APIs, integration tests, fault injection, documentation,
-   and dependent application updates.
+1. **In progress.** The application API is implemented: the `coven.circles()`
+   namespace (create, rename, add and remove member, resolve control, cancel and
+   exclude-device on a close, delete, retry operation, list, members, operations,
+   close_status), the public derived `CircleState` mapped once from the current
+   state, durable operation inspection with the typed block, read-only
+   `close_status`, and the typed public `CircleError` mapping the internal typed
+   refusals one-to-one with stable identifiers. Write-path status stays on
+   `WriteStatus`/`WriteBlock`. Finish integration tests, fault injection,
+   documentation, and dependent application updates.
 
 Each completed boundary updates this plan when implementation discovers a
 different invariant or representation. Status marks alone are not enough.

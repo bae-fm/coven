@@ -115,17 +115,51 @@ struct SyncLoopInner {
     _open_guard: Arc<StoreOpenGuard>,
 }
 
+type CircleReply<T> =
+    tokio::sync::oneshot::Sender<Result<T, crate::sync::store::CircleOperationError>>;
+
 enum SyncCommand {
     CreateCircle {
         name: String,
-        reply: tokio::sync::oneshot::Sender<
-            Result<crate::CircleId, crate::sync::store::CircleOperationError>,
-        >,
+        reply: CircleReply<crate::CircleId>,
     },
     RenameCircle {
         circle_id: crate::CircleId,
         name: String,
-        reply: tokio::sync::oneshot::Sender<Result<(), crate::sync::store::CircleOperationError>>,
+        reply: CircleReply<()>,
+    },
+    AddCircleMember {
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+        role: crate::CircleRole,
+        reply: CircleReply<()>,
+    },
+    RemoveCircleMember {
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+        reply: CircleReply<crate::CircleOperationId>,
+    },
+    ResolveCircleControl {
+        circle_id: crate::CircleId,
+        chosen: crate::CircleControlCoord,
+        reply: CircleReply<()>,
+    },
+    CancelCircleEpochClose {
+        circle_id: crate::CircleId,
+        reply: CircleReply<crate::CircleOperationId>,
+    },
+    ExcludeCircleCloseDevice {
+        circle_id: crate::CircleId,
+        excluded_device_id: crate::StoreDeviceId,
+        reply: CircleReply<()>,
+    },
+    DeleteCircle {
+        circle_id: crate::CircleId,
+        reply: CircleReply<()>,
+    },
+    RetryCircleOperation {
+        operation_id: crate::CircleOperationId,
+        reply: CircleReply<()>,
     },
 }
 
@@ -252,7 +286,7 @@ impl SyncLoopHandle {
                                     info!("Sync command channel closed before first cycle");
                                     return;
                                 };
-                                execute_command(&inner, command).await;
+                                execute_command(&inner, &store_dir, command).await;
                             }
                         }
                     }
@@ -342,7 +376,7 @@ impl SyncLoopHandle {
                                     info!("Sync command channel closed, stopping sync loop");
                                     break;
                                 };
-                                execute_command(&inner, command).await;
+                                execute_command(&inner, &store_dir, command).await;
                             }
                         }
                     }
@@ -486,21 +520,29 @@ impl SyncLoopHandle {
             .await
     }
 
-    pub(crate) async fn create_circle(
+    /// Send a Circle write command to the loop thread and await its reply. Circle
+    /// writes run on the loop thread so they never interleave with a sync cycle.
+    async fn send_circle_command<T>(
         &self,
-        name: &str,
-    ) -> Result<crate::CircleId, crate::sync::store::CircleOperationError> {
+        command: impl FnOnce(CircleReply<T>) -> SyncCommand,
+    ) -> Result<T, crate::sync::store::CircleOperationError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.command_tx
-            .send(SyncCommand::CreateCircle {
-                name: name.to_string(),
-                reply,
-            })
+            .send(command(reply))
             .await
             .map_err(|_| crate::sync::store::CircleOperationError::CommandChannelClosed)?;
         response
             .await
             .map_err(|_| crate::sync::store::CircleOperationError::ReplyChannelClosed)?
+    }
+
+    pub(crate) async fn create_circle(
+        &self,
+        name: &str,
+    ) -> Result<crate::CircleId, crate::sync::store::CircleOperationError> {
+        let name = name.to_string();
+        self.send_circle_command(|reply| SyncCommand::CreateCircle { name, reply })
+            .await
     }
 
     pub(crate) async fn rename_circle(
@@ -508,39 +550,201 @@ impl SyncLoopHandle {
         circle_id: crate::CircleId,
         name: &str,
     ) -> Result<(), crate::sync::store::CircleOperationError> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.command_tx
-            .send(SyncCommand::RenameCircle {
-                circle_id,
-                name: name.to_string(),
-                reply,
-            })
+        let name = name.to_string();
+        self.send_circle_command(|reply| SyncCommand::RenameCircle {
+            circle_id,
+            name,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn add_circle_member(
+        &self,
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+        role: crate::CircleRole,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::AddCircleMember {
+            circle_id,
+            member_pubkey,
+            role,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn remove_circle_member(
+        &self,
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+    ) -> Result<crate::CircleOperationId, crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::RemoveCircleMember {
+            circle_id,
+            member_pubkey,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn resolve_circle_control(
+        &self,
+        circle_id: crate::CircleId,
+        chosen: crate::CircleControlCoord,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::ResolveCircleControl {
+            circle_id,
+            chosen,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn cancel_circle_epoch_close(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleOperationId, crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::CancelCircleEpochClose { circle_id, reply })
             .await
-            .map_err(|_| crate::sync::store::CircleOperationError::CommandChannelClosed)?;
-        response
+    }
+
+    pub(crate) async fn exclude_circle_close_device(
+        &self,
+        circle_id: crate::CircleId,
+        excluded_device_id: crate::StoreDeviceId,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::ExcludeCircleCloseDevice {
+            circle_id,
+            excluded_device_id,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn delete_circle(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::DeleteCircle { circle_id, reply })
             .await
-            .map_err(|_| crate::sync::store::CircleOperationError::ReplyChannelClosed)?
+    }
+
+    pub(crate) async fn retry_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.send_circle_command(|reply| SyncCommand::RetryCircleOperation {
+            operation_id,
+            reply,
+        })
+        .await
+    }
+
+    /// Inspect a Circle's in-flight epoch close. A read, so it runs directly on the
+    /// components rather than serializing behind the write-command channel.
+    pub(crate) async fn circle_close_status(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleCloseStatus, crate::sync::store::CircleOperationError> {
+        self.inner.components.circle_close_status(circle_id).await
     }
 }
 
-async fn execute_command(inner: &SyncLoopInner, command: SyncCommand) {
+async fn execute_command(inner: &SyncLoopInner, store_dir: &StoreDir, command: SyncCommand) {
     match command {
         SyncCommand::CreateCircle { name, reply } => {
-            let result = inner.components.create_circle(&name).await;
-            if reply.send(result).is_err() {
-                debug!("create_circle caller dropped its reply receiver");
-            }
+            reply_circle_command(reply, inner.components.create_circle(&name).await);
         }
         SyncCommand::RenameCircle {
             circle_id,
             name,
             reply,
         } => {
-            let result = inner.components.rename_circle(circle_id, &name).await;
-            if reply.send(result).is_err() {
-                debug!("rename_circle caller dropped its reply receiver");
-            }
+            reply_circle_command(
+                reply,
+                inner.components.rename_circle(circle_id, &name).await,
+            );
         }
+        SyncCommand::AddCircleMember {
+            circle_id,
+            member_pubkey,
+            role,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner
+                    .components
+                    .add_circle_member(store_dir, circle_id, member_pubkey, role)
+                    .await,
+            );
+        }
+        SyncCommand::RemoveCircleMember {
+            circle_id,
+            member_pubkey,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner
+                    .components
+                    .remove_circle_member(circle_id, member_pubkey)
+                    .await,
+            );
+        }
+        SyncCommand::ResolveCircleControl {
+            circle_id,
+            chosen,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner
+                    .components
+                    .resolve_circle_control(circle_id, chosen)
+                    .await,
+            );
+        }
+        SyncCommand::CancelCircleEpochClose { circle_id, reply } => {
+            reply_circle_command(
+                reply,
+                inner.components.cancel_circle_epoch_close(circle_id).await,
+            );
+        }
+        SyncCommand::ExcludeCircleCloseDevice {
+            circle_id,
+            excluded_device_id,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner
+                    .components
+                    .exclude_circle_close_device(circle_id, excluded_device_id)
+                    .await,
+            );
+        }
+        SyncCommand::DeleteCircle { circle_id, reply } => {
+            reply_circle_command(reply, inner.components.delete_circle(circle_id).await);
+        }
+        SyncCommand::RetryCircleOperation {
+            operation_id,
+            reply,
+        } => {
+            reply_circle_command(
+                reply,
+                inner.components.retry_circle_operation(&operation_id).await,
+            );
+        }
+    }
+}
+
+fn reply_circle_command<T>(
+    reply: CircleReply<T>,
+    result: Result<T, crate::sync::store::CircleOperationError>,
+) {
+    if reply.send(result).is_err() {
+        debug!("Circle command caller dropped its reply receiver");
     }
 }
 

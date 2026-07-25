@@ -121,6 +121,47 @@ impl StoreDatabase {
             .await
     }
 
+    /// Every Circle the local identity can see, with its public derived state. A
+    /// deleted or conflicted Circle stays visible (as `Deleted`/`ControlConflict`)
+    /// rather than silently disappearing; an inactive Circle the identity holds no
+    /// access to is `Inactive`.
+    pub async fn circle_states(
+        &self,
+        identity_pubkey: &str,
+        active_store_members: std::collections::BTreeSet<String>,
+    ) -> Result<Vec<crate::sync::circle::Circle>, DbError> {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.database
+            .call(move |conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT circle_id, state
+                     FROM circle_current_state
+                     ORDER BY circle_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(DbError::from)?;
+                let mut circles = Vec::new();
+                for row in rows {
+                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
+                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
+                    let (name, role) = state.display(&identity_pubkey);
+                    circles.push(crate::sync::circle::Circle {
+                        id: state.circle_id(),
+                        name,
+                        role,
+                        state: state.derived_state(&active_store_members),
+                    });
+                }
+                Ok(circles)
+            })
+            .await
+    }
+
     pub async fn get_circle_members(
         &self,
         circle_id: crate::sync::circle::CircleId,

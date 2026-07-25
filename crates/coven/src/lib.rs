@@ -608,6 +608,7 @@ pub(crate) mod sync {
     pub(crate) mod sync_manager;
 }
 
+mod circles;
 mod coven;
 mod handle;
 mod keyring_backend;
@@ -671,6 +672,7 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // exposed only because `generate_restore_code` takes a caller-supplied
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
+pub use circles::{CircleError, Circles};
 pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
@@ -686,8 +688,10 @@ pub use coven_core::sync::store::{
 };
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
-    Audience, CircleId, CircleInfo, CircleMemberInfo, CircleOperationId, CircleOperationInfo,
-    CircleOperationKind, CircleOperationState, CircleRole,
+    Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
+    CircleControlCoord, CircleEpochCloseId, CircleId, CircleMemberInfo, CircleOperationBlock,
+    CircleOperationId, CircleOperationInfo, CircleOperationKind, CircleOperationState, CircleRole,
+    CircleState, StoreDeviceId,
 };
 pub use coven_core::{MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo};
 

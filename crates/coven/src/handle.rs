@@ -1301,49 +1301,11 @@ impl CovenHandle {
         manager.resolve_membership_conflict(choice).await
     }
 
-    /// Create and activate a circle whose founder is this Store identity.
-    /// Returns only after the signed roster, metadata, access set, control,
-    /// Store commit, activation head, and local materialization are durable.
-    pub async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.create_circle(name).await
-    }
-
-    /// Rename a Circle without changing its epoch key or membership.
-    pub async fn rename_circle(
-        &self,
-        circle_id: &crate::CircleId,
-        name: &str,
-    ) -> Result<(), SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.rename_circle(circle_id, name).await
-    }
-
-    /// Return each Circle the local identity can see: an active Circle it holds
-    /// access to, or a conflicted Circle whose control history has forked and
-    /// awaits Owner resolution.
-    pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.get_circles().await
-    }
-
-    /// Return current Circle members who remain current Store members.
-    pub async fn get_circle_members(
-        &self,
-        circle_id: &crate::CircleId,
-    ) -> Result<Vec<crate::CircleMemberInfo>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.get_circle_members(circle_id).await
-    }
-
-    /// Return durable circle commands that have not activated.
-    pub async fn get_circle_operations(
-        &self,
-    ) -> Result<Vec<crate::CircleOperationInfo>, SyncError> {
-        self.database
-            .get_circle_operations()
-            .await
-            .map_err(SyncError::from)
+    /// The Circle application surface: create, lifecycle, inspection, and typed
+    /// [`CircleError`](crate::CircleError). A borrowed namespace with no state of
+    /// its own.
+    pub fn circles(&self) -> crate::Circles<'_> {
+        crate::Circles::new(self)
     }
 }
 
@@ -2671,17 +2633,12 @@ mod tests {
                 .invite_member(&public_key_hex, None, MemberRole::Member)
                 .await;
             let remove = handle.remove_member(&public_key_hex).await;
-            let circle = handle.create_circle("Household").await;
+            let circle = handle.circles().create("Household").await;
 
             assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
             assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
             assert!(
-                matches!(
-                    &circle,
-                    Err(SyncError::Circle(
-                        crate::sync::store::CircleOperationError::BrowsableStorage
-                    ))
-                ),
+                matches!(&circle, Err(crate::CircleError::BrowsableStorage)),
                 "{circle:?}"
             );
         }))
@@ -2713,27 +2670,30 @@ mod tests {
                 .expect("connect encrypted Merge home");
 
             let circle_id = handle
-                .create_circle("Household")
+                .circles()
+                .create("Household")
                 .await
                 .expect("create and activate circle");
 
             handle
-                .rename_circle(&circle_id, "Household money")
+                .circles()
+                .rename(circle_id, "Household money")
                 .await
                 .expect("rename and activate circle");
 
             assert_eq!(
-                handle.get_circles().await.expect("read active circles"),
-                vec![crate::CircleInfo::Active {
+                handle.circles().list().await.expect("read active circles"),
+                vec![crate::Circle {
                     id: circle_id,
-                    name: "Household money".to_string(),
-                    role: crate::CircleRole::Owner,
-                    rotation_required: false,
+                    name: Some("Household money".to_string()),
+                    role: Some(crate::CircleRole::Owner),
+                    state: crate::CircleState::Active,
                 }]
             );
             assert_eq!(
                 handle
-                    .get_circle_members(&circle_id)
+                    .circles()
+                    .members(circle_id)
                     .await
                     .expect("read active Circle members"),
                 vec![crate::CircleMemberInfo {
@@ -2757,7 +2717,8 @@ mod tests {
                 .expect("intersect Circle roster with an empty Store membership")
                 .is_empty());
             assert!(handle
-                .get_circle_operations()
+                .circles()
+                .operations()
                 .await
                 .expect("read completed circle operations")
                 .is_empty());
@@ -2785,6 +2746,147 @@ mod tests {
             })
             .await
             .expect("read activated circle state");
+        }))
+        .await;
+    }
+
+    /// The `circles()` namespace round-trips through the running loop across
+    /// derived states: create and rename land `Active`, read back through `list`;
+    /// deletion lands `Deleted`. Each write dispatches through the loop-thread
+    /// command channel and each state is read back through the public list surface.
+    #[tokio::test]
+    async fn circles_namespace_round_trips_across_states() {
+        await_test_orchestration(tokio::spawn(async {
+            test_keyring::install();
+
+            let (_tmp, store_dir) = temp_store_dir();
+            let db = read_test_db("images");
+            let keyring = crate::encryption::MasterKeyring::generate();
+            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+                .resolve("lib-circles-namespace", &store_dir);
+            let handle =
+                test_handle_with_custody("lib-circles-namespace", store_dir, db.clone(), custody);
+            handle
+                .connect_sync_with_test_home(
+                    Arc::new(InMemoryCloudHome::new()),
+                    CloudCipher::Encrypted(EncryptionService::from(keyring)),
+                )
+                .await
+                .expect("connect encrypted home");
+
+            let circles = handle.circles();
+            let circle_id = circles.create("Family").await.expect("create the Circle");
+            circles
+                .rename(circle_id, "Household")
+                .await
+                .expect("rename the Circle");
+
+            let state_of = |list: Vec<crate::Circle>| {
+                list.into_iter()
+                    .find(|circle| circle.id == circle_id)
+                    .expect("the Circle is listed")
+                    .state
+            };
+            assert_eq!(
+                state_of(circles.list().await.expect("list after rename")),
+                crate::CircleState::Active,
+            );
+
+            circles.delete(circle_id).await.expect("delete the Circle");
+            assert_eq!(
+                state_of(circles.list().await.expect("list after delete")),
+                crate::CircleState::Deleted,
+            );
+        }))
+        .await;
+    }
+
+    /// Every Circle write command reaches the loop thread through its own
+    /// `SyncCommand` dispatch arm and returns a reply. Each is fired at a state
+    /// that refuses it: the three close/resolve commands come back with distinct
+    /// typed errors naming the forwarded circle id (which also proves each arm
+    /// forwards to the *right* components method — a swapped arm would return a
+    /// different typed error); retry, remove, and add come back carrying the
+    /// forwarded operation or circle id in their message. A wrong-field or
+    /// wrong-method bug in any arm would surface here.
+    #[tokio::test]
+    async fn circle_write_commands_dispatch_through_their_command_arms() {
+        await_test_orchestration(tokio::spawn(async {
+            test_keyring::install();
+
+            let (_tmp, store_dir) = temp_store_dir();
+            let db = read_test_db("images");
+            let keyring = crate::encryption::MasterKeyring::generate();
+            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+                .resolve("lib-circles-dispatch", &store_dir);
+            let handle = test_handle_with_custody("lib-circles-dispatch", store_dir, db, custody);
+            handle
+                .connect_sync_with_test_home(
+                    Arc::new(InMemoryCloudHome::new()),
+                    CloudCipher::Encrypted(EncryptionService::from(keyring)),
+                )
+                .await
+                .expect("connect encrypted home");
+
+            let circles = handle.circles();
+            let circle_id = circles.create("Family").await.expect("create the Circle");
+            let member = hex::encode(crate::keys::UserKeypair::generate().public_key());
+
+            // Distinct typed refusals: a swapped arm would return a different one.
+            assert!(
+                matches!(
+                    circles.cancel_close(circle_id).await,
+                    Err(crate::CircleError::NoCloseToCancel { circle_id: refused })
+                        if refused == circle_id
+                ),
+                "cancel_close dispatches to its arm and returns NoCloseToCancel"
+            );
+            let device = "aa"
+                .repeat(32)
+                .parse::<crate::StoreDeviceId>()
+                .expect("device id");
+            assert!(
+                matches!(
+                    circles.exclude_close_device(circle_id, device).await,
+                    Err(crate::CircleError::NoCloseToExclude { circle_id: refused })
+                        if refused == circle_id
+                ),
+                "exclude_close_device dispatches to its arm and returns NoCloseToExclude"
+            );
+            assert!(
+                matches!(
+                    circles
+                        .resolve(circle_id, crate::CircleControlCoord::placeholder(1))
+                        .await,
+                    Err(crate::CircleError::NotConflicted { circle_id: refused })
+                        if refused == circle_id
+                ),
+                "resolve dispatches to its arm and returns NotConflicted"
+            );
+
+            // The remaining three carry the forwarded id in their message.
+            let retry = circles
+                .retry_operation(crate::CircleOperationId::placeholder("dispatch-op-seed"))
+                .await;
+            assert!(
+                matches!(&retry, Err(crate::CircleError::Protocol(message))
+                    if message.contains("dispatch-op-seed")),
+                "retry_operation forwards the operation id: {retry:?}"
+            );
+
+            let absent_circle = crate::CircleId::from_bytes([9u8; 16]);
+            let remove = circles.remove_member(absent_circle, &member).await;
+            assert!(
+                matches!(&remove, Err(crate::CircleError::Protocol(message))
+                    if message.contains(&absent_circle.to_string())),
+                "remove_member forwards the circle id: {remove:?}"
+            );
+
+            let add = circles.add_member(circle_id, &member).await;
+            assert!(
+                add.is_err(),
+                "add_member dispatches to its arm and returns a reply: {add:?}"
+            );
         }))
         .await;
     }
