@@ -1654,6 +1654,224 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     );
 }
 
+/// End-to-end receipt that restore selection installs from a standalone Circle
+/// snapshot when it dominates the other coverage candidates. The fixture authors
+/// content under the successor epoch after the close and cuts a standalone snapshot
+/// over it, so its coverage strictly dominates both the leaf-named successor
+/// bootstrap and the preserved author-coverage row (both fixed at the close cutoff).
+/// A fresh device restores, and the staged Install decision must name the standalone
+/// snapshot's image.
+///
+/// The standalone snapshot is authored under the SUCCESSOR control, which the head
+/// control is — so it is a retained activation and restore selection does not skip
+/// it as reclaimed (the reclaimed-control skip only drops snapshots authored under a
+/// control a later close reclaimed). Selection reads the standalone metadata and
+/// image with the Circle epoch key the restorer's active leaf carries. That
+/// threading is load-bearing: decrypting the standalone stream with any other key
+/// fails the read outright (a wrong key is an error, not absence), so the restore
+/// cannot install the snapshot and this assertion does not hold.
+#[tokio::test]
+async fn restore_installs_a_dominating_standalone_circle_snapshot() {
+    let routing = EncryptionService::from_key([42; 32]);
+    let db = open_circle_routing_test_db();
+    let (store, signer, founder) =
+        persist_merge_operation(&db, "standalone-restore-dominates").await;
+    let circle_id = founder.circle_id();
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("activate founder transition");
+
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    crate::sync::store::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &signer,
+        &crate::sync::hlc::Hlc::new("standalone-dominates-owner".to_string()),
+        &member_pubkey,
+        None,
+        MemberRole::Member,
+        &routing,
+        store.storage.store_id(),
+        "Restore Store",
+        &StoreDatabase::new(&db),
+    )
+    .await
+    .expect("invite Store member");
+    let (_store_temp, store_dir) = temp_store_dir();
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        store.home.clone(),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(routing.clone()),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store.storage.store_id(),
+        signer.clone(),
+    )
+    .expect("open Circle owner storage");
+    let components = init_sync_over_storage(
+        &StoreDatabase::new(&db),
+        owner_storage,
+        StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(routing.clone()),
+    )
+    .await
+    .expect("initialize Circle owner sync");
+    components
+        .add_circle_member(
+            &store_dir,
+            circle_id,
+            member_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add Circle member");
+
+    // Pre-close content, then close the epoch by removing the member. The successor
+    // bootstrap and the owner's successor leaf both cover the pre-close cutoff.
+    write_circle_document(
+        &db,
+        &routing,
+        circle_id,
+        "00000000-0000-4000-8000-000000000090",
+        "0000000002000-0000-owner",
+    )
+    .await;
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish pre-close Circle content");
+    components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+
+    // Post-close content under the successor epoch advances the frontier past the
+    // close cutoff, so a snapshot over it dominates the close-cutoff candidates.
+    write_circle_document(
+        &db,
+        &routing,
+        circle_id,
+        "00000000-0000-4000-8000-000000000091",
+        "0000000004000-0000-owner",
+    )
+    .await;
+    components
+        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+        .await
+        .expect("publish post-close Circle content");
+
+    // Author the dominating standalone Circle snapshot under the successor epoch.
+    let (_standalone_temp, standalone_dir) = temp_store_dir();
+    let standalone = crate::sync::store::push_circle_snapshots_for_test(
+        &db,
+        &*store.storage,
+        standalone_dir.as_ref().join("standalone"),
+        db.schema_version(),
+        &signer,
+        "2026-07-24T02:00:00Z",
+        &routing,
+    )
+    .await
+    .expect("author the dominating standalone Circle snapshot");
+    let standalone_image_hash = standalone.bootstrap.image.image_hash;
+
+    // A Store snapshot covering the post-close frontier, acknowledged stable.
+    let authorized = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+        .await
+        .expect("authorize the post-close Store snapshot");
+    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
+    let cut = authorized
+        .capture_snapshot_cut(
+            snapshot_dir.as_ref().to_path_buf(),
+            db.synced_tables().to_vec(),
+            Some(&routing),
+        )
+        .await
+        .expect("capture the post-close Store snapshot cut");
+    let coverage = cut.coverage.clone();
+    authorized
+        .push_snapshot(
+            cut.snapshot,
+            cut.coverage,
+            db.schema_version(),
+            &signer,
+            "2026-07-24T02:00:01Z".to_string(),
+        )
+        .await
+        .expect("publish the post-close Store snapshot");
+    crate::sync::store::stage_store_acknowledgement_for_test(
+        &db,
+        &store.storage,
+        coverage.clone(),
+        "2026-07-24T02:00:02Z".to_string(),
+        &signer,
+    )
+    .await
+    .expect("stage post-close snapshot stability acknowledgement");
+    crate::sync::store::drain_store_acknowledgements_for_test(&db, &store.storage, &signer)
+        .await
+        .expect("activate post-close snapshot stability acknowledgement");
+
+    // A fresh device restores from the Store snapshot.
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
+            .await
+            .expect("load membership for snapshot restore")
+            .chain
+            .expect("membership chain");
+    let destination = tempfile::tempdir().expect("standalone-restore destination");
+    let database_path = destination.path().join("store.db");
+    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
+        &*store.storage,
+        store.storage.store_id(),
+        store.root.clone(),
+        &crate::join_code::MembershipFloor(membership.head_refs().to_vec()),
+        db.schema_version(),
+        &database_path,
+    )
+    .await
+    .expect("restore the post-close Store snapshot");
+    let restored = bootstrap
+        .open_database(
+            store.storage.store_id(),
+            &database_path,
+            db.synced_tables().to_vec(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "standalone-restore-device".to_string(),
+            &circle_routing_migrations(),
+            Some(&routing),
+            &*store.storage,
+            &signer,
+        )
+        .await
+        .expect("install the restored snapshot database");
+
+    // The staged Install decision chose the dominating standalone snapshot: the
+    // coverage row names its image.
+    let coverage_row = restored
+        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .await
+        .expect("read restored Circle coverage")
+        .expect("the restore installs a Circle coverage row");
+    assert_eq!(
+        coverage_row.bootstrap.image.image_hash, standalone_image_hash,
+        "restore installs the dominating standalone snapshot's image, not a \
+         close-cutoff bootstrap"
+    );
+}
+
 #[tokio::test]
 async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
     let fixture = rotation_fixture("rotation-ack-read").await;

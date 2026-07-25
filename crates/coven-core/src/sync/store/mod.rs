@@ -236,7 +236,7 @@ pub(crate) async fn push_circle_snapshots_for_test(
     identity: &UserKeypair,
     created_at: &str,
     store_routing: &crate::encryption::EncryptionService,
-) -> Result<(), snapshot::SnapshotError> {
+) -> Result<super::store_commit::CircleSnapshotMeta, snapshot::SnapshotError> {
     let store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
@@ -249,7 +249,6 @@ pub(crate) async fn push_circle_snapshots_for_test(
             store_routing,
         )
         .await
-        .map(|_| ())
 }
 
 /// Drive the resume-aware Circle snapshot publication the cycle runs: resume any
