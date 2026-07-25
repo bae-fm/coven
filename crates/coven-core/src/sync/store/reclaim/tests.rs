@@ -11,6 +11,179 @@ fn proof_object(path: &str) -> ExactObjectRef {
     )
 }
 
+/// An owner Store whose founder stream carries two acknowledged, snapshot-covered
+/// Store packages, released from replay retention so both are reclaim-eligible.
+struct ReclaimJourneyFixture {
+    db: crate::database::Database,
+    store: crate::sync::test_helpers::TestStore,
+    signer: UserKeypair,
+    device_id: String,
+    membership: MembershipChain,
+    packages: Vec<StorePackageReclaimTarget>,
+}
+
+impl ReclaimJourneyFixture {
+    async fn build(store_id: &str) -> Self {
+        let db = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(&db, store_id, signer.clone())
+            .await
+            .expect("create Store");
+
+        let mut activations = Vec::new();
+        for (sequence, row) in [
+            (
+                1,
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                     VALUES ('reclaim-journey-1', 'first', NULL, \
+                     '0000000001000-0000-reclaim-journey', '2026-01-01')",
+            ),
+            (
+                2,
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                     VALUES ('reclaim-journey-2', 'second', NULL, \
+                     '0000000002000-0000-reclaim-journey', '2026-01-01')",
+            ),
+        ] {
+            let changeset = crate::sync::test_helpers::capture_bytes(
+                &crate::sync::test_helpers::open_test_db(),
+                &[row],
+            )
+            .await;
+            let activation = store
+                .publish_changeset("founder", sequence, &changeset, db.schema_version())
+                .await
+                .expect("publish package activation");
+            activations.push(activation);
+        }
+        let tip = activations.last().expect("published two packages").clone();
+        let StoreCommitCoord { stream_id, .. } = tip.coord;
+        let coverage = CommitFrontier(BTreeMap::from([(stream_id, tip)]));
+
+        let membership = crate::sync::store::pull::load_cycle_membership(
+            &store.storage,
+            &StoreDatabase::new(&db),
+        )
+        .await
+        .expect("load Store membership");
+        let chain = membership
+            .chain
+            .clone()
+            .expect("initialized Store has membership");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            b"reclaim journey snapshot".to_vec(),
+            coverage.clone(),
+            &signer,
+            &chain,
+            &db,
+        )
+        .await
+        .expect("publish covering snapshot");
+        crate::sync::test_helpers::publish_store_ack_fixture(
+            &db,
+            &store.storage,
+            coverage,
+            &signer,
+        )
+        .await
+        .expect("acknowledge covering snapshot");
+        db.call(|connection| {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(crate::database::DbError::from)?;
+            StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
+            transaction.commit().map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("release retained replay ownership");
+
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load local device id")
+            .expect("local device id exists");
+
+        let mut packages = Vec::new();
+        for activation in activations {
+            let (commit, _) = crate::sync::store::pull::load_commit_with_author(
+                &store.storage,
+                &store.root,
+                &activation,
+            )
+            .await
+            .expect("load package activation");
+            let package = commit
+                .store_package()
+                .expect("activation carries a Store package")
+                .clone();
+            packages.push(StorePackageReclaimTarget {
+                package,
+                activation,
+            });
+        }
+
+        Self {
+            db,
+            store,
+            signer,
+            device_id,
+            membership: chain,
+            packages,
+        }
+    }
+
+    async fn reclaim(&self) -> Result<StoreReclaimResult, StoreReclaimError> {
+        reclaim_store_packages(
+            &StoreDatabase::new(&self.db),
+            &self.store.storage,
+            &self.device_id,
+            &self.signer,
+            self.store.root.store_root_hash,
+            &self.membership,
+        )
+        .await
+    }
+
+    async fn package_is_present(&self, target: &StorePackageReclaimTarget) -> bool {
+        let stream_id = target.activation.coord.stream_id.to_string();
+        let prefix = crate::sync::store_commit::package_semantic_prefix(
+            target.package.candidate_family,
+            &stream_id,
+            target.activation.coord.sequence(),
+            target.package.content_hash,
+        );
+        let context = ProtocolObjectContext::store_encrypted(
+            self.store.root.store_root_hash,
+            ProtocolObjectDomain::StorePackage,
+        );
+        match self
+            .store
+            .storage
+            .read_protocol_object(&context, &target.package.object, &prefix)
+            .await
+        {
+            Ok(_) => true,
+            Err(StorageError::NotFound(_)) => false,
+            Err(error) => panic!("read reclaim package object: {error}"),
+        }
+    }
+
+    fn package_deletes(&self, target: &StorePackageReclaimTarget) -> usize {
+        let key = target.package.object.slot().logical_key();
+        self.store
+            .home
+            .deletes_seen()
+            .into_iter()
+            // Opaque exact slots record as `<logical_key>#exact#<provider_id>`;
+            // compare the logical part so a re-created object's new provider id
+            // still counts as a delete of the same package.
+            .filter(|deleted| deleted.split("#exact#").next() == Some(key))
+            .count()
+    }
+}
+
 #[tokio::test]
 async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_snapshot() {
     let db = crate::sync::test_helpers::open_test_db();
@@ -609,4 +782,124 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         )
         .await
         .expect("retracted activation authority leaves target readable");
+}
+
+/// A delete failure between authorization activation and object deletion leaves
+/// the already-deleted package gone and the failing one still present; a restart
+/// deletes exactly the remaining package and never re-issues the completed delete.
+#[tokio::test]
+async fn interrupted_reclaim_deletes_only_the_remaining_package_on_restart() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-crash-resume").await;
+    for target in &fixture.packages {
+        assert!(
+            fixture.package_is_present(target).await,
+            "every covered package is present before reclamation",
+        );
+    }
+
+    // The two package deletions are the last exact deletes of a reclaim run and
+    // arrive in an order fixed by the (per-run random) authorization identities.
+    // Fail the second one whichever it is: the first package deletes durably, the
+    // second's delete fails, and the run surfaces the error to its initiator.
+    let package_slots: Vec<&ObjectSlot> = fixture
+        .packages
+        .iter()
+        .map(|target| target.package.object.slot())
+        .collect();
+    fixture
+        .store
+        .home
+        .fail_nth_exact_delete_of(&package_slots, 2);
+
+    let interrupted = fixture.reclaim().await;
+    assert!(
+        interrupted.is_err(),
+        "the delete failure fails the reclaim to its initiator: {interrupted:?}",
+    );
+
+    let present: Vec<&StorePackageReclaimTarget> = {
+        let mut present = Vec::new();
+        for target in &fixture.packages {
+            if fixture.package_is_present(target).await {
+                present.push(target);
+            }
+        }
+        present
+    };
+    assert_eq!(
+        present.len(),
+        1,
+        "exactly one package survives the interrupted deletion",
+    );
+    let survivor = present[0];
+    for target in &fixture.packages {
+        assert_eq!(
+            fixture.package_deletes(target),
+            usize::from(!std::ptr::eq(target, survivor)),
+            "only the already-deleted package has a recorded delete",
+        );
+    }
+
+    let resumed = fixture
+        .reclaim()
+        .await
+        .expect("restart resumes reclamation");
+    assert_eq!(
+        resumed,
+        StoreReclaimResult {
+            packages_deleted: 1,
+            physical_copies_deleted: 1,
+        },
+        "the restart reclaims exactly the one remaining package",
+    );
+    for target in &fixture.packages {
+        assert!(
+            !fixture.package_is_present(target).await,
+            "every covered package is deleted after the restart",
+        );
+        assert_eq!(
+            fixture.package_deletes(target),
+            1,
+            "each package is deleted exactly once across the interrupted and resumed runs",
+        );
+    }
+}
+
+/// The whole reclaim journal runs end to end: both acknowledged, snapshot-covered
+/// packages are proof-gated, deleted, and receipted in one uninterrupted pass.
+#[tokio::test]
+async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-journal-full-pass").await;
+    let result = fixture.reclaim().await.expect("reclaim covered packages");
+    assert_eq!(
+        result,
+        StoreReclaimResult {
+            packages_deleted: 2,
+            physical_copies_deleted: 2,
+        },
+    );
+    for target in &fixture.packages {
+        assert!(
+            !fixture.package_is_present(target).await,
+            "every covered package is deleted",
+        );
+        assert_eq!(
+            fixture.package_deletes(target),
+            1,
+            "each package is deleted exactly once",
+        );
+    }
+
+    let idempotent = fixture
+        .reclaim()
+        .await
+        .expect("a second reclaim over the same coverage is a no-op");
+    assert_eq!(
+        idempotent,
+        StoreReclaimResult {
+            packages_deleted: 0,
+            physical_copies_deleted: 0,
+        },
+        "the recorded reclaim operations are not repeated",
+    );
 }

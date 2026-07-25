@@ -75,6 +75,14 @@ pub struct InMemoryCloudHome {
     exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     exact_delete_count: Arc<AtomicUsize>,
     fail_exact_delete_on: Arc<AtomicUsize>,
+    fail_exact_delete_of: Arc<Mutex<Option<TargetedDeleteFailure>>>,
+}
+
+/// Fail the `countdown`-th delete of an object whose key is in `keys`, counting
+/// only those deletes. Set by [`InMemoryCloudHome::fail_nth_exact_delete_of`].
+struct TargetedDeleteFailure {
+    keys: std::collections::HashSet<String>,
+    countdown: usize,
 }
 
 impl InMemoryCloudHome {
@@ -117,6 +125,7 @@ impl InMemoryCloudHome {
             exact_stream_read_barrier: Arc::new(Mutex::new(None)),
             exact_delete_count: Arc::new(AtomicUsize::new(0)),
             fail_exact_delete_on: Arc::new(AtomicUsize::new(0)),
+            fail_exact_delete_of: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -246,6 +255,24 @@ impl InMemoryCloudHome {
         assert!(call > 0, "exact-delete call numbers are 1-based");
         self.exact_delete_count.store(0, Ordering::SeqCst);
         self.fail_exact_delete_on.store(call, Ordering::SeqCst);
+    }
+
+    /// Fail the `nth` (1-based) delete of an object among `slots`, counting only
+    /// deletes of those objects, then disarm. Unlike [`fail_exact_delete_on_call`],
+    /// which counts every exact delete (probes, candidate cleanup), this counts
+    /// only the identities that matter, so "fail the 2nd package delete" lands
+    /// deterministically however many unrelated deletes interleave and whatever
+    /// order the two package deletes arrive in.
+    pub fn fail_nth_exact_delete_of(&self, slots: &[&ObjectSlot], nth: usize) {
+        assert!(nth > 0, "targeted delete ordinals are 1-based");
+        let keys = slots
+            .iter()
+            .map(|slot| Self::exact_storage_key(slot).expect("test exact slot is valid"))
+            .collect();
+        *self.fail_exact_delete_of.lock().unwrap() = Some(TargetedDeleteFailure {
+            keys,
+            countdown: nth,
+        });
     }
 
     /// Drop `key`'s bytes out of band — as if the object vanished from the
@@ -509,6 +536,20 @@ impl InMemoryCloudHome {
             return Err(CloudHomeError::Transport(format!(
                 "InMemoryCloudHome: forced exact delete failure on call {call}"
             )));
+        }
+        {
+            let mut targeted = self.fail_exact_delete_of.lock().unwrap();
+            if let Some(failure) = targeted.as_mut() {
+                if failure.keys.contains(&key) {
+                    failure.countdown -= 1;
+                    if failure.countdown == 0 {
+                        *targeted = None;
+                        return Err(CloudHomeError::Transport(format!(
+                            "InMemoryCloudHome: forced exact delete failure of {key}"
+                        )));
+                    }
+                }
+            }
         }
         self.writes.lock().unwrap().remove(&key);
         self.deletes.lock().unwrap().push(key);
