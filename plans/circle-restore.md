@@ -230,6 +230,32 @@ storage-hosted candidate and fail the whole restore with no database exposed
 when it rejects — which `remove_incomplete_database` guarantees on any
 failure.
 
+**Resolved by moving membership-head deserialization off the async poll stack.**
+`post_close_circle_store_snapshot_restores_and_converges` stack-overflowed
+(SIGABRT) at the default 2 MB thread stack. The earlier note here misattributed
+it to founder-graph loading and a `PreparedExactObject` whose `stored_bytes:
+Vec<u8>` is itself serialized JSON; direct backtrace and frame measurement
+disproved that. The founder graph is structurally flat (JSON depth 5–11) and its
+load was never on the failing stack. The real cause was stack-frame exhaustion,
+not depth-proportional recursion: the whole stack was ~60 frames spanning ~2 MB,
+dominated by large `async fn` state-machine frames along `add_circle_member` →
+`prepare_circle_operation_request` → `load_and_persist_owner_anchor` → the
+`exact_chain` membership loaders, terminating in a heavy monomorphized serde
+deserialize of `AuthorHead`. It passed under a 1 GB stack because the depth is
+fixed and finite; `main`'s added authoring frames were only what crossed the
+2 MB boundary. Two leaves in `exact_chain.rs` ran `serde_json::from_slice::<
+AuthorHead>` inline on the async poll stack, unlike the entry/head-by-reference
+loaders, which already run their parse on a fresh blocking-pool stack through
+`load_exact_object`. Routing those two head parses through the same
+`run_blocking_object_verification` path keeps the deep async descent and the
+heavy deserialization off one stack. Fixed on this branch as its own commit
+(subject: the stack budget, not restore); the test flips from SIGABRT to pass at
+the default stack, with no stack enlargement and no test dropped. The 5-layer
+`exact_chain` async loader collapse remains a separate follow-up. The epoch-key
+snapshot-authoring write-path overflow noted above was not separately
+reproduced; it is most likely the same frame-exhaustion class at a different
+serde leaf, not a distinct defect.
+
 ### 4. App-level wiring
 
 `crates/coven/src/sync/restore.rs` (`restore_from_cloud`) passes through

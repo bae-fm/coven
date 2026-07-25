@@ -247,8 +247,7 @@ async fn traverse_exact_membership_stream(
             }
             Err(error) => return Err(AnchoredChainError::LoadFailed(error.to_string())),
         };
-        let head: AuthorHead = serde_json::from_slice(&bytes)
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        let head = parse_membership_head_off_stack(bytes, semantic_prefix, &object).await?;
         let coord = head.entry_coord();
         if coord.author_pubkey != author
             || coord.author_owner_grant != *grant
@@ -533,8 +532,8 @@ fn load_exact_membership_head_with_root<'a>(
                 operation: format!("read exact membership head {coord:?}"),
                 source,
             })?;
-        let head: AuthorHead = serde_json::from_slice(&bytes)
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        let head =
+            parse_membership_head_off_stack(bytes, semantic_prefix, &reference.object).await?;
         if head.entry_coord() != *coord || head.head_hash() != reference.head_hash {
             return Err(AnchoredChainError::LoadFailed(
                 "membership head differs from its exact reference".to_string(),
@@ -624,6 +623,33 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
         pending_resolution,
     ))
     .await
+}
+
+/// Deserialize an exact membership head off the async poll stack.
+///
+/// This runs at the leaves of the nested membership-load chain, where the
+/// accumulated async future frames leave little of the default thread stack for
+/// serde's monomorphized deserializer of the large `AuthorHead` graph. Running
+/// the parse on a fresh blocking-pool stack keeps the deep async descent and the
+/// heavy deserialization off the same stack — the same bounded-stack path
+/// [`load_exact_object`](crate::sync::store_objects::load_exact_object) uses for
+/// entries and heads loaded by reference.
+async fn parse_membership_head_off_stack(
+    bytes: Vec<u8>,
+    semantic_prefix: &str,
+    object: &crate::sync::storage::ExactObjectRef,
+) -> Result<AuthorHead, AnchoredChainError> {
+    crate::sync::store_objects::run_blocking_object_verification(
+        semantic_prefix,
+        object,
+        Box::new(move || {
+            serde_json::from_slice::<AuthorHead>(&bytes).map_err(|error| {
+                crate::sync::store_commit::StoreProtocolError::Malformed(error.to_string())
+            })
+        }),
+    )
+    .await
+    .map_err(map_membership_object_error)
 }
 
 pub(super) fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {
