@@ -1269,18 +1269,7 @@ fn read_exact_cloudkit_object(
     });
     for index in 0..part_count {
         let key = exact_part_key(logical_key, index);
-        let part = ops.read_versioned_record(scope, &key)?;
-        let expected_len = if index + 1 == part_count {
-            total_len - index * CHUNK_SIZE
-        } else {
-            CHUNK_SIZE
-        };
-        if part.bytes.len() != expected_len {
-            return Err(CloudHomeError::Transport(format!(
-                "CloudKit exact object {logical_key:?} part {index} has {} bytes, expected {expected_len}",
-                part.bytes.len()
-            )));
-        }
+        let part = read_exact_part(ops, scope, logical_key, part_count, total_len, index, &key)?;
         bytes.extend_from_slice(&part.bytes);
         records.push(CloudKitRecordVersion {
             key,
@@ -1288,6 +1277,80 @@ fn read_exact_cloudkit_object(
         });
     }
     Ok((bytes, records))
+}
+
+/// The plaintext length part `index` of an exact object carries: a full chunk
+/// for every part but the last, which holds the remainder.
+fn exact_part_len(part_count: usize, total_len: usize, index: usize) -> usize {
+    if index + 1 == part_count {
+        total_len - index * CHUNK_SIZE
+    } else {
+        CHUNK_SIZE
+    }
+}
+
+/// Read one part record and refuse a length its manifest does not assign it. A
+/// part that is short is not the part the manifest describes, so splicing it
+/// would silently serve the wrong bytes at every later offset.
+fn read_exact_part(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    logical_key: &str,
+    part_count: usize,
+    total_len: usize,
+    index: usize,
+    key: &str,
+) -> Result<CloudVersionedObject, CloudHomeError> {
+    let part = ops.read_versioned_record(scope, key)?;
+    let expected_len = exact_part_len(part_count, total_len, index);
+    if part.bytes.len() != expected_len {
+        return Err(CloudHomeError::Transport(format!(
+            "CloudKit exact object {logical_key:?} part {index} has {} bytes, expected {expected_len}",
+            part.bytes.len()
+        )));
+    }
+    Ok(part)
+}
+
+/// Read one byte range of an exact CloudKit object, fetching only the part
+/// records that cover it.
+///
+/// The whole-object sibling is [`read_exact_cloudkit_object`]. Both read the
+/// same manifest, but this one never touches a part the range does not reach —
+/// which is what makes a ranged read of a blob cost the range. Reading the whole
+/// object and slicing would answer correctly and cost the object, so the
+/// caller's O(range) guarantee lives or dies here.
+fn read_exact_cloudkit_range(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    logical_key: &str,
+    start: usize,
+    end: usize,
+) -> Result<Vec<u8>, CloudHomeError> {
+    let manifest = ops.read_versioned_record(scope, logical_key)?;
+    let (part_count, total_len) = decode_exact_manifest(&manifest.bytes)?;
+    if end > total_len {
+        return Err(CloudHomeError::Transport(format!(
+            "range {start}..{end} exceeds CloudKit exact object {logical_key:?} size {total_len}"
+        )));
+    }
+    let first = start / CHUNK_SIZE;
+    let last = (end - 1) / CHUNK_SIZE;
+    if last >= part_count {
+        return Err(CloudHomeError::Transport(format!(
+            "range {start}..{end} needs part {last} of CloudKit exact object {logical_key:?}, which has {part_count}"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(end - start);
+    for index in first..=last {
+        let key = exact_part_key(logical_key, index);
+        let part = read_exact_part(ops, scope, logical_key, part_count, total_len, index, &key)?;
+        let part_start = index * CHUNK_SIZE;
+        let from = start.saturating_sub(part_start);
+        let to = (end - part_start).min(part.bytes.len());
+        bytes.extend_from_slice(&part.bytes[from..to]);
+    }
+    Ok(bytes)
 }
 
 #[async_trait]
@@ -1540,17 +1603,23 @@ impl ExactSlotStorage for CloudKitCloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        let bytes = self.read_at(slot).await?;
+        validate_cloudkit_slot(slot)?;
         let start = usize::try_from(start)
             .map_err(|_| CloudHomeError::Configuration("range start is too large".to_string()))?;
         let end = usize::try_from(end)
             .map_err(|_| CloudHomeError::Configuration("range end is too large".to_string()))?;
-        bytes.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
-            CloudHomeError::Configuration(format!(
-                "invalid range {start}..{end} for {} bytes",
-                bytes.len()
-            ))
-        })
+        if end < start {
+            return Err(CloudHomeError::Configuration(format!(
+                "invalid range {start}..{end}"
+            )));
+        }
+        if end == start {
+            return Ok(Vec::new());
+        }
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let logical_key = slot.logical_key().to_string();
+        blocking(move || read_exact_cloudkit_range(&*ops, &scope, &logical_key, start, end)).await
     }
 
     async fn read_at_to_file(
@@ -1633,12 +1702,24 @@ mod tests {
         return_wrong_commit_keys: AtomicBool,
         pause_write_after_store: Mutex<Option<PausedWrite>>,
         record_exists_calls: AtomicUsize,
+        /// Every versioned-record fetch, by key. Kept apart from `calls` so a
+        /// test can count which records a read touched without disturbing the
+        /// call-sequence assertions the ledger already carries.
+        versioned_reads: Mutex<Vec<String>>,
         grant_share_calls: AtomicUsize,
         revoke_share_calls: AtomicUsize,
         shares: Mutex<HashMap<String, CloudKitShare>>,
     }
 
     impl MockCloudKitOps {
+        fn versioned_reads(&self) -> Vec<String> {
+            self.versioned_reads.lock().unwrap().clone()
+        }
+
+        fn clear_versioned_reads(&self) {
+            self.versioned_reads.lock().unwrap().clear();
+        }
+
         fn new() -> Self {
             Self {
                 store: Mutex::new(HashMap::new()),
@@ -1655,6 +1736,7 @@ mod tests {
                 return_wrong_commit_keys: AtomicBool::new(false),
                 pause_write_after_store: Mutex::new(None),
                 record_exists_calls: AtomicUsize::new(0),
+                versioned_reads: Mutex::new(Vec::new()),
                 grant_share_calls: AtomicUsize::new(0),
                 revoke_share_calls: AtomicUsize::new(0),
                 shares: Mutex::new(HashMap::new()),
@@ -1870,6 +1952,7 @@ mod tests {
             scope: &CloudKitScope,
             key: &str,
         ) -> Result<CloudVersionedObject, CloudHomeError> {
+            self.versioned_reads.lock().unwrap().push(key.to_string());
             let record = (scope.clone(), key.to_string());
             let store = self.store.lock().unwrap();
             let versions = self.versions.lock().unwrap();
@@ -2894,6 +2977,114 @@ mod tests {
         // end == 0 returns empty (the underflow case)
         let slice = ch.read_range("range.bin", 0, 0).await.unwrap();
         assert!(slice.is_empty());
+    }
+
+    /// The O(range) receipt for the backend the app actually ships on. CloudKit
+    /// stores an exact object as a manifest plus numbered part records, so a
+    /// ranged read must fetch the manifest and only the parts covering the
+    /// range. Reading the whole object and slicing answers correctly and costs
+    /// the object — the sabotage this test exists to catch, since a caller that
+    /// fetches only covering chunks gains nothing if the backend under it reads
+    /// everything anyway.
+    #[tokio::test]
+    async fn exact_ranged_read_fetches_only_the_parts_it_covers() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let slot = exact_slot("audio/ranged-track");
+        // Four parts: three full chunks and a short tail.
+        let data: Vec<u8> = (0..3 * CHUNK_SIZE + 1024)
+            .map(|value| (value % 251) as u8)
+            .collect();
+        ExactSlotStorage::create_at(
+            &home,
+            &slot,
+            BlobBody::from_bytes(data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        // A range wholly inside part 2.
+        ops.clear_versioned_reads();
+        let start = 2 * CHUNK_SIZE + 10;
+        let end = start + 64;
+        assert_eq!(
+            ExactSlotStorage::read_range_at(&home, &slot, start as u64, end as u64)
+                .await
+                .unwrap(),
+            &data[start..end],
+        );
+        assert_eq!(
+            ops.versioned_reads(),
+            vec![
+                "audio/ranged-track".to_string(),
+                "audio/ranged-track.exact-part2".to_string(),
+            ],
+            "the manifest names the layout; only the covering part is fetched",
+        );
+
+        // A range straddling the part 0 / part 1 boundary fetches exactly two.
+        ops.clear_versioned_reads();
+        let start = CHUNK_SIZE - 8;
+        let end = CHUNK_SIZE + 8;
+        assert_eq!(
+            ExactSlotStorage::read_range_at(&home, &slot, start as u64, end as u64)
+                .await
+                .unwrap(),
+            &data[start..end],
+        );
+        assert_eq!(
+            ops.versioned_reads(),
+            vec![
+                "audio/ranged-track".to_string(),
+                "audio/ranged-track.exact-part0".to_string(),
+                "audio/ranged-track.exact-part1".to_string(),
+            ],
+        );
+
+        // The tail, in the short last part.
+        ops.clear_versioned_reads();
+        assert_eq!(
+            ExactSlotStorage::read_range_at(
+                &home,
+                &slot,
+                data.len() as u64 - 16,
+                data.len() as u64
+            )
+            .await
+            .unwrap(),
+            &data[data.len() - 16..],
+        );
+        assert_eq!(
+            ops.versioned_reads(),
+            vec![
+                "audio/ranged-track".to_string(),
+                "audio/ranged-track.exact-part3".to_string(),
+            ],
+        );
+
+        // The whole read is the one that legitimately touches every part, so the
+        // counter discriminates rather than just being small.
+        ops.clear_versioned_reads();
+        assert_eq!(ExactSlotStorage::read_at(&home, &slot).await.unwrap(), data);
+        assert_eq!(
+            ops.versioned_reads().len(),
+            5,
+            "a whole read fetches the manifest and all four parts",
+        );
+
+        // A range past the end is refused rather than shortened.
+        assert!(ExactSlotStorage::read_range_at(
+            &home,
+            &slot,
+            data.len() as u64 - 4,
+            data.len() as u64 + 4,
+        )
+        .await
+        .is_err());
+        assert!(ExactSlotStorage::read_range_at(&home, &slot, 10, 10)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
