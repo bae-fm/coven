@@ -161,12 +161,29 @@ impl StoreDatabase {
         &self,
         coverage: crate::sync::circle::CircleBootstrapCoverageRef,
     ) -> Result<bool, DbError> {
+        self.circle_image_is_retained_for_replay(
+            coverage.circle_id,
+            coverage.bootstrap.image.clone(),
+        )
+        .await
+    }
+
+    /// Whether the local device's live Circle projection was seeded from this exact
+    /// image. One `circle_bootstrap_coverage` row per Circle names whichever image
+    /// the projection came from — a recipient bootstrap installed on pull or a
+    /// standalone snapshot installed on restore — so both kinds of image answer the
+    /// same question against the same row.
+    pub(in crate::sync::store) async fn circle_image_is_retained_for_replay(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        image: crate::sync::store_commit::SnapshotImageRef,
+    ) -> Result<bool, DbError> {
         self.database
             .call(move |conn| {
                 let row: Option<Vec<u8>> = conn
                     .query_row(
                         "SELECT bootstrap_ref FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                        [coverage.circle_id.to_string()],
+                        [circle_id.to_string()],
                         |row| row.get(0),
                     )
                     .optional()
@@ -180,7 +197,7 @@ impl StoreDatabase {
                             "parse retained Circle bootstrap reference: {error}"
                         ))
                     })?;
-                Ok(bootstrap.image == coverage.bootstrap.image)
+                Ok(bootstrap.image == image)
             })
             .await
     }

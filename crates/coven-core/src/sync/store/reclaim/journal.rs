@@ -334,7 +334,7 @@ impl ReclaimedStorePackage {
         let target_activation = authorization.target_activation();
         if *target.object() == authorization.object
             || *target.object() == authorization.evidence.object
-            || *target.object() == target_activation.object
+            || target.object() == target_activation.object()
         {
             return Err(StoreReclaimJournalError::Invalid(
                 "reclaimed package aliases authority or crosses Store histories".to_string(),
@@ -365,8 +365,10 @@ fn validate_reclaim_identity(
     authorization_activation: &ReclaimCommitActivation,
 ) -> Result<(), StoreReclaimJournalError> {
     authorization_activation.validate()?;
-    let target_activation = authorization.target_activation();
-    if target_activation == authorization_activation.commit() {
+    // The commit carrying the authorization must follow whatever activated the
+    // target, never be it — an Owner cannot authorize a reclaim in the same signed
+    // statement that published the object.
+    if authorization.target_activation().object() == &authorization_activation.commit().object {
         return Err(StoreReclaimJournalError::Invalid(
             "reclaim authorization does not follow its target in one Store history".to_string(),
         ));

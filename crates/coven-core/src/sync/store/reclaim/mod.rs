@@ -17,9 +17,9 @@ use crate::sync::storage::{
 };
 use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, CircleAckRef, CirclePackageRef, CircleSnapshotRef,
-    CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError, StoreRootRef,
-    StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
+    CommitFrontier, ObjectHash, SnapshotImageRef, StoreAckRef, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError,
+    StoreRootRef, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -37,6 +37,7 @@ pub enum ReclaimTarget {
     StorePackage(StorePackageReclaimTarget),
     CirclePackage(CirclePackageReclaimTarget),
     CircleBootstrapImage(CircleBootstrapImageReclaimTarget),
+    CircleSnapshotImage(CircleSnapshotImageReclaimTarget),
 }
 
 impl ReclaimTarget {
@@ -45,16 +46,59 @@ impl ReclaimTarget {
             Self::StorePackage(target) => &target.package.object,
             Self::CirclePackage(target) => &target.package.package.object,
             Self::CircleBootstrapImage(target) => &target.coverage.bootstrap.image.object,
+            Self::CircleSnapshotImage(target) => &target.image.object,
         }
     }
 
-    pub(crate) fn activation(&self) -> &StoreBatchCommitRef {
+    pub(crate) fn activation(&self) -> ReclaimActivation<'_> {
         match self {
-            Self::StorePackage(target) => &target.activation,
-            Self::CirclePackage(target) => &target.activation,
-            Self::CircleBootstrapImage(target) => &target.coverage.activation_commit,
+            Self::StorePackage(target) => ReclaimActivation::Commit(&target.activation),
+            Self::CirclePackage(target) => ReclaimActivation::Commit(&target.activation),
+            Self::CircleBootstrapImage(target) => {
+                ReclaimActivation::Commit(&target.coverage.activation_commit)
+            }
+            Self::CircleSnapshotImage(target) => {
+                ReclaimActivation::CircleSnapshotMetadata(CircleSnapshotStreamActivation {
+                    circle_id: target.circle_id,
+                    author_registration: &target.snapshot_author,
+                    snapshot: &target.snapshot,
+                })
+            }
         }
     }
+}
+
+/// The signed statement that put a reclaim target into the shared live set — the
+/// authority a verifier re-reads to confirm the Owner is deleting what its claim
+/// says. It follows how the object was published: a Store commit names packages
+/// and the bootstrap images its Circle-control activations carry, while a device's
+/// per-Circle snapshot stream names its own images through signed metadata that
+/// rides no commit at all.
+pub(crate) enum ReclaimActivation<'a> {
+    Commit(&'a StoreBatchCommitRef),
+    CircleSnapshotMetadata(CircleSnapshotStreamActivation<'a>),
+}
+
+impl ReclaimActivation<'_> {
+    /// The exact object carrying the activating signature. Reclaim identity checks
+    /// use it to refuse a target that aliases its own authority.
+    pub(crate) fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::Commit(commit) => &commit.object,
+            Self::CircleSnapshotMetadata(activation) => &activation.snapshot.object,
+        }
+    }
+}
+
+/// One generation of a device's per-Circle snapshot stream, named by the exact
+/// metadata object whose signature vouches for the image that generation
+/// published. The stream is anchored on the author's Store device registration and
+/// the Circle, which is all a Store member outside the Circle can check; a member
+/// inside re-walks the stream itself.
+pub(crate) struct CircleSnapshotStreamActivation<'a> {
+    pub circle_id: CircleId,
+    pub author_registration: &'a StoreDeviceRegistrationRef,
+    pub snapshot: &'a CircleSnapshotRef,
 }
 
 /// The eligibility proof an Owner signs to authorize one reclaim. The claim kind
@@ -66,6 +110,7 @@ pub enum ReclaimClaim {
     StorePackage(StorePackageReclaimClaim),
     CirclePackage(CirclePackageReclaimClaim),
     CircleBootstrapImage(CircleBootstrapImageReclaimClaim),
+    CircleSnapshotImage(CircleSnapshotImageReclaimClaim),
 }
 
 impl ReclaimClaim {
@@ -76,6 +121,9 @@ impl ReclaimClaim {
             Self::CircleBootstrapImage(claim) => {
                 ReclaimTarget::CircleBootstrapImage(claim.target.clone())
             }
+            Self::CircleSnapshotImage(claim) => {
+                ReclaimTarget::CircleSnapshotImage(claim.target.clone())
+            }
         }
     }
 
@@ -84,6 +132,7 @@ impl ReclaimClaim {
             Self::StorePackage(claim) => claim.validate(),
             Self::CirclePackage(claim) => claim.validate(),
             Self::CircleBootstrapImage(claim) => claim.validate(),
+            Self::CircleSnapshotImage(claim) => claim.validate(),
         }
     }
 }
@@ -322,6 +371,76 @@ impl CircleBootstrapImageReclaimClaim {
     }
 }
 
+/// The exact image of one generation of a device's standalone Circle snapshot
+/// stream.
+///
+/// Only the image ciphertext is ever a reclaim target. A reader reconstructs the
+/// stream by walking it from generation zero along each metadata object's
+/// create-once successor slot and stopping at the first slot that is absent, so
+/// deleting any generation's metadata hides every later generation from every
+/// reader — the metadata chain is permanent regardless of how superseded the
+/// generation is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleSnapshotImageReclaimTarget {
+    pub circle_id: CircleId,
+    pub snapshot_author: StoreDeviceRegistrationRef,
+    pub control: CircleControlCoord,
+    pub snapshot: CircleSnapshotRef,
+    pub image: SnapshotImageRef,
+}
+
+impl CircleSnapshotImageReclaimTarget {
+    /// The ownership record's owner for this image: the device-authorized
+    /// activation of the author's per-Circle snapshot stream, at this generation.
+    /// Derived from the target's own identity rather than carried in it, so an
+    /// ownership record can only close against the generation that published it.
+    pub(crate) fn snapshot_owner(
+        &self,
+        store_root_hash: ObjectHash,
+    ) -> Result<crate::sync::remote_object::SnapshotObjectOwner, StoreProtocolError> {
+        Ok(crate::sync::remote_object::SnapshotObjectOwner {
+            activation: crate::sync::store_commit::circle_snapshot_stream_activation(
+                store_root_hash,
+                &self.snapshot_author,
+                self.circle_id,
+                &self.snapshot_author.device_id.to_string(),
+            )?,
+            generation: self.snapshot.generation,
+        })
+    }
+}
+
+/// Evidence that a later generation of the same device's Circle snapshot stream
+/// supersedes the reclaimed one. The claim names only the exact superseding
+/// generation — that generation's own signed metadata, its stability against every
+/// active-access device's acknowledgement, and its coverage of the reclaimed cut
+/// are all re-derived from live state at verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleSnapshotImageReclaimClaim {
+    pub target: CircleSnapshotImageReclaimTarget,
+    pub superseding: CircleSnapshotRef,
+}
+
+impl CircleSnapshotImageReclaimClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        if self.superseding.generation <= self.target.snapshot.generation {
+            return Err(StoreProtocolError::Malformed(
+                "Circle snapshot reclaim names a superseding generation that is not later"
+                    .to_string(),
+            ));
+        }
+        let image = &self.target.image.object;
+        if *image == self.target.snapshot.object || *image == self.superseding.object {
+            return Err(StoreProtocolError::Malformed(
+                "Circle snapshot reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorePackageReclaimClaim {
@@ -531,7 +650,7 @@ impl ReclaimAuthorizationRef {
         &self.evidence.target
     }
 
-    pub(crate) fn target_activation(&self) -> &StoreBatchCommitRef {
+    pub(crate) fn target_activation(&self) -> ReclaimActivation<'_> {
         self.evidence.target.activation()
     }
 
@@ -821,9 +940,9 @@ pub enum StoreReclaimError {
     },
     #[error("exact Store ancestry is missing commit {commit_hash}")]
     MissingAncestry { commit_hash: ObjectHash },
-    #[error("deleting exact Store package owned by commit {commit_hash} failed: {source}")]
+    #[error("deleting the exact object activated by {activation} failed: {source}")]
     Delete {
-        commit_hash: ObjectHash,
+        activation: ObjectHash,
         #[source]
         source: StorageError,
     },
@@ -1059,6 +1178,75 @@ async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
     Ok(())
 }
 
+/// Authorize deletion of every Circle snapshot image a later generation of the
+/// same device's stream has superseded: that later generation's cut strictly
+/// dominates the reclaimed one and every device holding active Circle access has
+/// acknowledged it, so no reader will ever install from the older image again.
+/// Only images are enumerated — the metadata chain is what a reader walks to find
+/// any generation at all, so it is never a target.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_circle_snapshot_image_reclaim_authorizations(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: &MembershipChain,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    streams: &[CircleSnapshotStream],
+    stable: &[SelectedCircleSnapshot],
+) -> Result<(), StoreReclaimError> {
+    for stream in streams {
+        for (reference, meta) in &stream.generations {
+            let Some(superseding) = stable.iter().find(|candidate| {
+                candidate.author_registration == stream.author_registration
+                    && candidate.reference.generation > reference.generation
+                    && snapshot_supersedes_seed(
+                        &candidate.meta.bootstrap.coverage,
+                        &meta.bootstrap.coverage,
+                    )
+            }) else {
+                continue;
+            };
+            let target = CircleSnapshotImageReclaimTarget {
+                circle_id,
+                snapshot_author: stream.author_registration.clone(),
+                control: meta.control.clone(),
+                snapshot: reference.clone(),
+                image: meta.bootstrap.image.clone(),
+            };
+            if reclaim_target_is_recorded(
+                database,
+                &ReclaimTarget::CircleSnapshotImage(target.clone()),
+            )
+            .await?
+            {
+                continue;
+            }
+            if database
+                .circle_image_is_retained_for_replay(circle_id, target.image.clone())
+                .await?
+            {
+                continue;
+            }
+            Box::pin(prepare_reclaim_authorization(
+                database,
+                storage,
+                device_id,
+                identity_signer,
+                membership,
+                root,
+                ReclaimClaim::CircleSnapshotImage(CircleSnapshotImageReclaimClaim {
+                    target,
+                    superseding: superseding.reference.clone(),
+                }),
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Enumerate every reclaimable Circle package: for each Circle this device holds
 /// active access to, select the maximal acknowledgement-stable Circle snapshot,
 /// and authorize each package its cut covers that is not still a retained replay
@@ -1090,7 +1278,10 @@ async fn prepare_circle_reclaim_authorizations(
             &control,
         ))
         .await?;
-        let Some(selected) = Box::pin(choose_circle_snapshot(
+        // Both remaining passes read the same evidence: every device's snapshot
+        // stream and which of its generations every active-access device has
+        // acknowledged. Read it once.
+        let streams = Box::pin(load_circle_snapshot_streams(
             database,
             storage,
             root,
@@ -1098,8 +1289,26 @@ async fn prepare_circle_reclaim_authorizations(
             &control,
             registrations,
         ))
-        .await?
-        else {
+        .await?;
+        let stable = Box::pin(stable_circle_snapshots(
+            database, storage, root, circle_id, &control, &streams,
+        ))
+        .await?;
+        // A superseded snapshot generation's image is reclaimable on its own
+        // stream's evidence, independent of which snapshot covers the packages.
+        Box::pin(prepare_circle_snapshot_image_reclaim_authorizations(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            circle_id,
+            &streams,
+            &stable,
+        ))
+        .await?;
+        let Some(selected) = maximal_stable_circle_snapshot(stable) else {
             continue;
         };
         let targets = exact_circle_package_targets(
@@ -1159,20 +1368,27 @@ struct SelectedCircleSnapshot {
     acknowledgements: Vec<CircleAckRef>,
 }
 
-/// The maximal acknowledgement-stable Circle snapshot across every active device's
-/// stream: its cut is dominated by no other stable snapshot, and every device
-/// holding active Circle access has acknowledged coverage dominating that cut.
-async fn choose_circle_snapshot(
+/// One device's per-Circle snapshot stream, read in generation order.
+struct CircleSnapshotStream {
+    author_registration: StoreDeviceRegistrationRef,
+    generations: Vec<(
+        CircleSnapshotRef,
+        crate::sync::store_commit::CircleSnapshotMeta,
+    )>,
+}
+
+/// Every active device's Circle snapshot stream, decrypted under the current
+/// control's retained keyring — which resolves every epoch the reader holds, since
+/// a device's stream may span epochs that rotated away and a single-epoch key
+/// cannot decrypt the older ones.
+async fn load_circle_snapshot_streams(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-) -> Result<Option<SelectedCircleSnapshot>, StoreReclaimError> {
-    // Read snapshot metadata under the current control's retained keyring, which
-    // resolves every epoch the reader holds — a device's stream may span epochs
-    // that rotated away, and a single-epoch key cannot decrypt the older ones.
+) -> Result<Vec<CircleSnapshotStream>, StoreReclaimError> {
     let encryption = database
         .circle_package_access(circle_id, current_control.clone())
         .await?
@@ -1182,7 +1398,7 @@ async fn choose_circle_snapshot(
             ))
         })?
         .encryption;
-    let mut stable: Vec<SelectedCircleSnapshot> = Vec::new();
+    let mut streams = Vec::new();
     for (registration_ref, registration) in registrations {
         // A device's snapshot stream is a create-once chain sealed under the epoch
         // active when each generation was authored. A generation sealed under an
@@ -1190,7 +1406,7 @@ async fn choose_circle_snapshot(
         // reader held it) is not current-epoch coverage; skip the stream — reclaim
         // is best-effort and idempotent, so a later cycle retries once coverage is
         // resolvable. Only a decryptable stream contributes coverage evidence.
-        let stream = match super::snapshot::load_circle_snapshot_stream_refs(
+        let generations = match super::snapshot::load_circle_snapshot_stream_refs(
             storage,
             root,
             circle_id,
@@ -1210,7 +1426,27 @@ async fn choose_circle_snapshot(
                 continue;
             }
         };
-        for (reference, meta) in stream {
+        streams.push(CircleSnapshotStream {
+            author_registration: registration_ref.clone(),
+            generations,
+        });
+    }
+    Ok(streams)
+}
+
+/// Every Circle snapshot generation, across every active device's stream, whose
+/// cut every device holding active Circle access has acknowledged.
+async fn stable_circle_snapshots(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    current_control: &CircleControlCoord,
+    streams: &[CircleSnapshotStream],
+) -> Result<Vec<SelectedCircleSnapshot>, StoreReclaimError> {
+    let mut stable = Vec::new();
+    for stream in streams {
+        for (reference, meta) in &stream.generations {
             if let Some(acknowledgements) =
                 super::acknowledgements::stable_circle_acks_dominating_on(
                     database,
@@ -1224,14 +1460,22 @@ async fn choose_circle_snapshot(
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
             {
                 stable.push(SelectedCircleSnapshot {
-                    author_registration: registration_ref.clone(),
-                    reference,
-                    meta,
+                    author_registration: stream.author_registration.clone(),
+                    reference: reference.clone(),
+                    meta: meta.clone(),
                     acknowledgements,
                 });
             }
         }
     }
+    Ok(stable)
+}
+
+/// The maximal stable Circle snapshot: the one whose cut no other stable
+/// snapshot strictly dominates.
+fn maximal_stable_circle_snapshot(
+    mut stable: Vec<SelectedCircleSnapshot>,
+) -> Option<SelectedCircleSnapshot> {
     let coverages: Vec<CommitFrontier> = stable
         .iter()
         .map(|candidate| candidate.meta.bootstrap.coverage.clone())
@@ -1242,7 +1486,39 @@ async fn choose_circle_snapshot(
         })
     });
     stable.sort_by_key(|candidate| candidate.reference.snapshot_hash);
-    Ok(stable.pop())
+    stable.pop()
+}
+
+/// The maximal acknowledgement-stable Circle snapshot across every active device's
+/// stream: its cut is dominated by no other stable snapshot, and every device
+/// holding active Circle access has acknowledged coverage dominating that cut.
+async fn choose_circle_snapshot(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    current_control: &CircleControlCoord,
+    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+) -> Result<Option<SelectedCircleSnapshot>, StoreReclaimError> {
+    let streams = Box::pin(load_circle_snapshot_streams(
+        database,
+        storage,
+        root,
+        circle_id,
+        current_control,
+        registrations,
+    ))
+    .await?;
+    let stable = Box::pin(stable_circle_snapshots(
+        database,
+        storage,
+        root,
+        circle_id,
+        current_control,
+        &streams,
+    ))
+    .await?;
+    Ok(maximal_stable_circle_snapshot(stable))
 }
 
 /// Every Circle package addressed to `circle_id` whose activating commit lies at
@@ -1606,7 +1882,7 @@ async fn execute_reclaim_delete(
         .delete_protocol_object(target.object())
         .await
         .map_err(|source| StoreReclaimError::Delete {
-            commit_hash: target.activation().commit_hash,
+            activation: target.activation().object().stored_hash(),
             source,
         })?;
     verify_reclaim_target_absent(database, storage, &root, &target).await?;
@@ -1634,6 +1910,9 @@ async fn target_is_retained_for_replay(
             .await?),
         ReclaimTarget::CircleBootstrapImage(target) => Ok(database
             .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
+            .await?),
+        ReclaimTarget::CircleSnapshotImage(target) => Ok(database
+            .circle_image_is_retained_for_replay(target.circle_id, target.image.clone())
             .await?),
     }
 }
@@ -1736,7 +2015,106 @@ async fn verify_reclaim_evidence(
         ReclaimClaim::CircleBootstrapImage(claim) => Ok(ReclaimTarget::CircleBootstrapImage(
             verify_circle_bootstrap_image_reclaim_claim(database, storage, root, claim).await?,
         )),
+        ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
+            verify_circle_snapshot_image_reclaim_claim(database, storage, root, claim).await?,
+        )),
     }
+}
+
+/// Re-verify that a later generation of the reclaimed image's own stream
+/// supersedes it. The stream is re-walked from generation zero, so both the
+/// reclaimed generation and the named superseding one are re-read from their own
+/// signed metadata; the superseding generation must carry a cut that strictly
+/// dominates the reclaimed one, and every device holding active Circle access must
+/// have acknowledged that cut. Nothing the claim asserts about coverage,
+/// stability, or the image itself is taken on trust.
+async fn verify_circle_snapshot_image_reclaim_claim(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    claim: &CircleSnapshotImageReclaimClaim,
+) -> Result<CircleSnapshotImageReclaimTarget, StoreReclaimError> {
+    let circle_id = claim.target.circle_id;
+    let current_control = database
+        .current_circle_control(circle_id)
+        .await?
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(format!(
+                "Circle {circle_id} has no active control for snapshot image reclaim"
+            ))
+        })?;
+    let author = database
+        .activated_store_device_registration(claim.target.snapshot_author.clone())
+        .await?;
+    let author_stream = [(claim.target.snapshot_author.clone(), author)];
+    let streams = Box::pin(load_circle_snapshot_streams(
+        database,
+        storage,
+        root,
+        circle_id,
+        &current_control,
+        &author_stream,
+    ))
+    .await?;
+    let [stream] = streams.as_slice() else {
+        return Err(StoreReclaimError::Authorization(
+            "Circle snapshot reclaim author's stream is not readable".to_string(),
+        ));
+    };
+    let generation = stream
+        .generations
+        .iter()
+        .find(|(reference, _)| *reference == claim.target.snapshot)
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(
+                "Circle snapshot reclaim target is absent from its author's stream".to_string(),
+            )
+        })?;
+    if generation.1.circle_id != circle_id
+        || generation.1.control != claim.target.control
+        || generation.1.bootstrap.image != claim.target.image
+    {
+        return Err(StoreReclaimError::Authorization(
+            "Circle snapshot reclaim target differs from its own signed generation".to_string(),
+        ));
+    }
+    let superseding = stream
+        .generations
+        .iter()
+        .find(|(reference, _)| *reference == claim.superseding)
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(
+                "Circle snapshot reclaim superseding generation is absent from the same stream"
+                    .to_string(),
+            )
+        })?;
+    if !snapshot_supersedes_seed(
+        &superseding.1.bootstrap.coverage,
+        &generation.1.bootstrap.coverage,
+    ) {
+        return Err(StoreReclaimError::Authorization(
+            "Circle snapshot reclaim superseding generation does not strictly dominate the reclaimed cut"
+                .to_string(),
+        ));
+    }
+    if super::acknowledgements::stable_circle_acks_dominating_on(
+        database,
+        storage,
+        root,
+        circle_id,
+        &current_control,
+        &superseding.1.bootstrap.coverage,
+    )
+    .await
+    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+    .is_none()
+    {
+        return Err(StoreReclaimError::Authorization(
+            "Circle snapshot reclaim superseding generation is not acknowledgement-stable"
+                .to_string(),
+        ));
+    }
+    Ok(claim.target.clone())
 }
 
 async fn verify_store_package_reclaim_claim(
@@ -2410,6 +2788,32 @@ async fn verify_reclaim_target_absent(
                 crate::sync::store_commit::semantic_prefix_from_exact_object(
                     &target.coverage.bootstrap.image.object,
                     crate::sync::storage::ProtectedObjectDomain::CircleBootstrapImage.extension(),
+                )
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
+            )
+        }
+        ReclaimTarget::CircleSnapshotImage(target) => {
+            // A standalone Circle snapshot image is sealed under the epoch key of the
+            // control its generation was authored under; resolving that access only
+            // builds the read context — a deleted object reads back absent before any
+            // decryption.
+            let access = database
+                .circle_package_access(target.circle_id, target.control.clone())
+                .await?
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "reclaim target Circle snapshot image key is not resolvable".to_string(),
+                    )
+                })?;
+            (
+                ProtocolObjectContext::circle(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::CircleSnapshotImage,
+                    access.encryption,
+                ),
+                crate::sync::store_commit::semantic_prefix_from_exact_object(
+                    &target.image.object,
+                    crate::sync::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
                 )
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
             )

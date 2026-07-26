@@ -11,6 +11,32 @@ pub struct CircleSnapshotRef {
     pub object: ExactObjectRef,
 }
 
+/// The device-authorized activation binding one device's per-Circle snapshot
+/// stream to its Circle. Such a stream has no first slot in the registration —
+/// like the per-Circle acknowledgement stream, it is anchored on the deterministic
+/// generation-zero slot both the author and every reader compute.
+pub(crate) fn circle_snapshot_stream_activation(
+    store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
+    circle_id: CircleId,
+    device_id: &str,
+) -> Result<StreamActivationId, StoreProtocolError> {
+    let first_slot = ObjectSlot::logical(format!(
+        "{}.json",
+        circle_snapshot_slot_prefix(circle_id, device_id, 0)
+    ))
+    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    Ok(StreamActivation::device_authorized(
+        store_root_hash,
+        author_registration.clone(),
+        DeviceStreamAnchor::CircleSnapshots {
+            circle_id,
+            first_slot,
+        },
+    )
+    .activation_id())
+}
+
 /// The exact predecessor and create-once successor slot binding one Circle
 /// snapshot into its per-(device, Circle) stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

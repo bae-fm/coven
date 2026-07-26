@@ -2622,6 +2622,219 @@ async fn publish_covered_circle_package(
     (circle_package, published)
 }
 
+/// The owner device's Circle snapshot stream, read the way any reader reads it:
+/// from generation zero along each metadata object's create-once successor slot,
+/// stopping at the first absent slot.
+async fn owner_circle_snapshot_stream(
+    fixture: &RotationFixture,
+) -> Vec<(
+    crate::sync::store_commit::CircleSnapshotRef,
+    crate::sync::store_commit::CircleSnapshotMeta,
+)> {
+    let database = StoreDatabase::new(&fixture.db);
+    let control = database
+        .current_circle_control(fixture.circle_id)
+        .await
+        .expect("read the current Circle control")
+        .expect("the Circle has an active control");
+    let encryption = database
+        .circle_package_access(fixture.circle_id, control)
+        .await
+        .expect("resolve Circle snapshot access")
+        .expect("the Circle access is retained")
+        .encryption;
+    let registration_ref = database
+        .local_activated_registration_ref()
+        .await
+        .expect("read the local registration reference")
+        .expect("the local device is activated");
+    let registration = database
+        .activated_store_device_registration(registration_ref.clone())
+        .await
+        .expect("read the local activated registration");
+    crate::sync::store::snapshot::load_circle_snapshot_stream_refs(
+        &fixture.store.storage,
+        &fixture.store.root,
+        fixture.circle_id,
+        encryption,
+        &registration_ref,
+        &registration,
+    )
+    .await
+    .expect("walk the owner's Circle snapshot stream")
+}
+
+/// Whether the exact Circle snapshot image ciphertext is still readable in cloud
+/// storage, read under the epoch key of the control its generation was authored
+/// under.
+async fn circle_snapshot_image_present(
+    fixture: &RotationFixture,
+    meta: &crate::sync::store_commit::CircleSnapshotMeta,
+) -> bool {
+    let access = StoreDatabase::new(&fixture.db)
+        .circle_package_access(fixture.circle_id, meta.control.clone())
+        .await
+        .expect("resolve Circle snapshot image access")
+        .expect("the generation's control stays retained");
+    let context = crate::sync::storage::ProtocolObjectContext::circle(
+        fixture.store.root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::CircleSnapshotImage,
+        access.encryption,
+    );
+    let prefix = crate::sync::store_commit::semantic_prefix_from_exact_object(
+        &meta.bootstrap.image.object,
+        crate::sync::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
+    )
+    .expect("derive the Circle snapshot image prefix");
+    match fixture
+        .store
+        .storage
+        .read_protocol_object(&context, &meta.bootstrap.image.object, &prefix)
+        .await
+    {
+        Ok(_) => true,
+        Err(crate::sync::storage::StorageError::NotFound(_)) => false,
+        Err(error) => panic!("read the exact Circle snapshot image: {error}"),
+    }
+}
+
+/// A device authors its Circle snapshots as one create-once stream of
+/// generations, and a reader finds any generation only by walking that stream from
+/// generation zero. Once a later generation is acknowledgement-stable and its cut
+/// strictly dominates an earlier one, nobody will install the earlier image again
+/// — so reclamation deletes that image while leaving the whole metadata chain, and
+/// the surviving generation's own image, intact.
+#[tokio::test]
+async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
+    let fixture = rotation_fixture("circle-snapshot-generation-reclaim").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000d1",
+    )
+    .await;
+    let before = owner_circle_snapshot_stream(&fixture).await;
+    let (_, latest) = before
+        .last()
+        .expect("the owner authored a Circle snapshot")
+        .clone();
+
+    // Nothing supersedes the stream's latest generation, so reclamation refuses it
+    // and its image stays readable.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation with no superseding Circle snapshot generation");
+    assert!(
+        circle_snapshot_image_present(&fixture, &latest).await,
+        "the latest generation's image survives while nothing supersedes it"
+    );
+
+    // Publish Circle content past the acknowledged frontier and author a snapshot
+    // over it. That generation strictly dominates the previous one, but no device
+    // has acknowledged its cut — so it supersedes nothing and the earlier image
+    // stays.
+    capture_document(
+        &fixture,
+        "00000000-0000-4000-8000-0000000000d3",
+        Some(fixture.circle_id),
+        "2026-07-23T00:30:00Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish Circle content past the acknowledged frontier");
+    let unstable_temp = tempfile::tempdir().expect("unstable snapshot temp dir");
+    drive_circle_snapshots(&fixture, &unstable_temp, "2026-07-23T00:35:00Z")
+        .await
+        .expect("author an unacknowledged Circle snapshot generation");
+    let unacknowledged = owner_circle_snapshot_stream(&fixture).await;
+    let (_, unstable) = unacknowledged
+        .last()
+        .expect("the owner authored a later Circle snapshot")
+        .clone();
+    assert!(
+        unstable.generation > latest.generation
+            && unstable
+                .bootstrap
+                .coverage
+                .covers(&latest.bootstrap.coverage)
+            && unstable.bootstrap.coverage != latest.bootstrap.coverage,
+        "the unacknowledged generation's cut strictly dominates the earlier one"
+    );
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation against an unacknowledged superseding generation");
+    assert!(
+        circle_snapshot_image_present(&fixture, &latest).await,
+        "a superseding generation nobody acknowledged does not release the earlier image"
+    );
+
+    // A second round of Circle content drives both devices to acknowledge the later
+    // generations, so the once-latest generation is superseded.
+    publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000d2",
+    )
+    .await;
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the superseded Circle snapshot image");
+
+    let after = owner_circle_snapshot_stream(&fixture).await;
+    let (_, newest) = after
+        .last()
+        .expect("the owner authored later Circle snapshots")
+        .clone();
+    assert!(
+        newest.generation > latest.generation
+            && newest.bootstrap.coverage.covers(&latest.bootstrap.coverage)
+            && newest.bootstrap.coverage != latest.bootstrap.coverage,
+        "a later generation's cut strictly dominates the earlier one"
+    );
+    assert!(
+        !circle_snapshot_image_present(&fixture, &latest).await,
+        "the superseded generation's image is deleted"
+    );
+    assert!(
+        circle_snapshot_image_present(&fixture, &newest).await,
+        "the generation no later snapshot supersedes keeps its image"
+    );
+    assert!(
+        after
+            .iter()
+            .map(|(reference, _)| reference.generation)
+            .collect::<Vec<_>>()
+            .starts_with(
+                &before
+                    .iter()
+                    .map(|(reference, _)| reference.generation)
+                    .collect::<Vec<_>>()
+            ),
+        "every generation's metadata survives, so the stream stays walkable"
+    );
+}
+
 #[tokio::test]
 async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
     let fixture = rotation_fixture("circle-package-reclaim").await;

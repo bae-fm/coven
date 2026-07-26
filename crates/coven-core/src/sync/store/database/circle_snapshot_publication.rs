@@ -3,7 +3,7 @@ use crate::sync::circle::CircleId;
 use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
-    CircleSnapshotRef, DeviceStreamAnchor, ObjectHash, StreamActivation,
+    CircleSnapshotRef, ObjectHash,
 };
 use rusqlite::OptionalExtension;
 
@@ -41,32 +41,6 @@ impl StoreDatabase {
         self.sqlite()
             .call(move |conn| load_published_circle_snapshot_on(conn, circle_id))
             .await
-    }
-
-    /// The device-authorized stream activation binding one device's Circle
-    /// snapshot stream to its Circle. A per-(device, Circle) stream has no first
-    /// slot in the registration, so it is bound to a synthetic deterministic slot
-    /// exactly as the Circle acknowledgement stream is.
-    fn circle_snapshot_stream_activation(
-        store_root_hash: ObjectHash,
-        registration_ref: &crate::sync::store_commit::StoreDeviceRegistrationRef,
-        circle_id: CircleId,
-        device_id: &str,
-    ) -> Result<crate::sync::store_commit::StreamActivationId, DbError> {
-        let first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
-            "{}.json",
-            circle_snapshot_slot_prefix(circle_id, device_id, 0)
-        ))
-        .map_err(|error| DbError::Message(error.to_string()))?;
-        Ok(StreamActivation::device_authorized(
-            store_root_hash,
-            registration_ref.clone(),
-            DeviceStreamAnchor::CircleSnapshots {
-                circle_id,
-                first_slot,
-            },
-        )
-        .activation_id())
     }
 
     pub(crate) async fn stage_circle_snapshot_publication(
@@ -157,12 +131,13 @@ impl StoreDatabase {
                 let next_generation = meta.generation.checked_add(1).ok_or_else(|| {
                     DbError::Message("Circle snapshot generation overflow".to_string())
                 })?;
-                let activation = Self::circle_snapshot_stream_activation(
+                let activation = crate::sync::store_commit::circle_snapshot_stream_activation(
                     root.store_root_hash,
                     &registration_ref,
                     meta.circle_id,
                     &device_id,
-                )?;
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
                 if meta.successor.activation != activation
                     || meta.successor.next_slot.logical_key()
                         != format!(

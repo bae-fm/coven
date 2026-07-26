@@ -24,7 +24,7 @@ use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta,
     CircleSnapshotSuccessorLink, CommitFrontier, DeviceStreamAnchor, ObjectHash, SnapshotImageRef,
     SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreProtocolError, StoreRootRef,
-    StoreSnapshotRef, StoreSnapshotState, StreamActivation,
+    StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::KeyFingerprint;
 
@@ -986,7 +986,7 @@ pub(crate) async fn push_circle_snapshot(
             Some(previous.reference),
             previous.successor_slot,
         ),
-        None => (0, None, stream_first_slot.clone()),
+        None => (0, None, stream_first_slot),
     };
     let meta_context = ProtocolObjectContext::circle(
         root.store_root_hash,
@@ -1010,15 +1010,13 @@ pub(crate) async fn push_circle_snapshot(
         )
         .await
         .map_err(SnapshotError::Bucket)?;
-    let activation = StreamActivation::device_authorized(
+    let activation = crate::sync::store_commit::circle_snapshot_stream_activation(
         root.store_root_hash,
-        registration_ref.clone(),
-        DeviceStreamAnchor::CircleSnapshots {
-            circle_id,
-            first_slot: stream_first_slot,
-        },
+        &registration_ref,
+        circle_id,
+        &device_id,
     )
-    .activation_id();
+    .map_err(|error| SnapshotError::Parse(error.to_string()))?;
     let meta = CircleSnapshotMeta::signed(
         root.store_root_hash,
         circle_id,

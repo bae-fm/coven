@@ -353,6 +353,13 @@ pub(crate) fn record_reclaimed_store_package_on(
                     &target.coverage.bootstrap.image,
                     &target.coverage.activation_commit,
                 ),
+            crate::sync::store::ReclaimTarget::CircleSnapshotImage(target) => {
+                let root = required_store_root_authority_on(conn)?;
+                let owner = target
+                    .snapshot_owner(root.store_root_hash)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                remote.validate_reclaimable_snapshot_image(&target.image, &owner)
+            }
         }
         .map_err(|error| {
             DbError::Message(format!("close reclaimed package {object_id}: {error}"))

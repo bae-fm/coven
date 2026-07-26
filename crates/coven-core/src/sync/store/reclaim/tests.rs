@@ -512,7 +512,11 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
     })
     .await
     .expect("release retained replay package ownership");
-    let mut authorization_activation = opened.evidence.value.claim.target().activation().clone();
+    let target = opened.evidence.value.claim.target();
+    let super::ReclaimActivation::Commit(target_activation) = target.activation() else {
+        panic!("a Store package reclaim target is activated by a Store commit");
+    };
+    let mut authorization_activation = target_activation.clone();
     authorization_activation.coord = StoreCommitCoord {
         stream_id: authorization_activation.coord.stream_id,
         sequence: authorization_activation.coord.sequence() + 1,

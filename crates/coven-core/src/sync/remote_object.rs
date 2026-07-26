@@ -888,6 +888,53 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
+    /// A snapshot image is reclaimable when the generation that published it is its
+    /// only surviving owner: no pending activation and exactly one activated owner,
+    /// the `Snapshot` owner naming that stream and generation. A snapshot image
+    /// accretes no further owners, so anything else means the record is not the one
+    /// the claim describes.
+    pub(crate) fn validate_reclaimable_snapshot_image(
+        &self,
+        image: &super::store_commit::SnapshotImageRef,
+        owner: &SnapshotObjectOwner,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let ownership = self.activated_snapshot_image_ownership(image, owner)?;
+        if !ownership.pending.is_empty() || ownership.activated.len() != 1 {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
+    }
+
+    fn activated_snapshot_image_ownership<'a>(
+        &'a self,
+        image: &super::store_commit::SnapshotImageRef,
+        owner: &SnapshotObjectOwner,
+    ) -> Result<&'a SharedObjectOwnership, RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::StoreSnapshotImage { reference } if reference == image
+        ) || record.identity.semantic_hash != image.image_hash
+            || record.identity.object != image.object
+            || !record.bytes.canonical_semantic_bytes().is_empty()
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !ownership
+            .activated
+            .contains(&SharedObjectOwner::Snapshot(owner.clone()))
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(ownership)
+    }
+
     fn activated_circle_bootstrap_image_ownership<'a>(
         &'a self,
         image: &super::store_commit::SnapshotImageRef,
