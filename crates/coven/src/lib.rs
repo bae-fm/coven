@@ -693,11 +693,15 @@ pub use coven_core::sync::store::{
 };
 // The storage-mediated device-join transport: the offer bundle a host encodes
 // as its join code, the slot namespace it names, and the two role drivers.
+// The three driver functions themselves stay unexported: each takes a `Store`,
+// which a host never holds, so naming them here would publish a surface nobody
+// outside this crate can call. `CovenHandle`'s `begin_device_invite`,
+// `drive_device_join`, `cancel_device_invite`, and `abandon_device_invite` are
+// the facade's path to them.
 pub use coven_core::sync::store::{
-    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
     DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
-    DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportError,
-    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming,
 };
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
@@ -788,10 +792,13 @@ pub use storage::cloud::{
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
-#[cfg(any(test, feature = "test-utils"))]
-pub use sync::device_join_transport::join_with_scanned_invite_over_test_home;
 pub use sync::device_join_transport::{
-    join_with_scanned_invite, DeviceJoinInvite, DeviceJoinTransportOutcome,
+    close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
+    DeviceJoinTransportOutcome,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub use sync::device_join_transport::{
+    close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
 };
 pub use sync::join::{BootstrapError, DeviceJoinClient};
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};

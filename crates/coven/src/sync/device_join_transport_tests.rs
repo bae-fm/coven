@@ -305,7 +305,7 @@ impl TransportFixture {
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-        crate::drive_device_join(
+        crate::sync::store::drive_device_join(
             &self.owner_store,
             &self.owner,
             bundle,
@@ -331,21 +331,6 @@ impl TransportFixture {
             })
             .await
             .expect("drop the owner journal row");
-    }
-
-    /// The attempt reference the owner cancels, taken from its own journal.
-    async fn attempt_ref(&self, bundle: &DeviceJoinOfferBundle) -> crate::DeviceJoinAttemptRef {
-        match self
-            .owner_database
-            .device_join_status(bundle.offer.attempt_id, crate::DeviceJoinRole::Owner)
-            .await
-            .expect("load the owner journal")
-        {
-            Some(crate::DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
-                bootstrap.publication_authorization.attempt.clone()
-            }
-            other => panic!("the owner has not activated the attempt yet: {other:?}"),
-        }
     }
 
     fn transport<'a>(&'a self, bundle: &'a DeviceJoinOfferBundle) -> DeviceJoinTransport<'a> {
@@ -761,14 +746,12 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
         "the attempt reached the transport before it was cancelled",
     );
 
-    let attempt = fixture.attempt_ref(&bundle).await;
     let closing_joiner = fixture.client();
     let (owner_unwind, joiner_unwind) = tokio::join!(
-        Box::pin(crate::cancel_device_join_via_transport(
+        Box::pin(crate::sync::store::cancel_device_join_via_transport(
             &fixture.owner_store,
             &fixture.owner,
             &bundle,
-            attempt,
             timing(),
         )),
         Box::pin(closing_joiner.close_device_join_via_transport(&bundle, timing())),
@@ -806,10 +789,13 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
-    let abandonment =
-        crate::abandon_device_join_via_transport(&fixture.owner_store, &fixture.owner, &bundle)
-            .await
-            .expect("the owner abandons the attempt");
+    let abandonment = crate::sync::store::abandon_device_join_via_transport(
+        &fixture.owner_store,
+        &fixture.owner,
+        &bundle,
+    )
+    .await
+    .expect("the owner abandons the attempt");
     assert!(
         fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::Abandonment)
@@ -888,17 +874,14 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
     );
 
     // The owner cancels and dies waiting for the joiner's terminal.
-    let attempt = fixture.attempt_ref(&bundle).await;
     let owner_cancel = |timing| {
-        let attempt = attempt.clone();
         let fixture = &fixture;
         let bundle = &bundle;
         async move {
-            crate::cancel_device_join_via_transport(
+            crate::sync::store::cancel_device_join_via_transport(
                 &fixture.owner_store,
                 &fixture.owner,
                 bundle,
-                attempt,
                 timing,
             )
             .await
@@ -1059,7 +1042,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::DeviceJoinApproval::Refuse
     };
-    let refused = crate::drive_device_join(
+    let refused = crate::sync::store::drive_device_join(
         &fixture.owner_store,
         &fixture.owner,
         &bundle,
@@ -1096,7 +1079,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         crate::DeviceJoinApproval::Approve
     };
     assert_owner_waited_for(
-        crate::drive_device_join(
+        crate::sync::store::drive_device_join(
             &fixture.owner_store,
             &fixture.owner,
             &bundle,

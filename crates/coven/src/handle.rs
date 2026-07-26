@@ -1105,7 +1105,7 @@ impl CovenHandle {
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let store = self.device_join_store().await?;
-        Ok(crate::drive_device_join(
+        Ok(crate::sync::store::drive_device_join(
             &store,
             &signer,
             &invite.bundle,
@@ -1114,6 +1114,50 @@ impl CovenHandle {
             timing,
         )
         .await?)
+    }
+
+    /// Cancel an invited join and carry the unwind to its activated cleanup,
+    /// publishing each artifact the joining device needs to close its own side.
+    ///
+    /// Which attempt this cancels comes from this device's own owner journal,
+    /// which is what decided it. Retry the whole call if it fails: a Store
+    /// commit that loses a race with this handle's sync loop is refused before
+    /// it persists, and the unwind resumes from where its journal stands.
+    ///
+    /// The counterpart for a host delivering artifacts itself is
+    /// [`cancel_device_join`](Self::cancel_device_join), which produces the
+    /// cancellation and hands it back rather than publishing it.
+    pub async fn cancel_device_invite(
+        &self,
+        invite: &crate::DeviceJoinInvite,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let store = self.device_join_store().await?;
+        Ok(crate::sync::store::cancel_device_join_via_transport(
+            &store,
+            &signer,
+            &invite.bundle,
+            timing,
+        )
+        .await?)
+    }
+
+    /// Give up on an invited join and publish the abandonment, so a joining
+    /// device waiting on its next artifact learns the join is over.
+    ///
+    /// The counterpart for a host delivering artifacts itself is
+    /// [`abandon_device_join`](Self::abandon_device_join).
+    pub async fn abandon_device_invite(
+        &self,
+        invite: &crate::DeviceJoinInvite,
+    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let store = self.device_join_store().await?;
+        Ok(
+            crate::sync::store::abandon_device_join_via_transport(&store, &signer, &invite.bundle)
+                .await?,
+        )
     }
 
     pub async fn begin_device_join(
