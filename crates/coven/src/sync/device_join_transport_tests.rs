@@ -53,7 +53,9 @@ where
         })
         .expect("spawn the test thread")
         .join()
-        .expect("test thread");
+        // Carry the body's own panic across the thread boundary rather than
+        // reporting an opaque join failure in its place.
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
 }
 
 fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {

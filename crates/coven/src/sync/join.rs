@@ -435,7 +435,7 @@ pub struct DeviceJoinClient {
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     test_home: Option<Arc<dyn CloudHome>>,
 }
 
@@ -487,12 +487,12 @@ impl DeviceJoinClient {
             oauth_tokens,
             cloudkit_ops,
             clock,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             test_home: None,
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn CloudHome>) -> Self {
         self.test_home = Some(home);
         self
@@ -857,7 +857,7 @@ impl DeviceJoinClient {
     }
 
     async fn build_cloud_home(&self) -> Result<JoinCloudHome, BootstrapError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
             return Ok(JoinCloudHome { home: home.clone() });
         }

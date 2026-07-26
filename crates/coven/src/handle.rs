@@ -1063,6 +1063,59 @@ impl CovenHandle {
         manager.membership_conflict().await
     }
 
+    /// Admit the device that generated `join_request_code`, and return the one
+    /// payload that device needs: its invite code and this attempt's transport
+    /// bundle.
+    ///
+    /// The joining device generates its join request first and shows it here —
+    /// the offer is signed for that device's key, so it cannot be minted
+    /// before this device knows it.
+    pub async fn begin_device_invite(
+        &self,
+        join_request_code: &str,
+        role: MemberRole,
+    ) -> Result<crate::sync::device_join_transport::DeviceJoinInvite, SyncError> {
+        let member_pubkey = crate::join_code::decode_join_request(join_request_code)
+            .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
+            .public_key;
+        let invite_code = self.invite_member(&member_pubkey, None, role).await?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let bundle = self
+            .device_join_store()
+            .await?
+            .begin_device_join_bundle(&signer, &member_pubkey)
+            .await?;
+        Ok(crate::sync::device_join_transport::DeviceJoinInvite::new(
+            invite_code,
+            bundle,
+        ))
+    }
+
+    /// Drive the admitting side of a join this device issued, publishing each
+    /// artifact it produces and waiting for the joining device's.
+    ///
+    /// Returns when the attempt reaches an end this side owns: its activation,
+    /// or the abandonment that ended it early.
+    pub async fn drive_device_join(
+        &self,
+        invite: &crate::sync::device_join_transport::DeviceJoinInvite,
+        policy: crate::DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let store = self.device_join_store().await?;
+        Ok(crate::drive_device_join(
+            &store,
+            &signer,
+            &invite.bundle,
+            policy,
+            access_administrator,
+            timing,
+        )
+        .await?)
+    }
+
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
