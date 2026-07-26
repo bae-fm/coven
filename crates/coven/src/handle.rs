@@ -18,9 +18,9 @@
 //!   runs its app SQL through [`sql`](CovenHandle::sql) and row+blob batches
 //!   through [`write`](CovenHandle::write).
 //! - **Blobs** — the [`StoreDir`] the blob engine reads/writes, plus the
-//!   credentials to build a read [`SyncStorage`] on a cloud miss. Read, ranged
-//!   read, store, register external, pin/unpin, the locality transitions, and the
-//!   upload drain are methods here.
+//!   credentials to build a read [`SyncStorage`] on a cloud miss. Whole read, open
+//!   a ranged stream, store, register external, pin/unpin, the locality
+//!   transitions, and the upload drain are methods here.
 //! - **Sync** — built lazily by [`connect_sync`](CovenHandle::connect_sync) when a
 //!   cloud provider is connected. A store with no cloud home never builds a
 //!   [`SyncManager`] and only ever holds Local blobs.
@@ -32,7 +32,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
-use crate::blob::cache::BlobCacheError;
+use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
@@ -846,24 +846,22 @@ impl CovenHandle {
         .await
     }
 
-    /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
-    /// streaming or seeking without loading the whole file. The [`RowBlobRef`]
-    /// carries the plaintext length used to bound the range. The ranged sibling
-    /// of [`read_blob`](Self::read_blob).
-    pub async fn open_blob_stream(
-        &self,
-        blob: &RowBlobRef,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, BlobCacheError> {
+    /// Open an exact row blob's plaintext for ranged reading, for streaming or
+    /// seeking without loading the whole file. The ranged sibling of
+    /// [`read_blob`](Self::read_blob), which stays the one-shot whole read.
+    ///
+    /// Opening resolves the blob's locality, proves the plaintext's size and
+    /// content hash against the row, and holds the open file; every
+    /// [`BlobStream::read_at`] then costs only the bytes it returns. Hold the
+    /// stream for as long as the host is reading that blob — a stream per opened
+    /// file, not per range — since re-opening re-proves the whole blob.
+    pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::sync::store::blob::open_blob_stream(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
             blob,
-            offset,
-            len,
         )
         .await
     }

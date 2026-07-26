@@ -413,7 +413,6 @@ pub(crate) async fn exact_file_facts(
 enum ExactReadSelection {
     IdentityOnly,
     Whole,
-    Range { offset: u64, len: u64 },
 }
 
 /// Read bytes and calculate their whole-file identity through one open file
@@ -425,46 +424,24 @@ pub(crate) async fn read_with_facts(
     read_selected_with_facts(path, ExactReadSelection::Whole).await
 }
 
-/// Read one range while calculating the whole-file identity through the same open
-/// handle. The full scan proves the exact file; only the selected bytes are retained.
-pub(crate) async fn read_range_with_facts(
-    path: &Path,
-    offset: u64,
-    len: u64,
-) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
-    read_selected_with_facts(path, ExactReadSelection::Range { offset, len }).await
-}
-
 async fn read_selected_with_facts(
     path: &Path,
     selection: ExactReadSelection,
 ) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
-    let file = tokio::fs::File::open(path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| format!("open exact file {}: {error}", path.display()))?;
-    read_open_file_with_facts(file, path, selection).await
+    read_open_file_with_facts(&mut file, path, selection).await
 }
 
 async fn read_open_file_with_facts(
-    mut file: tokio::fs::File,
+    file: &mut tokio::fs::File,
     path: &Path,
     selection: ExactReadSelection,
 ) -> Result<(Vec<u8>, u64, crate::sync::store_commit::ObjectHash), String> {
     use sha2::{Digest, Sha256};
 
-    let mut selected = match selection {
-        ExactReadSelection::IdentityOnly | ExactReadSelection::Whole => Vec::new(),
-        ExactReadSelection::Range { len, .. } => Vec::with_capacity(
-            usize::try_from(len)
-                .map_err(|_| format!("exact file range is too large: {len} bytes"))?,
-        ),
-    };
-    let range_end = match selection {
-        ExactReadSelection::IdentityOnly | ExactReadSelection::Whole => 0,
-        ExactReadSelection::Range { offset, len } => offset
-            .checked_add(len)
-            .ok_or_else(|| format!("exact file range overflow: {offset} + {len}"))?,
-    };
+    let mut selected = Vec::new();
     let mut size = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
@@ -476,33 +453,101 @@ async fn read_open_file_with_facts(
         if read == 0 {
             break;
         }
-        let chunk_start = size;
-        let chunk_end = size
+        size = size
             .checked_add(read as u64)
             .ok_or_else(|| format!("exact file size overflow: {}", path.display()))?;
         hasher.update(&buffer[..read]);
         match selection {
             ExactReadSelection::IdentityOnly => {}
             ExactReadSelection::Whole => selected.extend_from_slice(&buffer[..read]),
-            ExactReadSelection::Range { offset, .. } => {
-                let overlap_start = chunk_start.max(offset);
-                let overlap_end = chunk_end.min(range_end);
-                if overlap_start < overlap_end {
-                    let start = usize::try_from(overlap_start - chunk_start)
-                        .expect("overlap starts inside the in-memory chunk");
-                    let end = usize::try_from(overlap_end - chunk_start)
-                        .expect("overlap ends inside the in-memory chunk");
-                    selected.extend_from_slice(&buffer[start..end]);
-                }
-            }
         }
-        size = chunk_end;
     }
     Ok((
         selected,
         size,
         crate::sync::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
     ))
+}
+
+/// One open file handle whose whole-content size and SHA-256 identity were
+/// measured by reading every byte through this same handle.
+///
+/// The handle is the identity. Once [`open`](Self::open) has measured the file,
+/// every [`read_at`](Self::read_at) reads the descriptor that was measured, so
+/// replacing, renaming, or deleting the path afterwards cannot redirect a read to
+/// bytes the measurement never covered — the caller checks the measured facts
+/// against its expected identity once and then reads as many ranges as it likes.
+/// A path-keyed range read has no such property: it re-opens by name, so it must
+/// re-measure the whole file on every call to say anything about what it served.
+///
+/// Each read positions the descriptor itself, and the mutex makes that seek and
+/// its read one operation, so concurrent readers of one handle cannot interleave
+/// into each other's ranges.
+pub(crate) struct OpenExactFile {
+    file: tokio::sync::Mutex<tokio::fs::File>,
+    path: PathBuf,
+    size: u64,
+    hash: crate::sync::store_commit::ObjectHash,
+}
+
+impl OpenExactFile {
+    /// Open `path` and read all of it through the returned handle to measure the
+    /// size and content hash its later reads are bound to.
+    pub(crate) async fn open(path: &Path) -> Result<Self, String> {
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| format!("open exact file {}: {error}", path.display()))?;
+        let (_, size, hash) =
+            read_open_file_with_facts(&mut file, path, ExactReadSelection::IdentityOnly).await?;
+        Ok(Self {
+            file: tokio::sync::Mutex::new(file),
+            path: path.to_path_buf(),
+            size,
+            hash,
+        })
+    }
+
+    /// The size and content hash measured through this handle when it opened.
+    pub(crate) fn facts(&self) -> (u64, crate::sync::store_commit::ObjectHash) {
+        (self.size, self.hash)
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Read exactly `len` bytes at `offset`. The caller bounds the range against
+    /// [`size`](Self::size); a file that cannot supply them is an error, never a
+    /// short result.
+    pub(crate) async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+        use tokio::io::AsyncSeekExt;
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buffer = vec![
+            0_u8;
+            usize::try_from(len).map_err(|_| format!(
+                "exact file range is too large: {len} bytes"
+            ))?
+        ];
+        let mut file = self.file.lock().await;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|error| {
+                format!(
+                    "seek exact file {} to {offset}: {error}",
+                    self.path.display()
+                )
+            })?;
+        file.read_exact(&mut buffer).await.map_err(|error| {
+            format!(
+                "read {len} bytes at {offset} from exact file {}: {error}",
+                self.path.display()
+            )
+        })?;
+        Ok(buffer)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -698,28 +743,6 @@ pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
     tokio::fs::read(path)
         .await
         .map_err(|e| format!("read local blob {}: {e}", path.display()))
-}
-
-pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("open local blob {} for ranged read: {e}", path.display()))?;
-    file.seek(std::io::SeekFrom::Start(offset))
-        .await
-        .map_err(|e| format!("seek local blob {} to {offset}: {e}", path.display()))?;
-    let mut buf = vec![0u8; len as usize];
-    file.read_exact(&mut buf).await.map_err(|e| {
-        format!(
-            "read {len} bytes at {offset} from local blob {}: {e}",
-            path.display()
-        )
-    })?;
-    Ok(buf)
 }
 
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1005,10 +1028,6 @@ mod tests {
         assert!(exists(&source).await.expect("source exists"));
         assert_eq!(file_len(&source).await.expect("source length"), 10);
         assert_eq!(read(&source).await.expect("read source"), bytes);
-        assert_eq!(
-            read_range(&source, 3, 4).await.expect("read range"),
-            b"3456"
-        );
 
         write_atomic(&copy, b"old copy").await.expect("seed copy");
         copy_atomic(&source, &copy).await.expect("replace copy");
@@ -1028,22 +1047,85 @@ mod tests {
         let original = b"original exact bytes";
         let replacement = b"replacement bytes";
         write_atomic(&path, original).await.expect("write original");
-        let open = tokio::fs::File::open(&path).await.expect("open original");
+        let mut open = tokio::fs::File::open(&path).await.expect("open original");
 
         write_atomic(&path, replacement)
             .await
             .expect("replace path after open");
         let (bytes, size, hash) =
-            read_open_file_with_facts(open, &path, ExactReadSelection::Range { offset: 9, len: 5 })
+            read_open_file_with_facts(&mut open, &path, ExactReadSelection::Whole)
                 .await
                 .expect("read the already-open exact file");
 
-        assert_eq!(bytes, b"exact");
+        assert_eq!(bytes, original);
         assert_eq!(size, original.len() as u64);
         assert_eq!(
             hash,
             crate::sync::store_commit::ObjectHash::digest(original)
         );
+        assert_eq!(read(&path).await.expect("read replacement"), replacement);
+    }
+
+    /// An [`OpenExactFile`] measures the file once and then serves every range from
+    /// the descriptor it measured. Replacing the path with same-length different
+    /// bytes — the swap a per-range re-open by name would silently follow — cannot
+    /// change what the handle reads or what it reports its identity to be.
+    #[tokio::test]
+    async fn an_open_exact_file_serves_ranges_from_the_inode_it_measured() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("blob.bin");
+        let original = b"original exact bytes";
+        let replacement = b"replaced exact bytes";
+        assert_eq!(
+            original.len(),
+            replacement.len(),
+            "equal lengths leave the content hash as the only discriminator",
+        );
+        write_atomic(&path, original).await.expect("write original");
+
+        let open = OpenExactFile::open(&path).await.expect("open and measure");
+        assert_eq!(open.size(), original.len() as u64);
+        assert_eq!(
+            open.facts(),
+            (
+                original.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(original)
+            ),
+        );
+
+        write_atomic(&path, replacement)
+            .await
+            .expect("replace the path after the handle measured it");
+
+        assert_eq!(
+            open.read_at(9, 5).await.expect("mid-file range"),
+            b"exact",
+            "the range comes from the measured inode, not the file now at the name",
+        );
+        assert_eq!(
+            open.read_at(0, original.len() as u64)
+                .await
+                .expect("whole measured file"),
+            original,
+        );
+        assert_eq!(
+            open.read_at(0, 8).await.expect("re-read the head"),
+            &original[..8],
+            "each read positions itself, so an earlier read leaves no cursor behind",
+        );
+        assert_eq!(
+            open.read_at(4, 0).await.expect("zero-length range"),
+            Vec::<u8>::new(),
+        );
+        let past_end = open
+            .read_at(original.len() as u64 - 2, 5)
+            .await
+            .expect_err("a range past the measured end must fail, not short-read");
+        assert!(
+            past_end.contains("read 5 bytes at"),
+            "the error names the range it could not serve: {past_end}",
+        );
+
         assert_eq!(read(&path).await.expect("read replacement"), replacement);
     }
 

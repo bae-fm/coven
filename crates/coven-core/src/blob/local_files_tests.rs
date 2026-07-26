@@ -7,7 +7,7 @@ use crate::blob::cache::{evict_to_budget, write_blob};
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::sync::test_helpers::{open_test_db, temp_store_dir};
 
-/// Store a host-provided blob, read it back whole and ranged, then drop it.
+/// Store a host-provided blob, read it back whole, then drop it.
 #[tokio::test]
 async fn store_read_drop_round_trip() {
     let (_tmp, ld) = temp_store_dir();
@@ -25,17 +25,6 @@ async fn store_read_drop_round_trip() {
         .await
         .expect("read");
     assert_eq!(read, Some(bytes.clone()), "the whole blob round-trips");
-
-    let (offset, len) = (500u64, 300u64);
-    let ranged =
-        local_files::read_range(&ld, "covers", "cov0aaaa", bytes.len() as u64, offset, len)
-            .await
-            .expect("ranged read");
-    assert_eq!(
-        ranged,
-        Some(bytes[offset as usize..(offset + len) as usize].to_vec()),
-        "a ranged read returns the right slice",
-    );
 
     // A blob that isn't stored reads back as None (no error), so a caller falls
     // through to the cache/cloud path.

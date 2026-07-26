@@ -50,10 +50,21 @@
 //!   fail-loud corruption ([`BlobCacheError::NoLocalCopy`]). Neither falls through to
 //!   the cloud: a Local blob has no cloud copy.
 //!
-//! [`read_blob`] returns the entire blob (a cloud miss fetches + decrypts it and
-//! populates `cache/`); [`open_blob_stream`] serves a plaintext byte range for a host
-//! streaming or seeking (a cloud miss stages and verifies the whole plaintext, then
-//! returns the requested range without populating the cache).
+//! [`read_blob`] returns the entire blob in one call; [`open_blob_stream`] returns a
+//! [`BlobStream`] a host reads ranges from while streaming or seeking. Both resolve
+//! the source the same way and both prove the plaintext's identity — size and content
+//! hash against the exact row-bound locator — before serving it, and for both a cloud
+//! miss fetches + decrypts the exact object once and populates `cache/`.
+//!
+//! The difference is how often identity is proven. Proving it means reading every
+//! byte, so the one-shot read proves the blob per call, which is what it already
+//! reads anyway. A stream cannot work that way: proving per range would make each
+//! range cost the whole blob no matter how few bytes it asked for. So the stream
+//! proves the blob once, when it opens, and then **holds that open file handle** and
+//! reads it for every range. Holding the handle is not just the cheap way, it is the
+//! exact way — a path can be swapped between two reads, a descriptor cannot, so the
+//! stream keeps serving the plaintext the row named at open even if the file is later
+//! evicted, renamed, or deleted.
 //!
 //! The cache has a **per-namespace** size budget the host sets per device (see
 //! [`Database::set_cache_budget`]), so a small namespace (`covers`) is never wiped by
@@ -563,7 +574,7 @@ pub(crate) async fn read_blob(
                     id: blob.id.clone(),
                 }
             })?;
-            read_external_file(reference, ext, ExactRead::Whole).await
+            read_external_file(reference, ext).await
         }
         // Local + host-provided: the local store is the ONLY copy (a Local blob has no
         // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
@@ -579,7 +590,7 @@ pub(crate) async fn read_blob(
                 }
                 Err(error) => return Err(BlobCacheError::Io(error)),
             }
-            read_exact_local_file(&path, reference, ExactRead::Whole).await
+            read_exact_local_file(&path, reference).await
         }
     }?;
     validate_row_reference(db, reference).await?;
@@ -630,84 +641,137 @@ async fn read_remote_whole(
     Ok(bytes)
 }
 
-/// Serve `len` plaintext bytes of a blob starting at `offset`, for a host
-/// streaming or seeking it (playback) without loading the whole file. The ranged
-/// sibling of [`read_blob`]: same arguments plus `(source_size, offset, len)`,
-/// returning the plaintext slice.
+/// One opened blob's plaintext, ready to serve ranges. Held by a host that is
+/// streaming or seeking a blob (playback probing a codec header, then a tail, then
+/// decoding forward) rather than loading it whole.
 ///
-/// `source_size` is the blob's plaintext length — the host knows it (the row that
-/// owns the blob carries it) and every serving path needs it to bound the range.
-/// The range is validated once here, against
-/// `source_size`, so a request behaves identically whether it is served from the
-/// local file or the cloud: `len == 0` is an empty result, and an `offset + len`
-/// past `source_size` (or an overflow) is an error, never a short read — the same
-/// contract [`crate::sync::cloud_storage::BlobRangeReader::read`] enforces.
+/// The stream owns the open file handle its identity was proven through
+/// ([`local_blob::OpenExactFile`](crate::local_blob::OpenExactFile)), which is what
+/// lets [`read_at`](Self::read_at) cost only the bytes it returns. Proving a blob's
+/// identity means reading all of it, so proving it *per range* makes every range
+/// cost the whole blob; proving it once at [`open_blob_stream`] and then reading
+/// the descriptor that was proven costs the whole blob once per stream.
 ///
-/// The serving paths mirror [`read_blob`], dispatched the same way ([`resolve_source`]
-/// reads the gate, then provenance): **Remote** serves the range off a cache hit
-/// (the exact locator's pinned or cache path) — the whole-plaintext local file read at `offset`,
-/// no decryption, no cloud. A miss stages and verifies the whole cloud plaintext,
-/// returns the requested range, and **never writes a cache file**; only the
-/// whole-file read populates, and later cache hits must match the
-/// declared blob length before [`read_blob`] serves them. **Local +
-/// user-provided** reads the range off the user's external file (ref required —
-/// [`NoExternalRef`] otherwise; a vanished/short file is [`ExternalMissing`]).
-/// **Local + host-provided** reads the range off the local store ([`NoLocalCopy`] on
-/// a miss, never a cloud fetch).
+/// Holding the descriptor is what makes that safe rather than merely cheaper.
+/// A path can be replaced between two reads; the descriptor cannot — it refers to
+/// the bytes that were hashed for as long as the stream lives, even if the file is
+/// evicted, renamed, or deleted from under it. So the stream serves exactly the
+/// plaintext the row named when it opened, and nothing can be swapped in behind
+/// it.
 ///
-/// As in [`read_blob`], a failure to even check a file's existence is surfaced,
-/// never collapsed into a miss (which would re-fetch over a present file and could
-/// mask a real fault).
+/// What that leaves uncovered is an **in-place** rewrite of the descriptor's own
+/// file. A blob's identity is one hash over its whole content, so there is nothing
+/// smaller to re-check a single range against — catching a mid-stream rewrite would
+/// mean re-reading the whole blob per range, which is the cost this type exists to
+/// remove. It is reachable only for a file the user owns and edits themselves:
+/// coven's own copies (the local store, `pinned/`, `cache/`) are published by
+/// rename or hard link and never written in place, so for those the swap case above
+/// is the only one there is. [`read_blob`] and the next
+/// [`open_blob_stream`] both re-prove the file and reject a rewritten one.
+pub struct BlobStream {
+    blob: crate::blob::BlobRef,
+    file: crate::local_blob::OpenExactFile,
+}
+
+impl BlobStream {
+    /// The blob's whole plaintext length, as proven when the stream opened. Every
+    /// range must lie inside it.
+    pub fn plaintext_size(&self) -> u64 {
+        self.file.size()
+    }
+
+    /// Serve `len` plaintext bytes starting at `offset` from the proven handle:
+    /// one positioned read, no hashing, no cloud, no reopening by path.
+    ///
+    /// `len == 0` is an empty result, and an `offset + len` past the blob's
+    /// plaintext size (or an overflow) is an error, never a short read. The size
+    /// checked against is the one proven at open, so the bound is the file's real
+    /// length rather than a number the caller supplied.
+    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, BlobCacheError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            BlobCacheError::Io(format!(
+                "blob range overflow for {}: offset={offset}, len={len}",
+                self.blob.id
+            ))
+        })?;
+        let source_size = self.file.size();
+        if end > source_size {
+            return Err(BlobCacheError::Io(format!(
+                "blob range {offset}..{end} for {} exceeds blob size {source_size}",
+                self.blob.id
+            )));
+        }
+        self.file
+            .read_at(offset, len)
+            .await
+            .map_err(BlobCacheError::Io)
+    }
+}
+
+/// Open a blob's plaintext for ranged reading and prove its identity once, for a
+/// host streaming or seeking it without loading the whole file. The ranged sibling
+/// of [`read_blob`], which stays the primitive for a one-shot whole read.
 ///
+/// Opening resolves the blob's source the same way [`read_blob`] does
+/// ([`resolve_source`] reads the locality root, then provenance), opens that one
+/// file, and reads all of it through the opened handle to check its size and
+/// content hash against the exact row-bound locator — [`LocalIntegrity`] if they
+/// disagree. The handle is then held for the stream's lifetime, and every
+/// [`BlobStream::read_at`] reads it directly. This is the whole point of the type:
+/// identity is proven per *stream*, not per range.
+///
+/// - **Remote** ⇒ the exact locator's `pinned/` then `cache/` path; a hit opens and
+///   proves the cache file. A miss downloads and decrypts the exact cloud object
+///   once, proves the staged plaintext through the handle the stream will serve
+///   from, and then publishes it into the evictable cache — the same populate
+///   [`read_blob`]'s miss performs, so a later open of the same blob is a local
+///   open. Publication and any later eviction move the file's *name*; the stream's
+///   handle is unaffected. [`NoCloudHome`] when a Remote blob is opened with no
+///   provider connected.
+/// - **Local + user-provided** ⇒ the user's own external file ([`NoExternalRef`] if
+///   its ref is absent, [`ExternalMissing`] if the file is gone,
+///   [`ExternalSizeMismatch`] if its length no longer matches).
+/// - **Local + host-provided** ⇒ the local store, coven's only copy
+///   ([`NoLocalCopy`] on a miss, never a cloud fetch).
+///
+/// The row reference is validated when the stream opens, which binds the stream to
+/// that exact row version's plaintext. Ranges are not revalidated against the
+/// database: a later row replacement produces a *different* blob, and this stream
+/// was opened for the one the caller asked for — it keeps serving those proven
+/// bytes rather than half a file from each.
+///
+/// [`LocalIntegrity`]: BlobCacheError::LocalIntegrity
+/// [`NoCloudHome`]: BlobCacheError::NoCloudHome
 /// [`NoExternalRef`]: BlobCacheError::NoExternalRef
 /// [`ExternalMissing`]: BlobCacheError::ExternalMissing
+/// [`ExternalSizeMismatch`]: BlobCacheError::ExternalSizeMismatch
 /// [`NoLocalCopy`]: BlobCacheError::NoLocalCopy
 pub(crate) async fn open_blob_stream(
     db: &Database,
     store_dir: &StoreDir,
     remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
-    offset: u64,
-    len: u64,
-) -> Result<Vec<u8>, BlobCacheError> {
+) -> Result<BlobStream, BlobCacheError> {
     validate_row_reference(db, reference).await?;
     let blob = reference.blob();
-    let source_size = reference.plaintext_size();
-    // The range contract, applied once for all serving paths. A zero-length read
-    // is empty without touching disk or cloud; an out-of-range read is an error
-    // before any path runs, so the local-file path can't silently short-read.
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    let end = offset.checked_add(len).ok_or_else(|| {
-        BlobCacheError::Io(format!(
-            "blob range overflow for {}: offset={offset}, len={len}",
-            blob.id
-        ))
-    })?;
-    if end > source_size {
-        return Err(BlobCacheError::Io(format!(
-            "blob range {offset}..{end} for {} exceeds blob size {source_size}",
-            blob.id
-        )));
-    }
-
-    let bytes = match resolve_source(reference)? {
-        // Remote: the cache copy, else a verified cloud stage (populating nothing).
-        BlobSource::Cache => read_remote_range(db, store_dir, remote, reference, offset, len).await,
-        // Local + user-provided: range-read the user's external file. The window was
-        // validated against `source_size`, and `read_range` reads exactly `len`
-        // (failing loud on a short file). The ref must be present — no fallback.
+    let file = match resolve_source(reference)? {
+        // Remote: the cache copy, else one cloud download that also populates the cache.
+        BlobSource::Cache => open_remote_stream(db, store_dir, remote, reference).await,
+        // Local + user-provided: the user's own external file. Its ref must be present
+        // — gate-resolved Local + UserProvided with no ref is corruption, not a miss.
         BlobSource::External => {
             let ext = lookup_external_ref(db, reference).await?.ok_or_else(|| {
                 BlobCacheError::NoExternalRef {
                     id: blob.id.clone(),
                 }
             })?;
-            read_external_file(reference, ext, ExactRead::Range { offset, len }).await
+            open_external_file(reference, ext).await
         }
-        // Local + host-provided: range-read the local store, coven's only copy. A miss
-        // is fail-loud corruption, never a cloud fetch.
+        // Local + host-provided: the local store is the ONLY copy (a Local blob has no
+        // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
         BlobSource::LocalStore => {
             let path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
             match crate::local_blob::exists(&path).await {
@@ -720,50 +784,98 @@ pub(crate) async fn open_blob_stream(
                 }
                 Err(error) => return Err(BlobCacheError::Io(error)),
             }
-            read_exact_local_file(&path, reference, ExactRead::Range { offset, len }).await
+            open_exact_local_file(&path, reference).await
         }
     }?;
     validate_row_reference(db, reference).await?;
-    Ok(bytes)
+    Ok(BlobStream {
+        blob: blob.clone(),
+        file,
+    })
 }
 
-/// Serve a Remote blob's plaintext range. A hit at either exact locator cache path
-/// reads the slice off the whole-plaintext local file. A miss stages and verifies
-/// the whole cloud plaintext, returns its requested range, and writes NO cache file. Split from
-/// [`open_blob_stream`] so the Remote path reads as one branch of the locality
-/// dispatch; the range was already validated by the caller against `source_size`.
-async fn read_remote_range(
+/// Open a Remote blob's plaintext for a stream. A hit at either exact locator cache
+/// path opens that file. A miss downloads and decrypts the exact cloud object once,
+/// proves the staged plaintext through the handle the stream keeps, and publishes it
+/// into the evictable cache — the same populate [`read_remote_whole`] performs, so
+/// the next open of this blob needs no cloud round-trip.
+///
+/// The handle is opened on the staged file *before* publication, so it refers to the
+/// published inode: neither the publish nor a later eviction can take the bytes this
+/// stream is serving. Split from [`open_blob_stream`] so the Remote path reads as one
+/// branch of the authority dispatch.
+async fn open_remote_stream(
     db: &Database,
     store_dir: &StoreDir,
     remote: Option<RemoteBlobAccess<'_>>,
     reference: &RowBlobRef,
-    offset: u64,
-    len: u64,
-) -> Result<Vec<u8>, BlobCacheError> {
-    // A hit in either folder serves the slice from the local plaintext file. The
-    // file must match the whole blob length, so the validated range is in bounds
-    // and `read_range` reads exactly `len` bytes. An existence-check failure is
-    // surfaced, not read as a miss.
+) -> Result<crate::local_blob::OpenExactFile, BlobCacheError> {
+    // The one legitimate probe — per-device cache materialization, a filesystem fact
+    // no shared state holds. An existence-check failure is surfaced, not read as a miss.
     if let Some(hit) = cached_blob_path(store_dir, reference).await? {
-        return read_exact_local_file(hit.path(), reference, ExactRead::Range { offset, len })
-            .await;
+        return open_exact_local_file(hit.path(), reference).await;
     }
 
-    // Miss: serve the range from the cloud (range read + decrypt over the resolved
-    // scope) WITHOUT writing a cache file. Only `read_blob` populates the cache. A
-    // home-less store has no storage to range-read a Remote blob from; surface it.
+    // Miss: fetch from the cloud and populate the evictable cache. A home-less
+    // store reaches here only when a Remote blob is read with no provider
+    // connected — there is no storage to fetch it from, so surface that fault.
     let remote = remote.ok_or(BlobCacheError::NoCloudHome)?;
     let stored = remote_stored_ref(reference)?;
-    let (_, destination) = remote_cache_paths(store_dir, reference)?;
+    let (_, cache) = remote_cache_paths(store_dir, reference)?;
     let staged = remote
         .storage
-        .stage_verified_blob_plaintext(stored, remote.protection, &destination)
+        .stage_verified_blob_plaintext(stored, remote.protection, &cache)
         .await?;
-    let bytes = crate::local_blob::read_range(staged.path(), offset, len)
+    let file = open_exact_local_file(staged.path(), reference).await?;
+    validate_row_reference(db, reference).await?;
+    publish_materialization(staged, reference).await?;
+    // The populate may have pushed `cache/` over budget; evict the oldest files
+    // back under it, never the file just written (passed as `protect`). This
+    // stream's handle survives either way — it holds the inode, not the name.
+    evict_to_budget(db, store_dir, &reference.blob().namespace, Some(&cache)).await?;
+    Ok(file)
+}
+
+/// Open a local plaintext file and prove its whole content against the exact
+/// row-bound locator through the handle the caller keeps.
+async fn open_exact_local_file(
+    path: &std::path::Path,
+    reference: &RowBlobRef,
+) -> Result<crate::local_blob::OpenExactFile, BlobCacheError> {
+    let file = crate::local_blob::OpenExactFile::open(path)
         .await
         .map_err(BlobCacheError::Io)?;
-    validate_row_reference(db, reference).await?;
-    Ok(bytes)
+    let (actual_size, actual_hash) = file.facts();
+    verify_local_file_identity(path, reference, actual_size, actual_hash)?;
+    Ok(file)
+}
+
+/// Open a user-provided Local blob's registered external file for a stream. The
+/// external file is the only copy — no fallback — so a failure to open or read it is
+/// [`BlobCacheError::ExternalMissing`] with its underlying cause preserved, and a
+/// length that no longer matches the registered `size` is
+/// [`BlobCacheError::ExternalSizeMismatch`].
+async fn open_external_file(
+    reference: &RowBlobRef,
+    ext: crate::db::ExternalBlob,
+) -> Result<crate::local_blob::OpenExactFile, BlobCacheError> {
+    let id = &reference.blob().id;
+    let file = crate::local_blob::OpenExactFile::open(&ext.path)
+        .await
+        .map_err(|source| BlobCacheError::ExternalMissing {
+            id: id.to_string(),
+            path: ext.path.clone(),
+            source,
+        })?;
+    let (actual_size, actual_hash) = file.facts();
+    if actual_size != ext.size || actual_size != reference.plaintext_size() {
+        return Err(BlobCacheError::ExternalSizeMismatch {
+            id: id.clone(),
+            path: ext.path,
+        });
+    }
+    verify_local_file_identity(&ext.path, reference, actual_size, actual_hash)?;
+    Ok(file)
 }
 
 /// Stage a Remote blob's whole verified plaintext beside `dest` without making
@@ -1214,15 +1326,10 @@ async fn verify_local_file_facts(
 async fn read_exact_local_file(
     path: &std::path::Path,
     reference: &RowBlobRef,
-    read: ExactRead,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let (bytes, actual_size, actual_hash) = match read {
-        ExactRead::Whole => crate::local_blob::read_with_facts(path).await,
-        ExactRead::Range { offset, len } => {
-            crate::local_blob::read_range_with_facts(path, offset, len).await
-        }
-    }
-    .map_err(BlobCacheError::Io)?;
+    let (bytes, actual_size, actual_hash) = crate::local_blob::read_with_facts(path)
+        .await
+        .map_err(BlobCacheError::Io)?;
     verify_local_file_identity(path, reference, actual_size, actual_hash)?;
     Ok(bytes)
 }
@@ -1323,49 +1430,25 @@ async fn read_cached_exact(
     let Some(hit) = cached_blob_path(store_dir, reference).await? else {
         return Ok(None);
     };
-    read_exact_local_file(hit.path(), reference, ExactRead::Whole)
-        .await
-        .map(Some)
+    read_exact_local_file(hit.path(), reference).await.map(Some)
 }
 
-/// A whole-blob vs ranged read of an external (user-provided Local) file. The two
-/// reads share the validate-on-read; only the local read primitive differs.
-#[derive(Clone, Copy)]
-enum ExactRead {
-    Whole,
-    Range { offset: u64, len: u64 },
-}
-
-/// Read a user-provided Local blob from its registered external file `ext`. The
-/// external file is the only copy — no fallback. A failed read surfaces its
+/// Read a user-provided Local blob whole from its registered external file `ext`.
+/// The external file is the only copy — no fallback. A failed read surfaces its
 /// underlying cause as [`BlobCacheError::ExternalMissing`] (the error is preserved,
-/// not collapsed); for a whole read, a length that no longer matches the registered
-/// `size` is [`BlobCacheError::ExternalSizeMismatch`].
+/// not collapsed).
 async fn read_external_file(
     reference: &RowBlobRef,
     ext: crate::db::ExternalBlob,
-    op: ExactRead,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let id = &reference.blob().id;
-    let read = match op {
-        ExactRead::Whole => crate::local_blob::read_with_facts(&ext.path).await,
-        ExactRead::Range { offset, len } => {
-            crate::local_blob::read_range_with_facts(&ext.path, offset, len).await
-        }
-    };
-    let (bytes, actual_size, actual_hash) =
-        read.map_err(|source| BlobCacheError::ExternalMissing {
-            id: id.to_string(),
+    let (bytes, actual_size, actual_hash) = crate::local_blob::read_with_facts(&ext.path)
+        .await
+        .map_err(|source| BlobCacheError::ExternalMissing {
+            id: reference.blob().id.clone(),
             path: ext.path.clone(),
             source,
         })?;
-    if actual_size != ext.size || actual_size != reference.plaintext_size() {
-        return Err(BlobCacheError::ExternalSizeMismatch {
-            id: id.clone(),
-            path: ext.path,
-        });
-    }
-    verify_local_file_identity(&ext.path, reference, actual_size, actual_hash)?;
+    verify_external_facts(reference, &ext, actual_size, actual_hash)?;
     Ok(bytes)
 }
 
@@ -1373,31 +1456,34 @@ async fn verify_external_file(
     reference: &RowBlobRef,
     ext: &crate::db::ExternalBlob,
 ) -> Result<(), BlobCacheError> {
-    let id = &reference.blob().id;
     let (actual_size, actual_hash) = crate::local_blob::exact_file_facts(&ext.path)
         .await
         .map_err(|source| BlobCacheError::ExternalMissing {
-            id: id.clone(),
+            id: reference.blob().id.clone(),
             path: ext.path.clone(),
             source,
         })?;
+    verify_external_facts(reference, ext, actual_size, actual_hash)
+}
+
+/// Check an external file's measured facts against both the registered ref length
+/// and the exact row-bound locator. A user-owned file can drift either way: a length
+/// that no longer matches the registered `size` is
+/// [`BlobCacheError::ExternalSizeMismatch`], and same-length different bytes are
+/// caught by the locator's content hash.
+fn verify_external_facts(
+    reference: &RowBlobRef,
+    ext: &crate::db::ExternalBlob,
+    actual_size: u64,
+    actual_hash: crate::sync::store_commit::ObjectHash,
+) -> Result<(), BlobCacheError> {
     if actual_size != ext.size || actual_size != reference.plaintext_size() {
         return Err(BlobCacheError::ExternalSizeMismatch {
-            id: id.clone(),
+            id: reference.blob().id.clone(),
             path: ext.path.clone(),
         });
     }
-    let expected_hash = reference.plaintext_hash();
-    if actual_hash != expected_hash {
-        return Err(BlobCacheError::LocalIntegrity {
-            path: ext.path.clone(),
-            expected_size: reference.plaintext_size(),
-            actual_size,
-            expected_hash,
-            actual_hash,
-        });
-    }
-    Ok(())
+    verify_local_file_identity(&ext.path, reference, actual_size, actual_hash)
 }
 
 /// Move one exact locator file between cache folders. The source is copied into an

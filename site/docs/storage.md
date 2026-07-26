@@ -292,24 +292,20 @@ choice set when the home is created:
 
 ## Ranged reads
 
-A host that streams a large blob (audio playback, scrubbing) needs a byte
-window from the middle of the file without downloading and decrypting
-everything before it. The cache's
-[`open_blob_stream`](/docs/cache#reading-a-blob) serves a window from the local
-file on a hit, and on a miss reads it from the cloud through
-[`SyncStorage::read_blob_range`](rustdoc:trait:coven::sync::storage::SyncStorage),
-which is backed by a
-[`BlobRangeReader`](rustdoc:struct:coven::sync::cloud_storage::BlobRangeReader).
+A host that streams a large blob (audio playback, scrubbing) needs byte windows
+from the middle of the file without loading the whole thing into memory for each
+one. [`open_blob_stream`](/docs/cache#reading-a-blob) serves those windows from a
+local plaintext file it opened and proved once — see
+[reading a blob](/docs/cache#reading-a-blob) for why the ranges come off an open
+file rather than a path.
 
-On an opaque home a blob is stored as `[nonce: 24 bytes][encrypted chunks...]`.
-The reader fetches the 24-byte base nonce once on the first read and reuses it,
-then for each window range-reads only the encrypted chunks covering it and
-decrypts them (see [chunked encryption](/docs/encryption#chunked-encryption)). So
-streaming a blob in N windows issues one nonce read, not N, and never pulls the
-whole object. On a browsable home the blob is stored verbatim, so a window is
-read straight through with no nonce or decryption. The blob's
-[scope](/docs/blobs#encryption-scope) is resolved to its key once when the reader
-is built, so master-, derived-, and item-key blobs all stream the same way.
+The cloud is read whole, once, when that stream opens over a blob the device has
+no cache copy of: the exact object is downloaded, verified, and decrypted into
+`cache/`, and every range then comes off that file. A blob's identity is its
+whole-content hash, so there is nothing smaller than the whole object to verify
+against — a range fetched straight from the cloud could not be checked at all. The
+blob's [scope](/docs/blobs#encryption-scope) is resolved to its key once, when the
+stream opens, so master-, derived-, and item-key blobs all stream the same way.
 
 ## Lifecycle
 

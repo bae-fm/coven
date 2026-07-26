@@ -111,27 +111,6 @@ pub async fn path_if_present(
     }
 }
 
-/// Serve `len` plaintext bytes at `offset` from the local store, or `None` when no
-/// file is stored there. The local store holds the whole blob, so a request the
-/// caller has bounded against the blob's length reads exactly `len`; a file whose
-/// length differs from the declared size fails before the range read.
-pub async fn read_range(
-    store_dir: &StoreDir,
-    namespace: &str,
-    id: &str,
-    expected_size: u64,
-    offset: u64,
-    len: u64,
-) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match path_if_present(store_dir, namespace, id, expected_size).await? {
-        Some(path) => crate::local_blob::read_range(&path, offset, len)
-            .await
-            .map(Some)
-            .map_err(LocalBlobError::Io),
-        None => Ok(None),
-    }
-}
-
 async fn ensure_file_len(path: &std::path::Path, expected_size: u64) -> Result<(), LocalBlobError> {
     let actual = crate::local_blob::file_len(path)
         .await

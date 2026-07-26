@@ -69,8 +69,9 @@
 //!
 //! - [`cache`] — the device-local cache for **Remote** blobs: bytes on disk keyed
 //!   by exact locator hash, with the folder a file lives in as the only retention truth
-//!   (`storage/pinned/` protected, `storage/cache/` evictable). Read (whole and
-//!   ranged), pin/unpin, clear, and budget eviction.
+//!   (`storage/pinned/` protected, `storage/cache/` evictable). Reads — one-shot
+//!   whole, or an opened stream that proves the blob once and serves ranges off
+//!   the file it proved — plus pin/unpin, clear, and budget eviction.
 //! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
 //!   local store (`storage/local/<namespace>/<id>`). Never evicted; the budget
 //!   sweep never walks it. Store, read, drop.

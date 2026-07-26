@@ -135,7 +135,7 @@ pub use db::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use rusqlite;
 
 // Blob descriptors, errors, the host-implemented observer.
-pub use blob::cache::BlobCacheError;
+pub use blob::cache::{BlobCacheError, BlobStream};
 pub use blob::{
     BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
     RowBlobAuthority, RowBlobRef,

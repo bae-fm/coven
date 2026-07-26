@@ -145,19 +145,9 @@ pub async fn open_blob_stream(
     store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     reference: &RowBlobRef,
-    offset: u64,
-    len: u64,
-) -> Result<Vec<u8>, BlobCacheError> {
+) -> Result<crate::blob::cache::BlobStream, BlobCacheError> {
     let remote = remote_access(database, storage, reference).await?;
-    crate::blob::cache::open_blob_stream(
-        database.sqlite(),
-        store_dir,
-        remote,
-        reference,
-        offset,
-        len,
-    )
-    .await
+    crate::blob::cache::open_blob_stream(database.sqlite(), store_dir, remote, reference).await
 }
 
 #[doc(hidden)]

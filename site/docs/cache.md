@@ -123,25 +123,39 @@ read populates the cache; it never pins.
 
 [`CovenHandle::open_blob_stream`](rustdoc:method:coven::CovenHandle::open_blob_stream)
 is the ranged sibling, for a host that streams or seeks a large blob (audio
-playback) without loading the whole file:
+playback) without loading the whole file. It returns a
+[`BlobStream`](rustdoc:struct:coven::BlobStream) the host holds for as long as it
+is reading that blob, and reads ranges from:
 
 ```rust
-let slice = handle
-    .open_blob_stream(&blob, source_size, offset, len)
-    .await?;
+let stream = handle.open_blob_stream(&blob).await?;
+let header = stream.read_at(0, 1024).await?;
+let tail = stream.read_at(stream.plaintext_size() - 4096, 4096).await?;
 ```
 
-`source_size` is the blob's plaintext length, which the host knows (the row that
-owns the blob carries it). The range is validated against it once, so the request
-behaves identically whether served from the local file or the cloud: a zero
-length is an empty result, and a range past the end is an error rather than a
-short read. A cache hit reads the slice straight off the local plaintext file at
-`offset`, with no decryption. A miss range-reads and decrypts only the covering
-chunks from the cloud (see [`BlobRangeReader`](/docs/storage#ranged-reads)).
+Opening resolves the blob's locality the same way `read_blob` does, opens the one
+file that holds it, and reads all of it to check its size and content hash against
+the row — then **keeps that open file** for the stream's lifetime. Each `read_at`
+is one positioned read of the already-proven file: it costs the bytes it returns,
+not the size of the blob. A zero length is an empty result, and a range past the
+blob's plaintext length is an error rather than a short read.
 
-A ranged miss writes **no** cache file. A partial file under `cache/<namespace>/<id>`
-would be read as the whole blob by `read_blob`, since presence is the only truth,
-so only the whole-file `read_blob` ever populates the cache.
+Holding the open file is what makes the ranges exact, not just cheap. Proving a
+blob's identity means reading all of it, so a stream cannot re-prove per range —
+that would make every range cost the whole blob. Instead it proves once, and then
+reads a file handle rather than a path: a name can be replaced between two reads,
+a handle cannot. The stream keeps serving the plaintext the row named at open even
+if the file is evicted, renamed, or deleted underneath it. The one thing this does
+not cover is an **in-place** rewrite of a file the user owns and edits themselves;
+coven's own copies are only ever published by rename or hard link, never written
+in place. Open a new stream (or call `read_blob`) to re-check the file against the
+row.
+
+A stream opened over a cache miss downloads and decrypts the exact cloud object
+once and populates `cache/<namespace>/<locator-hash>` with the whole plaintext,
+exactly as a whole-file miss does — so the next stream over the same blob opens a
+local file. Only whole plaintexts are ever written there: a partial file would be
+read as the whole blob by `read_blob`, since presence is the only truth.
 
 On either path, a failure to even check whether a file exists (a broken
 filesystem) is surfaced, never collapsed into a miss: re-downloading over a

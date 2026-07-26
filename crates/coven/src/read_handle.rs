@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use crate::blob::cache::BlobCacheError;
+use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
 use crate::config::Config;
@@ -177,25 +177,25 @@ impl CovenReadHandle {
         .await
     }
 
-    /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
-    /// streaming or seeking without loading the whole file. The [`RowBlobRef`]
-    /// carries the plaintext length used to bound the range. The ranged sibling of
-    /// [`read_blob`](Self::read_blob); a Remote-miss range read fetches from the cloud
-    /// but writes no cache file (only a whole-file read populates).
-    pub async fn open_blob_stream(
-        &self,
-        blob: &RowBlobRef,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, BlobCacheError> {
+    /// Open an exact row blob's plaintext for ranged reading, for streaming or
+    /// seeking without loading the whole file. The ranged sibling of
+    /// [`read_blob`](Self::read_blob); the read counterpart of
+    /// [`CovenHandle::open_blob_stream`](crate::CovenHandle::open_blob_stream).
+    ///
+    /// Opening resolves the blob's locality, proves the plaintext's size and content
+    /// hash against the row, and holds the open file, so every
+    /// [`BlobStream::read_at`] costs only the bytes it returns. A Remote miss fetches
+    /// the exact cloud object once and populates the per-device cache
+    /// (`storage/cache/`) with an atomic temp-then-link — device scratch, no synced
+    /// state touched — so a File Provider serving ranges through a read-only handle
+    /// downloads the object once per opened stream, not once per range.
+    pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::sync::store::blob::open_blob_stream(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
             blob,
-            offset,
-            len,
         )
         .await
     }

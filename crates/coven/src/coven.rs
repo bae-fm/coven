@@ -2267,14 +2267,19 @@ mod tests {
         );
 
         let (offset, len) = (12u64, 19u64);
-        let range = handle
-            .open_blob_stream(&blob, offset, len)
+        let stream = handle
+            .open_blob_stream(&blob)
             .await
             .expect("open_blob_stream serves upload staging before sync upload");
+        assert_eq!(stream.plaintext_size(), expected.len() as u64);
+        let range = stream
+            .read_at(offset, len)
+            .await
+            .expect("read a range from the opened stream");
         assert_eq!(
             range,
             &expected[offset as usize..(offset + len) as usize],
-            "open_blob_stream returns the requested slice of the staged bytes",
+            "the stream returns the requested slice of the staged bytes",
         );
     }
 
@@ -4338,7 +4343,10 @@ mod tests {
         // A ranged read through the same handle serves the requested slice.
         let (offset, len) = (5u64, 10u64);
         let range = reader
-            .open_blob_stream(&blob, offset, len)
+            .open_blob_stream(&blob)
+            .await
+            .expect("open a stream via read handle")
+            .read_at(offset, len)
             .await
             .expect("ranged read via read handle");
         assert_eq!(range, &bytes[offset as usize..(offset + len) as usize]);
