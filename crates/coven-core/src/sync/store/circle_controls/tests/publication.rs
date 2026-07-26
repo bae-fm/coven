@@ -4045,8 +4045,11 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
 /// Publish an accepted old-epoch Circle row, pull it onto the silent
 /// participant, then close the epoch excluding that participant and finalize the
 /// successor — without ever pulling the participant's later writes.
-async fn drive_close_and_exclude_silent(fixture: &SilentParticipantCircle, covered_id: &str) {
-    capture_circle_document(
+async fn drive_close_and_exclude_silent(
+    fixture: &SilentParticipantCircle,
+    covered_id: &str,
+) -> StoreBatchCommitRef {
+    let covered_write = capture_circle_document(
         &fixture.db,
         covered_id,
         fixture.circle_id,
@@ -4058,6 +4061,15 @@ async fn drive_close_and_exclude_silent(fixture: &SilentParticipantCircle, cover
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("publish the accepted old-epoch Circle row");
+    let covered_commit_ref = match fixture
+        .db
+        .write_status(&covered_write)
+        .await
+        .expect("read the accepted pre-close write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("the accepted pre-close Circle write must publish: {status:?}"),
+    };
     silent_pull(fixture)
         .await
         .expect("silent participant pulls the active epoch");
@@ -4083,6 +4095,7 @@ async fn drive_close_and_exclude_silent(fixture: &SilentParticipantCircle, cover
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("finalize the successor after exclusion");
+    covered_commit_ref
 }
 
 /// The finalized successor control coordinate, read from the Owner.
@@ -4096,6 +4109,149 @@ async fn successor_control_coord(
         .0
         .control
         .coord
+}
+
+/// Pull every published Store commit onto the Owner's device without running a
+/// full cycle, so reclamation is driven explicitly afterwards.
+async fn owner_pull(fixture: &SilentParticipantCircle) {
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Owner Store")
+        .pull(
+            &fixture.store_dir,
+            &fixture.signer,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("Owner pulls the published commits");
+}
+
+/// Whether the exact Circle package ciphertext is still readable in cloud
+/// storage, read under the epoch key of the control the package was addressed to.
+async fn circle_package_object_present(
+    fixture: &SilentParticipantCircle,
+    package: &crate::sync::store_commit::CirclePackageRef,
+    activation: &StoreBatchCommitRef,
+) -> bool {
+    let access = StoreDatabase::new(&fixture.db)
+        .circle_package_access(package.circle_id, package.control.clone())
+        .await
+        .expect("resolve Circle package access")
+        .expect("the package's control stays retained after its epoch closed");
+    let context = ProtocolObjectContext::circle(
+        fixture.store.root.store_root_hash,
+        ProtocolObjectDomain::CirclePackage,
+        access.encryption,
+    );
+    let prefix = crate::sync::store_commit::circle_package_semantic_prefix(
+        package.circle_id,
+        package.package.candidate_family,
+        &activation.coord.stream_id.to_string(),
+        activation.coord.sequence(),
+        package.package.content_hash,
+    );
+    match fixture
+        .store
+        .storage
+        .read_protocol_object(&context, &package.package.object, &prefix)
+        .await
+    {
+        Ok(_) => true,
+        Err(crate::sync::storage::StorageError::NotFound(_)) => false,
+        Err(error) => panic!("read the exact Circle package object: {error}"),
+    }
+}
+
+/// A Circle package published beyond an epoch close's accepted cutoff is invalid
+/// by construction: every device applies the same cutoff predicate the pull path
+/// applies and skips it, so it never materializes anywhere and no snapshot will
+/// ever cover it. The Owner reclaims it on that ground alone — no coverage
+/// evidence, no acknowledgements — while the package the same cutoff accepts
+/// stays untouched.
+#[tokio::test]
+async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
+    let fixture = setup_circle_with_silent_member("circle-beyond-cutoff-reclaim").await;
+    let covered_id = "00000000-0000-4000-8000-000000000001";
+    let covered_commit_ref = drive_close_and_exclude_silent(&fixture, covered_id).await;
+    let covered_package = circle_package_in(&fixture.store, &covered_commit_ref).await;
+
+    // Still holding the closed epoch and unaware of the close, the excluded
+    // participant publishes a Circle package the cutoff does not accept.
+    let beyond_id = "00000000-0000-4000-8000-000000000002";
+    let beyond_write = capture_circle_document(
+        &fixture.silent_db,
+        beyond_id,
+        fixture.circle_id,
+        "0000000009000-0000-silent",
+    )
+    .await;
+    silent_publish_pending_write(&fixture, "0000000009000-0000-silent").await;
+    let beyond_commit_ref = match fixture
+        .silent_db
+        .write_status(&beyond_write)
+        .await
+        .expect("read the beyond-cutoff write status")
+    {
+        crate::WriteStatus::Published(position) => position.commit,
+        status => panic!("the beyond-cutoff Circle write must publish: {status:?}"),
+    };
+    let beyond_package = circle_package_in(&fixture.store, &beyond_commit_ref).await;
+    assert_eq!(
+        beyond_package.control, covered_package.control,
+        "the excluded participant addresses the same closed epoch as the accepted package"
+    );
+
+    // The Owner accepts the commit but not its Circle package: the cutoff
+    // predicate skips it, so the row never materializes.
+    owner_pull(&fixture).await;
+    assert!(
+        !document_present(&fixture.db, beyond_id).await,
+        "the beyond-cutoff row never materializes on the Owner"
+    );
+    assert!(
+        document_present(&fixture.db, covered_id).await,
+        "the accepted pre-close row stays materialized"
+    );
+    assert!(
+        circle_package_object_present(&fixture, &beyond_package, &beyond_commit_ref).await,
+        "the beyond-cutoff package ciphertext is uploaded before reclamation"
+    );
+
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the beyond-cutoff Circle package");
+
+    assert!(
+        !circle_package_object_present(&fixture, &beyond_package, &beyond_commit_ref).await,
+        "the beyond-cutoff package ciphertext is deleted"
+    );
+    assert!(
+        circle_package_object_present(&fixture, &covered_package, &covered_commit_ref).await,
+        "the package the cutoff accepts is live history and survives"
+    );
+    assert!(
+        document_present(&fixture.db, covered_id).await,
+        "reclamation leaves the materialized rows intact"
+    );
+}
+
+/// The exact Circle package one commit carries.
+async fn circle_package_in(
+    store: &TestStore,
+    commit_ref: &StoreBatchCommitRef,
+) -> crate::sync::store_commit::CirclePackageRef {
+    let (commit, _) =
+        crate::sync::store::pull::load_commit_with_author(&store.storage, &store.root, commit_ref)
+            .await
+            .expect("load the exact Circle package commit");
+    let [package] = commit.circle_packages() else {
+        panic!("the commit must carry exactly one Circle package");
+    };
+    package.clone()
 }
 
 /// An ordinary member that responds to the close — never excluded — and holds

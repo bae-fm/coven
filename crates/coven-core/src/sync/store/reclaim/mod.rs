@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::database::StoreDatabase;
 use super::AuthorizedStore;
 use crate::keys::{self, UserKeypair};
-use crate::sync::circle::{CircleBootstrapCoverageRef, CircleControlCoord, CircleId};
+use crate::sync::circle::{
+    CircleBootstrapCoverageRef, CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId,
+};
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::membership::{MembershipChain, MembershipGrantId};
 use crate::sync::storage::{
@@ -70,7 +72,7 @@ impl ReclaimClaim {
     pub(crate) fn target(&self) -> ReclaimTarget {
         match self {
             Self::StorePackage(claim) => ReclaimTarget::StorePackage(claim.target.clone()),
-            Self::CirclePackage(claim) => ReclaimTarget::CirclePackage(claim.target.clone()),
+            Self::CirclePackage(claim) => ReclaimTarget::CirclePackage(claim.target().clone()),
             Self::CircleBootstrapImage(claim) => {
                 ReclaimTarget::CircleBootstrapImage(claim.target.clone())
             }
@@ -111,6 +113,65 @@ pub struct CircleSnapshotLocator {
     pub snapshot: CircleSnapshotRef,
 }
 
+/// The two ways one Circle package stops being live history. Either a stable
+/// Circle snapshot covers it and every active-access device acknowledged that
+/// coverage, or the package lies beyond its epoch's accepted close cutoff — in
+/// which case it never materialized anywhere and needs no coverage evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CirclePackageReclaimClaim {
+    SnapshotCovered(CirclePackageSnapshotCoverageClaim),
+    BeyondEpochCutoff(CirclePackageBeyondCutoffClaim),
+}
+
+impl CirclePackageReclaimClaim {
+    pub(crate) fn target(&self) -> &CirclePackageReclaimTarget {
+        match self {
+            Self::SnapshotCovered(claim) => &claim.target,
+            Self::BeyondEpochCutoff(claim) => &claim.target,
+        }
+    }
+
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        match self {
+            Self::SnapshotCovered(claim) => claim.validate(),
+            Self::BeyondEpochCutoff(claim) => claim.validate(),
+        }
+    }
+}
+
+/// Evidence that one Circle package lies beyond the accepted cutoff of the epoch
+/// it was addressed to: the named successor control activated with a closed-epoch
+/// origin whose cutoff does not cover the package's activating commit. Such a
+/// package is invalid by construction — no device materializes it — so it needs no
+/// snapshot coverage or acknowledgement evidence. The successor control is an
+/// exact coordinate the verifier re-resolves from retained activations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CirclePackageBeyondCutoffClaim {
+    pub target: CirclePackageReclaimTarget,
+    pub successor_control: CircleControlCoord,
+}
+
+impl CirclePackageBeyondCutoffClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        self.successor_control
+            .validate()
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        if self.successor_control == self.target.package.control {
+            return Err(StoreProtocolError::Malformed(
+                "Circle package beyond-cutoff successor is the package's own control".to_string(),
+            ));
+        }
+        if self.target.package.package.object == self.target.activation.object {
+            return Err(StoreProtocolError::Malformed(
+                "Circle package reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Evidence that one Circle package is covered by an acknowledgement-stable
 /// Circle snapshot: the snapshot's cut covers the package's activating commit,
 /// and every device holding active Circle access has acknowledged coverage that
@@ -118,13 +179,13 @@ pub struct CircleSnapshotLocator {
 /// readable by the Owner as a Circle member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CirclePackageReclaimClaim {
+pub struct CirclePackageSnapshotCoverageClaim {
     pub target: CirclePackageReclaimTarget,
     pub covering_snapshot: CircleSnapshotLocator,
     pub acknowledgements: Vec<CircleAckRef>,
 }
 
-impl CirclePackageReclaimClaim {
+impl CirclePackageSnapshotCoverageClaim {
     fn validate(&self) -> Result<(), StoreProtocolError> {
         if self.acknowledgements.is_empty() {
             return Err(StoreProtocolError::Malformed(
@@ -913,6 +974,91 @@ async fn reclaim_store_packages(
     })
 }
 
+/// Authorize deletion of every Circle package the Circle's current epoch cutoff
+/// excludes. A package addressed to a closed epoch whose activating commit the
+/// close cutoff does not accept never materializes on any device — it is invalid
+/// by construction — so it is eligible once the successor epoch activated, with no
+/// snapshot coverage or acknowledgement evidence required. Enumerated from this
+/// device's accepted history rather than a snapshot cut, because such a package is
+/// by definition outside every snapshot's coverage.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: &MembershipChain,
+    root: &StoreRootRef,
+    circle_id: CircleId,
+    current_control: &CircleControlCoord,
+) -> Result<(), StoreReclaimError> {
+    let successor = database
+        .verified_circle_activation(circle_id, current_control.clone())
+        .await?
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(format!(
+                "Circle {circle_id} current control is not a retained activation"
+            ))
+        })?;
+    // Only a control that closed a predecessor epoch carries a cutoff; a Circle
+    // whose current epoch closed nothing has no beyond-cutoff package to enumerate.
+    if !matches!(
+        successor.control.value.state(),
+        CircleControlState::ActiveEpoch(active)
+            if matches!(active.common.origin, CircleEpochOrigin::Closed { .. })
+    ) {
+        return Ok(());
+    }
+    let frontier = CommitFrontier::from_refs(database.materialized_frontier().await?)
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let epochs = database.circle_replay_epoch_index().await?;
+    for (commit, package) in
+        exact_circle_package_targets(storage, root, circle_id, &frontier).await?
+    {
+        // `permits` is the same predicate the pull path applies; a package it
+        // accepts is live history. A package whose control it cannot resolve, or
+        // that conflicts with the cutoff, errors rather than being reclaimed.
+        if epochs
+            .permits(&commit, circle_id, &package.control)
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+        {
+            continue;
+        }
+        let target = ReclaimTarget::CirclePackage(CirclePackageReclaimTarget {
+            package: package.clone(),
+            activation: commit.clone(),
+        });
+        if reclaim_target_is_recorded(database, &target).await? {
+            continue;
+        }
+        if database
+            .circle_package_is_retained_for_replay(package.clone(), commit.clone())
+            .await?
+        {
+            continue;
+        }
+        Box::pin(prepare_reclaim_authorization(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            ReclaimClaim::CirclePackage(CirclePackageReclaimClaim::BeyondEpochCutoff(
+                CirclePackageBeyondCutoffClaim {
+                    target: CirclePackageReclaimTarget {
+                        package,
+                        activation: commit,
+                    },
+                    successor_control: current_control.clone(),
+                },
+            )),
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
 /// Enumerate every reclaimable Circle package: for each Circle this device holds
 /// active access to, select the maximal acknowledgement-stable Circle snapshot,
 /// and authorize each package its cut covers that is not still a retained replay
@@ -930,6 +1076,20 @@ async fn prepare_circle_reclaim_authorizations(
     for input in database.circle_acknowledgement_publication_inputs().await? {
         let circle_id = input.circle_id;
         let control = input.control;
+        // A package beyond its epoch's accepted cutoff never materializes anywhere,
+        // so it needs no snapshot coverage and is enumerated whether or not this
+        // Circle has a stable snapshot.
+        Box::pin(prepare_beyond_cutoff_circle_reclaim_authorizations(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            circle_id,
+            &control,
+        ))
+        .await?;
         let Some(selected) = Box::pin(choose_circle_snapshot(
             database,
             storage,
@@ -970,19 +1130,21 @@ async fn prepare_circle_reclaim_authorizations(
                 identity_signer,
                 membership,
                 root,
-                ReclaimClaim::CirclePackage(CirclePackageReclaimClaim {
-                    target: CirclePackageReclaimTarget {
-                        package,
-                        activation: commit,
+                ReclaimClaim::CirclePackage(CirclePackageReclaimClaim::SnapshotCovered(
+                    CirclePackageSnapshotCoverageClaim {
+                        target: CirclePackageReclaimTarget {
+                            package,
+                            activation: commit,
+                        },
+                        covering_snapshot: CircleSnapshotLocator {
+                            author_registration: selected.author_registration.clone(),
+                            circle_id,
+                            control: selected.meta.control.clone(),
+                            snapshot: selected.reference.clone(),
+                        },
+                        acknowledgements: selected.acknowledgements.clone(),
                     },
-                    covering_snapshot: CircleSnapshotLocator {
-                        author_registration: selected.author_registration.clone(),
-                        circle_id,
-                        control: selected.meta.control.clone(),
-                        snapshot: selected.reference.clone(),
-                    },
-                    acknowledgements: selected.acknowledgements.clone(),
-                }),
+                )),
             ))
             .await?;
         }
@@ -1652,16 +1814,99 @@ async fn verify_store_package_reclaim_claim(
     Ok(claim.target.clone())
 }
 
-/// Re-verify a Circle package reclaim: a stable Circle snapshot on the same
-/// Circle covers the package's activating commit, and every device holding
-/// active Circle access has acknowledged coverage dominating the snapshot cut.
-/// The acknowledgements are read under the Circle's current control, whose
-/// retained keyring resolves epochs sealed before a rotation.
 async fn verify_circle_package_reclaim_claim(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     claim: &CirclePackageReclaimClaim,
+) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
+    match claim {
+        CirclePackageReclaimClaim::SnapshotCovered(claim) => {
+            verify_circle_package_snapshot_coverage_claim(database, storage, root, claim).await
+        }
+        CirclePackageReclaimClaim::BeyondEpochCutoff(claim) => {
+            verify_circle_package_beyond_cutoff_claim(database, claim).await
+        }
+    }
+}
+
+/// Re-verify that a Circle package lies beyond its epoch's accepted close cutoff.
+/// The named successor control must be a retained activation whose closed-epoch
+/// origin names the epoch the package's own control belongs to, and the same
+/// replay-epoch predicate the pull path applies must refuse the package. A package
+/// the cutoff accepts, or one whose control the cutoff conflicts with, is not
+/// eligible under this arm and fails loud rather than falling back to coverage.
+async fn verify_circle_package_beyond_cutoff_claim(
+    database: &StoreDatabase,
+    claim: &CirclePackageBeyondCutoffClaim,
+) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
+    let circle_id = claim.target.package.circle_id;
+    let successor = database
+        .verified_circle_activation(circle_id, claim.successor_control.clone())
+        .await?
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(format!(
+                "Circle {circle_id} beyond-cutoff successor control is not a retained activation"
+            ))
+        })?;
+    let CircleControlState::ActiveEpoch(active) = successor.control.value.state() else {
+        return Err(StoreReclaimError::Authorization(
+            "Circle beyond-cutoff successor control is not an activated epoch".to_string(),
+        ));
+    };
+    let CircleEpochOrigin::Closed {
+        closed_epoch_id, ..
+    } = &active.common.origin
+    else {
+        return Err(StoreReclaimError::Authorization(
+            "Circle beyond-cutoff successor epoch did not close a predecessor".to_string(),
+        ));
+    };
+    // The package must be addressed to the epoch that close cut off, not to some
+    // other epoch that merely happens to precede the successor.
+    let package_control = database
+        .verified_circle_activation(circle_id, claim.target.package.control.clone())
+        .await?
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(format!(
+                "Circle {circle_id} package control is not a retained activation"
+            ))
+        })?;
+    if package_control.control.value.epoch_id() != *closed_epoch_id {
+        return Err(StoreReclaimError::Authorization(
+            "Circle beyond-cutoff package belongs to another epoch than the one closed".to_string(),
+        ));
+    }
+    // The same predicate the pull path uses to skip a package beyond its accepted
+    // cutoff; a package it permits is live history and is never eligible here.
+    if database
+        .circle_replay_epoch_index()
+        .await?
+        .permits(
+            &claim.target.activation,
+            circle_id,
+            &claim.target.package.control,
+        )
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+    {
+        return Err(StoreReclaimError::Authorization(
+            "Circle package lies within its accepted epoch cutoff and is not reclaimable as beyond-cutoff"
+                .to_string(),
+        ));
+    }
+    Ok(claim.target.clone())
+}
+
+/// Re-verify a Circle package reclaim: a stable Circle snapshot on the same
+/// Circle covers the package's activating commit, and every device holding
+/// active Circle access has acknowledged coverage dominating the snapshot cut.
+/// The acknowledgements are read under the Circle's current control, whose
+/// retained keyring resolves epochs sealed before a rotation.
+async fn verify_circle_package_snapshot_coverage_claim(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    claim: &CirclePackageSnapshotCoverageClaim,
 ) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
     let circle_id = claim.target.package.circle_id;
     let snapshot_control = &claim.covering_snapshot.control;
