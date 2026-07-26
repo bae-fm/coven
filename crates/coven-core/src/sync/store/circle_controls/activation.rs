@@ -39,7 +39,6 @@ pub(crate) use state::{
     CircleAuthoringState, CircleCurrentState, CirclePackageAccess, LocalCircleExclusion,
     VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage,
     VerifiedCircleReference, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
-
 };
 
 /// The verified epoch-close settlement a successor activation carries: the exact
@@ -404,7 +403,7 @@ async fn verify_epoch_close_outcome(
                 "closed-origin in-epoch Circle control differs from its retained epoch".to_string(),
             ));
         }
-        return Ok(());
+        return Ok(None);
     }
     let outcome_ref = objects.close_outcome.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(
