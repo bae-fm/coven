@@ -30,7 +30,7 @@ pub enum DeviceJoinTransportOutcome {
 
 impl DeviceJoinClient {
     /// Join through the transport: one call from the scanned offer bundle to a
-    /// saved member [`Config`].
+    /// saved member [`Config`], or to the owner's abandonment of the attempt.
     ///
     /// Every step resumes from the joiner journal, so calling this again after
     /// a crash picks up where the last durable step left off — a republished

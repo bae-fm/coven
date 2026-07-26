@@ -721,8 +721,9 @@ pub enum DeviceJoinApproval {
 /// keys: the role checks below find only that device's work, and every artifact
 /// it does not produce it waits for in the transport instead.
 ///
-/// Returns when the join reaches its activation. The joiner's completion is the
-/// joiner's own step.
+/// Returns when the attempt reaches an end the admitting side owns: its
+/// activation, or the abandonment that ends it early. The joiner's completion
+/// is the joiner's own step.
 pub async fn drive_device_join(
     store: &Store,
     identity_signer: &UserKeypair,
