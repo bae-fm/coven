@@ -75,6 +75,7 @@ use crate::db::{
     live_coven_schema_manifest, CovenSchemaManifest, ExternalBlob, OutboxEntry, OutboxOperation,
     OutboxUploadState,
 };
+pub use crate::db::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};

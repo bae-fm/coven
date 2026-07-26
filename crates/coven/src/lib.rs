@@ -613,6 +613,8 @@ pub(crate) mod sync {
     pub(crate) mod sync_manager;
 }
 
+#[cfg(test)]
+mod blob_facade_tests;
 mod circles;
 mod coven;
 mod handle;
@@ -647,8 +649,14 @@ pub use coven_core::{
 // Blob descriptors, cache error, the host-implemented transition observer.
 pub use coven_core::{
     BlobCacheError, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    Provenance, RowBlobAuthority, RowBlobRef,
+    MakeRemoteProgress, Provenance, QueuedDelete, QueuedUpload, RowBlobAuthority, RowBlobRef,
 };
+// A host computes a blob's content hash at import and writes it into the row's
+// declared hash column — including for a file it registers rather than hands
+// over, where the row's hash is what a read validates the file against.
+// `ContentHasher` is the same hash fed a chunk at a time, for a file too large
+// to hold in memory.
+pub use coven_core::blob::{content_hash, ContentHasher};
 
 // Applied-sync change notification.
 pub use coven_core::{ChangeOp, RowChange};

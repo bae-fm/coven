@@ -237,6 +237,76 @@ impl Database {
         .map_err(DbError::from)
     }
 
+    /// Every upload the durable queue is still holding, oldest first.
+    ///
+    /// This is the read side of the same rows the drain works: an upload
+    /// appears here the moment `make_remote` enqueues it, before any transfer
+    /// is attempted, and stays until its publication activates or its
+    /// cancellation clears it — across restarts, because the queue is a table
+    /// in the store database rather than anything the process holds.
+    pub async fn queued_uploads(&self) -> Result<Vec<QueuedUpload>, DbError> {
+        self.queued_upload_rows(None).await
+    }
+
+    /// The queued uploads belonging to one gated root.
+    ///
+    /// Filtered in SQL rather than by the caller, so asking about one root
+    /// neither loads nor decodes the row references of every other queued
+    /// upload in the store.
+    pub async fn queued_uploads_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<QueuedUpload>, DbError> {
+        self.queued_upload_rows(Some((root_table.to_string(), root_id.to_string())))
+            .await
+    }
+
+    async fn queued_upload_rows(
+        &self,
+        root: Option<(String, String)>,
+    ) -> Result<Vec<QueuedUpload>, DbError> {
+        self.call(move |conn| {
+            const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
+                            attempt_count, last_error, created_at, last_attempt_at
+                     FROM cloud_outbox WHERE operation = 'upload'";
+            let (sql, params): (String, Vec<String>) = match root {
+                Some((root_table, root_id)) => (
+                    format!("{COLUMNS} AND root_table = ?1 AND root_id = ?2 ORDER BY id"),
+                    vec![root_table, root_id],
+                ),
+                None => (format!("{COLUMNS} ORDER BY id"), Vec::new()),
+            };
+            let mut statement = conn.prepare(&sql).map_err(DbError::from)?;
+            let queued = statement
+                .query_map(rusqlite::params_from_iter(params), row_to_queued_upload)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            Ok(queued)
+        })
+        .await
+    }
+
+    /// Every cloud tombstone the durable queue is still holding, oldest first.
+    pub async fn queued_deletes(&self) -> Result<Vec<QueuedDelete>, DbError> {
+        self.call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT stored_ref, attempt_count, last_error, created_at, last_attempt_at
+                     FROM cloud_outbox WHERE operation = 'delete' ORDER BY id",
+                )
+                .map_err(DbError::from)?;
+            let queued = statement
+                .query_map([], row_to_queued_delete)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            Ok(queued)
+        })
+        .await
+    }
+
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox("upload").await
     }
@@ -402,4 +472,55 @@ impl Database {
         })
         .await
     }
+}
+
+fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUpload> {
+    let invalid = |index: usize, message: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            message.into(),
+        )
+    };
+    let encoded: String = row.get(0)?;
+    let reference: RowBlobRef =
+        serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
+    let attempt_count: i64 = row.get(4)?;
+    Ok(QueuedUpload {
+        namespace: reference.blob().namespace.clone(),
+        blob_id: reference.blob().id.clone(),
+        table_name: reference.table().to_string(),
+        row_id: reference.row_id().to_string(),
+        root_table: row.get(1)?,
+        root_id: row.get(2)?,
+        retain_pinned: row.get(3)?,
+        attempt_count: u64::try_from(attempt_count)
+            .map_err(|error| invalid(4, error.to_string()))?,
+        last_error: row.get(5)?,
+        created_at: row.get(6)?,
+        last_attempt_at: row.get(7)?,
+    })
+}
+
+fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDelete> {
+    let invalid = |index: usize, message: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            message.into(),
+        )
+    };
+    let encoded: String = row.get(0)?;
+    let stored: StoredBlobRef =
+        serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
+    let attempt_count: i64 = row.get(1)?;
+    Ok(QueuedDelete {
+        namespace: stored.locator().namespace().to_string(),
+        blob_id: stored.locator().blob_id().to_string(),
+        attempt_count: u64::try_from(attempt_count)
+            .map_err(|error| invalid(1, error.to_string()))?,
+        last_error: row.get(2)?,
+        created_at: row.get(3)?,
+        last_attempt_at: row.get(4)?,
+    })
 }

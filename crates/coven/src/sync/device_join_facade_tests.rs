@@ -405,13 +405,22 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
         )),
     );
 
-    let config = match joined.expect("the joining device completes") {
+    // Report both sides: a failure on one is usually explained by the other,
+    // and expecting them one at a time throws that half away.
+    let (joined, drove) = match (joined, drove) {
+        (Ok(joined), Ok(drove)) => (joined, drove),
+        (joined, drove) => panic!(
+            "the join did not complete: the joining device ended {joined:?}, \
+             the admitting side ended {drove:?}"
+        ),
+    };
+    let config = match joined {
         crate::DeviceJoinTransportOutcome::Joined(config) => config,
         crate::DeviceJoinTransportOutcome::Abandoned(_) => {
             panic!("the attempt was abandoned, not completed")
         }
     };
-    let activation = match drove.expect("the owner's handle drives the admission") {
+    let activation = match drove {
         crate::DeviceJoinDriveOutcome::Activated(activation) => activation,
         crate::DeviceJoinDriveOutcome::Abandoned(_) => {
             panic!("the attempt was abandoned, not activated")

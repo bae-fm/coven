@@ -500,7 +500,7 @@ impl Database {
         })
     }
 
-    pub(crate) fn row_blob_ref_on(
+    pub fn row_blob_ref_on(
         conn: &Connection,
         gates: &Gates,
         table: &SyncedTable,

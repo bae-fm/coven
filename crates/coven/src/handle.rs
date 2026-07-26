@@ -1010,6 +1010,66 @@ impl CovenHandle {
     /// connected home, against coven's own register clock and the handle's
     /// observer. Errors when no provider is connected (there is no cloud to write
     /// to).
+    /// Every upload the durable queue is holding, oldest first.
+    ///
+    /// An upload appears here the moment [`make_remote`](Self::make_remote)
+    /// enqueues it — before any transfer is attempted, and whether or not sync
+    /// is connected — and stays until its publication activates or its
+    /// cancellation clears it. The queue is a table in the store database, so
+    /// this survives restarts: a host can render "waiting to upload" without
+    /// having observed the transfer that will do it.
+    ///
+    /// This is a read; nothing here starts or advances a transfer. Compare
+    /// [`drain_uploads`](Self::drain_uploads), which does the work.
+    ///
+    /// To ask whether a *root* still has a transition running, prefer
+    /// [`make_remote_progress`](Self::make_remote_progress): the queue empties
+    /// before the transition ends.
+    pub async fn queued_uploads(&self) -> Result<Vec<crate::QueuedUpload>, crate::DbError> {
+        self.db().queued_uploads().await
+    }
+
+    /// The queued uploads belonging to one gated root.
+    ///
+    /// The filter runs in SQL, so asking about one root does not decode every
+    /// other queued upload in the store. A host answers "is anything still
+    /// waiting to upload for this row?" from whether this is empty — but see
+    /// [`make_remote_progress`](Self::make_remote_progress) for whether the
+    /// transition itself has finished, which outlasts its uploads.
+    pub async fn queued_uploads_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<crate::QueuedUpload>, crate::DbError> {
+        self.db().queued_uploads_for_root(root_table, root_id).await
+    }
+
+    /// Every cloud tombstone the durable queue is holding, oldest first.
+    ///
+    /// A tombstone is queued by
+    /// [`SqlContext::enqueue_blob_delete`](crate::SqlContext::enqueue_blob_delete)
+    /// and stays until a sync cycle carries the removal out, so this reports
+    /// removals still owed to the cloud across restarts.
+    pub async fn queued_deletes(&self) -> Result<Vec<crate::QueuedDelete>, crate::DbError> {
+        self.db().queued_deletes().await
+    }
+
+    /// How far the make-remote for one gated root has got, or `None` when that
+    /// root has none running.
+    ///
+    /// This outlasts the root's queued uploads. Once the last upload lands its
+    /// queue rows are consumed, but the transition is not finished until the
+    /// Store write publishing it activates — so a root can have no queued
+    /// uploads and still be mid-transition, reported here as
+    /// [`MakeRemoteProgress::Publishing`](crate::MakeRemoteProgress).
+    pub async fn make_remote_progress(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Option<crate::MakeRemoteProgress>, crate::DbError> {
+        self.db().make_remote_progress(root_table, root_id).await
+    }
+
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         let sync_loop = manager

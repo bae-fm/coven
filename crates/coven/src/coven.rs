@@ -455,11 +455,40 @@ fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResul
 pub struct SqlContext<'ctx, 'conn> {
     tx: &'ctx rusqlite::Transaction<'conn>,
     stamper: UpdatedAtStamper,
+    /// The declared tables and gates, carried so a blob registration can
+    /// resolve the row's binding against the same schema this write runs under.
+    tables: &'ctx [SyncedTable],
+    gates: &'ctx crate::sync::gate::Gates,
 }
 
 impl<'ctx, 'conn> SqlContext<'ctx, 'conn> {
-    pub(crate) fn new(tx: &'ctx rusqlite::Transaction<'conn>, stamper: UpdatedAtStamper) -> Self {
-        Self { tx, stamper }
+    pub(crate) fn new(
+        tx: &'ctx rusqlite::Transaction<'conn>,
+        stamper: UpdatedAtStamper,
+        tables: &'ctx [SyncedTable],
+        gates: &'ctx crate::sync::gate::Gates,
+    ) -> Self {
+        Self {
+            tx,
+            stamper,
+            tables,
+            gates,
+        }
+    }
+
+    /// The declared table by name, refused if it declares no blob.
+    fn blob_table(&self, table: &str) -> Result<&SyncedTable, DbError> {
+        let declared = self
+            .tables
+            .iter()
+            .find(|candidate| candidate.name() == table)
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
+        if declared.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {table:?} has no blob declaration"
+            )));
+        }
+        Ok(declared)
     }
 
     /// Execute one SQL statement with bound parameters.
@@ -497,6 +526,79 @@ impl<'ctx, 'conn> SqlContext<'ctx, 'conn> {
 
     pub fn stamp(&self) -> String {
         self.stamper.stamp()
+    }
+
+    /// Point a row's blob at a file the user owns, without copying it.
+    ///
+    /// Call this in the same write that inserted or updated the row: the
+    /// registration binds to the row's *current* version, so registering from a
+    /// later write would bind a version the next row change invalidates. The
+    /// row must already carry the blob's id, size, and content hash in the
+    /// columns its table declared — those are what the binding is derived from,
+    /// and a read verifies the file against them.
+    ///
+    /// Only tables declared [`Provenance::UserProvided`](crate::Provenance)
+    /// take external files. On a host-provided table coven keeps its own copy,
+    /// so nothing would ever read the registration; that is refused rather than
+    /// written and ignored.
+    ///
+    /// coven reads the file but never owns it: it is not copied, and if the
+    /// user moves, truncates, or rewrites it, the next read fails loud instead
+    /// of serving different bytes.
+    pub fn register_external_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+        path: &std::path::Path,
+    ) -> Result<(), DbError> {
+        let declared = self.blob_table(table)?;
+        let reference = Database::row_blob_ref_on(self.tx, self.gates, declared, row_id)?;
+        if reference.blob().provenance != crate::Provenance::UserProvided {
+            return Err(DbError::Message(format!(
+                "table {table:?} declares host-provided blobs, which coven copies; \
+                 an external file registration on it would never be read"
+            )));
+        }
+        Database::register_external_blob_on(self.tx, &reference, path)
+    }
+
+    /// Queue the cloud object behind a blob for removal.
+    ///
+    /// Deleting a row removes coven's local copy, but the object already
+    /// uploaded to the cloud outlives it — this is what tombstones it. The
+    /// removal is durable and retried, so it survives a crash between the row
+    /// delete and the transfer that carries it out.
+    ///
+    /// Takes the reference rather than a row id because the row is usually
+    /// gone by the time this is called: capture it with
+    /// [`CovenHandle::row_blob_ref`](crate::CovenHandle::row_blob_ref) before
+    /// the write, then enqueue in the same write that deletes the row, so the
+    /// tombstone and the deletion commit together.
+    ///
+    /// A blob with no cloud object — never uploaded, or already local-only —
+    /// has nothing to tombstone, and is refused rather than queueing a removal
+    /// for an object that was never there.
+    pub fn enqueue_blob_delete(&self, blob: &crate::RowBlobRef) -> Result<(), DbError> {
+        let stored = blob.stored().ok_or_else(|| {
+            DbError::Message(format!(
+                "blob {:?} in {:?} has no cloud object to remove",
+                blob.blob().id,
+                blob.blob().namespace
+            ))
+        })?;
+        Database::enqueue_delete_on(self.tx, stored, &self.stamp())
+    }
+
+    /// Drop the external-file registration for a row's blob.
+    ///
+    /// Idempotent: a row with no registration is left alone. Like
+    /// [`register_external_blob`](Self::register_external_blob) this binds to
+    /// the row's current version, so it belongs in the write that changed the
+    /// row.
+    pub fn clear_external_blob(&self, table: &str, row_id: &str) -> Result<(), DbError> {
+        let declared = self.blob_table(table)?;
+        let reference = Database::row_blob_ref_on(self.tx, self.gates, declared, row_id)?;
+        Database::clear_external_blob_on(self.tx, &reference)
     }
 }
 
@@ -580,7 +682,7 @@ impl CovenHandle {
                         routing_encryption.as_ref(),
                         Some(&blob_staging),
                         write_id,
-                        |tx| f(SqlContext::new(tx, stamper)),
+                        |tx| f(SqlContext::new(tx, stamper, &tables, &gates)),
                     ),
                 )
             })
@@ -959,7 +1061,7 @@ fn run_write_batch_on_connection<R>(
             }
 
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sql(SqlContext::new(tx, stamper))
+                sql(SqlContext::new(tx, stamper, &tables, &gates))
             })) {
                 Ok(Ok(value)) => {
                     for (blob, intent) in deleted.iter().zip(&cleanup_intents) {

@@ -107,6 +107,35 @@ impl Database {
         .map_err(DbError::from)
     }
 
+    /// How far the make-remote for one gated root has got, or `None` when that
+    /// root has none in flight.
+    ///
+    /// This outlives the root's queued uploads: once the last upload lands the
+    /// queue rows are consumed, but the intent stays until the publication
+    /// write activates. A caller asking "is a transition still running for this
+    /// root?" has to read this, not the upload queue, or it will answer no
+    /// during publication.
+    pub async fn make_remote_progress(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Option<MakeRemoteProgress>, DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        self.call(move |conn| {
+            Ok(
+                Self::make_remote_intent_state(conn, &root_table, &root_id)?.map(
+                    |state| match state {
+                        MakeRemoteIntentState::Uploading => MakeRemoteProgress::Uploading,
+                        MakeRemoteIntentState::Cancelling => MakeRemoteProgress::Cancelling,
+                        MakeRemoteIntentState::Publishing(_) => MakeRemoteProgress::Publishing,
+                    },
+                ),
+            )
+        })
+        .await
+    }
+
     pub(crate) fn make_remote_intent_state(
         conn: &Connection,
         root_table: &str,

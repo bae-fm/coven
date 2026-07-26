@@ -1266,6 +1266,74 @@ pub struct ExternalBlob {
     pub size: u64,
 }
 
+/// How far a gated root's make-remote transition has got, as its durable
+/// intent records it. The write id a publication carries is bookkeeping the
+/// transition owns, so it is not part of this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MakeRemoteProgress {
+    /// Blobs are queued or uploading.
+    Uploading,
+    /// A cancellation is unwinding the transition.
+    Cancelling,
+    /// Every upload landed; the Store write that publishes them is pending.
+    Publishing,
+}
+
+/// One cloud object the durable queue is holding a tombstone for.
+///
+/// A delete carries only the stored object it removes — there is no row left to
+/// name, which is the point: the row is gone and this is what still has to
+/// happen in the cloud.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedDelete {
+    /// The namespace the removed blob lived in.
+    pub namespace: String,
+    /// The removed blob's id within that namespace.
+    pub blob_id: String,
+    /// Failed removal attempts so far; 0 for one never yet tried.
+    pub attempt_count: u64,
+    /// Why the last attempt failed, if one has.
+    pub last_error: Option<String>,
+    /// When the tombstone was enqueued.
+    pub created_at: String,
+    /// When it was last attempted, if it has been.
+    pub last_attempt_at: Option<String>,
+}
+
+/// One upload the durable cloud queue is holding, as a host renders it.
+///
+/// This is a projection of the queue row, not the drain's working entry: it
+/// carries what a person needs to see — which blob, which row it belongs to,
+/// whether it is retried and why — and none of the transfer bookkeeping the
+/// drain needs. `attempt_count` is 0 and `last_error` is `None` until a
+/// transfer has actually been tried and failed, so a freshly queued upload is
+/// distinguishable from a retrying one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedUpload {
+    /// The blob's namespace, from the queued row reference.
+    pub namespace: String,
+    /// The blob's id within that namespace.
+    pub blob_id: String,
+    /// The blob-bearing row this upload belongs to.
+    pub table_name: String,
+    pub row_id: String,
+    /// The gated root whose make-remote enqueued this upload. Every upload for
+    /// one root shares this pair, and the root is what a host groups by.
+    pub root_table: String,
+    pub root_id: String,
+    /// Whether the transition asked for the plaintext to stay cached locally
+    /// once the upload lands.
+    pub retain_pinned: bool,
+    /// Failed transfer attempts so far; 0 for an upload never yet tried.
+    pub attempt_count: u64,
+    /// Why the last attempt failed, if one has.
+    pub last_error: Option<String>,
+    /// When the upload was enqueued.
+    pub created_at: String,
+    /// When it was last attempted, if it has been.
+    pub last_attempt_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
     pub id: i64,
