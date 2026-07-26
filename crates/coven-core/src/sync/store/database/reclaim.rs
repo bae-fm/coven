@@ -202,6 +202,180 @@ impl StoreDatabase {
             .await
     }
 
+    /// Every stored row blob this device has an ownership record for, paired with
+    /// the activated Store commits whose package bindings published it.
+    /// `blob_locators` is the stored-blob subset of `remote_objects`, so it is the
+    /// exact candidate set without scanning every remote object.
+    pub(in crate::sync::store) async fn stored_blob_reclaim_candidates(
+        &self,
+    ) -> Result<
+        Vec<(
+            crate::blob::locator::StoredBlobRef,
+            Vec<StoreBatchCommitRef>,
+        )>,
+        DbError,
+    > {
+        self.database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT remote_object_id FROM blob_locators ORDER BY remote_object_id")
+                    .map_err(DbError::from)?;
+                let object_ids = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                drop(statement);
+                let mut candidates = Vec::new();
+                for object_id in object_ids {
+                    let parsed = object_id.parse().map_err(|error| {
+                        DbError::Message(format!("stored blob object id {object_id:?}: {error}"))
+                    })?;
+                    let remote = load_remote_object_on(conn, parsed)?;
+                    if !remote.is_activated_stored_blob() {
+                        continue;
+                    }
+                    let locator = crate::blob::locator::BlobLocator::parse(
+                        remote.bytes().canonical_semantic_bytes(),
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("stored blob {object_id} locator: {error}"))
+                    })?;
+                    let stored =
+                        crate::blob::locator::StoredBlobRef::new(locator, remote.object().clone())
+                            .map_err(|error| {
+                                DbError::Message(format!(
+                                    "stored blob {object_id} reference: {error}"
+                                ))
+                            })?;
+                    candidates.push((stored, remote.stored_blob_commit_owners()));
+                }
+                Ok(candidates)
+            })
+            .await
+    }
+
+    /// Whether a published snapshot generation lists this blob in its image, read
+    /// straight off the ownership record.
+    #[cfg(test)]
+    pub(crate) async fn stored_blob_has_snapshot_owner_for_test(
+        &self,
+        stored: crate::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        self.database
+            .call(move |conn| {
+                let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
+                let pinned = remote.snapshot_owners().next().is_some();
+                Ok(pinned)
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stored_blob_reclaim_candidates_for_test(
+        &self,
+    ) -> Result<
+        Vec<(
+            crate::blob::locator::StoredBlobRef,
+            Vec<StoreBatchCommitRef>,
+        )>,
+        DbError,
+    > {
+        self.stored_blob_reclaim_candidates().await
+    }
+
+    /// Whether no live row in this device's materialized state binds the blob as a
+    /// remote reference — the same predicate the member-signed tombstone path
+    /// applies before deleting a blob body. An unresolved reference is not an
+    /// answer: it means a row's locality cannot be decided yet, so it fails rather
+    /// than counting as an orphan.
+    pub(in crate::sync::store) async fn stored_blob_is_row_orphaned(
+        &self,
+        stored: crate::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        let gates = self.database.gates();
+        let tables = self.database.synced_tables().to_vec();
+        self.database
+            .call(move |conn| {
+                match crate::database::Database::stored_blob_reference_state_on(
+                    conn, &gates, &tables, &stored,
+                )? {
+                    crate::database::StoredBlobReferenceState::NotLiveRemote => Ok(true),
+                    crate::database::StoredBlobReferenceState::LiveRemote => Ok(false),
+                    crate::database::StoredBlobReferenceState::Unresolved => {
+                        Err(DbError::Message(format!(
+                            "stored blob {} has a live reference whose locality is unresolved",
+                            remote_object_id(stored.object())
+                        )))
+                    }
+                }
+            })
+            .await
+    }
+
+    /// Whether an installable image still pins this row blob.
+    ///
+    /// A snapshot or bootstrap image lists the exact blobs a device installing
+    /// from it must be able to read. Those blobs outlive the rows that published
+    /// them: a device restoring from an image reads its listed blobs before it has
+    /// any rows at all, so "no live row binds this blob" does not mean the blob is
+    /// free. A blob a retained image lists is never eligible, whatever its rows
+    /// say. Re-checked before deletion, so an image published since the
+    /// authorization was signed fails the delete loud rather than removing a blob
+    /// a restore now needs.
+    pub(in crate::sync::store) async fn audience_blob_is_retained_for_replay(
+        &self,
+        stored: crate::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        self.database
+            .call(move |conn| {
+                let object_id = remote_object_id(stored.object());
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                        [object_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if exists {
+                    let remote = load_remote_object_on(conn, object_id)?;
+                    // A published snapshot generation pinned this blob into its image,
+                    // or an accepted merge still replays the package that carried it.
+                    if remote.snapshot_owners().next().is_some()
+                        || remote.retained_replay_owners().next().is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                let mut statement = conn
+                    .prepare("SELECT bootstrap_ref FROM circle_bootstrap_coverage")
+                    .map_err(DbError::from)?;
+                let coverages = statement
+                    .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                drop(statement);
+                for bytes in coverages {
+                    let bootstrap: crate::sync::circle::CircleBootstrapRef =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            DbError::Message(format!(
+                                "parse retained Circle bootstrap reference: {error}"
+                            ))
+                        })?;
+                    if bootstrap
+                        .blobs
+                        .iter()
+                        .any(|blob| blob.stored() == Some(&stored))
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .await
+    }
+
     pub(in crate::sync::store) async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {

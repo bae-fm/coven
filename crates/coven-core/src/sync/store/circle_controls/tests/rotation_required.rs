@@ -11,17 +11,43 @@ fn circle_routing_migrations() -> Vec<crate::migration::Migration> {
                  id TEXT PRIMARY KEY,
                  audience TEXT,
                  _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE document_files (
+                 id TEXT PRIMARY KEY,
+                 document_id TEXT NOT NULL REFERENCES documents(id),
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
              ) STRICT;",
     )]
 }
 
-fn open_circle_routing_test_db() -> Database {
-    crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::sync::session::SyncedTable::new(
+/// `documents` is scoped by its audience column; `document_files` carries a blob
+/// and inherits its document's audience, so moving a document between audiences
+/// republishes its file's ciphertext under the destination audience's locator.
+fn circle_routing_tables() -> Vec<crate::sync::session::SyncedTable> {
+    vec![
+        crate::sync::session::SyncedTable::new(
             "documents",
             crate::sync::session::RowIdentity::IndependentUuid,
         )
-        .scoped_by("audience")],
+        .scoped_by("audience"),
+        crate::sync::session::SyncedTable::new(
+            "document_files",
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )
+        .inherits_audience_through("document_id")
+        .carries_blob(crate::sync::session::BlobDecl::new(
+            "files",
+            crate::blob::Provenance::HostProvided,
+            crate::blob::CacheFill::CacheEager,
+        )),
+    ]
+}
+
+fn open_circle_routing_test_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        circle_routing_tables(),
         circle_routing_migrations(),
     )
 }
@@ -2620,6 +2646,483 @@ async fn publish_covered_circle_package(
         .await
         .expect("owner activates the member acknowledgement");
     (circle_package, published)
+}
+
+/// Capture a document and one blob-bearing file row under `audience`, staging the
+/// file's bytes in the local store so the next cycle uploads them.
+async fn capture_document_with_file(
+    fixture: &RotationFixture,
+    document_id: &str,
+    file_id: &str,
+    audience: Option<CircleId>,
+    bytes: &[u8],
+    stamp: &str,
+) -> crate::WriteId {
+    let write_id = fixture.db.new_write_id();
+    let captured = write_id.clone();
+    let tables = fixture.db.synced_tables().to_vec();
+    let routing = EncryptionService::from_key([42; 32]);
+    let insert = format!(
+        "INSERT INTO documents (id, audience, _updated_at)
+         VALUES ('{document_id}', {}, '{stamp}');
+         INSERT INTO document_files (id, document_id, size, hash, _updated_at)
+         VALUES ('{file_id}', '{document_id}', {}, '{}', '{stamp}');",
+        audience
+            .map(|circle_id| format!("'{circle_id}'"))
+            .unwrap_or_else(|| "NULL".to_string()),
+        bytes.len(),
+        crate::blob::content_hash(bytes),
+    );
+    fixture
+        .db
+        .call(move |connection| {
+            StoreDatabase::run_internal_store_write_transaction_on(
+                connection,
+                &tables,
+                Some(&routing),
+                captured,
+                |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
+            )
+        })
+        .await
+        .expect("capture document and its file row");
+    crate::blob::local_files::store(&fixture.store_dir, "files", file_id, bytes)
+        .await
+        .expect("stage the document file bytes");
+    write_id
+}
+
+/// Move a document to another audience, republishing every blob its file rows
+/// carry under the destination audience's locator.
+async fn move_document_audience(
+    fixture: &RotationFixture,
+    document_id: &str,
+    audience: Option<CircleId>,
+    stamp: &str,
+) {
+    let write_id = fixture.db.new_write_id();
+    let tables = fixture.db.synced_tables().to_vec();
+    let gates = fixture.db.gates();
+    let blob_decls = fixture.db.blob_decls();
+    let audience_value = audience.map(|circle_id| circle_id.to_string());
+    let document_id = document_id.to_string();
+    let stamp = stamp.to_string();
+    // An audience move re-seals every blob the moved rows carry under the
+    // destination audience's key, so the write needs the storage and store
+    // directory that staging reads and writes.
+    let staging = crate::sync::store::HostWriteBlobStaging::new(
+        tokio::runtime::Handle::current(),
+        Ok(Some(std::sync::Arc::new(fixture.store.storage.clone()))),
+        fixture.store_dir.clone(),
+    );
+    fixture
+        .db
+        .call(move |connection| {
+            let routing = EncryptionService::from_key([42; 32]);
+            StoreDatabase::run_store_write_transaction_on(
+                connection,
+                &tables,
+                &gates,
+                &blob_decls,
+                Some(&routing),
+                Some(&staging),
+                write_id,
+                |transaction| {
+                    transaction
+                        .execute(
+                            "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
+                            rusqlite::params![document_id, audience_value, stamp],
+                        )
+                        .map_err(DbError::from)?;
+                    // The file rows are re-sealed under the destination audience, so
+                    // their bindings land at a new row stamp rather than replacing the
+                    // content already bound at the old one.
+                    transaction
+                        .execute(
+                            "UPDATE document_files SET _updated_at = ?2 WHERE document_id = ?1",
+                            rusqlite::params![document_id, stamp],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("move the document to another audience");
+}
+
+/// Every stored blob this device holds an ownership record for, in whichever
+/// audience its locator addresses.
+async fn stored_blobs(fixture: &RotationFixture) -> Vec<crate::blob::locator::StoredBlobRef> {
+    StoreDatabase::new(&fixture.db)
+        .stored_blob_reclaim_candidates_for_test()
+        .await
+        .expect("read stored blob candidates")
+        .into_iter()
+        .map(|(stored, _)| stored)
+        .collect()
+}
+
+/// Whether the exact blob ciphertext is still readable in cloud storage.
+async fn blob_object_present(
+    fixture: &RotationFixture,
+    stored: &crate::blob::locator::StoredBlobRef,
+) -> bool {
+    match fixture.store.storage.verify_blob_object(stored).await {
+        Ok(()) => true,
+        Err(crate::sync::storage::StorageError::NotFound(_)) => false,
+        Err(error) => panic!("read the exact stored blob: {error}"),
+    }
+}
+
+/// A user-initiated blob deletion writes a signed tombstone and the graced GC
+/// performs the delete, but only after re-checking that no live row still
+/// references the blob. That check has to be able to answer for a row whose
+/// locality comes from an audience column rather than a keep gate — a Circle
+/// document's attachment is exactly that shape — or the whole GC pass fails and no
+/// tombstone anywhere is ever collected.
+#[tokio::test]
+async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row() {
+    let fixture = rotation_fixture("audience-scoped-tombstone-gc").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    capture_document_with_file(
+        &fixture,
+        "00000000-0000-4000-8000-0000000000e3",
+        "00000000-0000-4000-8000-0000000000f3",
+        Some(fixture.circle_id),
+        b"circle attachment under a tombstone",
+        "2026-07-23T00:10:00Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the Circle document and its file");
+    let published = stored_blobs(&fixture).await;
+    let [stored] = published.as_slice() else {
+        panic!("the Circle document published exactly one blob: {published:?}");
+    };
+    let stored = stored.clone();
+
+    // A stale tombstone over a blob whose row is still live: past the grace the GC
+    // must resolve the reference, cancel the tombstone, and keep the ciphertext.
+    let deleted_at = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:11:00+00:00")
+        .expect("valid tombstone instant")
+        .with_timezone(&chrono::Utc);
+    let enqueued = stored.clone();
+    fixture
+        .db
+        .call(move |connection| {
+            crate::database::Database::enqueue_delete_on(
+                connection,
+                &enqueued,
+                "2026-07-23T00:11:00Z",
+            )
+        })
+        .await
+        .expect("enqueue the blob deletion");
+    let cipher = std::sync::RwLock::new(crate::sync::cloud_storage::CloudCipher::Encrypted(
+        EncryptionService::from_key([42; 32]),
+    ));
+    assert_eq!(
+        crate::blob::delete::drain_tombstones(
+            &fixture.db,
+            fixture.store.home.as_ref(),
+            &cipher,
+            &crate::sync::cloud_storage::PendingRotation::default(),
+            fixture.store.storage.store_id(),
+            &fixture.signer,
+            &crate::clock::FixedClock(deleted_at),
+        )
+        .await
+        .expect("write the signed tombstone"),
+        1,
+        "the queued deletion writes one tombstone"
+    );
+    let tombstone_key = format!(
+        "blob_tombstones/{}{}",
+        crate::sync::remote_object::remote_object_id(stored.object()),
+        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32]))
+            .suffix(),
+    );
+    assert!(
+        fixture.store.home.read(&tombstone_key).await.is_ok(),
+        "the tombstone is written at its exact slot"
+    );
+
+    let past = crate::clock::FixedClock(
+        deleted_at + crate::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
+    );
+    let collected =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize the Owner Store")
+            .gc_tombstones(
+                fixture.store.home.as_ref(),
+                &cipher,
+                fixture.store.storage.store_id(),
+                &keys::public_key_hex(&fixture.signer),
+                &past,
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+            )
+            .await
+            .expect("run the graced tombstone GC over an audience-scoped blob");
+
+    assert_eq!(
+        collected, 0,
+        "a live row still references the blob, so nothing is collected"
+    );
+    assert!(
+        blob_object_present(&fixture, &stored).await,
+        "the referenced ciphertext stays in cloud storage"
+    );
+    assert!(
+        fixture.store.home.read(&tombstone_key).await.is_err(),
+        "the stale tombstone is canceled"
+    );
+}
+
+/// Moving a row between audiences republishes its blob under the destination
+/// audience's locator and drops the binding to the source ciphertext, which
+/// nothing else ever deletes. Reclamation deletes exactly the ciphertext no live
+/// row binds any more — in both directions, since a document can leave a Circle
+/// for the Store audience or join one from it — and leaves the destination
+/// ciphertext, which a live row does bind, alone.
+#[tokio::test]
+async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
+    let fixture = rotation_fixture("audience-blob-reclaim").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let leaving = "00000000-0000-4000-8000-0000000000e1";
+    let joining = "00000000-0000-4000-8000-0000000000e2";
+    capture_document_with_file(
+        &fixture,
+        leaving,
+        "00000000-0000-4000-8000-0000000000f1",
+        Some(fixture.circle_id),
+        b"circle attachment",
+        "2026-07-23T00:10:00Z",
+    )
+    .await;
+    capture_document_with_file(
+        &fixture,
+        joining,
+        "00000000-0000-4000-8000-0000000000f2",
+        None,
+        b"store attachment",
+        "2026-07-23T00:10:01Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish both documents and their files");
+
+    let sources = stored_blobs(&fixture).await;
+    assert_eq!(
+        sources.len(),
+        2,
+        "one ciphertext per audience is published: {sources:?}"
+    );
+    for stored in &sources {
+        assert!(
+            blob_object_present(&fixture, stored).await,
+            "the published ciphertext is uploaded"
+        );
+    }
+
+    // Nothing has moved yet: every ciphertext is still bound by a live row.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation while every blob is still bound");
+    for stored in &sources {
+        assert!(
+            blob_object_present(&fixture, stored).await,
+            "a blob a live row still binds is never reclaimed"
+        );
+    }
+
+    move_document_audience(&fixture, leaving, None, "2026-07-23T00:20:00Z").await;
+    move_document_audience(
+        &fixture,
+        joining,
+        Some(fixture.circle_id),
+        "2026-07-23T00:20:01Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("republish both documents under their destination audiences");
+
+    let after_move = stored_blobs(&fixture).await;
+    let destinations = after_move
+        .into_iter()
+        .filter(|stored| !sources.contains(stored))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        destinations.len(),
+        2,
+        "each move republished its blob under a new locator: {destinations:?}"
+    );
+
+    // A blob a published snapshot image lists is read by devices restoring from
+    // that image, which have no rows at all — so an unbound blob an image still
+    // names is held back rather than deleted.
+    let mut pinned_by_an_image = Vec::new();
+    for stored in &sources {
+        if StoreDatabase::new(&fixture.db)
+            .stored_blob_has_snapshot_owner_for_test(stored.clone())
+            .await
+            .expect("read the blob's snapshot ownership")
+        {
+            pinned_by_an_image.push(stored.clone());
+        }
+    }
+
+    // A blob an accepted merge still replays is not free however its rows moved;
+    // release that ownership, as a superseding coverage cut does in production.
+    release_retained_replay_ownership(&fixture).await;
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the stranded source ciphertext");
+
+    let mut deleted = 0;
+    for stored in &sources {
+        if pinned_by_an_image.contains(stored) {
+            assert!(
+                blob_object_present(&fixture, stored).await,
+                "a blob a published snapshot image lists survives its rows moving away: {:?}",
+                stored.locator().audience()
+            );
+            continue;
+        }
+        assert!(
+            !blob_object_present(&fixture, stored).await,
+            "the stranded source ciphertext is deleted: {:?}",
+            stored.locator().audience()
+        );
+        deleted += 1;
+    }
+    assert!(
+        deleted > 0,
+        "at least one stranded source ciphertext was reclaimable"
+    );
+    for stored in &destinations {
+        assert!(
+            blob_object_present(&fixture, stored).await,
+            "the destination ciphertext a live row binds survives: {:?}",
+            stored.locator().audience()
+        );
+    }
+}
+
+/// Every reclaim kind rides the same durable journal, so a delete that fails
+/// between authorization and deletion must leave a plan the next run finishes.
+/// Driven over a stranded audience blob because its eligibility is fully
+/// controlled here — the move unbinds it and releasing replay ownership frees it —
+/// so the interruption lands on the delete under test rather than on whatever a
+/// setup cycle happened to reclaim first.
+#[tokio::test]
+async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
+    let fixture = rotation_fixture("audience-blob-crash-resume").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let document = "00000000-0000-4000-8000-0000000000e5";
+    capture_document_with_file(
+        &fixture,
+        document,
+        "00000000-0000-4000-8000-0000000000f5",
+        Some(fixture.circle_id),
+        b"circle attachment for the interrupted reclaim",
+        "2026-07-23T00:10:00Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the Circle document and its file");
+    let published = stored_blobs(&fixture).await;
+    let [source] = published.as_slice() else {
+        panic!("the Circle document published exactly one blob: {published:?}");
+    };
+    let source = source.clone();
+
+    move_document_audience(&fixture, document, None, "2026-07-23T00:20:00Z").await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("republish the document under the Store audience");
+    release_retained_replay_ownership(&fixture).await;
+
+    // The stranded ciphertext is now eligible. Fail its delete: the reclaim
+    // authorizes the deletion, the delete fails, and the run surfaces the failure
+    // to its initiator with the object still present.
+    fixture
+        .store
+        .home
+        .fail_nth_exact_delete_of(&[source.object().slot()], 1);
+    let interrupted = crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await;
+    assert!(
+        interrupted.is_err(),
+        "the delete failure fails the reclaim to its initiator: {interrupted:?}"
+    );
+    assert!(
+        blob_object_present(&fixture, &source).await,
+        "the stranded ciphertext survives the interrupted deletion"
+    );
+
+    // The journal still holds the authorized reclaim, so a restart finishes it.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("restart resumes the interrupted audience blob reclaim");
+    assert!(
+        !blob_object_present(&fixture, &source).await,
+        "the restart deletes the stranded ciphertext"
+    );
+
+    // A further run is idempotent: the target is recorded as reclaimed, so nothing
+    // re-authorizes or re-deletes it.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("a further run finds nothing left to reclaim");
+    assert!(
+        !blob_object_present(&fixture, &source).await,
+        "the reclaimed ciphertext stays absent"
+    );
 }
 
 /// The owner device's Circle snapshot stream, read the way any reader reads it:

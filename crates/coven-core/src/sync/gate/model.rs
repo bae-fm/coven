@@ -82,7 +82,7 @@ impl Gates {
             .any(|gate| matches!(gate, TableGate::ScopedRoot { .. }))
     }
 
-    pub(super) fn table_is_scoped(&self, table: &str) -> bool {
+    pub(crate) fn table_is_scoped(&self, table: &str) -> bool {
         let mut current = table;
         let mut seen = HashSet::new();
         loop {

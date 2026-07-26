@@ -315,7 +315,74 @@ async fn validate_commit_reclaim_authorization(
         super::store_reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
             validate_circle_snapshot_activated_reclaim_target(&target, &activation)
         }
+        super::store_reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
+            Box::pin(validate_package_bound_reclaim_target(
+                storage,
+                root,
+                root_value,
+                commit,
+                &target,
+                &activation,
+            ))
+            .await
+        }
     }
+}
+
+/// Bind a row blob to the package that published it. The blob is never named in a
+/// commit body — only inside the package's bindings — so what a commit establishes
+/// is that the named package was activated by a commit in this device's
+/// predecessor history. The blob's own reference is self-binding: its object key is
+/// derived from its locator, which names the audience and uploading device, and
+/// the audience must be the one the package addresses. Reading the bindings
+/// themselves requires the package's audience key, which a Store member outside a
+/// Circle does not hold; the Owner re-reads them before authorizing any delete.
+async fn validate_package_bound_reclaim_target(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    commit: &StoreBatchCommit,
+    target: &super::store_reclaim::ReclaimTarget,
+    activation: &super::store_reclaim::PackageBlobBindingActivation<'_>,
+) -> Result<(), RegistrationLoadError> {
+    let super::store_reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim target is not published by a package binding".to_string(),
+        ));
+    };
+    let expected = activation.activation.clone();
+    let (_, activating) = Box::pin(predecessor_commit_matching_at_root(
+        storage,
+        root,
+        root_value,
+        &commit.order,
+        Box::new(move |candidate, _| candidate == &expected),
+    ))
+    .await?
+    .ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim evidence blob activation is absent from predecessor history".to_string(),
+        )
+    })?;
+    let names_package = match activation.package {
+        super::store_reclaim::AudienceBlobBindingPackage::Store(package) => {
+            activating.store_package() == Some(package)
+        }
+        super::store_reclaim::AudienceBlobBindingPackage::Circle(package) => {
+            activating.circle_packages().contains(package)
+        }
+    };
+    if !names_package {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim evidence blob package differs from its exact activation".to_string(),
+        ));
+    }
+    if blob.blob.locator().audience() != activation.package.remote_audience() {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim evidence blob names a package for another audience".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Bind a reclaim target to the retained Store commit that published it: the
@@ -356,9 +423,11 @@ async fn validate_commit_activated_reclaim_target(
             .iter()
             .flat_map(|control| control.objects.access.iter())
             .any(|access| access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)),
-        super::store_reclaim::ReclaimTarget::CircleSnapshotImage(_) => {
+        super::store_reclaim::ReclaimTarget::CircleSnapshotImage(_)
+        | super::store_reclaim::ReclaimTarget::AudienceBlob(_) => {
             return Err(RegistrationLoadError::Invalid(
-                "Circle snapshot image reclaim target claims a Store commit activation".to_string(),
+                "reclaim target claims a Store commit activation it is not published by"
+                    .to_string(),
             ));
         }
     };

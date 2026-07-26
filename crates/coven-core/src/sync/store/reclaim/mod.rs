@@ -38,6 +38,7 @@ pub enum ReclaimTarget {
     CirclePackage(CirclePackageReclaimTarget),
     CircleBootstrapImage(CircleBootstrapImageReclaimTarget),
     CircleSnapshotImage(CircleSnapshotImageReclaimTarget),
+    AudienceBlob(AudienceBlobReclaimTarget),
 }
 
 impl ReclaimTarget {
@@ -47,6 +48,7 @@ impl ReclaimTarget {
             Self::CirclePackage(target) => &target.package.package.object,
             Self::CircleBootstrapImage(target) => &target.coverage.bootstrap.image.object,
             Self::CircleSnapshotImage(target) => &target.image.object,
+            Self::AudienceBlob(target) => target.blob.object(),
         }
     }
 
@@ -64,6 +66,12 @@ impl ReclaimTarget {
                     snapshot: &target.snapshot,
                 })
             }
+            Self::AudienceBlob(target) => {
+                ReclaimActivation::PackageBlobBinding(PackageBlobBindingActivation {
+                    package: &target.package,
+                    activation: &target.activation,
+                })
+            }
         }
     }
 }
@@ -71,12 +79,14 @@ impl ReclaimTarget {
 /// The signed statement that put a reclaim target into the shared live set — the
 /// authority a verifier re-reads to confirm the Owner is deleting what its claim
 /// says. It follows how the object was published: a Store commit names packages
-/// and the bootstrap images its Circle-control activations carry, while a device's
+/// and the bootstrap images its Circle-control activations carry; a device's
 /// per-Circle snapshot stream names its own images through signed metadata that
-/// rides no commit at all.
+/// rides no commit at all; and a row blob is named by the bindings of the package
+/// that published the row, not by the commit body.
 pub(crate) enum ReclaimActivation<'a> {
     Commit(&'a StoreBatchCommitRef),
     CircleSnapshotMetadata(CircleSnapshotStreamActivation<'a>),
+    PackageBlobBinding(PackageBlobBindingActivation<'a>),
 }
 
 impl ReclaimActivation<'_> {
@@ -86,8 +96,19 @@ impl ReclaimActivation<'_> {
         match self {
             Self::Commit(commit) => &commit.object,
             Self::CircleSnapshotMetadata(activation) => &activation.snapshot.object,
+            Self::PackageBlobBinding(activation) => activation.package.object(),
         }
     }
+}
+
+/// The exact package whose row-blob bindings carry a reclaimed blob's locator,
+/// together with the Store commit that activated it. A blob rides inside a package
+/// addressed to one audience and is never named by the commit body, so the package
+/// is the signed statement a verifier re-reads to confirm the blob was published
+/// where the claim says.
+pub(crate) struct PackageBlobBindingActivation<'a> {
+    pub package: &'a AudienceBlobBindingPackage,
+    pub activation: &'a StoreBatchCommitRef,
 }
 
 /// One generation of a device's per-Circle snapshot stream, named by the exact
@@ -111,6 +132,7 @@ pub enum ReclaimClaim {
     CirclePackage(CirclePackageReclaimClaim),
     CircleBootstrapImage(CircleBootstrapImageReclaimClaim),
     CircleSnapshotImage(CircleSnapshotImageReclaimClaim),
+    AudienceBlob(AudienceBlobReclaimClaim),
 }
 
 impl ReclaimClaim {
@@ -124,6 +146,7 @@ impl ReclaimClaim {
             Self::CircleSnapshotImage(claim) => {
                 ReclaimTarget::CircleSnapshotImage(claim.target.clone())
             }
+            Self::AudienceBlob(claim) => ReclaimTarget::AudienceBlob(claim.target.clone()),
         }
     }
 
@@ -133,6 +156,7 @@ impl ReclaimClaim {
             Self::CirclePackage(claim) => claim.validate(),
             Self::CircleBootstrapImage(claim) => claim.validate(),
             Self::CircleSnapshotImage(claim) => claim.validate(),
+            Self::AudienceBlob(claim) => claim.validate(),
         }
     }
 }
@@ -435,6 +459,77 @@ impl CircleSnapshotImageReclaimClaim {
         if *image == self.target.snapshot.object || *image == self.superseding.object {
             return Err(StoreProtocolError::Malformed(
                 "Circle snapshot reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The exact package whose row-blob bindings published one blob, in whichever
+/// audience the row was written to. Reading the package back needs its audience:
+/// a Store package is sealed to the Store, a Circle package to the Circle epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AudienceBlobBindingPackage {
+    Store(StorePackageRef),
+    Circle(CirclePackageRef),
+}
+
+impl AudienceBlobBindingPackage {
+    pub(crate) fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::Store(package) => &package.object,
+            Self::Circle(package) => &package.package.object,
+        }
+    }
+
+    pub(crate) fn remote_audience(&self) -> crate::blob::locator::RemoteAudience {
+        match self {
+            Self::Store(_) => crate::blob::locator::RemoteAudience::Store,
+            Self::Circle(package) => {
+                crate::blob::locator::RemoteAudience::Circle(package.circle_id)
+            }
+        }
+    }
+}
+
+/// The exact ciphertext of one row blob that no live row still binds in its
+/// audience. Moving a row to another audience republishes its blob under a new
+/// locator and drops the old binding, leaving the source ciphertext addressed to
+/// an audience nothing reads from any more.
+///
+/// The blob reference is self-binding: its object's logical key is derived from
+/// the locator, which names the audience and the uploading device, so a target
+/// cannot describe one object while naming another's addressing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceBlobReclaimTarget {
+    pub blob: crate::blob::locator::StoredBlobRef,
+    pub package: AudienceBlobBindingPackage,
+    pub activation: StoreBatchCommitRef,
+}
+
+/// Evidence that a row blob is no longer bound by any live row. The claim carries
+/// nothing but the target: the verifier re-reads the publishing package to confirm
+/// it bound this blob, then re-derives from its own materialized rows that none
+/// still binds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudienceBlobReclaimClaim {
+    pub target: AudienceBlobReclaimTarget,
+}
+
+impl AudienceBlobReclaimClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        let blob = self.target.blob.object();
+        if blob == self.target.package.object() || *blob == self.target.activation.object {
+            return Err(StoreProtocolError::Malformed(
+                "audience blob reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        if self.target.blob.locator().audience() != self.target.package.remote_audience() {
+            return Err(StoreProtocolError::Malformed(
+                "audience blob reclaim target names a package for another audience".to_string(),
             ));
         }
         Ok(())
@@ -1073,6 +1168,15 @@ async fn reclaim_store_packages(
         &registrations,
     ))
     .await?;
+    Box::pin(prepare_audience_blob_reclaim_authorizations(
+        database,
+        storage,
+        device_id,
+        identity_signer,
+        membership,
+        &root,
+    ))
+    .await?;
     packages_deleted = packages_deleted
         .checked_add(
             Box::pin(resume_store_reclaim_operations(
@@ -1172,6 +1276,95 @@ async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
                     successor_control: current_control.clone(),
                 },
             )),
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+/// The package in one commit that could have published a blob of this audience.
+/// The blob's own locator names its audience, and a commit carries at most one
+/// package per audience, so the audience selects the package outright.
+fn audience_blob_binding_package(
+    commit: &crate::sync::store_commit::StoreBatchCommit,
+    audience: crate::blob::locator::RemoteAudience,
+) -> Option<AudienceBlobBindingPackage> {
+    match audience {
+        crate::blob::locator::RemoteAudience::Store => commit
+            .store_package()
+            .cloned()
+            .map(AudienceBlobBindingPackage::Store),
+        crate::blob::locator::RemoteAudience::Circle(circle_id) => commit
+            .circle_packages()
+            .iter()
+            .find(|package| package.circle_id == circle_id)
+            .cloned()
+            .map(AudienceBlobBindingPackage::Circle),
+    }
+}
+
+/// Authorize deletion of every row blob no live row still binds in its audience.
+/// Moving a row to another audience republishes its blob under a new locator and
+/// drops the old binding, stranding the source ciphertext; nothing else ever
+/// deletes it. The same orphan test the member-signed tombstone path applies
+/// decides eligibility, and an image that still pins the blob holds it back.
+async fn prepare_audience_blob_reclaim_authorizations(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: &MembershipChain,
+    root: &StoreRootRef,
+) -> Result<(), StoreReclaimError> {
+    for (blob, owners) in database.stored_blob_reclaim_candidates().await? {
+        if !database.stored_blob_is_row_orphaned(blob.clone()).await? {
+            continue;
+        }
+        if database
+            .audience_blob_is_retained_for_replay(blob.clone())
+            .await?
+        {
+            continue;
+        }
+        // Which owning commit's package carries the binding is the one thing no
+        // local state records — the audience picks the package within a commit, but
+        // not which commit. Probe only that dimension.
+        let mut binding = None;
+        for owner in &owners {
+            let (commit, _) = super::pull::load_commit_with_author(storage, root, owner)
+                .await
+                .map_err(StoreReclaimError::Object)?;
+            if let Some(package) = audience_blob_binding_package(&commit, blob.locator().audience())
+            {
+                binding = Some((package, owner.clone()));
+                break;
+            }
+        }
+        let Some((package, activation)) = binding else {
+            tracing::debug!(
+                blob = %crate::sync::remote_object::remote_object_id(blob.object()),
+                "skip orphaned blob whose owning commits name no package for its audience",
+            );
+            continue;
+        };
+        let target = AudienceBlobReclaimTarget {
+            blob,
+            package,
+            activation,
+        };
+        if reclaim_target_is_recorded(database, &ReclaimTarget::AudienceBlob(target.clone()))
+            .await?
+        {
+            continue;
+        }
+        Box::pin(prepare_reclaim_authorization(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            ReclaimClaim::AudienceBlob(AudienceBlobReclaimClaim { target }),
         ))
         .await?;
     }
@@ -1878,13 +2071,16 @@ async fn execute_reclaim_delete(
             "reclaim target remains retained for accepted replay".to_string(),
         ));
     }
-    storage
-        .delete_protocol_object(target.object())
-        .await
-        .map_err(|source| StoreReclaimError::Delete {
-            activation: target.activation().object().stored_hash(),
-            source,
-        })?;
+    // A row blob has no protocol domain: it is addressed by its locator, so its
+    // exact delete goes through the blob primitive rather than the protocol one.
+    match &target {
+        ReclaimTarget::AudienceBlob(blob) => storage.delete_blob_object(&blob.blob).await,
+        _ => storage.delete_protocol_object(target.object()).await,
+    }
+    .map_err(|source| StoreReclaimError::Delete {
+        activation: target.activation().object().stored_hash(),
+        source,
+    })?;
     verify_reclaim_target_absent(database, storage, &root, &target).await?;
     database
         .mark_store_reclaim_target_absent(operation, target)
@@ -1913,6 +2109,9 @@ async fn target_is_retained_for_replay(
             .await?),
         ReclaimTarget::CircleSnapshotImage(target) => Ok(database
             .circle_image_is_retained_for_replay(target.circle_id, target.image.clone())
+            .await?),
+        ReclaimTarget::AudienceBlob(target) => Ok(database
+            .audience_blob_is_retained_for_replay(target.blob.clone())
             .await?),
     }
 }
@@ -2018,7 +2217,105 @@ async fn verify_reclaim_evidence(
         ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
             verify_circle_snapshot_image_reclaim_claim(database, storage, root, claim).await?,
         )),
+        ReclaimClaim::AudienceBlob(claim) => Ok(ReclaimTarget::AudienceBlob(
+            verify_audience_blob_reclaim_claim(database, storage, root, claim).await?,
+        )),
     }
+}
+
+/// Re-verify that a row blob is free. The package the claim names is re-read from
+/// storage and must itself bind this exact blob — the signed statement that
+/// published it — and the orphan test is re-run against this device's own
+/// materialized rows rather than taken from the claim.
+async fn verify_audience_blob_reclaim_claim(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    claim: &AudienceBlobReclaimClaim,
+) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
+    let package = read_audience_blob_binding_package(
+        database,
+        storage,
+        root,
+        &claim.target.package,
+        &claim.target.activation,
+    )
+    .await?;
+    if !package
+        .blob_bindings()
+        .iter()
+        .any(|binding| binding.blob() == &claim.target.blob)
+    {
+        return Err(StoreReclaimError::Authorization(
+            "audience blob reclaim package does not bind the target blob".to_string(),
+        ));
+    }
+    if !database
+        .stored_blob_is_row_orphaned(claim.target.blob.clone())
+        .await?
+    {
+        return Err(StoreReclaimError::Authorization(
+            "a live row still binds the audience blob as a remote reference".to_string(),
+        ));
+    }
+    Ok(claim.target.clone())
+}
+
+/// Read back the exact package body that published a blob. A Store package is
+/// sealed to the Store and a Circle package to its epoch, so the audience selects
+/// both the read context and the semantic prefix.
+async fn read_audience_blob_binding_package(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    package: &AudienceBlobBindingPackage,
+    activation: &StoreBatchCommitRef,
+) -> Result<crate::sync::audience_package::AudiencePackage, StoreReclaimError> {
+    let (context, prefix, object) = match package {
+        AudienceBlobBindingPackage::Store(package) => (
+            ProtocolObjectContext::store_encrypted(
+                root.store_root_hash,
+                ProtocolObjectDomain::StorePackage,
+            ),
+            crate::sync::store_commit::package_semantic_prefix(
+                package.candidate_family,
+                &activation.coord.stream_id.to_string(),
+                activation.coord.sequence(),
+                package.content_hash,
+            ),
+            &package.object,
+        ),
+        AudienceBlobBindingPackage::Circle(package) => {
+            let access = database
+                .circle_package_access(package.circle_id, package.control.clone())
+                .await?
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "audience blob reclaim package key is not resolvable".to_string(),
+                    )
+                })?;
+            (
+                ProtocolObjectContext::circle(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::CirclePackage,
+                    access.encryption,
+                ),
+                crate::sync::store_commit::circle_package_semantic_prefix(
+                    package.circle_id,
+                    package.package.candidate_family,
+                    &activation.coord.stream_id.to_string(),
+                    activation.coord.sequence(),
+                    package.package.content_hash,
+                ),
+                &package.package.object,
+            )
+        }
+    };
+    let bytes = storage
+        .read_protocol_object(&context, object, &prefix)
+        .await?;
+    crate::sync::audience_package::AudiencePackage::parse(&bytes)
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
 }
 
 /// Re-verify that a later generation of the reclaimed image's own stream
@@ -2725,6 +3022,18 @@ async fn verify_reclaim_target_absent(
     root: &StoreRootRef,
     target: &ReclaimTarget,
 ) -> Result<(), StoreReclaimError> {
+    // A row blob is addressed by its locator, not by a protocol domain prefix, so
+    // its absence is confirmed through the same exact-object verification the blob
+    // primitives use.
+    if let ReclaimTarget::AudienceBlob(blob) = target {
+        return match storage.verify_blob_object(&blob.blob).await {
+            Err(StorageError::NotFound(_)) => Ok(()),
+            Ok(()) => Err(StoreReclaimError::Authorization(
+                "reclaim target remains readable after exact deletion".to_string(),
+            )),
+            Err(error) => Err(StoreReclaimError::Storage(error)),
+        };
+    }
     let (context, prefix) = match target {
         ReclaimTarget::StorePackage(target) => (
             ProtocolObjectContext::store_encrypted(
@@ -2817,6 +3126,11 @@ async fn verify_reclaim_target_absent(
                 )
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
             )
+        }
+        ReclaimTarget::AudienceBlob(_) => {
+            return Err(StoreReclaimError::Authorization(
+                "audience blob reclaim target has no protocol object prefix".to_string(),
+            ));
         }
     };
     match storage

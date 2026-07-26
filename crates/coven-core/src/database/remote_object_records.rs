@@ -360,10 +360,28 @@ pub(crate) fn record_reclaimed_store_package_on(
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
+            crate::sync::store::ReclaimTarget::AudienceBlob(target) => {
+                remote.validate_reclaimable_stored_blob(&target.blob)
+            }
         }
         .map_err(|error| {
             DbError::Message(format!("close reclaimed package {object_id}: {error}"))
         })?;
+        // A stored blob is referenced by a chain: row bindings name its locator row,
+        // which names its remote object. All three leave in this transaction or none
+        // does. The bindings that remain here are stale by construction — the reclaim
+        // verified no live row resolves to this blob — and they are what the foreign
+        // keys would otherwise hold the locator row against.
+        conn.execute(
+            "DELETE FROM row_blob_locators WHERE remote_object_id = ?1",
+            [object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "DELETE FROM blob_locators WHERE remote_object_id = ?1",
+            [object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
         let deleted = conn
             .execute(
                 "DELETE FROM remote_objects WHERE object_id = ?1",

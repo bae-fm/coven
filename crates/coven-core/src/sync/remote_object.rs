@@ -963,6 +963,59 @@ impl RemoteObjectRecord {
         Ok(ownership)
     }
 
+    /// A stored blob is reclaimable when it is the exact activated blob the target
+    /// names. Unlike a package or an image, a blob legitimately carries several
+    /// activated owners — one per commit that bound it — so ownership count is not
+    /// the eligibility question here; whether any live row or installable image
+    /// still needs it is, and the reclaim verified that before reaching closure.
+    pub(crate) fn validate_reclaimable_stored_blob(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        let locator_bytes = stored.locator().to_bytes();
+        if record.identity.domain != SharedLiveSetObjectDomain::StoredBlob
+            || record.identity.semantic_hash != ObjectHash::digest(&locator_bytes)
+            || record.identity.object != *stored.object()
+            || record.bytes.canonical_semantic_bytes() != locator_bytes
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !ownership.pending.is_empty() || ownership.activated.is_empty() {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
+    }
+
+    /// The activated Store commits that published this stored blob. A blob accretes
+    /// one per commit whose package bindings named it, so a republished blob carries
+    /// several.
+    pub(crate) fn stored_blob_commit_owners(&self) -> Vec<StoreBatchCommitRef> {
+        let Self::SharedLiveSet(record) = self else {
+            return Vec::new();
+        };
+        if record.identity.domain != SharedLiveSetObjectDomain::StoredBlob {
+            return Vec::new();
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Vec::new();
+        };
+        ownership
+            .activated
+            .iter()
+            .filter_map(|owner| match owner {
+                SharedObjectOwner::StoreCommit(commit) => Some(commit.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot_owners(&self) -> impl Iterator<Item = &SnapshotObjectOwner> {
         let owners = match self {
             Self::SharedLiveSet(record)
