@@ -13,6 +13,13 @@ pub enum StoreError {
     InvalidState { key: &'static str, reason: String },
     #[error("outbound Store row is invalid: {0}")]
     InvalidOutbound(String),
+    /// Another writer took the activation slot between this operation's
+    /// preparation and its publication, so the candidate had to be re-prepared
+    /// and **nothing was persisted**. Re-derive from durable state and run the
+    /// operation again; it is the ordinary outcome of two writers racing, not a
+    /// damaged store.
+    #[error("another writer activated first; this Store operation persisted nothing")]
+    ActivationConflict,
     #[error("outbound Store preparation failed: {0}")]
     Preparation(#[source] crate::sync::service::SyncCycleError),
     #[error("outbound blob {namespace}/{id} is local and cannot be published")]

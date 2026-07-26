@@ -251,9 +251,7 @@ pub(crate) async fn activate_store_operation_commit(
         )),
         StoreOperationPublicationOutcome::RepreparedCandidate(_)
         | StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
-            Err(StoreError::InvalidOutbound(
-                "unpersisted Store operation encountered an activation conflict".to_string(),
-            ))
+            Err(StoreError::ActivationConflict)
         }
     }
 }

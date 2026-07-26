@@ -4,6 +4,9 @@ pub(crate) fn blocked_status(error: &StoreError) -> Option<crate::WriteBlock> {
     match error {
         StoreError::Database(_)
         | StoreError::BlobStorage { .. }
+        // Nothing was persisted and the caller re-runs the operation, so this
+        // blocks no writer.
+        | StoreError::ActivationConflict
         | StoreError::CandidateCleanup(_) => None,
         StoreError::MergeAnnouncementOccupied { .. } => {
             Some(crate::WriteBlock::InvalidProtocolState {

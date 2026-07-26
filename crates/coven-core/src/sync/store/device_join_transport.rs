@@ -767,6 +767,76 @@ pub async fn drive_device_join(
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+    retrying_activation_conflicts(|| {
+        drive_device_join_once(
+            store,
+            identity_signer,
+            bundle,
+            &policy,
+            access_administrator,
+            timing,
+        )
+    })
+    .await
+}
+
+/// How many times a driver re-derives after losing an activation slot, and how
+/// long it waits before each retry.
+///
+/// A device holding the join also runs its sync loop, so the two publish Store
+/// operations against the same positions. Losing that race persists nothing, so
+/// the answer is to re-derive and go again — but only so many times: a store
+/// that keeps refusing is not a race, and has to surface.
+const ACTIVATION_CONFLICT_RETRIES: usize = 8;
+const ACTIVATION_CONFLICT_BACKOFF: Duration = Duration::from_millis(25);
+
+/// Whether this failure is another writer having taken the activation slot
+/// first — which persisted nothing, so the operation can simply be re-derived.
+fn is_activation_conflict(error: &DeviceJoinTransportError) -> bool {
+    matches!(
+        error,
+        DeviceJoinTransportError::DeviceJoin(DeviceJoinError::Outbound(
+            crate::sync::store::StoreError::ActivationConflict
+        ))
+    )
+}
+
+/// Run a driver pass, re-entering it when it loses an activation slot.
+///
+/// Every pass starts from the role journals, so a re-entry resumes rather than
+/// repeating: the phases already settled are skipped and the one that lost the
+/// race is re-derived against whatever the winner just committed. The backoff
+/// grows so a busy store is not hammered, and the last failure propagates
+/// unchanged once the budget is spent — this retries a lost race, it does not
+/// paper over a wedged store.
+async fn retrying_activation_conflicts<Pass, Fut, T>(
+    mut pass: Pass,
+) -> Result<T, DeviceJoinTransportError>
+where
+    Pass: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, DeviceJoinTransportError>>,
+{
+    // Each pass is boxed: a driver pass composes many large generators, and
+    // holding one inline here would add its whole frame to this loop's own.
+    for attempt in 0..ACTIVATION_CONFLICT_RETRIES {
+        match Box::pin(pass()).await {
+            Err(error) if is_activation_conflict(&error) => {
+                tokio::time::sleep(ACTIVATION_CONFLICT_BACKOFF * (attempt as u32 + 1)).await;
+            }
+            settled => return settled,
+        }
+    }
+    Box::pin(pass()).await
+}
+
+async fn drive_device_join_once(
+    store: &Store,
+    identity_signer: &UserKeypair,
+    bundle: &DeviceJoinOfferBundle,
+    policy: &DeviceJoinApprovalPolicy<'_>,
+    access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+    timing: DeviceJoinTransportTiming,
+) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
     let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
     let attempt_id = bundle.offer.attempt_id;
@@ -802,7 +872,7 @@ pub async fn drive_device_join(
                 let request = transport
                     .await_artifact::<DeviceProviderAccessRequest>(timing)
                     .await?;
-                approve_access_request(store, roles, &bundle.offer, &request, &policy).await?;
+                approve_access_request(store, roles, &bundle.offer, &request, policy).await?;
                 Some(
                     store
                         .authorize_device_provider_access(
@@ -986,6 +1056,18 @@ pub async fn cancel_device_join_via_transport(
     bundle: &DeviceJoinOfferBundle,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
+    retrying_activation_conflicts(|| {
+        cancel_device_join_via_transport_once(store, identity_signer, bundle, timing)
+    })
+    .await
+}
+
+async fn cancel_device_join_via_transport_once(
+    store: &Store,
+    identity_signer: &UserKeypair,
+    bundle: &DeviceJoinOfferBundle,
+    timing: DeviceJoinTransportTiming,
+) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
     let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
     let attempt_id = bundle.offer.attempt_id;
@@ -1152,4 +1234,79 @@ async fn self_issued(
         .device_join_status(offer.attempt_id, DeviceJoinRole::Owner)
         .await?
         .is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn conflict() -> DeviceJoinTransportError {
+        DeviceJoinError::Outbound(crate::sync::store::StoreError::ActivationConflict).into()
+    }
+
+    /// Losing the activation slot is not a failure of the join — the operation
+    /// persisted nothing, so the driver re-derives and goes again.
+    #[tokio::test]
+    async fn a_lost_activation_slot_is_re_entered_until_it_lands() {
+        let attempts = Cell::new(0usize);
+        let settled = retrying_activation_conflicts(|| {
+            let attempts = &attempts;
+            async move {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 3 {
+                    Err(conflict())
+                } else {
+                    Ok("landed")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(settled.expect("the retry converges"), "landed");
+        assert_eq!(attempts.get(), 3, "it re-entered until the slot was free");
+    }
+
+    /// A store that keeps refusing is not a race. The budget runs out and the
+    /// failure surfaces rather than looping forever.
+    #[tokio::test]
+    async fn a_store_that_never_yields_surfaces_the_conflict() {
+        let attempts = Cell::new(0usize);
+        let settled: Result<(), _> = retrying_activation_conflicts(|| {
+            let attempts = &attempts;
+            async move {
+                attempts.set(attempts.get() + 1);
+                Err(conflict())
+            }
+        })
+        .await;
+
+        assert!(
+            is_activation_conflict(&settled.expect_err("an unyielding store fails")),
+            "the conflict propagates unchanged once the budget is spent",
+        );
+        assert_eq!(
+            attempts.get(),
+            ACTIVATION_CONFLICT_RETRIES + 1,
+            "bounded: the retries plus the final attempt whose failure is returned",
+        );
+    }
+
+    /// Anything that is not a lost slot is the caller's to see immediately —
+    /// retrying a real failure would only delay it.
+    #[tokio::test]
+    async fn any_other_failure_is_not_retried() {
+        let attempts = Cell::new(0usize);
+        let settled: Result<(), _> = retrying_activation_conflicts(|| {
+            let attempts = &attempts;
+            async move {
+                attempts.set(attempts.get() + 1);
+                Err(DeviceJoinError::OfferMismatch.into())
+            }
+        })
+        .await;
+
+        assert!(settled.is_err());
+        assert_eq!(attempts.get(), 1, "it ran once and propagated");
+    }
 }
