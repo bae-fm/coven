@@ -237,9 +237,27 @@ rebuild the deleted choice.
   `circle_bootstrap_coverage` cuts). The Owner signs the authorization; physical
   deletion and readback-absence complete before the terminal receipt. Acknowledgement
   reads resolve each epoch key from retained controls, so coverage stays verifiable
-  across an epoch rotation. Bootstrap-image, superseded-snapshot-generation, and
-  audience-blob-ciphertext reclamation, and the beyond-epoch-cutoff eligibility
-  arm, are not yet implemented.
+  across an epoch rotation.
+- Circle bootstrap-image reclamation uses the same pipeline with a target that
+  names the retained bootstrap coverage a recipient's projection was seeded from.
+  The coverage is recovered from the recipient's own signed acknowledgement
+  (`seeded_from`), never fabricated by the Owner. A seed image is eligible when the
+  maximal acknowledgement-stable Circle snapshot's cut strictly dominates it — the
+  later sufficient snapshot every active-access device acknowledged — while its
+  recipient still holds access, or when the recipient's owner is absent from the
+  roster of an activated successor control that strictly covers the seed's control.
+  Roster exclusion at a successor control is the only lost-authority evidence the
+  arm consumes: revoking a recipient's Store membership marks the Circle
+  rotation-required but leaves it in the roster, so the Circle-member removal that
+  closes the epoch is what produces the evidence, whichever revocation triggered it.
+  A seed the local `circle_bootstrap_coverage` row still names is a retained replay
+  input and is never eligible. A removed recipient's acknowledgement is read under
+  the retained control that names its epoch, since a removal rotates its epoch key
+  away from the current control. A bootstrap image's storage path is keyed by its
+  recipient's slot, so recipients never share one image object and each is owned by
+  exactly the one activation that seeded it.
+- Superseded-snapshot-generation and audience-blob-ciphertext reclamation, and the
+  beyond-epoch-cutoff eligibility arm, are not yet implemented.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -314,9 +332,9 @@ rebuild the deleted choice.
    restoring identity's own access from the verified control chain, selects the
    maximal verified image per Circle it can decrypt, clears the coverage rows for
    Circles it cannot, and installs the Store image and every Circle image in one
-   transaction. Circle package reclamation is implemented on the shared Store
-   reclaim pipeline. Finish the remaining reclamation target kinds (bootstrap
-   images, superseded snapshot generations, audience blob ciphertext, and the
+   transaction. Circle package and bootstrap-image reclamation are implemented on
+   the shared Store reclaim pipeline. Finish the remaining reclamation target kinds
+   (superseded snapshot generations, audience blob ciphertext, and the
    beyond-epoch-cutoff arm), packages, pull, and blobs.
 1. **In progress.** The application API is implemented: the `coven.circles()`
    namespace (create, rename, add and remove member, resolve control, cancel and

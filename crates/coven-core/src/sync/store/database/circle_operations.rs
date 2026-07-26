@@ -333,6 +333,58 @@ impl StoreDatabase {
             .await
     }
 
+    /// Every retained Circle control coordinate for `circle_id`. Bootstrap
+    /// reclamation reads a removed recipient's acknowledgement under the epoch that
+    /// sealed it — an epoch a later removal rotated away — so it must resolve the
+    /// key from the control the acknowledgement names, not the current control.
+    pub(crate) async fn retained_circle_control_coords(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Vec<crate::sync::circle::CircleControlCoord>, DbError> {
+        self.database
+            .call(move |conn| {
+                Ok(Self::circle_control_activation_index_on(conn)?
+                    .into_iter()
+                    .find(|(indexed, _)| *indexed == circle_id)
+                    .map(|(_, controls)| controls)
+                    .unwrap_or_default())
+            })
+            .await
+    }
+
+    /// Whether one activated Circle control strictly covers another in the retained
+    /// control lineage — `covering` is a proper successor of `covered`. Bootstrap
+    /// reclamation uses this to prove a removed recipient lost authority under a
+    /// successor control that supersedes its seed's control. `false` when the
+    /// controls are equal or `covering` is not retained.
+    pub(crate) async fn circle_control_covers_strictly(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        covering: &crate::sync::circle::CircleControlCoord,
+        covered: &crate::sync::circle::CircleControlCoord,
+    ) -> Result<bool, DbError> {
+        if covering == covered {
+            return Ok(false);
+        }
+        let covering = covering.clone();
+        let covered = covered.clone();
+        self.database
+            .call(move |conn| {
+                let Some(covering_reference) =
+                    Self::verified_circle_activation_on(conn, circle_id, &covering)?
+                else {
+                    return Ok(false);
+                };
+                Self::verified_circle_control_covers_on(
+                    conn,
+                    circle_id,
+                    &covering_reference.control,
+                    &covered,
+                )
+            })
+            .await
+    }
+
     pub(crate) async fn closing_circle_controls(
         &self,
     ) -> Result<Vec<crate::sync::circle::PreparedCircleControl>, DbError> {

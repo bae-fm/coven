@@ -180,7 +180,7 @@ impl StoreDatabase {
 
     /// The pubkeys in `circle_id`'s current resolved roster, or an empty set when
     /// the Circle is not in an active local state (so it has no snapshot quorum).
-    async fn circle_current_roster_members(
+    pub(crate) async fn circle_current_roster_members(
         &self,
         circle_id: CircleId,
     ) -> Result<BTreeSet<String>, DbError> {
@@ -199,11 +199,11 @@ impl StoreDatabase {
             .await
     }
 
-    /// The latest activated Circle acknowledgement each device that holds active
-    /// access to `circle_id` has published — one per device. An inactive recipient
-    /// holds no access and therefore publishes no acknowledgement, so it never
-    /// appears here.
-    #[cfg(test)]
+    /// The latest activated Circle acknowledgement every device that has ever
+    /// acknowledged `circle_id` published — one per device, including devices whose
+    /// owner has since been removed from the roster (rows are never deleted, so a
+    /// removed recipient's last acknowledgement persists as the evidence bootstrap
+    /// reclamation reads to prove that recipient lost authority).
     pub(crate) async fn activated_circle_acks(
         &self,
         circle_id: CircleId,

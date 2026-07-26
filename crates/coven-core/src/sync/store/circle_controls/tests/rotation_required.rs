@@ -2714,17 +2714,16 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
             .expect("read Circle package replay retention"),
         "the Circle package is retained for replay"
     );
-    let result = crate::sync::store::reclaim_packages_for_test(
+    // Reclamation may still delete the member's now-superseded seed bootstrap image
+    // (the member advanced past it), but the replay-retained package itself is never
+    // reclaimed while its ownership survives.
+    crate::sync::store::reclaim_packages_for_test(
         &fixture.db,
         &fixture.store.storage,
         &fixture.signer,
     )
     .await
     .expect("run reclamation with the package still retained");
-    assert_eq!(
-        result.packages_deleted, 0,
-        "the replay-retained Circle package is not reclaimed"
-    );
     assert!(
         StoreDatabase::new(&fixture.db)
             .circle_package_is_retained_for_replay(circle_package, published)
@@ -2809,6 +2808,448 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
             .await
             .expect("read Circle package replay retention after reclaim"),
         "the reclaimed Circle package no longer owns its object"
+    );
+}
+
+/// Whether the Circle bootstrap image at `image_object` still owns a live
+/// remote-object record. Reclamation deletes the record (and the ciphertext)
+/// once the recipient's seed is superseded.
+async fn bootstrap_image_present(
+    fixture: &RotationFixture,
+    image_object: &crate::sync::storage::ExactObjectRef,
+) -> bool {
+    let object_id = crate::sync::remote_object::remote_object_id(image_object);
+    fixture
+        .db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read bootstrap image ownership presence")
+}
+
+/// The exact bootstrap image the Owner authored for the member, read from the
+/// member's own installed coverage row.
+async fn member_seed_image(
+    fixture: &RotationFixture,
+    circle_id: CircleId,
+) -> crate::sync::storage::ExactObjectRef {
+    fixture
+        .member_db
+        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .await
+        .expect("read member Circle bootstrap coverage")
+        .expect("the member's projection seeded from a real bootstrap coverage row")
+        .bootstrap
+        .image
+        .object
+}
+
+/// The number of Store commits that own the bootstrap image at `image_object`.
+async fn bootstrap_image_owner_count(
+    fixture: &RotationFixture,
+    image_object: &crate::sync::storage::ExactObjectRef,
+) -> usize {
+    let object_id = crate::sync::remote_object::remote_object_id(image_object);
+    let record = fixture
+        .db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("load bootstrap image ownership");
+    let record: crate::sync::remote_object::RemoteObjectRecord =
+        serde_json::from_str(&record).expect("parse bootstrap image ownership");
+    let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record else {
+        panic!("a live bootstrap image is a shared object");
+    };
+    let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } = shared.state
+    else {
+        panic!("a live bootstrap image is verified");
+    };
+    ownership
+        .activated
+        .iter()
+        .filter(|owner| {
+            matches!(
+                owner,
+                crate::sync::remote_object::SharedObjectOwner::StoreCommit(_)
+            )
+        })
+        .count()
+}
+
+/// Every live Circle bootstrap image in the owner's ownership table, as
+/// (image object, owning Store commit count).
+async fn live_bootstrap_images(
+    fixture: &RotationFixture,
+) -> Vec<(crate::sync::storage::ExactObjectRef, usize)> {
+    let records = fixture
+        .db
+        .call(|connection| {
+            let mut statement = connection
+                .prepare("SELECT state FROM remote_objects ORDER BY object_id")
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            Ok(rows)
+        })
+        .await
+        .expect("read remote object records");
+    records
+        .into_iter()
+        .filter_map(|raw| {
+            let record: crate::sync::remote_object::RemoteObjectRecord =
+                serde_json::from_str(&raw).expect("parse remote object record");
+            let crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
+            else {
+                return None;
+            };
+            if !matches!(
+                shared.identity.domain,
+                crate::sync::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+            ) {
+                return None;
+            }
+            let crate::sync::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+                shared.state
+            else {
+                return None;
+            };
+            let owners = ownership
+                .activated
+                .iter()
+                .filter(|owner| {
+                    matches!(
+                        owner,
+                        crate::sync::remote_object::SharedObjectOwner::StoreCommit(_)
+                    )
+                })
+                .count();
+            Some((shared.identity.object.clone(), owners))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn two_circle_recipients_never_share_one_bootstrap_image() {
+    // A bootstrap image's storage path is keyed by the recipient's slot, so two
+    // recipients bootstrapped from the same underlying snapshot cut land on two
+    // DISTINCT image objects, each owned by exactly the one add-member commit that
+    // activated it. Sharing one image between recipients is therefore structurally
+    // impossible, and the single-owner requirement in the reclaim eligibility check
+    // (`validate_reclaimable_circle_bootstrap_image`) is always satisfiable: deleting
+    // one recipient's seed can never remove another recipient's.
+    let fixture = rotation_fixture("circle-bootstrap-two-recipients").await;
+    let circle_id = fixture.circle_id;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let first_image = member_seed_image(&fixture, circle_id).await;
+    assert_eq!(
+        bootstrap_image_owner_count(&fixture, &first_image).await,
+        1,
+        "the first recipient's seed image has exactly one activating owner"
+    );
+
+    // Onboard a second Store member and add it to the same Circle. Its bootstrap is
+    // cut from the Circle's current content, the same underlying state the first
+    // recipient was seeded from.
+    let second = UserKeypair::generate();
+    let second_pubkey = keys::public_key_hex(&second);
+    crate::sync::store::invite_member(
+        &fixture.store.storage,
+        fixture.store.home.as_ref(),
+        &fixture.signer,
+        &crate::sync::hlc::Hlc::new("second-recipient".to_string()),
+        &second_pubkey,
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key([42; 32]),
+        fixture.store.storage.store_id(),
+        "Rotation Store",
+        &StoreDatabase::new(&fixture.db),
+    )
+    .await
+    .expect("invite the second Store member");
+    let second_db = open_circle_routing_test_db();
+    install_active_device_fixture(
+        &fixture.store,
+        &fixture.db,
+        &second_db,
+        &second,
+        "2026-07-25T02:00:00Z",
+    )
+    .await
+    .expect("activate the second member device");
+    fixture
+        .components
+        .add_circle_member(
+            &fixture.store_dir,
+            circle_id,
+            second_pubkey.clone(),
+            CircleRole::Member,
+        )
+        .await
+        .expect("add the second Circle member");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the second member's access");
+
+    // Two recipients, two distinct image objects, each with exactly one owner.
+    let images = live_bootstrap_images(&fixture).await;
+    assert_eq!(
+        images.len(),
+        2,
+        "each recipient has its own bootstrap image: {images:?}"
+    );
+    let objects = images
+        .iter()
+        .map(|(object, _)| object.slot().logical_key().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        objects.len(),
+        2,
+        "the two recipients' bootstrap images are distinct objects: {objects:?}"
+    );
+    for (object, owners) in &images {
+        assert_eq!(
+            *owners,
+            1,
+            "bootstrap image {} is owned by exactly one activating commit",
+            object.slot().logical_key()
+        );
+    }
+    assert!(
+        images.iter().any(|(object, _)| *object == first_image),
+        "the first recipient's seed image is untouched by the second recipient's activation"
+    );
+}
+
+#[tokio::test]
+async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed() {
+    let fixture = rotation_fixture("circle-bootstrap-reclaim-advance").await;
+    let circle_id = fixture.circle_id;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let image_object = member_seed_image(&fixture, circle_id).await;
+    assert!(
+        bootstrap_image_present(&fixture, &image_object).await,
+        "the recipient's seed image exists before reclamation"
+    );
+
+    // No later Circle snapshot supersedes the recipient's seed yet, so reclamation
+    // leaves the image in place.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation before a later snapshot exists");
+    assert!(
+        bootstrap_image_present(&fixture, &image_object).await,
+        "the seed image survives while no later sufficient snapshot supersedes it"
+    );
+
+    // The member pulls a later Circle package and every active-access device
+    // acknowledges a stable snapshot whose cut strictly dominates the seed. The
+    // recipient has moved to a later sufficient snapshot, so its seed is reclaimable.
+    publish_covered_circle_package(
+        &fixture,
+        &member_storage,
+        &member_store_dir,
+        "00000000-0000-4000-8000-0000000000b1",
+    )
+    .await;
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the superseded seed image");
+    assert!(
+        !bootstrap_image_present(&fixture, &image_object).await,
+        "the seed image is reclaimed once a later sufficient snapshot supersedes it"
+    );
+}
+
+#[tokio::test]
+async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
+    let fixture = rotation_fixture("circle-bootstrap-reclaim-removed").await;
+    let circle_id = fixture.circle_id;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let image_object = member_seed_image(&fixture, circle_id).await;
+
+    // The member acknowledges its seed (naming its seed coverage) and the Owner
+    // activates that acknowledgement — the exact evidence the Owner reads after the
+    // member is removed to prove which seed the member held. No later snapshot is
+    // authored, so while the member still holds access its seed is not superseded
+    // and the automatic reclamation in the cycle leaves the image in place.
+    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-23T01:00:00Z").await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("owner activates the member acknowledgement");
+    assert!(
+        bootstrap_image_present(&fixture, &image_object).await,
+        "an active member's seed survives while no later snapshot supersedes it"
+    );
+
+    // Remove the member from the Circle; the epoch closes and a successor control
+    // activates whose roster excludes the member.
+    fixture
+        .components
+        .remove_circle_member(circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the Circle member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read successor roster")
+            .contains(&fixture.member_pubkey),
+        "the removed member is absent from the successor roster"
+    );
+
+    // The removed member lost authority under the activated successor control: its
+    // seed image is reclaimed, re-verified from its own signed acknowledgement.
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("reclaim the removed member's seed image");
+    assert!(
+        !bootstrap_image_present(&fixture, &image_object).await,
+        "the removed member's seed image is reclaimed under the successor control"
+    );
+}
+
+#[tokio::test]
+async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
+    // Revoking a recipient's STORE membership does not by itself exclude it from the
+    // Circle roster: it marks the Circle rotation-required and waits. The operator's
+    // Circle-member removal then closes the epoch, and the successor roster — the one
+    // piece of evidence the lost-authority arm reads — omits the identity. This proves
+    // the Store-revocation trigger reaches the same roster-exclusion evidence rather
+    // than a second, separate authority path.
+    let fixture = rotation_fixture("circle-bootstrap-store-revocation").await;
+    let circle_id = fixture.circle_id;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let image_object = member_seed_image(&fixture, circle_id).await;
+
+    // The recipient acknowledges its seed: the signed evidence naming the exact
+    // coverage the Owner will later delete.
+    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-25T03:00:00Z").await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("owner activates the member acknowledgement");
+
+    // Revoke the recipient's Store membership. The Circle becomes rotation-required
+    // but its roster still names the identity, so no lost-authority evidence exists
+    // yet and the seed image survives.
+    remove_store_member(&fixture).await;
+    assert!(
+        list_circles(&fixture)
+            .await
+            .iter()
+            .find(|circle| circle.id() == circle_id)
+            .expect("affected Circle listed after Store removal")
+            .rotation_required(),
+        "revoking Store membership marks the Circle rotation-required"
+    );
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read roster after Store revocation")
+            .contains(&fixture.member_pubkey),
+        "Store revocation alone does not yet exclude the identity from the Circle roster"
+    );
+    crate::sync::store::reclaim_packages_for_test(
+        &fixture.db,
+        &fixture.store.storage,
+        &fixture.signer,
+    )
+    .await
+    .expect("run reclamation while the roster still names the identity");
+    assert!(
+        bootstrap_image_present(&fixture, &image_object).await,
+        "Store revocation alone does not reclaim the recipient's seed image"
+    );
+
+    // Completing the cascade — the Circle-member removal that clears rotation —
+    // activates a successor control whose roster omits the identity. That is the same
+    // evidence the lost-authority arm consumes, and the seed image is now reclaimed.
+    fixture
+        .components
+        .remove_circle_member(circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the Circle member");
+    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+        .await
+        .expect("authorize Circle close response")
+        .publish_circle_epoch_close_responses(&fixture.signer)
+        .await
+        .expect("publish local Circle epoch-close response");
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read successor roster")
+            .contains(&fixture.member_pubkey),
+        "the cascade excludes the revoked identity from the successor roster"
+    );
+    assert!(
+        !bootstrap_image_present(&fixture, &image_object).await,
+        "the revoked identity's seed image is reclaimed once the cascade completes"
     );
 }
 

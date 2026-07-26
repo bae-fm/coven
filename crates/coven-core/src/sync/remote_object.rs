@@ -872,6 +872,50 @@ impl RemoteObjectRecord {
         Ok(ownership)
     }
 
+    /// A Circle bootstrap image is reclaimable when its single activating Store
+    /// commit is its only surviving owner: no pending activation and exactly one
+    /// activated owner. A bootstrap image accretes a per-activating-commit owner,
+    /// so more than one means a live successor still references it.
+    pub(crate) fn validate_reclaimable_circle_bootstrap_image(
+        &self,
+        image: &super::store_commit::SnapshotImageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let ownership = self.activated_circle_bootstrap_image_ownership(image, activation)?;
+        if !ownership.pending.is_empty() || ownership.activated.len() != 1 {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(())
+    }
+
+    fn activated_circle_bootstrap_image_ownership<'a>(
+        &'a self,
+        image: &super::store_commit::SnapshotImageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<&'a SharedObjectOwnership, RemoteObjectRecordError> {
+        self.validate()?;
+        let Self::SharedLiveSet(record) = self else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
+        if !matches!(
+            &record.identity.domain,
+            SharedLiveSetObjectDomain::CircleBootstrapImage { reference } if reference == image
+        ) || record.identity.semantic_hash != image.image_hash
+            || record.identity.object != image.object
+            || !record.bytes.canonical_semantic_bytes().is_empty()
+        {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        let OwnedObjectState::UploadedVerified { ownership } = &record.state else {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        };
+        if !ownership.activated.contains(&expected_owner) {
+            return Err(RemoteObjectRecordError::InvalidReclaim);
+        }
+        Ok(ownership)
+    }
+
     pub(crate) fn snapshot_owners(&self) -> impl Iterator<Item = &SnapshotObjectOwner> {
         let owners = match self {
             Self::SharedLiveSet(record)

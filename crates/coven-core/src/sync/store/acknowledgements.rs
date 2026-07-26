@@ -296,6 +296,37 @@ pub(crate) async fn load_circle_acknowledgement_on(
         .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
 }
 
+/// Read one exact Circle acknowledgement whose sealing epoch is not known ahead of
+/// time — a removed recipient's acknowledgement is sealed under an epoch a later
+/// removal rotated away, so the current control's keyring cannot open it. Each
+/// retained control's keyring resolves exactly one epoch; the acknowledgement opens
+/// under the control that names its epoch. Key fingerprints are collision-resistant,
+/// so a control whose key opens the ciphertext is the epoch that sealed it. Tries
+/// `preferred` first, then the remaining retained controls, and returns the last
+/// decryption error when none resolve the key.
+pub(crate) async fn load_circle_acknowledgement_under_retained_controls(
+    database: &StoreDatabase,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    root: &StoreRootRef,
+    reference: &crate::sync::store_commit::CircleAckRef,
+    preferred: &crate::sync::circle::CircleControlCoord,
+    retained: &[crate::sync::circle::CircleControlCoord],
+) -> Result<CircleAck, StoreAckError> {
+    let mut last_error = None;
+    for control in std::iter::once(preferred).chain(retained.iter().filter(|c| *c != preferred)) {
+        match load_circle_acknowledgement_on(database, storage, root, reference, control).await {
+            Ok(acknowledgement) => return Ok(acknowledgement),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        StoreAckError::InvalidOutbound(format!(
+            "Circle {} acknowledgement has no retained control to resolve its epoch key",
+            reference.circle_id
+        ))
+    }))
+}
+
 /// The activated Circle acknowledgement of every device that currently holds
 /// active Circle access, when all of them dominate `snapshot_cut` — the exact
 /// per-device references, sorted. `None` when the Circle has no active-access

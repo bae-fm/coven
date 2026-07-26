@@ -348,6 +348,11 @@ pub(crate) fn record_reclaimed_store_package_on(
             crate::sync::store::ReclaimTarget::CirclePackage(target) => {
                 remote.validate_reclaimable_circle_package(&target.package, &target.activation)
             }
+            crate::sync::store::ReclaimTarget::CircleBootstrapImage(target) => remote
+                .validate_reclaimable_circle_bootstrap_image(
+                    &target.coverage.bootstrap.image,
+                    &target.coverage.activation_commit,
+                ),
         }
         .map_err(|error| {
             DbError::Message(format!("close reclaimed package {object_id}: {error}"))

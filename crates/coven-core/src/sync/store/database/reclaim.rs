@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use rusqlite::OptionalExtension;
+
 use super::*;
 use crate::database::{
     begin_remote_candidate_nonactivation_on, insert_store_reclaim_operation_on,
@@ -146,6 +148,39 @@ impl StoreDatabase {
                     )?;
                 }
                 Ok(true)
+            })
+            .await
+    }
+
+    /// Whether a Circle bootstrap image is still the local device's live seed for
+    /// its Circle: the `circle_bootstrap_coverage` row names the same image. Such a
+    /// bootstrap is a retained replay input and is never eligible for reclamation —
+    /// the per-Circle analogue of the package retained-replay guard, re-checked
+    /// before deletion so a seed installed since authoring fails the delete loud.
+    pub(in crate::sync::store) async fn circle_bootstrap_image_is_retained_for_replay(
+        &self,
+        coverage: crate::sync::circle::CircleBootstrapCoverageRef,
+    ) -> Result<bool, DbError> {
+        self.database
+            .call(move |conn| {
+                let row: Option<Vec<u8>> = conn
+                    .query_row(
+                        "SELECT bootstrap_ref FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                        [coverage.circle_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let Some(bootstrap_ref) = row else {
+                    return Ok(false);
+                };
+                let bootstrap: crate::sync::circle::CircleBootstrapRef =
+                    serde_json::from_slice(&bootstrap_ref).map_err(|error| {
+                        DbError::Message(format!(
+                            "parse retained Circle bootstrap reference: {error}"
+                        ))
+                    })?;
+                Ok(bootstrap.image == coverage.bootstrap.image)
             })
             .await
     }

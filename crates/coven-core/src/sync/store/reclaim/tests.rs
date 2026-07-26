@@ -912,3 +912,44 @@ async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
         "the recorded reclaim operations are not repeated",
     );
 }
+
+/// A single-stream commit frontier at `sequence`, deterministic in `stream`.
+fn frontier_at(stream: &str, sequence: u64) -> crate::sync::store_commit::CommitFrontier {
+    let stream_id = crate::sync::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
+        stream.as_bytes(),
+    ));
+    let commit = crate::sync::store_commit::StoreBatchCommitRef {
+        coord: StoreCommitCoord {
+            stream_id,
+            sequence,
+        },
+        commit_hash: ObjectHash::digest(format!("{stream}:{sequence}").as_bytes()),
+        object: proof_object(&format!(
+            "store-v1/candidates/f/commits/{stream}/{sequence}/hash"
+        )),
+    };
+    crate::sync::store_commit::CommitFrontier(std::collections::BTreeMap::from([(
+        stream_id, commit,
+    )]))
+}
+
+/// The bootstrap-reclaim strict-domination guard: a stable snapshot supersedes a
+/// seed only when its cut covers the seed AND is not equal to it. The equal-cut
+/// boundary (a snapshot at the recipient's exact bootstrap cut) must not reclaim —
+/// dropping the strict inequality flips this case and reclaims a live seed.
+#[test]
+fn snapshot_supersedes_seed_requires_strict_domination() {
+    let seed = frontier_at("owner", 4);
+    assert!(
+        !super::snapshot_supersedes_seed(&frontier_at("owner", 4), &seed),
+        "a snapshot whose cut equals the seed exactly does not supersede it"
+    );
+    assert!(
+        super::snapshot_supersedes_seed(&frontier_at("owner", 5), &seed),
+        "a snapshot strictly past the seed on its stream supersedes it"
+    );
+    assert!(
+        !super::snapshot_supersedes_seed(&frontier_at("owner", 3), &seed),
+        "a snapshot behind the seed does not cover it and cannot supersede it"
+    );
+}

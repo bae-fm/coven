@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::database::StoreDatabase;
 use super::AuthorizedStore;
 use crate::keys::{self, UserKeypair};
-use crate::sync::circle::{CircleControlCoord, CircleId};
+use crate::sync::circle::{CircleBootstrapCoverageRef, CircleControlCoord, CircleId};
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::membership::{MembershipChain, MembershipGrantId};
 use crate::sync::storage::{
@@ -34,6 +34,7 @@ const RECLAIM_RECEIPT_DOMAIN: &[u8] = b"coven.store-reclaim-receipt.v1\0";
 pub enum ReclaimTarget {
     StorePackage(StorePackageReclaimTarget),
     CirclePackage(CirclePackageReclaimTarget),
+    CircleBootstrapImage(CircleBootstrapImageReclaimTarget),
 }
 
 impl ReclaimTarget {
@@ -41,6 +42,7 @@ impl ReclaimTarget {
         match self {
             Self::StorePackage(target) => &target.package.object,
             Self::CirclePackage(target) => &target.package.package.object,
+            Self::CircleBootstrapImage(target) => &target.coverage.bootstrap.image.object,
         }
     }
 
@@ -48,6 +50,7 @@ impl ReclaimTarget {
         match self {
             Self::StorePackage(target) => &target.activation,
             Self::CirclePackage(target) => &target.activation,
+            Self::CircleBootstrapImage(target) => &target.coverage.activation_commit,
         }
     }
 }
@@ -60,6 +63,7 @@ impl ReclaimTarget {
 pub enum ReclaimClaim {
     StorePackage(StorePackageReclaimClaim),
     CirclePackage(CirclePackageReclaimClaim),
+    CircleBootstrapImage(CircleBootstrapImageReclaimClaim),
 }
 
 impl ReclaimClaim {
@@ -67,6 +71,9 @@ impl ReclaimClaim {
         match self {
             Self::StorePackage(claim) => ReclaimTarget::StorePackage(claim.target.clone()),
             Self::CirclePackage(claim) => ReclaimTarget::CirclePackage(claim.target.clone()),
+            Self::CircleBootstrapImage(claim) => {
+                ReclaimTarget::CircleBootstrapImage(claim.target.clone())
+            }
         }
     }
 
@@ -74,6 +81,7 @@ impl ReclaimClaim {
         match self {
             Self::StorePackage(claim) => claim.validate(),
             Self::CirclePackage(claim) => claim.validate(),
+            Self::CircleBootstrapImage(claim) => claim.validate(),
         }
     }
 }
@@ -163,6 +171,91 @@ impl CirclePackageReclaimClaim {
             return Err(StoreProtocolError::Malformed(
                 "Circle package reclaim target aliases proof authority".to_string(),
             ));
+        }
+        Ok(())
+    }
+}
+
+/// The exact Circle bootstrap image a reclaim deletes: the retained bootstrap
+/// coverage a recipient device's live projection was seeded from names the image
+/// object, its activating Store commit, and the cut the seed covers. The coverage
+/// is recovered from the recipient's own signed acknowledgement (`seeded_from`),
+/// never fabricated by the reclaiming Owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleBootstrapImageReclaimTarget {
+    pub coverage: CircleBootstrapCoverageRef,
+}
+
+/// The two proofs an Owner can present that a recipient no longer needs its seed
+/// image. Both carry the recipient device's own activated Circle acknowledgement,
+/// whose `seeded_from` names the target coverage — binding the proof to the exact
+/// image being deleted. The authorization verifier re-loads and re-checks the
+/// acknowledgement; nothing here is trusted from the claim alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleBootstrapReclaimProof {
+    /// The recipient advanced past its seed: its acknowledgement's accepted Store
+    /// frontier strictly dominates the bootstrap's cut, and its owner still holds
+    /// active Circle access.
+    RecipientCoverage { acknowledgement: CircleAckRef },
+    /// The recipient lost Circle authority: its owner is absent from the roster of
+    /// an activated successor control that strictly covers the seed's control.
+    LostAuthority {
+        acknowledgement: CircleAckRef,
+        successor_control: CircleControlCoord,
+    },
+}
+
+impl CircleBootstrapReclaimProof {
+    fn acknowledgement(&self) -> &CircleAckRef {
+        match self {
+            Self::RecipientCoverage { acknowledgement }
+            | Self::LostAuthority {
+                acknowledgement, ..
+            } => acknowledgement,
+        }
+    }
+}
+
+/// Evidence that one Circle bootstrap image is no longer a live seed for its
+/// recipient: the target image and the recipient-coverage or lost-authority proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleBootstrapImageReclaimClaim {
+    pub target: CircleBootstrapImageReclaimTarget,
+    pub proof: CircleBootstrapReclaimProof,
+}
+
+impl CircleBootstrapImageReclaimClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        let circle_id = self.target.coverage.circle_id;
+        let acknowledgement = self.proof.acknowledgement();
+        if acknowledgement.circle_id != circle_id {
+            return Err(StoreProtocolError::Malformed(
+                "Circle bootstrap reclaim acknowledgement names another Circle".to_string(),
+            ));
+        }
+        let image = &self.target.coverage.bootstrap.image.object;
+        if *image == self.target.coverage.activation_commit.object
+            || *image == acknowledgement.object
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Circle bootstrap reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        if let CircleBootstrapReclaimProof::LostAuthority {
+            successor_control, ..
+        } = &self.proof
+        {
+            successor_control
+                .validate()
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            if *successor_control == self.target.coverage.control {
+                return Err(StoreProtocolError::Malformed(
+                    "Circle bootstrap lost-authority successor is the seed control".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -790,6 +883,16 @@ async fn reclaim_store_packages(
         &registrations,
     ))
     .await?;
+    Box::pin(prepare_circle_bootstrap_reclaim_authorizations(
+        database,
+        storage,
+        device_id,
+        identity_signer,
+        membership,
+        &root,
+        &registrations,
+    ))
+    .await?;
     packages_deleted = packages_deleted
         .checked_add(
             Box::pin(resume_store_reclaim_operations(
@@ -1010,6 +1113,136 @@ async fn exact_circle_package_targets(
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+/// A stable Circle snapshot strictly supersedes a bootstrap seed when its cut
+/// covers the seed and is not equal to it — the recipient has moved to a later
+/// sufficient snapshot, not merely re-published coverage at the seed's own cut.
+/// The strict inequality is load-bearing: a snapshot whose cut equals the seed
+/// leaves the recipient exactly at its bootstrap and must not reclaim it.
+fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFrontier) -> bool {
+    cut.covers(seed) && cut != seed
+}
+
+/// Authorize deletion of every Circle bootstrap image no recipient still needs.
+/// Each device's activated acknowledgement names the exact coverage its
+/// projection was seeded from; the seed image is superseded either when a stable
+/// Circle snapshot's cut strictly dominates it — the "later sufficient snapshot"
+/// every active-access device acknowledged — while the recipient still holds
+/// access, or when the recipient's owner lost Circle authority under a successor
+/// control. The coverage the Owner deletes is taken from the recipient's own
+/// signed acknowledgement, never fabricated.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_circle_bootstrap_reclaim_authorizations(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: &MembershipChain,
+    root: &StoreRootRef,
+    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+) -> Result<(), StoreReclaimError> {
+    for input in database.circle_acknowledgement_publication_inputs().await? {
+        let circle_id = input.circle_id;
+        let current_control = input.control;
+        let roster = database.circle_current_roster_members(circle_id).await?;
+        let retained_controls = database.retained_circle_control_coords(circle_id).await?;
+        // The maximal acknowledgement-stable Circle snapshot cut, if any. A seed a
+        // still-active recipient holds is superseded only when this cut strictly
+        // dominates it — a later sufficient snapshot every active device acknowledged.
+        let stable_cut = Box::pin(choose_circle_snapshot(
+            database,
+            storage,
+            root,
+            circle_id,
+            &current_control,
+            registrations,
+        ))
+        .await?
+        .map(|selected| selected.meta.bootstrap.coverage);
+        for acknowledgement in database.activated_circle_acks(circle_id).await? {
+            let ack =
+                match super::acknowledgements::load_circle_acknowledgement_under_retained_controls(
+                    database,
+                    storage,
+                    root,
+                    &acknowledgement,
+                    &current_control,
+                    &retained_controls,
+                )
+                .await
+                {
+                    Ok(ack) => ack,
+                    Err(error) => {
+                        // A device stream sealed under an epoch this reader cannot resolve
+                        // is not current coverage evidence; reclaim is best-effort and a
+                        // later cycle retries once the key is resolvable.
+                        tracing::debug!(
+                            circle_id = %circle_id,
+                            "skip Circle acknowledgement for bootstrap reclaim: {error}"
+                        );
+                        continue;
+                    }
+                };
+            let Some(coverage) = ack.seeded_from.clone() else {
+                // A founder/source device never seeded from an image — nothing to reclaim.
+                continue;
+            };
+            let recipient = database
+                .activated_store_device_registration(acknowledgement.registration.clone())
+                .await?;
+            let recipient_active = roster.contains(&recipient.author_pubkey);
+            let seed = &coverage.bootstrap.coverage;
+            let superseded_by_snapshot = stable_cut
+                .as_ref()
+                .is_some_and(|cut| snapshot_supersedes_seed(cut, seed));
+            let proof = if recipient_active {
+                if superseded_by_snapshot {
+                    CircleBootstrapReclaimProof::RecipientCoverage {
+                        acknowledgement: acknowledgement.clone(),
+                    }
+                } else {
+                    // No later sufficient snapshot supersedes the recipient's live seed.
+                    continue;
+                }
+            } else if database
+                .circle_control_covers_strictly(circle_id, &current_control, &coverage.control)
+                .await?
+            {
+                CircleBootstrapReclaimProof::LostAuthority {
+                    acknowledgement: acknowledgement.clone(),
+                    successor_control: current_control.clone(),
+                }
+            } else {
+                continue;
+            };
+            let target = CircleBootstrapImageReclaimTarget { coverage };
+            let reclaim_target = ReclaimTarget::CircleBootstrapImage(target.clone());
+            if reclaim_target_is_recorded(database, &reclaim_target).await? {
+                continue;
+            }
+            if database
+                .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
+                .await?
+            {
+                continue;
+            }
+            Box::pin(prepare_reclaim_authorization(
+                database,
+                storage,
+                device_id,
+                identity_signer,
+                membership,
+                root,
+                ReclaimClaim::CircleBootstrapImage(CircleBootstrapImageReclaimClaim {
+                    target,
+                    proof,
+                }),
+            ))
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn reclaim_target_is_recorded(
@@ -1237,6 +1470,9 @@ async fn target_is_retained_for_replay(
                 target.activation.clone(),
             )
             .await?),
+        ReclaimTarget::CircleBootstrapImage(target) => Ok(database
+            .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
+            .await?),
     }
 }
 
@@ -1334,6 +1570,9 @@ async fn verify_reclaim_evidence(
         )),
         ReclaimClaim::CirclePackage(claim) => Ok(ReclaimTarget::CirclePackage(
             verify_circle_package_reclaim_claim(database, storage, root, claim).await?,
+        )),
+        ReclaimClaim::CircleBootstrapImage(claim) => Ok(ReclaimTarget::CircleBootstrapImage(
+            verify_circle_bootstrap_image_reclaim_claim(database, storage, root, claim).await?,
         )),
     }
 }
@@ -1503,6 +1742,121 @@ async fn verify_circle_package_reclaim_claim(
         return Err(StoreReclaimError::Authorization(
             "Circle reclaim target is not the exact package covered by its snapshot".to_string(),
         ));
+    }
+    Ok(claim.target.clone())
+}
+
+/// Re-verify a Circle bootstrap image reclaim: the recipient's own activated
+/// acknowledgement names the exact coverage being deleted (`seeded_from`), and
+/// either the recipient advanced strictly past that seed while still holding
+/// active access, or it lost authority under an activated successor control. The
+/// acknowledgement is read under the Circle's current control, whose retained
+/// keyring resolves the epoch it was sealed under even after a rotation.
+async fn verify_circle_bootstrap_image_reclaim_claim(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    claim: &CircleBootstrapImageReclaimClaim,
+) -> Result<CircleBootstrapImageReclaimTarget, StoreReclaimError> {
+    let circle_id = claim.target.coverage.circle_id;
+    let current_control = database
+        .current_circle_control(circle_id)
+        .await?
+        .ok_or_else(|| {
+            StoreReclaimError::Authorization(format!(
+                "Circle {circle_id} has no active control for bootstrap reclaim"
+            ))
+        })?;
+    let retained_controls = database.retained_circle_control_coords(circle_id).await?;
+    let acknowledgement_ref = claim.proof.acknowledgement();
+    let acknowledgement =
+        super::acknowledgements::load_circle_acknowledgement_under_retained_controls(
+            database,
+            storage,
+            root,
+            acknowledgement_ref,
+            &current_control,
+            &retained_controls,
+        )
+        .await
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    // The recipient's signed acknowledgement is the sole authority for the coverage
+    // the Owner deletes: the target must be exactly what the recipient said it was
+    // seeded from, so the Owner never fabricates the image, cut, or activation.
+    if acknowledgement.seeded_from.as_ref() != Some(&claim.target.coverage) {
+        return Err(StoreReclaimError::Authorization(
+            "Circle bootstrap reclaim target differs from the recipient's signed seed coverage"
+                .to_string(),
+        ));
+    }
+    let recipient = database
+        .activated_store_device_registration(acknowledgement_ref.registration.clone())
+        .await?;
+    let roster = database.circle_current_roster_members(circle_id).await?;
+    match &claim.proof {
+        CircleBootstrapReclaimProof::RecipientCoverage { .. } => {
+            if !roster.contains(&recipient.author_pubkey) {
+                return Err(StoreReclaimError::Authorization(
+                    "Circle bootstrap recipient-coverage proof names a device outside the current roster"
+                        .to_string(),
+                ));
+            }
+            // Re-derive the maximal acknowledgement-stable Circle snapshot and require
+            // its cut to strictly dominate the seed: the later sufficient snapshot the
+            // recipient (with every active device) acknowledged past its bootstrap.
+            let registrations = database
+                .activated_store_device_registration_records()
+                .await
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            let seed = &claim.target.coverage.bootstrap.coverage;
+            let superseded = Box::pin(choose_circle_snapshot(
+                database,
+                storage,
+                root,
+                circle_id,
+                &current_control,
+                &registrations,
+            ))
+            .await?
+            .is_some_and(|selected| {
+                snapshot_supersedes_seed(&selected.meta.bootstrap.coverage, seed)
+            });
+            if !superseded {
+                return Err(StoreReclaimError::Authorization(
+                    "no acknowledgement-stable Circle snapshot strictly dominates the recipient's seed coverage"
+                        .to_string(),
+                ));
+            }
+        }
+        CircleBootstrapReclaimProof::LostAuthority {
+            successor_control, ..
+        } => {
+            if roster.contains(&recipient.author_pubkey) {
+                return Err(StoreReclaimError::Authorization(
+                    "Circle bootstrap lost-authority proof names a device still in the current roster"
+                        .to_string(),
+                ));
+            }
+            if *successor_control != current_control {
+                return Err(StoreReclaimError::Authorization(
+                    "Circle bootstrap lost-authority successor is not the current activated control"
+                        .to_string(),
+                ));
+            }
+            if !database
+                .circle_control_covers_strictly(
+                    circle_id,
+                    successor_control,
+                    &claim.target.coverage.control,
+                )
+                .await?
+            {
+                return Err(StoreReclaimError::Authorization(
+                    "Circle bootstrap lost-authority successor does not strictly cover the seed control"
+                        .to_string(),
+                ));
+            }
+        }
     }
     Ok(claim.target.clone())
 }
@@ -1786,6 +2140,33 @@ async fn verify_reclaim_target_absent(
                     target.activation.coord.sequence(),
                     target.package.package.content_hash,
                 ),
+            )
+        }
+        ReclaimTarget::CircleBootstrapImage(target) => {
+            // A Circle bootstrap image is sealed under the Circle epoch key of the
+            // control it activated under; resolving that access only builds the read
+            // context — a deleted object reads back absent before any decryption. Its
+            // readback prefix is the image object's own logical key without the domain
+            // extension, so no recipient-sealed leaf field is needed to confirm absence.
+            let access = database
+                .circle_package_access(target.coverage.circle_id, target.coverage.control.clone())
+                .await?
+                .ok_or_else(|| {
+                    StoreReclaimError::Authorization(
+                        "reclaim target Circle bootstrap image key is not resolvable".to_string(),
+                    )
+                })?;
+            (
+                ProtocolObjectContext::circle(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::CircleBootstrapImage,
+                    access.encryption,
+                ),
+                crate::sync::store_commit::semantic_prefix_from_exact_object(
+                    &target.coverage.bootstrap.image.object,
+                    crate::sync::storage::ProtectedObjectDomain::CircleBootstrapImage.extension(),
+                )
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
             )
         }
     };

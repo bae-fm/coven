@@ -318,6 +318,12 @@ async fn validate_commit_reclaim_authorization(
         super::store_reclaim::ReclaimTarget::CirclePackage(circle) => {
             activation.1.circle_packages().contains(&circle.package)
         }
+        super::store_reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
+            .1
+            .circle_controls()
+            .iter()
+            .flat_map(|control| control.objects.access.iter())
+            .any(|access| access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)),
     };
     if !names_target {
         return Err(RegistrationLoadError::Invalid(
