@@ -1404,6 +1404,17 @@ pub trait SyncStorage: Send + Sync {
         dest: &Path,
     ) -> Result<crate::local_blob::AtomicStagedFile, StorageError>;
 
+    /// Open a reader that serves plaintext ranges of a stored blob by fetching
+    /// only the sealed chunks covering each range. The ranged counterpart of
+    /// [`Self::stage_verified_blob_plaintext`], which materializes the whole
+    /// blob; a host seeking around a large blob opens this instead so a range
+    /// costs its own bytes rather than the object's.
+    async fn open_blob_range_reader(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
+    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, StorageError>;
+
     /// Delete one exact stored blob body.
     async fn delete_blob_object(
         &self,
@@ -1558,6 +1569,14 @@ where
         (**self)
             .stage_verified_blob_plaintext(blob, protection, dest)
             .await
+    }
+
+    async fn open_blob_range_reader(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
+    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, StorageError> {
+        (**self).open_blob_range_reader(blob, protection).await
     }
 
     async fn delete_blob_object(

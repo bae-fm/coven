@@ -259,6 +259,13 @@ impl BlobLocator {
         }
     }
 
+    /// Whether the stored object is sealed — an opaque home's blob, carrying a
+    /// per-chunk authenticator. A browsable home stores the plaintext verbatim,
+    /// so its object can only be verified as a whole against the row's hash.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, Self::Opaque { .. })
+    }
+
     pub fn namespace(&self) -> &str {
         match self {
             Self::Opaque { namespace, .. } | Self::Browsable { namespace, .. } => namespace,

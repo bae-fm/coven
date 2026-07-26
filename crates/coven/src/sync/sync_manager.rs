@@ -104,6 +104,8 @@ pub(crate) struct SyncManager {
     database: StoreDatabase,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    /// How this installation chunks blobs and how wide its range requests are.
+    blob_chunking: crate::sync::cloud_storage::BlobChunking,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, cloned into every sync loop this manager
@@ -147,6 +149,7 @@ impl SyncManager {
                 self.identity_custody.as_ref(),
                 home,
                 None,
+                self.blob_chunking,
             ),
             None => {
                 crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
@@ -157,6 +160,7 @@ impl SyncManager {
                     None,
                     self.clock.clone(),
                     self.cloudkit_ops.clone(),
+                    self.blob_chunking,
                 )
                 .await
             }
@@ -184,6 +188,7 @@ impl SyncManager {
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+        blob_chunking: crate::sync::cloud_storage::BlobChunking,
     ) -> Self {
         Self {
             config_provider,
@@ -193,6 +198,7 @@ impl SyncManager {
             database: StoreDatabase::from_database(db),
             clock,
             cloudkit_ops,
+            blob_chunking,
             observer,
             open_guard,
             status_tx,
@@ -327,6 +333,7 @@ impl SyncManager {
             self.identity_custody.as_ref(),
             cloud_home.clone(),
             Some(cipher.clone()),
+            self.blob_chunking,
         )
         .map_err(|error| match error {
             crate::storage::cloud::setup::StorageSetupError::Key(error) => SyncError::Key(error),
@@ -1155,6 +1162,7 @@ mod tests {
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let error = match manager.get_members().await {
@@ -1201,6 +1209,7 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let error = manager
@@ -1242,6 +1251,7 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         ));
         start_sync_with_home_in_its_own_task(
             manager.clone(),
@@ -1312,6 +1322,7 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         ));
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -1372,6 +1383,7 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         ));
 
         start_sync_with_home_in_its_own_task(
@@ -1445,6 +1457,7 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let error = manager
@@ -1512,6 +1525,7 @@ mod tests {
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         ));
 
         let error =
@@ -1576,6 +1590,7 @@ mod tests {
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let fingerprint_a = match manager

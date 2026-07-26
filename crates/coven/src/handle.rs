@@ -173,6 +173,8 @@ pub struct CovenHandle {
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    /// How this installation chunks blobs and how wide its range requests are.
+    blob_chunking: crate::sync::cloud_storage::BlobChunking,
 
     /// Host bookkeeping for blob transitions (upload progress, materialize
     /// progress, completion). Passed to the [`SyncManager`] and to the upload
@@ -228,6 +230,7 @@ impl CovenHandle {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
+        blob_chunking: crate::sync::cloud_storage::BlobChunking,
     ) -> Self {
         Self {
             database: StoreDatabase::from_database(db),
@@ -240,6 +243,7 @@ impl CovenHandle {
             identity_custody,
             clock,
             cloudkit_ops,
+            blob_chunking,
             observer,
             open_guard,
             sync: Arc::new(RwLock::new(None)),
@@ -481,6 +485,7 @@ impl CovenHandle {
             self.observer.clone(),
             self.open_guard.clone(),
             self.sync_status_tx.clone(),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         ));
         Box::pin(start(manager.clone())).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
@@ -788,6 +793,7 @@ impl CovenHandle {
                     self.identity_custody.as_ref(),
                     home,
                     None,
+                    self.blob_chunking,
                 )?;
                 return Ok(Some(Arc::new(storage)));
             }
@@ -804,6 +810,7 @@ impl CovenHandle {
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),
+            self.blob_chunking,
         )
         .await?;
         Ok(Some(Arc::new(storage)))
@@ -1713,6 +1720,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         plant_blob_row(&db, "anyblob0", false, b"typed setup error").await;
@@ -1763,6 +1771,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         )
     }
 
@@ -2069,6 +2078,7 @@ mod tests {
             None,
             Some(upload_pause.clone()),
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
@@ -2180,6 +2190,7 @@ mod tests {
             Some(Arc::new(TestCloudKitOps::new())),
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         handle
@@ -2268,6 +2279,7 @@ mod tests {
             Some(ops.clone()),
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
         writer
             .connect_sync_with_cloudkit(ops.clone())
@@ -2289,6 +2301,7 @@ mod tests {
             identity_custody,
             Arc::new(SystemClock),
             Some(ops),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let read = reader
@@ -2404,6 +2417,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         handle
@@ -2543,6 +2557,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         )
     }
 
@@ -2735,6 +2750,7 @@ mod tests {
             test_identity_custody(),
             Arc::new(SystemClock),
             None,
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         assert_eq!(
@@ -3119,6 +3135,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -3196,6 +3213,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         handle
@@ -3270,6 +3288,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -3336,19 +3355,24 @@ mod tests {
             context.extend_from_slice(cloud_key.as_bytes());
             context
         };
-        let cipher = CloudCipher::Encrypted(
-            loop_handle
-                .current_encryption()
-                .expect("session remains encrypted"),
-        );
+        let encryption = loop_handle
+            .current_encryption()
+            .expect("session remains encrypted");
+        let (fingerprint, header, chunks) =
+            crate::sync::cloud_storage::split_sealed_blob(&stored).expect("stored blob layout");
+        assert_eq!(fingerprint, encryption.seal_key_fingerprint());
         assert_eq!(
-            cipher
-                .open(stored.clone(), &aad_context("lib-test"))
+            encryption
+                .blob_opener(header, &aad_context("lib-test"))
+                .open_chunks(0..header.chunk_count(), chunks)
                 .expect("open with the installed session binding"),
             plaintext,
         );
         assert!(
-            cipher.open(stored, &aad_context("next-lib")).is_err(),
+            encryption
+                .blob_opener(header, &aad_context("next-lib"))
+                .open_chunks(0..header.chunk_count(), chunks)
+                .is_err(),
             "a later config must not change the installed session's store binding",
         );
     }
@@ -3382,6 +3406,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::sync::cloud_storage::BlobChunking::DEFAULT,
         );
         (tmp, handle)
     }

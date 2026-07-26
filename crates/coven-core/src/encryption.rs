@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::str::FromStr;
 
 use crate::keys::KeyError;
@@ -124,12 +125,15 @@ pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
         + chunk_count_for_plaintext_len(plaintext_len) * TAG_SIZE as u64
 }
 
-/// Incremental encryptor that emits the same `[base_nonce][chunk_0][chunk_1]...`
-/// bytes as [`EncryptionService::encrypt`], one chunk at a time, so a large blob
-/// is sealed and uploaded without ever holding the whole plaintext or ciphertext
-/// in memory. `encrypt` is itself implemented on top of this, so the streaming
-/// and whole-buffer forms cannot drift.
-pub struct ChunkSealer {
+/// Incremental encryptor for the whole-object format [`EncryptionService::encrypt`]
+/// produces — a protocol object or a host's sealed app data. Emits
+/// `[base_nonce][chunk_0][chunk_1]...` one chunk at a time so a large payload is
+/// never held whole twice.
+///
+/// This format is read whole, always: it carries no header describing its own
+/// framing, so a reader needs every chunk before it knows anything. Blobs, which
+/// are read by range, use [`SealedBlobSealer`] instead.
+struct ChunkSealer {
     cipher: XChaCha20Poly1305,
     base_nonce: [u8; NONCE_SIZE],
     aad_context: Vec<u8>,
@@ -151,9 +155,9 @@ impl ChunkSealer {
         }
     }
 
-    /// The base nonce — the first [`NONCE_SIZE`] bytes of the encrypted blob,
-    /// emitted before any chunk.
-    pub fn base_nonce(&self) -> [u8; NONCE_SIZE] {
+    /// The base nonce — the first [`NONCE_SIZE`] bytes of the payload, emitted
+    /// before any chunk.
+    fn base_nonce(&self) -> [u8; NONCE_SIZE] {
         self.base_nonce
     }
 
@@ -161,7 +165,7 @@ impl ChunkSealer {
     /// ciphertext-plus-tag, advancing the chunk counter. A chunk longer than
     /// `CHUNK_SIZE` would desync the framing the decryptor expects, so the caller
     /// must split the plaintext on `CHUNK_SIZE` boundaries.
-    pub fn seal_chunk(&mut self, plaintext: &[u8]) -> Vec<u8> {
+    fn seal_chunk(&mut self, plaintext: &[u8]) -> Vec<u8> {
         debug_assert!(
             plaintext.len() <= CHUNK_SIZE,
             "a sealed chunk must be at most CHUNK_SIZE bytes"
@@ -178,6 +182,395 @@ impl ChunkSealer {
                 },
             )
             .expect("encryption should not fail")
+    }
+}
+
+/// The sealed-blob format version this build writes, and the only one it reads.
+/// The leading byte of every blob header; a blob naming any other version is
+/// refused rather than guessed at.
+pub const SEALED_BLOB_VERSION: u8 = 1;
+
+/// The chunk size a blob is sealed at when the host configures none. A read
+/// honors whatever its own header records, so this is only ever the *writer's*
+/// choice and can change without touching a blob already stored.
+pub const DEFAULT_BLOB_CHUNK_SIZE: NonZeroU32 = NonZeroU32::new(64 * 1024).expect("64 KiB");
+
+/// `[version: 1][chunk_size: 4 LE][plaintext_len: 8 LE]` — the fixed header
+/// every sealed blob carries ahead of its first chunk.
+pub const SEALED_BLOB_HEADER_LEN: usize = 1 + 4 + 8;
+
+const BLOB_AEAD_LABEL: &[u8] = b"coven-blob-aead-v1";
+const BLOB_NONCE_INFO: &[u8] = b"coven-blob-nonce-v1";
+
+/// What a sealed blob's header says about its own layout: the chunk size it was
+/// sealed at and the plaintext length it covers. Every other offset in the
+/// object is arithmetic over these two numbers, so a blob describes its own
+/// shape and nothing per-chunk is stored.
+///
+/// The header travels in the clear (a reader must know the chunk size before it
+/// can open anything) but is bound into every chunk's AAD, so altering it makes
+/// the first chunk fail to open rather than silently re-framing the object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedBlobHeader {
+    chunk_size: NonZeroU32,
+    plaintext_len: u64,
+}
+
+/// Why a sealed blob's header or one of its chunks could not be opened.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum SealedBlobError {
+    #[error("sealed blob header names version {0}, which this build does not read")]
+    UnknownVersion(u8),
+    #[error("sealed blob header is {0} bytes, expected {SEALED_BLOB_HEADER_LEN}")]
+    ShortHeader(usize),
+    #[error("sealed blob header names chunk size 0")]
+    ZeroChunkSize,
+    #[error("sealed blob chunk {index} is {actual} bytes, expected {expected}")]
+    ChunkLength {
+        index: u64,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("sealed blob chunk {index} failed authentication")]
+    ChunkAuthentication { index: u64 },
+    #[error("sealed blob range {start}..{end} lies outside its {plaintext_len}-byte plaintext")]
+    RangeOutOfBounds {
+        start: u64,
+        end: u64,
+        plaintext_len: u64,
+    },
+}
+
+impl SealedBlobHeader {
+    /// Describe a blob of `plaintext_len` bytes sealed at `chunk_size`.
+    pub fn new(chunk_size: NonZeroU32, plaintext_len: u64) -> Self {
+        Self {
+            chunk_size,
+            plaintext_len,
+        }
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, SealedBlobError> {
+        if bytes.len() < SEALED_BLOB_HEADER_LEN {
+            return Err(SealedBlobError::ShortHeader(bytes.len()));
+        }
+        if bytes[0] != SEALED_BLOB_VERSION {
+            return Err(SealedBlobError::UnknownVersion(bytes[0]));
+        }
+        let chunk_size = NonZeroU32::new(u32::from_le_bytes(
+            bytes[1..5].try_into().expect("four header bytes"),
+        ))
+        .ok_or(SealedBlobError::ZeroChunkSize)?;
+        let plaintext_len =
+            u64::from_le_bytes(bytes[5..13].try_into().expect("eight header bytes"));
+        Ok(Self::new(chunk_size, plaintext_len))
+    }
+
+    pub fn to_bytes(self) -> [u8; SEALED_BLOB_HEADER_LEN] {
+        let mut bytes = [0u8; SEALED_BLOB_HEADER_LEN];
+        bytes[0] = SEALED_BLOB_VERSION;
+        bytes[1..5].copy_from_slice(&self.chunk_size.get().to_le_bytes());
+        bytes[5..13].copy_from_slice(&self.plaintext_len.to_le_bytes());
+        bytes
+    }
+
+    pub fn chunk_size(self) -> NonZeroU32 {
+        self.chunk_size
+    }
+
+    pub fn plaintext_len(self) -> u64 {
+        self.plaintext_len
+    }
+
+    /// How many chunks the plaintext occupies. An empty blob still seals one
+    /// tag-only chunk, so opening it authenticates its emptiness rather than
+    /// trusting a zero-length object.
+    pub fn chunk_count(self) -> u64 {
+        self.plaintext_len
+            .div_ceil(u64::from(self.chunk_size.get()))
+            .max(1)
+    }
+
+    /// The plaintext length chunk `index` carries — the chunk size for every
+    /// chunk but the last, which holds the remainder.
+    pub fn chunk_plaintext_len(self, index: u64) -> u64 {
+        let start = index.saturating_mul(u64::from(self.chunk_size.get()));
+        self.plaintext_len
+            .saturating_sub(start)
+            .min(u64::from(self.chunk_size.get()))
+    }
+
+    /// The sealed length of chunk `index`: its plaintext plus one tag.
+    pub fn sealed_chunk_len(self, index: u64) -> u64 {
+        self.chunk_plaintext_len(index) + TAG_SIZE as u64
+    }
+
+    /// The whole sealed body: the header followed by every chunk. What a
+    /// streaming upload declares as its length before a byte is sealed.
+    pub fn sealed_len(self) -> u64 {
+        SEALED_BLOB_HEADER_LEN as u64 + self.plaintext_len + self.chunk_count() * TAG_SIZE as u64
+    }
+
+    /// The chunks covering plaintext `start..end`. A caller reads exactly these
+    /// and no others; the range must lie inside the plaintext.
+    pub fn covering_chunks(
+        self,
+        start: u64,
+        end: u64,
+    ) -> Result<std::ops::Range<u64>, SealedBlobError> {
+        if start > end || end > self.plaintext_len {
+            return Err(SealedBlobError::RangeOutOfBounds {
+                start,
+                end,
+                plaintext_len: self.plaintext_len,
+            });
+        }
+        if start == end {
+            return Ok(0..0);
+        }
+        let chunk_size = u64::from(self.chunk_size.get());
+        Ok((start / chunk_size)..((end - 1) / chunk_size + 1))
+    }
+
+    /// Where `chunks` sit in the sealed object, as an offset span measured from
+    /// the object's first byte. The header is included in the offset, so this is
+    /// what a ranged cloud read asks for verbatim.
+    pub fn sealed_span(self, chunks: std::ops::Range<u64>) -> std::ops::Range<u64> {
+        let full = u64::from(self.chunk_size.get()) + TAG_SIZE as u64;
+        let start = SEALED_BLOB_HEADER_LEN as u64 + chunks.start * full;
+        let mut end = start;
+        for index in chunks {
+            end += self.sealed_chunk_len(index);
+        }
+        start..end
+    }
+
+    /// Split `chunks` into the runs one ranged read each should fetch: as many
+    /// chunks as fit in `window` stored bytes, and never fewer than one (a chunk
+    /// wider than the window still takes exactly one request). The window is how
+    /// a reader trades round-trips against per-request size without changing what
+    /// bytes it asks for — the union of the runs is always exactly `chunks`.
+    pub fn request_runs(
+        self,
+        chunks: std::ops::Range<u64>,
+        window: NonZeroU64,
+    ) -> Vec<std::ops::Range<u64>> {
+        let mut runs = Vec::new();
+        let mut start = chunks.start;
+        while start < chunks.end {
+            let mut end = start;
+            let mut span = 0u64;
+            while end < chunks.end {
+                let next = span.saturating_add(self.sealed_chunk_len(end));
+                if end > start && next > window.get() {
+                    break;
+                }
+                span = next;
+                end += 1;
+            }
+            runs.push(start..end);
+            start = end;
+        }
+        runs
+    }
+
+    /// Where `chunks` sit in the plaintext.
+    pub fn plaintext_span(self, chunks: std::ops::Range<u64>) -> std::ops::Range<u64> {
+        let chunk_size = u64::from(self.chunk_size.get());
+        let start = (chunks.start * chunk_size).min(self.plaintext_len);
+        let end = (chunks.end * chunk_size).min(self.plaintext_len);
+        start..end
+    }
+}
+
+/// The per-blob nonce base: HKDF over the sealing key, bound to the blob's
+/// context. Chunk `n` uses this base XOR `n`, so no nonce is ever stored.
+///
+/// # Invariant: blob addressing must keep covering blob content
+///
+/// Nonce separation rests entirely on `aad_context` differing whenever the
+/// plaintext does. It holds today because the context is minted from the blob's
+/// semantic key, which for an opaque blob is `{namespace}/opaque/{locator_hash}`,
+/// and the locator hash covers the plaintext hash — so two different plaintexts
+/// cannot share a base without a SHA-256 collision. Re-sealing identical bytes
+/// under an identical locator reproduces an identical base, which is fine: it
+/// reproduces identical ciphertext, not a second message under one nonce.
+///
+/// **Any change to how a blob is addressed must preserve that.** A locator that
+/// stopped folding in the plaintext hash, or a context minted from something
+/// that outlives a blob's content (a bare row id, a stable path), would let one
+/// key seal two different plaintexts under one nonce — which for
+/// XChaCha20-Poly1305 leaks the plaintexts' XOR and forfeits authentication.
+/// That failure is silent: everything still encrypts, decrypts, and round-trips.
+fn blob_nonce_base(key: &[u8; 32], aad_context: &[u8]) -> [u8; NONCE_SIZE] {
+    let mut info = Vec::with_capacity(BLOB_NONCE_INFO.len() + aad_context.len());
+    info.extend_from_slice(BLOB_NONCE_INFO);
+    info.extend_from_slice(aad_context);
+    let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), key);
+    let mut base = [0u8; NONCE_SIZE];
+    hk.expand(&info, &mut base)
+        .expect("24 bytes is a valid HKDF output length");
+    base
+}
+
+/// Chunk `index`'s AAD: the format label, the whole header, the blob's context,
+/// and the index. Binding the header makes a rewritten chunk size or plaintext
+/// length fail the first open; binding the context and index makes a chunk
+/// refuse to open as a different blob's chunk, or as a different position in its
+/// own.
+fn sealed_blob_chunk_aad(header: SealedBlobHeader, aad_context: &[u8], index: u64) -> Vec<u8> {
+    let mut aad =
+        Vec::with_capacity(BLOB_AEAD_LABEL.len() + SEALED_BLOB_HEADER_LEN + 16 + aad_context.len());
+    aad.extend_from_slice(BLOB_AEAD_LABEL);
+    aad.extend_from_slice(&header.to_bytes());
+    aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
+    aad.extend_from_slice(aad_context);
+    aad.extend_from_slice(&index.to_le_bytes());
+    aad
+}
+
+/// Seals one blob's chunks in order, so an upload streams without ever holding
+/// the whole plaintext or ciphertext. The header it emits first is what a later
+/// read needs to compute every chunk offset.
+pub struct SealedBlobSealer {
+    cipher: XChaCha20Poly1305,
+    base_nonce: [u8; NONCE_SIZE],
+    header: SealedBlobHeader,
+    aad_context: Vec<u8>,
+    next_index: u64,
+}
+
+impl SealedBlobSealer {
+    fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
+        Self {
+            cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
+            base_nonce: blob_nonce_base(key, aad_context),
+            header,
+            aad_context: aad_context.to_vec(),
+            next_index: 0,
+        }
+    }
+
+    pub fn header(&self) -> SealedBlobHeader {
+        self.header
+    }
+
+    /// Seal the next chunk. The caller splits the plaintext on the header's
+    /// chunk boundaries; a chunk of any other length would desync the framing
+    /// every reader computes from the header.
+    pub fn seal_chunk(&mut self, plaintext: &[u8]) -> Vec<u8> {
+        let index = self.next_index;
+        debug_assert_eq!(
+            plaintext.len() as u64,
+            self.header.chunk_plaintext_len(index),
+            "a sealed chunk carries exactly the plaintext its header assigns it",
+        );
+        self.next_index += 1;
+        let nonce = chunk_nonce(&self.base_nonce, index);
+        let aad = sealed_blob_chunk_aad(self.header, &self.aad_context, index);
+        self.cipher
+            .encrypt(
+                GenericArray::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .expect("encryption should not fail")
+    }
+}
+
+/// Opens a sealed blob's chunks in any order. A chunk that opens is authentic —
+/// the tag covers its bytes, its position, and the header that framed it — so
+/// decryption is the whole verification and no separate hash is read.
+pub struct SealedBlobOpener {
+    cipher: XChaCha20Poly1305,
+    base_nonce: [u8; NONCE_SIZE],
+    header: SealedBlobHeader,
+    aad_context: Vec<u8>,
+}
+
+impl SealedBlobOpener {
+    fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
+        Self {
+            cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
+            base_nonce: blob_nonce_base(key, aad_context),
+            header,
+            aad_context: aad_context.to_vec(),
+        }
+    }
+
+    pub fn header(&self) -> SealedBlobHeader {
+        self.header
+    }
+
+    /// Open chunk `index` from exactly its sealed bytes. A length the header
+    /// does not assign that index is refused before the cipher runs — the bytes
+    /// are not that chunk, whatever they authenticate as.
+    pub fn open_chunk(&self, index: u64, sealed: &[u8]) -> Result<Vec<u8>, SealedBlobError> {
+        let expected = self.header.sealed_chunk_len(index);
+        if sealed.len() as u64 != expected {
+            return Err(SealedBlobError::ChunkLength {
+                index,
+                expected: expected as usize,
+                actual: sealed.len(),
+            });
+        }
+        let nonce = chunk_nonce(&self.base_nonce, index);
+        let aad = sealed_blob_chunk_aad(self.header, &self.aad_context, index);
+        self.cipher
+            .decrypt(
+                GenericArray::from_slice(&nonce),
+                Payload {
+                    msg: sealed,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| SealedBlobError::ChunkAuthentication { index })
+    }
+
+    /// Open every chunk in `chunks` from the contiguous sealed bytes covering
+    /// them — the span [`SealedBlobHeader::sealed_span`] names for the same
+    /// range — and return their whole plaintext. Chunks are opened one at a
+    /// time, so a tampered chunk fails only the reads that touch it.
+    pub fn open_chunks(
+        &self,
+        chunks: std::ops::Range<u64>,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, SealedBlobError> {
+        let window = self.header.plaintext_span(chunks.clone());
+        let mut plaintext = Vec::with_capacity((window.end - window.start) as usize);
+        let mut offset = 0usize;
+        for index in chunks {
+            let len = self.header.sealed_chunk_len(index) as usize;
+            let sealed_chunk = sealed.get(offset..offset + len).ok_or({
+                SealedBlobError::ChunkLength {
+                    index,
+                    expected: len,
+                    actual: sealed.len().saturating_sub(offset),
+                }
+            })?;
+            offset += len;
+            plaintext.extend(self.open_chunk(index, sealed_chunk)?);
+        }
+        Ok(plaintext)
+    }
+
+    /// Serve plaintext `start..end` from exactly the sealed bytes of the chunks
+    /// covering it. Deriving the chunk set here rather than taking it means the
+    /// bytes fetched and the bytes opened cannot disagree.
+    pub fn open_range(
+        &self,
+        sealed: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, SealedBlobError> {
+        let chunks = self.header.covering_chunks(start, end)?;
+        let window = self.header.plaintext_span(chunks.clone());
+        let plaintext = self.open_chunks(chunks, sealed)?;
+        let from = (start - window.start) as usize;
+        let to = (end - window.start) as usize;
+        Ok(plaintext[from..to].to_vec())
     }
 }
 
@@ -600,145 +993,25 @@ impl EncryptionService {
         Ok(result)
     }
 
-    /// A streaming sealer over this service's key, for encrypting a blob
-    /// chunk-by-chunk straight into an upload. See [`ChunkSealer`].
-    pub fn sealer(&self, plaintext_len: u64, aad_context: &[u8]) -> ChunkSealer {
+    /// A streaming sealer over this service's key. Only [`Self::encrypt`] uses
+    /// it: a whole-object payload is sealed chunk by chunk so a large one never
+    /// sits in memory twice, but it is always read whole.
+    fn sealer(&self, plaintext_len: u64, aad_context: &[u8]) -> ChunkSealer {
         ChunkSealer::new(&self.key_bytes(), plaintext_len, aad_context)
     }
 
-    /// Decrypt a specific chunk from chunked encrypted data.
-    /// Enables random-access decryption without reading preceding chunks.
-    pub fn decrypt_chunk(
-        &self,
-        ciphertext: &[u8],
-        chunk_index: usize,
-        aad_context: &[u8],
-    ) -> Result<Vec<u8>, EncryptionError> {
-        let base_nonce = read_base_nonce(ciphertext)?;
-        let layout = encrypted_chunk_layout(ciphertext.len())?;
-        let (chunk_start, chunk_end) = layout.chunk_bounds(ciphertext.len(), chunk_index)?;
-        let chunk_data = &ciphertext[chunk_start..chunk_end];
-
-        let key = self.key_bytes();
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
-        decrypt_chunk_with_cipher(
-            &cipher,
-            &base_nonce,
-            aad_context,
-            chunk_index as u64,
-            layout.total_chunks as u64,
-            chunk_data,
-        )
-        .map_err(|_| EncryptionError::Decryption("Authentication failed".to_string()))
+    /// A sealer for one blob, framed by `header`. The blob namespace's format:
+    /// the header travels in the clear ahead of the chunks, every chunk's nonce
+    /// is derived rather than stored, and the AAD binds the header, the blob's
+    /// context, and the chunk index.
+    pub fn blob_sealer(&self, header: SealedBlobHeader, aad_context: &[u8]) -> SealedBlobSealer {
+        SealedBlobSealer::new(&self.key_bytes(), header, aad_context)
     }
 
-    /// Decrypt a plaintext byte range using nonce from DB and partial chunk data.
-    ///
-    /// This is the efficient method for encrypted range requests:
-    /// - `nonce`: 24-byte nonce stored in DB at import time
-    /// - `encrypted_chunks`: Raw encrypted chunk bytes (NO nonce prefix)
-    /// - `first_chunk_index`: Which chunk index the encrypted_chunks starts at
-    /// - `plaintext_start`, `plaintext_end`: Absolute byte positions in original file
-    ///
-    /// Example: To read plaintext bytes 500,000-600,000:
-    /// 1. Calculate needed chunks: `encrypted_chunk_range(500000, 600000)` -> chunks 7-9
-    /// 2. Fetch encrypted bytes from cloud at those positions
-    /// 3. Call `decrypt_range_with_offset(nonce, chunks, 7, 500000, 600000, source_size, aad_context)`
-    pub fn decrypt_range_with_offset(
-        &self,
-        nonce: &[u8],
-        encrypted_chunks: &[u8],
-        first_chunk_index: u64,
-        plaintext_start: u64,
-        plaintext_end: u64,
-        source_size: u64,
-        aad_context: &[u8],
-    ) -> Result<Vec<u8>, EncryptionError> {
-        if nonce.len() != NONCE_SIZE {
-            return Err(EncryptionError::Decryption(format!(
-                "Invalid nonce length: expected {}, got {}",
-                NONCE_SIZE,
-                nonce.len()
-            )));
-        }
-
-        if plaintext_start >= plaintext_end {
-            return Err(EncryptionError::Decryption(format!(
-                "Invalid range: start ({}) >= end ({})",
-                plaintext_start, plaintext_end
-            )));
-        }
-        if plaintext_end > source_size {
-            return Err(EncryptionError::Decryption(format!(
-                "Invalid range: end ({plaintext_end}) > source size ({source_size})"
-            )));
-        }
-
-        let base_nonce: [u8; NONCE_SIZE] = nonce
-            .try_into()
-            .map_err(|_| EncryptionError::Decryption("Invalid nonce".to_string()))?;
-
-        let key = self.key_bytes();
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
-
-        let start_chunk = plaintext_start / CHUNK_SIZE as u64;
-        let end_chunk = (plaintext_end.saturating_sub(1)) / CHUNK_SIZE as u64;
-        let total_chunks = chunk_count_for_plaintext_len(source_size);
-
-        let mut plaintext = Vec::new();
-
-        for absolute_chunk_idx in start_chunk..=end_chunk {
-            // Convert absolute chunk index to position in encrypted_chunks
-            let relative_idx = absolute_chunk_idx - first_chunk_index;
-            let chunk_start = (relative_idx as usize) * ENCRYPTED_CHUNK_SIZE;
-
-            // Handle last chunk which may be smaller
-            let chunk_end = if chunk_start + ENCRYPTED_CHUNK_SIZE > encrypted_chunks.len() {
-                encrypted_chunks.len()
-            } else {
-                chunk_start + ENCRYPTED_CHUNK_SIZE
-            };
-
-            if chunk_start >= encrypted_chunks.len() {
-                return Err(EncryptionError::Decryption(format!(
-                    "Chunk {} not in provided data (first_chunk_index={})",
-                    absolute_chunk_idx, first_chunk_index
-                )));
-            }
-
-            let chunk_data = &encrypted_chunks[chunk_start..chunk_end];
-            let decrypted = decrypt_chunk_with_cipher(
-                &cipher,
-                &base_nonce,
-                aad_context,
-                absolute_chunk_idx,
-                total_chunks,
-                chunk_data,
-            )
-            .map_err(|_| {
-                EncryptionError::Decryption(format!(
-                    "Authentication failed for chunk {}",
-                    absolute_chunk_idx
-                ))
-            })?;
-
-            plaintext.extend(decrypted);
-        }
-
-        // Slice to exact range within the decrypted chunks
-        let offset_in_first_chunk = (plaintext_start % CHUNK_SIZE as u64) as usize;
-        let len = (plaintext_end - plaintext_start) as usize;
-        let end = offset_in_first_chunk + len;
-
-        if end > plaintext.len() {
-            return Err(EncryptionError::Decryption(format!(
-                "Decrypted data too short: need {} bytes, got {}",
-                end,
-                plaintext.len()
-            )));
-        }
-
-        Ok(plaintext[offset_in_first_chunk..end].to_vec())
+    /// The opener for a blob whose header has been read. Random access: any
+    /// chunk opens without the ones before it.
+    pub fn blob_opener(&self, header: SealedBlobHeader, aad_context: &[u8]) -> SealedBlobOpener {
+        SealedBlobOpener::new(&self.key_bytes(), header, aad_context)
     }
 
     /// Derive a scoped encryption service.
@@ -970,23 +1243,6 @@ fn chunk_nonce(base_nonce: &[u8; NONCE_SIZE], chunk_index: u64) -> [u8; NONCE_SI
     nonce
 }
 
-/// Calculate the encrypted byte range for a plaintext byte range.
-///
-/// Returns `(chunk_start, chunk_end)` - the byte positions in the encrypted file
-/// where the needed chunks are located. Does NOT include the nonce (first 24 bytes).
-///
-/// Use this for efficient range requests: fetch nonce separately (or from DB),
-/// then fetch just `chunk_start..chunk_end` from storage.
-pub fn encrypted_chunk_range(plaintext_start: u64, plaintext_end: u64) -> (u64, u64) {
-    let start_chunk = plaintext_start / CHUNK_SIZE as u64;
-    let end_chunk = (plaintext_end.saturating_sub(1)) / CHUNK_SIZE as u64;
-
-    let chunk_start = NONCE_SIZE as u64 + start_chunk * ENCRYPTED_CHUNK_SIZE as u64;
-    let chunk_end = NONCE_SIZE as u64 + (end_chunk + 1) * ENCRYPTED_CHUNK_SIZE as u64;
-
-    (chunk_start, chunk_end)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,30 +1260,6 @@ mod tests {
 
     fn create_test_service() -> EncryptionService {
         EncryptionService::from_key(test_key())
-    }
-
-    fn decrypt_plaintext_range(
-        service: &EncryptionService,
-        full_ciphertext: &[u8],
-        source_size: u64,
-        plaintext_start: u64,
-        plaintext_end: u64,
-    ) -> Vec<u8> {
-        let nonce = &full_ciphertext[..NONCE_SIZE];
-        let (chunk_start, chunk_end) = encrypted_chunk_range(plaintext_start, plaintext_end);
-        let chunks_only = &full_ciphertext[chunk_start as usize..chunk_end as usize];
-        let first_chunk_index = (chunk_start - NONCE_SIZE as u64) / ENCRYPTED_CHUNK_SIZE as u64;
-        service
-            .decrypt_range_with_offset(
-                nonce,
-                chunks_only,
-                first_chunk_index,
-                plaintext_start,
-                plaintext_end,
-                source_size,
-                TEST_AAD,
-            )
-            .unwrap()
     }
 
     #[test]
@@ -1132,45 +1364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_random_access_chunk() {
-        let service = create_test_service();
-        // 3 chunks: chunk 0 = 0x00, chunk 1 = 0x11, chunk 2 = 0x22
-        let mut plaintext = vec![0x00u8; CHUNK_SIZE];
-        plaintext.extend(vec![0x11u8; CHUNK_SIZE]);
-        plaintext.extend(vec![0x22u8; CHUNK_SIZE]);
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Decrypt only chunk 1 (middle chunk)
-        let chunk1 = service.decrypt_chunk(&ciphertext, 1, TEST_AAD).unwrap();
-        assert_eq!(chunk1, vec![0x11u8; CHUNK_SIZE]);
-
-        // Decrypt chunk 0
-        let chunk0 = service.decrypt_chunk(&ciphertext, 0, TEST_AAD).unwrap();
-        assert_eq!(chunk0, vec![0x00u8; CHUNK_SIZE]);
-
-        // Decrypt chunk 2
-        let chunk2 = service.decrypt_chunk(&ciphertext, 2, TEST_AAD).unwrap();
-        assert_eq!(chunk2, vec![0x22u8; CHUNK_SIZE]);
-    }
-
-    #[test]
-    fn test_random_access_partial_last_chunk() {
-        let service = create_test_service();
-        // 1 full chunk + partial chunk
-        let mut plaintext = vec![0xAAu8; CHUNK_SIZE];
-        plaintext.extend(vec![0xBBu8; 100]);
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        let chunk0 = service.decrypt_chunk(&ciphertext, 0, TEST_AAD).unwrap();
-        assert_eq!(chunk0, vec![0xAAu8; CHUNK_SIZE]);
-
-        let chunk1 = service.decrypt_chunk(&ciphertext, 1, TEST_AAD).unwrap();
-        assert_eq!(chunk1, vec![0xBBu8; 100]);
-    }
-
-    #[test]
     fn test_tamper_detection() {
         let service = create_test_service();
         let plaintext = b"Secret data";
@@ -1224,34 +1417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encrypted_range_single_chunk() {
-        // Plaintext bytes 0-100 are in chunk 0
-        let (start, end) = encrypted_chunk_range(0, 100);
-
-        assert_eq!(start, NONCE_SIZE as u64);
-        assert_eq!(end, NONCE_SIZE as u64 + ENCRYPTED_CHUNK_SIZE as u64);
-    }
-
-    #[test]
-    fn test_encrypted_range_spans_chunks() {
-        // Plaintext bytes spanning chunk 0 and chunk 1
-        let (start, end) = encrypted_chunk_range(CHUNK_SIZE as u64 - 10, CHUNK_SIZE as u64 + 10);
-
-        assert_eq!(start, NONCE_SIZE as u64);
-        assert_eq!(end, NONCE_SIZE as u64 + 2 * ENCRYPTED_CHUNK_SIZE as u64);
-    }
-
-    #[test]
-    fn test_encrypted_range_middle_chunk() {
-        // Plaintext bytes entirely within chunk 2
-        let chunk2_start = CHUNK_SIZE as u64 * 2;
-        let (start, end) = encrypted_chunk_range(chunk2_start + 10, chunk2_start + 100);
-
-        assert_eq!(start, NONCE_SIZE as u64 + 2 * ENCRYPTED_CHUNK_SIZE as u64);
-        assert_eq!(end, NONCE_SIZE as u64 + 3 * ENCRYPTED_CHUNK_SIZE as u64);
-    }
-
-    #[test]
     fn test_different_encryptions_different_ciphertext() {
         let service = create_test_service();
         let plaintext = b"Same message";
@@ -1265,222 +1430,6 @@ mod tests {
         // Both decrypt to same plaintext
         assert_eq!(service.decrypt(&ciphertext1, TEST_AAD).unwrap(), plaintext);
         assert_eq!(service.decrypt(&ciphertext2, TEST_AAD).unwrap(), plaintext);
-    }
-
-    #[test]
-    fn test_chunk_index_out_of_range() {
-        let service = create_test_service();
-        let plaintext = vec![0u8; CHUNK_SIZE]; // Exactly 1 chunk
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Chunk 0 should work
-        assert!(service.decrypt_chunk(&ciphertext, 0, TEST_AAD).is_ok());
-
-        // Chunk 1 should fail
-        assert!(service.decrypt_chunk(&ciphertext, 1, TEST_AAD).is_err());
-    }
-
-    #[test]
-    fn test_decrypt_range_within_single_chunk() {
-        let service = create_test_service();
-        // Create plaintext with recognizable pattern
-        let plaintext: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        let decrypted =
-            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, 100, 200);
-
-        assert_eq!(decrypted.len(), 100);
-        assert_eq!(decrypted, plaintext[100..200]);
-    }
-
-    #[test]
-    fn test_decrypt_range_spanning_chunks() {
-        let service = create_test_service();
-        // 3 chunks of data
-        let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 256) as u8).collect();
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Range spanning from end of chunk 0 into chunk 1
-        let start = CHUNK_SIZE as u64 - 100;
-        let end = CHUNK_SIZE as u64 + 100;
-        let decrypted =
-            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, start, end);
-
-        assert_eq!(decrypted.len(), 200);
-        assert_eq!(decrypted, &plaintext[start as usize..end as usize]);
-    }
-
-    #[test]
-    fn test_decrypt_range_entire_middle_chunk() {
-        let service = create_test_service();
-        // 3 chunks, middle chunk filled with 0xBB
-        let mut plaintext = vec![0xAAu8; CHUNK_SIZE];
-        plaintext.extend(vec![0xBBu8; CHUNK_SIZE]);
-        plaintext.extend(vec![0xCCu8; CHUNK_SIZE]);
-
-        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Decrypt just the middle chunk
-        let start = CHUNK_SIZE as u64;
-        let end = (CHUNK_SIZE * 2) as u64;
-        let decrypted =
-            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, start, end);
-
-        assert_eq!(decrypted, vec![0xBBu8; CHUNK_SIZE]);
-    }
-
-    #[test]
-    fn test_decrypt_range_with_partial_encrypted_data() {
-        let service = create_test_service();
-        // Create 3-chunk plaintext
-        let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Calculate encrypted range for plaintext bytes in chunk 1
-        let plaintext_start = CHUNK_SIZE as u64 + 100;
-        let plaintext_end = CHUNK_SIZE as u64 + 200;
-        let nonce = &full_ciphertext[..NONCE_SIZE];
-        let (chunk_start, chunk_end) = encrypted_chunk_range(plaintext_start, plaintext_end);
-        let chunks_only = &full_ciphertext[chunk_start as usize..chunk_end as usize];
-        let first_chunk_index = (chunk_start - NONCE_SIZE as u64) / ENCRYPTED_CHUNK_SIZE as u64;
-        let decrypted = service
-            .decrypt_range_with_offset(
-                nonce,
-                chunks_only,
-                first_chunk_index,
-                plaintext_start,
-                plaintext_end,
-                plaintext.len() as u64,
-                TEST_AAD,
-            )
-            .unwrap();
-
-        assert_eq!(decrypted.len(), 100);
-        assert_eq!(
-            decrypted,
-            &plaintext[plaintext_start as usize..plaintext_end as usize]
-        );
-    }
-
-    #[test]
-    fn test_encrypted_chunk_range_returns_actual_bounds() {
-        // For plaintext in chunk 5, should return just chunk 5's encrypted bytes
-        // NOT starting from 0
-        let chunk5_start = CHUNK_SIZE as u64 * 5;
-        let chunk5_end = chunk5_start + 1000;
-
-        let (enc_start, enc_end) = encrypted_chunk_range(chunk5_start, chunk5_end);
-
-        // Should start at chunk 5's position, not 0
-        let expected_start = NONCE_SIZE as u64 + 5 * ENCRYPTED_CHUNK_SIZE as u64;
-        let expected_end = NONCE_SIZE as u64 + 6 * ENCRYPTED_CHUNK_SIZE as u64;
-
-        assert_eq!(
-            enc_start, expected_start,
-            "encrypted_chunk_range should return actual chunk start, not 0"
-        );
-        assert_eq!(enc_end, expected_end);
-    }
-
-    #[test]
-    fn test_encrypted_chunk_range_spanning_multiple_chunks() {
-        // Range spanning chunks 3-5
-        let start = CHUNK_SIZE as u64 * 3 + 100;
-        let end = CHUNK_SIZE as u64 * 5 + 500;
-
-        let (enc_start, enc_end) = encrypted_chunk_range(start, end);
-
-        let expected_start = NONCE_SIZE as u64 + 3 * ENCRYPTED_CHUNK_SIZE as u64;
-        let expected_end = NONCE_SIZE as u64 + 6 * ENCRYPTED_CHUNK_SIZE as u64;
-
-        assert_eq!(enc_start, expected_start);
-        assert_eq!(enc_end, expected_end);
-    }
-
-    #[test]
-    fn test_decrypt_range_with_separate_nonce() {
-        // This simulates production flow: nonce from DB + chunks from range request
-        let service = create_test_service();
-
-        // Create 10-chunk plaintext with recognizable pattern
-        let plaintext: Vec<u8> = (0..CHUNK_SIZE * 10).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
-
-        // Extract nonce (this would come from DB in production)
-        let nonce = &full_ciphertext[..NONCE_SIZE];
-
-        // We want plaintext bytes in chunk 7
-        let plaintext_start = CHUNK_SIZE as u64 * 7 + 100;
-        let plaintext_end = CHUNK_SIZE as u64 * 7 + 500;
-
-        // Get the encrypted chunk range (NOT starting from 0)
-        let (chunk_start, chunk_end) = encrypted_chunk_range(plaintext_start, plaintext_end);
-
-        // Fetch just the needed chunks (simulating range request)
-        let chunks_only = &full_ciphertext[chunk_start as usize..chunk_end as usize];
-
-        // First chunk index is 7 (the chunk our range starts in)
-        let first_chunk_index = plaintext_start / CHUNK_SIZE as u64;
-
-        // Use the new method that handles offset chunks
-        let decrypted = service
-            .decrypt_range_with_offset(
-                nonce,
-                chunks_only,
-                first_chunk_index,
-                plaintext_start,
-                plaintext_end,
-                plaintext.len() as u64,
-                TEST_AAD,
-            )
-            .unwrap();
-
-        assert_eq!(decrypted.len(), 400);
-        assert_eq!(
-            decrypted,
-            &plaintext[plaintext_start as usize..plaintext_end as usize]
-        );
-    }
-
-    #[test]
-    fn test_decrypt_range_with_offset_spanning_chunks() {
-        // Test decrypting a range that spans multiple chunks
-        let service = create_test_service();
-
-        let plaintext: Vec<u8> = (0..CHUNK_SIZE * 10).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
-        let nonce = &full_ciphertext[..NONCE_SIZE];
-
-        // Range spanning chunks 3, 4, 5
-        let plaintext_start = CHUNK_SIZE as u64 * 3 + 1000;
-        let plaintext_end = CHUNK_SIZE as u64 * 5 + 2000;
-
-        let (chunk_start, chunk_end) = encrypted_chunk_range(plaintext_start, plaintext_end);
-        let chunks_only = &full_ciphertext[chunk_start as usize..chunk_end as usize];
-        let first_chunk_index = plaintext_start / CHUNK_SIZE as u64;
-
-        let decrypted = service
-            .decrypt_range_with_offset(
-                nonce,
-                chunks_only,
-                first_chunk_index,
-                plaintext_start,
-                plaintext_end,
-                plaintext.len() as u64,
-                TEST_AAD,
-            )
-            .unwrap();
-
-        let expected_len = (plaintext_end - plaintext_start) as usize;
-        assert_eq!(decrypted.len(), expected_len);
-        assert_eq!(
-            decrypted,
-            &plaintext[plaintext_start as usize..plaintext_end as usize]
-        );
     }
 
     #[test]

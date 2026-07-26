@@ -121,6 +121,7 @@ impl Coven {
             synced_tables: None,
             migrations: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            blob_chunking: crate::sync::cloud_storage::BlobChunking::DEFAULT,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
             clock: Arc::new(SystemClock),
@@ -145,6 +146,7 @@ pub struct CovenBuilder {
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    blob_chunking: crate::sync::cloud_storage::BlobChunking,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
@@ -216,6 +218,19 @@ impl CovenBuilder {
     /// let the GC erase a blob a lagging peer still references.
     pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
         self.blob_tombstone_grace = grace;
+        self
+    }
+
+    /// How this installation seals and reads blobs: the plaintext chunk size a
+    /// blob is sealed at, and how many stored bytes one ranged read spans.
+    /// Defaults to [`BlobChunking::DEFAULT`](crate::sync::cloud_storage::BlobChunking::DEFAULT).
+    ///
+    /// The chunk size applies to blobs this installation seals from here on. A
+    /// blob already in the cloud records the size it was sealed at in its own
+    /// header, and readers honor that, so changing this setting migrates
+    /// nothing and installations set differently read each other's blobs.
+    pub fn blob_chunking(mut self, chunking: crate::sync::cloud_storage::BlobChunking) -> Self {
+        self.blob_chunking = chunking;
         self
     }
 
@@ -360,6 +375,7 @@ impl CovenBuilder {
             self.cloudkit_ops,
             self.observer,
             open_guard,
+            self.blob_chunking,
         ))
     }
 
@@ -415,6 +431,7 @@ impl CovenBuilder {
             identity_custody,
             self.clock,
             self.cloudkit_ops,
+            self.blob_chunking,
         ))
     }
 }

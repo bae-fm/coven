@@ -64,6 +64,8 @@ pub struct CovenReadHandle {
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    /// How this installation chunks blobs and how wide its range requests are.
+    blob_chunking: crate::sync::cloud_storage::BlobChunking,
 }
 
 impl CovenReadHandle {
@@ -77,6 +79,7 @@ impl CovenReadHandle {
         identity_custody: Arc<dyn DeviceIdentityCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        blob_chunking: crate::sync::cloud_storage::BlobChunking,
     ) -> Self {
         Self {
             database: StoreDatabase::from_database(db),
@@ -87,6 +90,7 @@ impl CovenReadHandle {
             identity_custody,
             clock,
             cloudkit_ops,
+            blob_chunking,
         }
     }
 
@@ -140,6 +144,7 @@ impl CovenReadHandle {
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),
+            self.blob_chunking,
         )
         .await?;
         Ok(Some(Arc::new(storage)))

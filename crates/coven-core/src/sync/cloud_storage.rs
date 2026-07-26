@@ -11,13 +11,14 @@
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use tokio::sync::OnceCell;
 
 use super::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
     ResolvedProviderBinding, StorageError, SyncStorage,
 };
-use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
+use crate::encryption::{
+    EncryptionError, EncryptionService, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
+};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{
     BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage, ObjectSlot,
@@ -705,9 +706,9 @@ impl CloudCipher {
     /// `encryption` is the store master service; it is required for (and only
     /// consulted on) an opaque home. `None` is returned only for an opaque home
     /// with no service (a locked store) — a browsable home is always
-    /// `Plaintext` regardless. A host streaming a Remote blob via
-    /// [`BlobRangeReader`] builds the reader with this cipher so a read applies
-    /// the same protection the upload sealed under.
+    /// `Plaintext` regardless. A host streaming a Remote blob opens a
+    /// [`BlobRangeReader`] under this cipher, so a read applies the same
+    /// protection the upload sealed under.
     pub fn for_storage(
         storage: crate::config::HomeStorage,
         encryption: Option<EncryptionService>,
@@ -778,13 +779,14 @@ impl CloudCipher {
         matches!(self, CloudCipher::Plaintext)
     }
 
-    /// The final object length for a blob of `plaintext_len` bytes under this
-    /// cipher: the generation tag plus the chunked-encrypted length for an
-    /// encrypted home, the plaintext length verbatim for a browsable one.
-    pub fn body_len(&self, plaintext_len: u64) -> u64 {
+    /// The final object length for a blob framed by `header` under this cipher:
+    /// the key tag plus the sealed body for an encrypted home, the plaintext
+    /// length verbatim for a browsable one. Known before a byte is sealed, so a
+    /// streaming upload can declare its length up front.
+    pub fn body_len(&self, header: SealedBlobHeader) -> u64 {
         match self {
-            CloudCipher::Encrypted(_) => chunked_encrypted_len(plaintext_len) + KEY_TAG_LEN as u64,
-            CloudCipher::Plaintext => plaintext_len,
+            CloudCipher::Encrypted(_) => KEY_TAG_LEN as u64 + header.sealed_len(),
+            CloudCipher::Plaintext => header.plaintext_len(),
         }
     }
 
@@ -798,18 +800,21 @@ impl CloudCipher {
         scope: crate::blob::BlobScope,
         file_path: &std::path::Path,
         aad_context: &[u8],
+        chunk_size: std::num::NonZeroU32,
     ) -> Result<BlobBody, String> {
         let plaintext_len = crate::local_blob::file_len(file_path).await?;
+        let header = SealedBlobHeader::new(chunk_size, plaintext_len);
         let reader = crate::local_blob::open_reader(file_path).await?;
         let (sealer, prefix) = match self {
             CloudCipher::Encrypted(e) => {
-                let (encryption, prefix) = sealing_encryption_for_scope(scope, e);
-                (Some(encryption.sealer(plaintext_len, aad_context)), prefix)
+                let (encryption, mut prefix) = sealing_encryption_for_scope(scope, e);
+                prefix.extend_from_slice(&header.to_bytes());
+                (Some(encryption.blob_sealer(header, aad_context)), prefix)
             }
             CloudCipher::Plaintext => (None, Vec::new()),
         };
         Ok(BlobBody::from_file_with_prefix(
-            self.body_len(plaintext_len),
+            self.body_len(header),
             reader,
             sealer,
             prefix,
@@ -817,14 +822,133 @@ impl CloudCipher {
     }
 }
 
+/// The two numbers that decide what a blob transfer costs. They are independent
+/// on purpose: the chunk is fixed when a blob is sealed and bounds how little a
+/// read can fetch, so it sets how long a seek waits for its first byte; the
+/// window is a live reader-side choice about how much one request carries, so it
+/// sets how many round-trips a long read costs. Neither can be derived from the
+/// other, and changing the window never touches a stored blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobChunking {
+    chunk: std::num::NonZeroU32,
+    window: std::num::NonZeroU64,
+}
+
+impl BlobChunking {
+    /// 64 KiB chunks read one mebibyte of stored bytes at a time.
+    pub const DEFAULT: Self = Self {
+        chunk: crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
+        window: match std::num::NonZeroU64::new(1 << 20) {
+            Some(window) => window,
+            None => unreachable!(),
+        },
+    };
+
+    pub fn new(chunk: std::num::NonZeroU32, window: std::num::NonZeroU64) -> Self {
+        Self { chunk, window }
+    }
+
+    pub fn chunk(self) -> std::num::NonZeroU32 {
+        self.chunk
+    }
+
+    pub fn window(self) -> std::num::NonZeroU64 {
+        self.window
+    }
+}
+
+/// Serves plaintext ranges of one stored blob by fetching only the sealed chunks
+/// that cover them. A read costs the chunks it touches and nothing else — never
+/// the whole object, however many ranges the stream asks for.
+///
+/// Opening a sealed blob reads its `[key tag][header]` prefix once, which is
+/// what names the key and the chunk size; every later range is arithmetic over
+/// that header plus one ranged request per
+/// [window](BlobChunking::window)-worth of chunks. A chunk that opens is
+/// authentic — its tag covers its bytes, its index, and the header — so there is
+/// nothing else to check and no whole-object pass to amortize.
+pub struct BlobRangeReader {
+    exact: Arc<dyn ExactSlotStorage>,
+    slot: crate::storage::cloud::ObjectSlot,
+    opener: crate::encryption::SealedBlobOpener,
+    plaintext_size: u64,
+    window: std::num::NonZeroU64,
+}
+
+impl BlobRangeReader {
+    /// The blob's whole plaintext length, as its row declares it.
+    pub fn plaintext_size(&self) -> u64 {
+        self.plaintext_size
+    }
+
+    /// Read exactly `len` plaintext bytes at `offset`. A range past the blob's
+    /// end is an error, never a short read.
+    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, StorageError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
+        })?;
+        if end > self.plaintext_size {
+            return Err(StorageError::Storage(format!(
+                "blob range {offset}..{end} exceeds blob size {}",
+                self.plaintext_size
+            )));
+        }
+        let header = self.opener.header();
+        let chunks = header.covering_chunks(offset, end).map_err(|error| {
+            StorageError::InvalidContent(format!("blob range {offset}..{end}: {error}"))
+        })?;
+        let mut plaintext = Vec::with_capacity(len as usize);
+        for run in header.request_runs(chunks, self.window) {
+            let span = header.sealed_span(run.clone());
+            let sealed = self
+                .read_stored(
+                    KEY_TAG_LEN as u64 + span.start,
+                    KEY_TAG_LEN as u64 + span.end,
+                )
+                .await?;
+            let covered = header.plaintext_span(run.clone());
+            let opened = self.opener.open_chunks(run, &sealed).map_err(|error| {
+                StorageError::Decryption(format!("blob range {offset}..{end}: {error}"))
+            })?;
+            let from = (offset.max(covered.start) - covered.start) as usize;
+            let to = (end.min(covered.end) - covered.start) as usize;
+            plaintext.extend_from_slice(&opened[from..to]);
+        }
+        Ok(plaintext)
+    }
+
+    /// One ranged request against the stored object.
+    async fn read_stored(&self, start: u64, end: u64) -> Result<Vec<u8>, StorageError> {
+        let bytes = self
+            .exact
+            .read_range_at(&self.slot, start, end)
+            .await
+            .map_err(StorageError::from)?;
+        // A provider that ignored the range and answered with more (or less)
+        // than was asked for has not served this range; splicing its answer
+        // would silently read the wrong bytes.
+        if bytes.len() as u64 != end - start {
+            return Err(StorageError::InvalidContent(format!(
+                "ranged read of {} returned {} bytes for {start}..{end}",
+                self.slot.logical_key(),
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
+    }
+}
+
 /// `SyncStorage` that delegates raw I/O to a `CloudHome` and handles the path
 /// layout and the at-rest protection (its [`CloudCipher`]).
 pub struct CloudSyncStorage {
-    /// The raw cloud backend. `Arc` (not `Box`) because a ranged read hands a
-    /// clone to the [`BlobRangeReader`] it builds — the reader holds the home for
-    /// the life of a stream and reads across awaits, so the home is genuinely
-    /// shared between this storage and the readers it spawns, not owned by one.
     home: Arc<dyn CloudHome>,
+    /// `Arc` (not `Box`) because a ranged read hands a clone to the
+    /// [`BlobRangeReader`] it opens — the reader holds this client for the life
+    /// of a stream and reads across awaits, so it is genuinely shared between
+    /// this storage and the readers it opens, not owned by one.
     exact: Arc<dyn ExactSlotStorage>,
     exact_probe_peer: Arc<dyn ExactSlotStorage>,
     cipher: Arc<CloudCipherState>,
@@ -836,6 +960,8 @@ pub struct CloudSyncStorage {
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
+    /// How this installation chunks blobs and how wide its range requests are.
+    blob_chunking: BlobChunking,
     store_id: String,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
@@ -869,9 +995,19 @@ impl CloudSyncStorage {
             cipher: Arc::new(CloudCipherState::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
+            blob_chunking: BlobChunking::DEFAULT,
             store_id: store_id.into(),
             keypair,
         })
+    }
+
+    /// Seal and read blobs with `chunking` instead of [`BlobChunking::DEFAULT`].
+    /// The chunk size applies to blobs this storage seals from now on; already
+    /// stored blobs keep the size their own headers record, so installations
+    /// with different settings read each other's blobs unchanged.
+    pub fn with_blob_chunking(mut self, chunking: BlobChunking) -> Self {
+        self.blob_chunking = chunking;
+        self
     }
 
     pub(crate) fn exact_slot_probe_clients(
@@ -1204,42 +1340,11 @@ fn open_scoped_encrypted(
     opening_encryption_for_scope(scope, master, &fingerprint)?.decrypt(ciphertext, aad_context)
 }
 
-/// Reads plaintext byte ranges from a single stored blob without fetching the
-/// whole object — the ranged analogue of [`CloudSyncStorage::get_blob`].
-///
-/// On an encrypted home a blob is `[nonce: 24 bytes][encrypted chunks…]` (see
-/// [`EncryptionService::encrypt`]). Serving a plaintext range needs the nonce
-/// plus only the chunks covering it, never the whole object, so the 24-byte
-/// nonce is fetched once on the first read and reused: streaming a blob in N
-/// windows issues one nonce read, not N. On a plaintext home the blob is stored
-/// verbatim, so a range is read straight through with no nonce or decryption.
-///
-/// The blob's [`BlobScope`](crate::blob::BlobScope) is resolved to its
-/// key the same way `get_blob` resolves it (see [`encryption_for_scope`]), so a
-/// reader serves master- and derived-scoped blobs alike. A host that streams a
-/// large blob (audio playback, or pinning a file window by window) builds one of
-/// these instead of downloading and decrypting the whole object.
-pub struct BlobRangeReader {
-    home: Arc<dyn CloudHome>,
-    /// The scope's key for an encrypted home, resolved once at construction;
-    /// `None` for a plaintext home (the blob is read verbatim).
-    encryption: Option<RangeEncryption>,
-    /// The blob's cloud object key (see [`CloudSyncStorage::blob_key`]).
-    key: String,
-    /// Plaintext length of the blob. Ranges are validated against it, and the
-    /// encrypted chunk range is clamped to the matching blob length.
-    source_size: u64,
-    /// The encrypted blob header, read once on first use.
-    header: OnceCell<RangeHeader>,
-}
-
 enum ExactBlobOpening {
     Browsable,
     Opaque {
-        encryption: EncryptionService,
-        nonce: Vec<u8>,
+        opener: crate::encryption::SealedBlobOpener,
         next_chunk: u64,
-        aad_context: Vec<u8>,
     },
 }
 
@@ -1249,7 +1354,6 @@ struct ExactBlobPlaintextReader {
     source: crate::local_blob::PlaintextReader,
     opening: ExactBlobOpening,
     remaining: u64,
-    total_size: u64,
     hasher: Option<crate::blob::ContentHasher>,
     expected_hash: ObjectHash,
     locator_hash: ObjectHash,
@@ -1268,19 +1372,6 @@ impl ExactBlobPlaintextReader {
         let mut source = crate::local_blob::open_reader(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
-        let expected_stored_size = match locator {
-            crate::blob::locator::BlobLocator::Opaque { .. } => {
-                KEY_TAG_LEN as u64 + chunked_encrypted_len(locator.plaintext_size())
-            }
-            crate::blob::locator::BlobLocator::Browsable { .. } => locator.plaintext_size(),
-        };
-        if blob.object().stored_size() != expected_stored_size {
-            return Err(StorageError::InvalidContent(format!(
-                "blob {} stored length is {}, expected {expected_stored_size} for its locator",
-                locator.locator_hash(),
-                blob.object().stored_size()
-            )));
-        }
 
         let opening = match (locator, protection) {
             (
@@ -1291,42 +1382,30 @@ impl ExactBlobPlaintextReader {
                 },
                 crate::sync::storage::BlobSpoolProtection::Opaque(master),
             ) => {
-                let header = read_source_exact(
+                let prefix = read_source_exact(
                     &mut source,
-                    KEY_TAG_LEN + crate::encryption::NONCE_SIZE,
+                    KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN,
                     locator.locator_hash(),
                 )
                 .await?;
-                let (fingerprint, nonce_and_chunks) = read_key_tag(&header).map_err(|error| {
-                    StorageError::Decryption(format!(
-                        "blob {} key tag: {error}",
-                        locator.locator_hash()
-                    ))
-                })?;
-                if crate::encryption::KeyFingerprint::from_bytes(fingerprint) != *key_fingerprint {
-                    return Err(StorageError::InvalidContent(format!(
-                        "blob {} stored key fingerprint differs from its locator",
-                        locator.locator_hash()
-                    )));
-                }
-                let encryption = opening_encryption_for_scope(scope.clone(), &master, &fingerprint)
-                    .map_err(|error| {
-                        StorageError::Decryption(format!(
-                            "blob {} audience key: {error}",
-                            locator.locator_hash()
-                        ))
-                    })?;
+                let (encryption, header) =
+                    open_sealed_blob_prefix(&prefix, locator, key_fingerprint, scope, &master)?;
+                check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
                 ExactBlobOpening::Opaque {
-                    encryption,
-                    nonce: nonce_and_chunks.to_vec(),
+                    opener: encryption.blob_opener(
+                        header,
+                        &cloud_aad_context(store_id, &locator.semantic_key()),
+                    ),
                     next_chunk: 0,
-                    aad_context: cloud_aad_context(store_id, &locator.semantic_key()),
                 }
             }
             (
                 crate::blob::locator::BlobLocator::Browsable { .. },
                 crate::sync::storage::BlobSpoolProtection::Browsable,
-            ) => ExactBlobOpening::Browsable,
+            ) => {
+                check_stored_blob_length(blob, locator.plaintext_size())?;
+                ExactBlobOpening::Browsable
+            }
             (crate::blob::locator::BlobLocator::Opaque { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "opaque blob locator requires audience encryption".to_string(),
@@ -1340,11 +1419,20 @@ impl ExactBlobPlaintextReader {
         };
 
         Ok(Self {
+            // A sealed blob is verified by opening it: every chunk's tag covers
+            // its bytes, its index, and the header that frames them, so nothing
+            // the provider can serve opens as this blob's plaintext. A browsable
+            // home stores the plaintext in the clear and has no tags, so there
+            // the row's content hash is the only thing that can refuse the
+            // provider's bytes — the two homes verify by different means, not by
+            // one mechanism plus a spare.
+            hasher: match opening {
+                ExactBlobOpening::Browsable => Some(crate::blob::ContentHasher::default()),
+                ExactBlobOpening::Opaque { .. } => None,
+            },
             source,
             opening,
             remaining: locator.plaintext_size(),
-            total_size: locator.plaintext_size(),
-            hasher: Some(crate::blob::ContentHasher::default()),
             expected_hash: locator.plaintext_hash(),
             locator_hash: locator.locator_hash(),
             pending: Vec::new(),
@@ -1378,6 +1466,83 @@ impl ExactBlobPlaintextReader {
         }
         Ok(())
     }
+}
+
+/// Split a stored sealed blob into the three things its bytes declare: the key
+/// fingerprint naming what sealed it, the header framing its chunks, and the
+/// sealed chunks themselves.
+///
+/// The layout is `[CKF1][fingerprint: 32][version: 1][chunk_size: 4][plaintext_len: 8][chunks…]`.
+/// Everything before the chunks is cleartext — a reader must know the key and the
+/// chunk size before it can open anything — and all of it is bound into every
+/// chunk's AAD, so a rewritten prefix fails the first open rather than re-framing
+/// the object.
+pub fn split_sealed_blob(
+    stored: &[u8],
+) -> Result<(crate::encryption::KeyFingerprint, SealedBlobHeader, &[u8]), EncryptionError> {
+    let (fingerprint, rest) = read_key_tag(stored)?;
+    let header = SealedBlobHeader::parse(rest)
+        .map_err(|error| EncryptionError::Decryption(error.to_string()))?;
+    Ok((
+        crate::encryption::KeyFingerprint::from_bytes(fingerprint),
+        header,
+        &rest[SEALED_BLOB_HEADER_LEN..],
+    ))
+}
+
+/// Resolve a sealed blob's `[key tag][header]` prefix into the key that sealed
+/// it and the layout it declares. The fingerprint must be the one the row's
+/// locator names — a blob sealed under any other key is not this row's blob,
+/// whatever it decrypts to.
+fn open_sealed_blob_prefix(
+    prefix: &[u8],
+    locator: &crate::blob::locator::BlobLocator,
+    key_fingerprint: &crate::encryption::KeyFingerprint,
+    scope: &crate::blob::BlobScope,
+    master: &EncryptionService,
+) -> Result<(EncryptionService, SealedBlobHeader), StorageError> {
+    let (fingerprint, header, _) = split_sealed_blob(prefix).map_err(|error| {
+        StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))
+    })?;
+    if fingerprint != *key_fingerprint {
+        return Err(StorageError::InvalidContent(format!(
+            "blob {} stored key fingerprint differs from its locator",
+            locator.locator_hash()
+        )));
+    }
+    let encryption = opening_encryption_for_scope(scope.clone(), master, fingerprint.as_bytes())
+        .map_err(|error| {
+            StorageError::Decryption(format!(
+                "blob {} audience key: {error}",
+                locator.locator_hash()
+            ))
+        })?;
+    if header.plaintext_len() != locator.plaintext_size() {
+        return Err(StorageError::InvalidContent(format!(
+            "blob {} header declares {} plaintext bytes, its locator declares {}",
+            locator.locator_hash(),
+            header.plaintext_len(),
+            locator.plaintext_size()
+        )));
+    }
+    Ok((encryption, header))
+}
+
+/// Check a stored blob's length against what its own framing implies. The row
+/// pins the stored object's exact size, so a length the framing cannot produce
+/// means the object is not the one the row names.
+fn check_stored_blob_length(
+    blob: &crate::blob::locator::StoredBlobRef,
+    expected: u64,
+) -> Result<(), StorageError> {
+    if blob.object().stored_size() != expected {
+        return Err(StorageError::InvalidContent(format!(
+            "blob {} stored length is {}, expected {expected} for its locator",
+            blob.locator().locator_hash(),
+            blob.object().stored_size()
+        )));
+    }
+    Ok(())
 }
 
 async fn read_source_exact(
@@ -1436,38 +1601,23 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
                 }
                 chunk
             }
-            ExactBlobOpening::Opaque {
-                encryption,
-                nonce,
-                next_chunk,
-                aad_context,
-            } => {
-                let plaintext_len = self.remaining.min(crate::encryption::CHUNK_SIZE as u64);
-                let encrypted_len = usize::try_from(plaintext_len)
-                    .expect("one encryption chunk fits usize")
-                    + crate::encryption::TAG_SIZE;
-                let encrypted =
-                    read_source_exact(&mut self.source, encrypted_len, self.locator_hash)
-                        .await
-                        .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
-                let start = *next_chunk * crate::encryption::CHUNK_SIZE as u64;
-                let end = start + plaintext_len;
-                let plaintext = encryption
-                    .decrypt_range_with_offset(
-                        nonce,
-                        &encrypted,
-                        *next_chunk,
-                        start,
-                        end,
-                        self.total_size,
-                        aad_context,
-                    )
-                    .map_err(|error| {
-                        crate::local_blob::PlaintextChunkError::InvalidContent(format!(
-                            "blob {} chunk {}: {error}",
-                            self.locator_hash, *next_chunk
-                        ))
+            ExactBlobOpening::Opaque { opener, next_chunk } => {
+                let index = *next_chunk;
+                let sealed_len =
+                    usize::try_from(opener.header().sealed_chunk_len(index)).map_err(|_| {
+                        crate::local_blob::PlaintextChunkError::InvalidContent(
+                            "one sealed blob chunk does not fit this platform".to_string(),
+                        )
                     })?;
+                let sealed = read_source_exact(&mut self.source, sealed_len, self.locator_hash)
+                    .await
+                    .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
+                let plaintext = opener.open_chunk(index, &sealed).map_err(|error| {
+                    crate::local_blob::PlaintextChunkError::InvalidContent(format!(
+                        "blob {}: {error}",
+                        self.locator_hash
+                    ))
+                })?;
                 *next_chunk += 1;
                 plaintext
             }
@@ -1477,156 +1627,14 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
                 format!("blob {} produced excess plaintext", self.locator_hash),
             ));
         }
-        self.hasher
-            .as_mut()
-            .expect("hash verification remains active until EOF")
-            .update(&plaintext);
+        // Present only for a browsable home, where the content hash is what
+        // refuses the provider's bytes; a sealed blob is refused by its tags.
+        if let Some(hasher) = self.hasher.as_mut() {
+            hasher.update(&plaintext);
+        }
         self.remaining -= plaintext.len() as u64;
         self.pending = plaintext;
         Ok(self.take_pending(max))
-    }
-}
-
-/// What an encrypted home needs to open a blob's ranged reads: the master
-/// service (which generation-resolves once the header's tag is read), the
-/// blob's scope, and the AAD context.
-struct RangeEncryption {
-    master: EncryptionService,
-    scope: crate::blob::BlobScope,
-    aad_context: Vec<u8>,
-}
-
-struct RangeHeader {
-    encryption: EncryptionService,
-    nonce: Vec<u8>,
-    chunk_base: u64,
-}
-
-impl BlobRangeReader {
-    /// Build a reader for the blob stored at `key` (see
-    /// [`CloudSyncStorage::blob_key`]), `source_size` plaintext bytes long.
-    /// `cipher` and `scope` are how the home protects this blob: an encrypted
-    /// home resolves `scope` to its key once here; a plaintext home ignores
-    /// `scope` and reads verbatim.
-    pub fn new(
-        home: Arc<dyn CloudHome>,
-        cipher: &CloudCipher,
-        scope: crate::blob::BlobScope,
-        key: String,
-        source_size: u64,
-        aad_context: Vec<u8>,
-    ) -> Self {
-        let encryption = match cipher {
-            CloudCipher::Encrypted(master) => Some(RangeEncryption {
-                master: master.clone(),
-                scope,
-                aad_context,
-            }),
-            CloudCipher::Plaintext => None,
-        };
-        BlobRangeReader {
-            home,
-            encryption,
-            key,
-            source_size,
-            header: OnceCell::new(),
-        }
-    }
-
-    /// Read exactly `len` plaintext bytes starting at `offset`. An out-of-range
-    /// request errors rather than truncating.
-    pub async fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, StorageError> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let end = offset.checked_add(len).ok_or_else(|| {
-            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
-        })?;
-        if end > self.source_size {
-            return Err(StorageError::Storage(format!(
-                "blob range {offset}..{end} exceeds blob size {}",
-                self.source_size
-            )));
-        }
-
-        let encryption = match &self.encryption {
-            Some(encryption) => encryption,
-            // Plaintext home: the blob is stored verbatim, so the plaintext range
-            // is exactly the stored byte range — no nonce, no chunking.
-            None => {
-                return self
-                    .home
-                    .read_range(&self.key, offset, end)
-                    .await
-                    .map_err(StorageError::from);
-            }
-        };
-
-        use crate::encryption::{chunked_encrypted_len, encrypted_chunk_range, CHUNK_SIZE};
-
-        let header = self.header(encryption).await?;
-
-        let (chunk_start, mut chunk_end) = encrypted_chunk_range(offset, end);
-        chunk_end = chunk_end.min(chunked_encrypted_len(self.source_size));
-        let stored_chunk_start =
-            header.chunk_base + (chunk_start - crate::encryption::NONCE_SIZE as u64);
-        let stored_chunk_end =
-            header.chunk_base + (chunk_end - crate::encryption::NONCE_SIZE as u64);
-        let encrypted_chunks = self
-            .home
-            .read_range(&self.key, stored_chunk_start, stored_chunk_end)
-            .await
-            .map_err(StorageError::from)?;
-
-        let first_chunk_index = offset / CHUNK_SIZE as u64;
-        header
-            .encryption
-            .decrypt_range_with_offset(
-                &header.nonce,
-                &encrypted_chunks,
-                first_chunk_index,
-                offset,
-                end,
-                self.source_size,
-                &encryption.aad_context,
-            )
-            .map_err(|e| StorageError::Decryption(format!("blob range {offset}..{end}: {e}")))
-    }
-
-    /// The cached encrypted blob header, read once and reused for later range reads.
-    async fn header(&self, encryption: &RangeEncryption) -> Result<&RangeHeader, StorageError> {
-        use crate::encryption::NONCE_SIZE;
-        self.header
-            .get_or_try_init(|| async {
-                let header = self
-                    .home
-                    .read_range(&self.key, 0, (KEY_TAG_LEN + NONCE_SIZE) as u64)
-                    .await
-                    .map_err(StorageError::from)?;
-                if header.len() < KEY_TAG_LEN + NONCE_SIZE {
-                    return Err(StorageError::Decryption(format!(
-                        "blob header too short: expected {}, got {}",
-                        KEY_TAG_LEN + NONCE_SIZE,
-                        header.len()
-                    )));
-                }
-                let (fingerprint, nonce_and_chunks) = read_key_tag(&header)
-                    .map_err(|e| StorageError::Decryption(format!("blob key tag: {e}")))?;
-                let service = opening_encryption_for_scope(
-                    encryption.scope.clone(),
-                    &encryption.master,
-                    &fingerprint,
-                )
-                .map_err(|e| {
-                    StorageError::Decryption(format!("blob key {}: {e}", hex::encode(fingerprint)))
-                })?;
-                Ok(RangeHeader {
-                    encryption: service,
-                    nonce: nonce_and_chunks[..NONCE_SIZE].to_vec(),
-                    chunk_base: (KEY_TAG_LEN + NONCE_SIZE) as u64,
-                })
-            })
-            .await
     }
 }
 
@@ -1930,7 +1938,12 @@ impl SyncStorage for CloudSyncStorage {
                 }
                 let aad = cloud_aad_context(&self.store_id, &locator.semantic_key());
                 CloudCipher::Encrypted(encryption)
-                    .open_body(scope.clone(), plaintext_file, &aad)
+                    .open_body(
+                        scope.clone(),
+                        plaintext_file,
+                        &aad,
+                        self.blob_chunking.chunk(),
+                    )
                     .await
                     .map_err(StorageError::LocalFilesystem)?
             }
@@ -2195,6 +2208,60 @@ impl SyncStorage for CloudSyncStorage {
         Ok(plaintext)
     }
 
+    async fn open_blob_range_reader(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+    ) -> Result<BlobRangeReader, StorageError> {
+        let locator = blob.locator();
+        self.validate_blob_locator_home(locator)?;
+        let slot = blob.object().slot().clone();
+        let (scope, key_fingerprint) = match locator {
+            crate::blob::locator::BlobLocator::Opaque {
+                scope,
+                key_fingerprint,
+                ..
+            } => (scope, key_fingerprint),
+            // A browsable home stores the plaintext in the clear, so its objects
+            // carry no tags and a range read has nothing to check the provider's
+            // answer against. Ranged reading is refused rather than served
+            // unverified; the caller materializes the whole blob, where the row's
+            // content hash can refuse it.
+            crate::blob::locator::BlobLocator::Browsable { .. } => {
+                return Err(StorageError::Configuration(format!(
+                    "blob {} is stored in the clear, which has no per-range verification",
+                    locator.locator_hash()
+                )));
+            }
+        };
+        let crate::sync::storage::BlobSpoolProtection::Opaque(master) = protection else {
+            return Err(StorageError::Configuration(
+                "opaque blob locator requires audience encryption".to_string(),
+            ));
+        };
+        // One ranged read of the prefix names the key and the chunk size; every
+        // later range is arithmetic over the header it carries, so this is the
+        // only request a range does not pay for.
+        let prefix = self
+            .exact
+            .read_range_at(&slot, 0, (KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN) as u64)
+            .await
+            .map_err(StorageError::from)?;
+        let (encryption, header) =
+            open_sealed_blob_prefix(&prefix, locator, key_fingerprint, scope, &master)?;
+        check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
+        Ok(BlobRangeReader {
+            exact: self.exact.clone(),
+            slot,
+            opener: encryption.blob_opener(
+                header,
+                &cloud_aad_context(&self.store_id, &locator.semantic_key()),
+            ),
+            plaintext_size: locator.plaintext_size(),
+            window: self.blob_chunking.window(),
+        })
+    }
+
     async fn delete_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
@@ -2241,7 +2308,11 @@ mod tests {
             &stored[KEY_TAG_MAGIC.len()..KEY_TAG_LEN],
             fingerprint.as_bytes()
         );
-        assert_eq!(stored.len() as u64, cipher.body_len(plaintext.len() as u64));
+        assert_eq!(
+            stored.len() as u64,
+            KEY_TAG_LEN as u64 + crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
+            "a protocol object keeps the whole-object chunked format the blob namespace left",
+        );
         assert_eq!(cipher.open(stored, aad).unwrap(), plaintext);
     }
 
@@ -2382,6 +2453,636 @@ mod tests {
         (reference, registration)
     }
 
+    /// Publish one sealed blob into `home` and hand back the reference a reader
+    /// opens it through. `chunking` is the installation setting the blob is
+    /// sealed under; the reader honors whatever the stored header records.
+    async fn publish_sealed_blob(
+        home: &InMemoryCloudHome,
+        store_id: &str,
+        blob_id: &str,
+        plaintext: &[u8],
+        chunking: BlobChunking,
+    ) -> (
+        CloudSyncStorage,
+        crate::blob::locator::StoredBlobRef,
+        EncryptionService,
+        tempfile::TempDir,
+    ) {
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
+            BlobPathScheme::Hashed,
+            store_id,
+            UserKeypair::generate(),
+        )
+        .expect("test cloud storage supports exact slots")
+        .with_blob_chunking(chunking);
+        let (uploader, registration) = blob_write_registration(&storage, store_id).await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let audience_key = EncryptionService::from_key([9u8; 32]);
+        let locator = BlobLocator::opaque(
+            "audio",
+            blob_id,
+            uploader.clone(),
+            RemoteAudience::Store,
+            BlobScope::Master,
+            audience_key.seal_key_fingerprint(),
+            plaintext.len() as u64,
+            ObjectHash::digest(plaintext),
+        )
+        .expect("build locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        tokio::fs::write(&source, plaintext)
+            .await
+            .expect("write plaintext source");
+        storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::sync::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                &source,
+                &spool,
+            )
+            .await
+            .expect("seal exact spool");
+        let slot = storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .expect("allocate exact blob slot");
+        let blob = storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .expect("prepare exact blob");
+        storage
+            .create_blob_object_from_file(
+                &blob,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("create exact blob");
+        (storage, blob, audience_key, temp)
+    }
+
+    fn ramp(len: usize) -> Vec<u8> {
+        (0..len).map(|value| (value % 251) as u8).collect()
+    }
+
+    fn small_chunking(chunk: u32) -> BlobChunking {
+        BlobChunking::new(
+            std::num::NonZeroU32::new(chunk).expect("nonzero chunk"),
+            std::num::NonZeroU64::new(1 << 20).expect("nonzero window"),
+        )
+    }
+
+    /// The receipt the whole design exists for: many small ranges across one
+    /// stream transfer only the chunks those ranges touch, and never the object.
+    ///
+    /// The sabotage this fails under is a whole-object fetch reintroduced
+    /// anywhere on the read path — that shows up as a full or streamed exact
+    /// read, both asserted at zero, rather than hiding inside the ranged total.
+    #[tokio::test]
+    async fn ranged_reads_transfer_only_the_chunks_they_cover() {
+        const CHUNK: u32 = 4096;
+        let home = InMemoryCloudHome::new();
+        let plaintext = ramp(400 * CHUNK as usize);
+        let (storage, blob, key, _temp) = publish_sealed_blob(
+            &home,
+            "o-range-receipt",
+            "big-track",
+            &plaintext,
+            small_chunking(CHUNK),
+        )
+        .await;
+
+        // Publishing the blob read it back to verify it; the receipt below is
+        // about what the *reads* cost, so it is measured from here.
+        let published_whole_reads = (home.exact_full_read_count(), home.exact_stream_read_count());
+        home.clear_exact_range_reads();
+
+        let reader = storage
+            .open_blob_range_reader(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Opaque(key),
+            )
+            .await
+            .expect("open a ranged reader");
+        // Opening reads the prefix that names the key and the chunk size. Every
+        // range below is measured against a cleared ledger, so the receipt is
+        // about the ranges, not the open.
+        let opened_bytes = home.exact_range_read_bytes();
+        assert_eq!(
+            opened_bytes,
+            (KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN) as u64,
+            "opening costs one prefix read and nothing else",
+        );
+        home.clear_exact_range_reads();
+
+        // A codec header, a seek to the middle, and a tail — the shape a player
+        // issues to start a track.
+        let ranges = [
+            (0u64, 64u64),
+            (200 * CHUNK as u64 + 7, 300),
+            (plaintext.len() as u64 - 128, 128),
+            (CHUNK as u64 - 1, 2),
+        ];
+        for (offset, len) in ranges {
+            assert_eq!(
+                reader.read_at(offset, len).await.expect("serve range"),
+                &plaintext[offset as usize..(offset + len) as usize],
+            );
+        }
+
+        // Each range covers one chunk except the boundary-straddling last, which
+        // covers two. Every sealed chunk here is a full one.
+        let sealed_chunk = (CHUNK + crate::encryption::TAG_SIZE as u32) as u64;
+        assert_eq!(
+            home.exact_range_read_bytes(),
+            5 * sealed_chunk,
+            "ranged reads: {:?}",
+            home.exact_range_reads(),
+        );
+        assert!(
+            (home.exact_range_read_bytes() as usize) < plaintext.len() / 50,
+            "four small ranges cost a fraction of the object, not the object",
+        );
+        assert_eq!(
+            (home.exact_full_read_count(), home.exact_stream_read_count()),
+            published_whole_reads,
+            "no read fetched a whole object; only publication ever did",
+        );
+    }
+
+    /// A browsable home stores the plaintext in the clear, so nothing in the
+    /// object can refuse a provider's answer to a range. Ranged reading is
+    /// refused there rather than serving unverified bytes — the caller
+    /// materializes the whole blob, where the row's content hash still applies.
+    #[tokio::test]
+    async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
+        let home = InMemoryCloudHome::new();
+        let identity = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "browsable-range",
+            identity,
+        )
+        .expect("test cloud storage supports exact slots");
+        let (uploader, registration) = blob_write_registration(&storage, "browsable-range").await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let plaintext = ramp(4096);
+        let locator = BlobLocator::browsable(
+            "audio",
+            "readable-track",
+            uploader.clone(),
+            "Artist/Album/track.flac",
+            plaintext.len() as u64,
+            ObjectHash::digest(&plaintext),
+        )
+        .expect("build browsable locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        tokio::fs::write(&source, &plaintext)
+            .await
+            .expect("write plaintext source");
+        storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::sync::storage::BlobSpoolProtection::Browsable,
+                &source,
+                &spool,
+            )
+            .await
+            .expect("stage the browsable spool");
+        let slot = storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .expect("allocate exact blob slot");
+        let blob = storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .expect("prepare exact blob");
+        storage
+            .create_blob_object_from_file(
+                &blob,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("create exact blob");
+
+        assert!(matches!(
+            storage
+                .open_blob_range_reader(
+                    &blob,
+                    crate::sync::storage::BlobSpoolProtection::Browsable,
+                )
+                .await,
+            Err(StorageError::Configuration(_))
+        ));
+        // The whole-blob path still serves it, checked against the row's hash.
+        let destination = temp.path().join("materialized");
+        let staged = storage
+            .stage_verified_blob_plaintext(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Browsable,
+                &destination,
+            )
+            .await
+            .expect("materialize the whole browsable blob");
+        assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), plaintext);
+    }
+
+    /// The reader honors each blob's own header, so an installation that changed
+    /// its chunk size keeps reading what it sealed before, and blobs at
+    /// different sizes coexist with no migration.
+    #[tokio::test]
+    async fn blobs_sealed_at_different_chunk_sizes_coexist() {
+        let home = InMemoryCloudHome::new();
+        let plaintext = ramp(300_000);
+        let (small_storage, small_blob, small_key, _small_temp) = publish_sealed_blob(
+            &home,
+            "mixed-chunk-sizes",
+            "sealed-at-64k",
+            &plaintext,
+            small_chunking(64 * 1024),
+        )
+        .await;
+        let (big_storage, big_blob, big_key, _big_temp) = publish_sealed_blob(
+            &home,
+            "mixed-chunk-sizes",
+            "sealed-at-4m",
+            &plaintext,
+            small_chunking(4 * 1024 * 1024),
+        )
+        .await;
+        assert_ne!(
+            small_blob.object().stored_size(),
+            big_blob.object().stored_size(),
+            "different chunk counts mean different tag counts, so different objects",
+        );
+
+        for (storage, blob, key, chunk) in [
+            (&small_storage, &small_blob, small_key, 64u64 * 1024),
+            (&big_storage, &big_blob, big_key, 4 * 1024 * 1024),
+        ] {
+            let reader = storage
+                .open_blob_range_reader(
+                    blob,
+                    crate::sync::storage::BlobSpoolProtection::Opaque(key),
+                )
+                .await
+                .expect("open a ranged reader");
+            home.clear_exact_range_reads();
+            assert_eq!(
+                reader.read_at(1000, 100).await.expect("serve range"),
+                &plaintext[1000..1100],
+            );
+            let fetched = home.exact_range_read_bytes();
+            let covering = chunk.min(plaintext.len() as u64) + crate::encryption::TAG_SIZE as u64;
+            assert_eq!(
+                fetched, covering,
+                "the read fetched one chunk of this blob's own declared size",
+            );
+        }
+    }
+
+    /// A flipped byte fails exactly the ranges whose chunk holds it. Every other
+    /// range still serves — the tag is per chunk, so damage does not spread.
+    #[tokio::test]
+    async fn a_tampered_chunk_fails_only_the_ranges_that_touch_it() {
+        const CHUNK: u32 = 4096;
+        let home = InMemoryCloudHome::new();
+        let plaintext = ramp(10 * CHUNK as usize);
+        let (storage, blob, key, _temp) = publish_sealed_blob(
+            &home,
+            "chunk-tamper",
+            "tampered-track",
+            &plaintext,
+            small_chunking(CHUNK),
+        )
+        .await;
+
+        // Flip one byte inside chunk 3's ciphertext.
+        let mut stored = home.stored_exact_object(blob.object().slot());
+        let victim = KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16) + 10;
+        stored[victim] ^= 0xff;
+        home.replace_exact_object(blob.object().slot(), stored);
+
+        let reader = storage
+            .open_blob_range_reader(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Opaque(key),
+            )
+            .await
+            .expect("open a ranged reader");
+        for chunk in 0..10u64 {
+            let offset = chunk * CHUNK as u64;
+            let read = reader.read_at(offset, 16).await;
+            if chunk == 3 {
+                assert!(
+                    matches!(read, Err(StorageError::Decryption(_))),
+                    "chunk 3 must refuse, got {read:?}",
+                );
+            } else {
+                assert_eq!(
+                    read.expect("an untouched chunk still serves"),
+                    &plaintext[offset as usize..offset as usize + 16],
+                );
+            }
+        }
+    }
+
+    /// The header is bound into every chunk's AAD, so rewriting it does not
+    /// re-frame the object — it makes the first chunk fail to open.
+    #[tokio::test]
+    async fn a_tampered_header_fails_the_first_open() {
+        const CHUNK: u32 = 4096;
+        let home = InMemoryCloudHome::new();
+        let plaintext = ramp(4 * CHUNK as usize);
+        let (storage, blob, key, _temp) = publish_sealed_blob(
+            &home,
+            "header-tamper",
+            "rewritten-header",
+            &plaintext,
+            small_chunking(CHUNK),
+        )
+        .await;
+
+        // Halve the declared chunk size. The object's length no longer matches
+        // what that header implies, which is caught before a chunk is opened.
+        let mut stored = home.stored_exact_object(blob.object().slot());
+        stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&(CHUNK / 2).to_le_bytes());
+        home.replace_exact_object(blob.object().slot(), stored.clone());
+        assert!(
+            matches!(
+                storage
+                    .open_blob_range_reader(
+                        &blob,
+                        crate::sync::storage::BlobSpoolProtection::Opaque(key.clone()),
+                    )
+                    .await,
+                Err(StorageError::InvalidContent(_))
+            ),
+            "a header the object's length cannot produce is refused at open",
+        );
+
+        // Shorten the declared plaintext length. The row pins the stored object's
+        // exact size, so a header whose framing implies a different one is
+        // refused before a chunk is opened.
+        let mut stored = home.stored_exact_object(blob.object().slot());
+        stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&CHUNK.to_le_bytes());
+        let shorter = plaintext.len() as u64 - CHUNK as u64;
+        stored[KEY_TAG_LEN + 5..KEY_TAG_LEN + 13].copy_from_slice(&shorter.to_le_bytes());
+        stored.truncate(KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16));
+        home.replace_exact_object(blob.object().slot(), stored);
+        assert!(
+            matches!(
+                storage
+                    .open_blob_range_reader(
+                        &blob,
+                        crate::sync::storage::BlobSpoolProtection::Opaque(key.clone()),
+                    )
+                    .await,
+                Err(StorageError::InvalidContent(_))
+            ),
+            "a header that disagrees with the row's declared size is refused",
+        );
+
+        // The case only the AAD can catch. Nudging the chunk size by one byte
+        // leaves every length check satisfied — 16384 plaintext bytes still take
+        // four chunks at 4097 as at 4096, so chunk count, sealed length, and the
+        // row's declared size all agree — and re-frames where each chunk starts.
+        // Nothing but the tag over the header refuses this.
+        const NUDGED: u32 = CHUNK + 1;
+        let unaltered = SealedBlobHeader::new(
+            std::num::NonZeroU32::new(CHUNK).unwrap(),
+            plaintext.len() as u64,
+        );
+        let nudged = SealedBlobHeader::new(
+            std::num::NonZeroU32::new(NUDGED).unwrap(),
+            plaintext.len() as u64,
+        );
+        assert_eq!(
+            (nudged.chunk_count(), nudged.sealed_len()),
+            (unaltered.chunk_count(), unaltered.sealed_len()),
+            "the nudge must survive every length check, or it proves nothing about the AAD",
+        );
+
+        let mut stored = home.stored_exact_object(blob.object().slot());
+        stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&NUDGED.to_le_bytes());
+        stored[KEY_TAG_LEN + 5..KEY_TAG_LEN + 13]
+            .copy_from_slice(&(plaintext.len() as u64).to_le_bytes());
+        stored.truncate(KEY_TAG_LEN + unaltered.sealed_len() as usize);
+        home.replace_exact_object(blob.object().slot(), stored);
+
+        let reader = storage
+            .open_blob_range_reader(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Opaque(key),
+            )
+            .await
+            .expect("every length check passes, so the reader opens");
+        assert!(
+            matches!(
+                reader.read_at(0, 16).await,
+                Err(StorageError::Decryption(_))
+            ),
+            "the first chunk's tag covers the header, so a re-framed header fails the open",
+        );
+    }
+
+    /// A chunk cannot be moved: not into another blob, and not to another index
+    /// in its own. Its tag covers the blob's identity and its position.
+    #[tokio::test]
+    async fn a_spliced_chunk_refuses_to_open() {
+        const CHUNK: u32 = 4096;
+        const SEALED: usize = CHUNK as usize + 16;
+        let home = InMemoryCloudHome::new();
+        let plaintext = ramp(6 * CHUNK as usize);
+        let (storage, victim, victim_key, _victim_temp) =
+            publish_sealed_blob(&home, "splice", "victim", &plaintext, small_chunking(CHUNK)).await;
+        // A second blob with identical plaintext and chunking: the only thing
+        // separating the two objects is which blob they are.
+        let (_donor_storage, donor, _donor_key, _donor_temp) =
+            publish_sealed_blob(&home, "splice", "donor", &plaintext, small_chunking(CHUNK)).await;
+        let donor_stored = home.stored_exact_object(donor.object().slot());
+        let body = KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN;
+
+        // Cross-blob: the donor's chunk 2 in the victim's chunk 2.
+        let mut spliced = home.stored_exact_object(victim.object().slot());
+        spliced[body + 2 * SEALED..body + 3 * SEALED]
+            .copy_from_slice(&donor_stored[body + 2 * SEALED..body + 3 * SEALED]);
+        home.replace_exact_object(victim.object().slot(), spliced);
+        let reader = storage
+            .open_blob_range_reader(
+                &victim,
+                crate::sync::storage::BlobSpoolProtection::Opaque(victim_key.clone()),
+            )
+            .await
+            .expect("open a ranged reader");
+        assert!(
+            matches!(
+                reader.read_at(2 * CHUNK as u64, 16).await,
+                Err(StorageError::Decryption(_))
+            ),
+            "another blob's chunk cannot stand in for this one's",
+        );
+
+        // Cross-position: the victim's own chunk 4 moved to index 2.
+        let original = home.stored_exact_object(donor.object().slot());
+        let mut moved = original.clone();
+        let chunk_four = original[body + 4 * SEALED..body + 5 * SEALED].to_vec();
+        moved[body + 2 * SEALED..body + 3 * SEALED].copy_from_slice(&chunk_four);
+        home.replace_exact_object(donor.object().slot(), moved);
+        let reader = storage
+            .open_blob_range_reader(
+                &donor,
+                crate::sync::storage::BlobSpoolProtection::Opaque(victim_key),
+            )
+            .await
+            .expect("open a ranged reader");
+        assert!(
+            matches!(
+                reader.read_at(2 * CHUNK as u64, 16).await,
+                Err(StorageError::Decryption(_))
+            ),
+            "a chunk cannot open at an index it was not sealed for",
+        );
+        assert_eq!(
+            reader
+                .read_at(5 * CHUNK as u64, 16)
+                .await
+                .expect("an untouched chunk still serves"),
+            &plaintext[5 * CHUNK as usize..5 * CHUNK as usize + 16],
+        );
+    }
+
+    /// Every range shape a stream produces, against the plaintext: boundaries,
+    /// single bytes, the tail, the whole blob, and the empty range.
+    #[tokio::test]
+    async fn ranged_reads_sweep_every_boundary() {
+        const CHUNK: u32 = 1024;
+        let home = InMemoryCloudHome::new();
+        // Deliberately not a chunk multiple, so the last chunk is short.
+        let plaintext = ramp(3 * CHUNK as usize + 37);
+        let (storage, blob, key, _temp) = publish_sealed_blob(
+            &home,
+            "boundary-sweep",
+            "swept",
+            &plaintext,
+            small_chunking(CHUNK),
+        )
+        .await;
+        let reader = storage
+            .open_blob_range_reader(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Opaque(key),
+            )
+            .await
+            .expect("open a ranged reader");
+        let size = plaintext.len() as u64;
+        assert_eq!(reader.plaintext_size(), size);
+
+        assert!(reader.read_at(0, 0).await.expect("empty range").is_empty());
+        assert!(reader
+            .read_at(size, 0)
+            .await
+            .expect("empty range at the end")
+            .is_empty());
+        assert_eq!(
+            reader.read_at(0, size).await.expect("whole blob"),
+            plaintext,
+        );
+        assert_eq!(
+            reader.read_at(size - 1, 1).await.expect("last byte"),
+            &plaintext[plaintext.len() - 1..],
+        );
+        for boundary in [CHUNK as u64, 2 * CHUNK as u64, 3 * CHUNK as u64] {
+            for (offset, len) in [(boundary - 1, 2), (boundary - 1, 1), (boundary, 1)] {
+                assert_eq!(
+                    reader.read_at(offset, len).await.expect("boundary range"),
+                    &plaintext[offset as usize..(offset + len) as usize],
+                    "range {offset}..{} straddling a chunk boundary",
+                    offset + len,
+                );
+            }
+        }
+        // Every single-byte read across the last chunk, where the short chunk
+        // makes the arithmetic differ from every chunk before it.
+        for offset in 3 * CHUNK as u64..size {
+            assert_eq!(
+                reader.read_at(offset, 1).await.expect("tail byte"),
+                &plaintext[offset as usize..offset as usize + 1],
+            );
+        }
+        assert!(
+            reader.read_at(size, 1).await.is_err(),
+            "a range past the end is an error, not a short read",
+        );
+        assert!(reader.read_at(size - 1, 2).await.is_err());
+    }
+
+    /// A window narrower than the range splits it into several requests whose
+    /// spans, together, are exactly the covering chunks — the window changes how
+    /// many round-trips a read costs, never which bytes it fetches.
+    #[tokio::test]
+    async fn the_fetch_window_splits_requests_without_changing_the_bytes() {
+        const CHUNK: u32 = 1024;
+        let sealed_chunk = CHUNK as u64 + crate::encryption::TAG_SIZE as u64;
+        let plaintext = ramp(20 * CHUNK as usize);
+        let mut totals = Vec::new();
+        for window in [sealed_chunk, 4 * sealed_chunk, 1 << 20] {
+            let home = InMemoryCloudHome::new();
+            let (storage, blob, key, _temp) = publish_sealed_blob(
+                &home,
+                "fetch-window",
+                "windowed",
+                &plaintext,
+                BlobChunking::new(
+                    std::num::NonZeroU32::new(CHUNK).unwrap(),
+                    std::num::NonZeroU64::new(window).unwrap(),
+                ),
+            )
+            .await;
+            let reader = storage
+                .open_blob_range_reader(
+                    &blob,
+                    crate::sync::storage::BlobSpoolProtection::Opaque(key),
+                )
+                .await
+                .expect("open a ranged reader");
+            home.clear_exact_range_reads();
+            assert_eq!(
+                reader
+                    .read_at(0, 8 * CHUNK as u64)
+                    .await
+                    .expect("read eight chunks"),
+                &plaintext[..8 * CHUNK as usize],
+            );
+            totals.push((
+                home.exact_range_reads().len(),
+                home.exact_range_read_bytes(),
+            ));
+        }
+        assert_eq!(
+            totals,
+            vec![
+                (8, 8 * sealed_chunk),
+                (2, 8 * sealed_chunk),
+                (1, 8 * sealed_chunk)
+            ],
+            "the same eight chunks, in eight, two, then one request",
+        );
+    }
+
     #[tokio::test]
     async fn circle_blob_spool_uses_the_supplied_audience_key() {
         let home = InMemoryCloudHome::new();
@@ -2428,11 +3129,22 @@ mod tests {
             .expect("seal Circle blob spool");
 
         let stored = tokio::fs::read(&spool).await.expect("read exact spool");
-        let opened = CloudCipher::Encrypted(circle_key)
-            .open_scoped(
-                BlobScope::Master,
-                stored,
+        let (_, header) = open_sealed_blob_prefix(
+            &stored,
+            &locator,
+            &circle_key.seal_key_fingerprint(),
+            &BlobScope::Master,
+            &circle_key,
+        )
+        .expect("the spool names the supplied audience key");
+        let opened = circle_key
+            .blob_opener(
+                header,
                 &cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
+            )
+            .open_chunks(
+                0..header.chunk_count(),
+                &stored[KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN..],
             )
             .expect("open Circle blob with supplied key");
         assert_eq!(opened, plaintext);

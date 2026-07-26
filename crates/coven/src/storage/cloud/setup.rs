@@ -12,6 +12,7 @@ use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 #[cfg(feature = "oauth-providers")]
 use crate::oauth::OAuthTokens;
+use crate::sync::cloud_storage::BlobChunking;
 use crate::sync::cloud_storage::BlobPathScheme;
 use crate::sync::cloud_storage::CloudCipher;
 use std::sync::Arc;
@@ -512,6 +513,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
+    blob_chunking: BlobChunking,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_config(config)?;
     let cloud_home =
@@ -523,6 +525,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
         identity_custody,
         Arc::from(cloud_home),
         cipher,
+        blob_chunking,
     )
 }
 
@@ -536,6 +539,7 @@ pub(crate) fn create_sync_storage_with_home(
     identity_custody: &dyn DeviceIdentityCustody,
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
+    blob_chunking: BlobChunking,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
     let cipher = match cipher {
@@ -556,7 +560,8 @@ pub(crate) fn create_sync_storage_with_home(
         BlobPathScheme::for_storage(config.cloud_home.storage),
         config.store_id.clone(),
         keypair,
-    )?)
+    )?
+    .with_blob_chunking(blob_chunking))
 }
 
 /// Cloud provider setup error.

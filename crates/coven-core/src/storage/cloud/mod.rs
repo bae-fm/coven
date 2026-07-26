@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use futures_util::Stream;
 
-use crate::encryption::{ChunkSealer, CHUNK_SIZE};
+use crate::encryption::{SealedBlobSealer, DEFAULT_BLOB_CHUNK_SIZE};
 use crate::local_blob::PlaintextReader;
 
 /// Errors from raw cloud storage operations.
@@ -444,19 +444,18 @@ enum BlobSource {
     /// small in-memory write, or the in-memory test backend's payload.
     Buffered(Bytes),
     /// Plaintext read incrementally from a local file and, for an encrypted home,
-    /// sealed one 64 KiB chunk at a time into the `[base_nonce][chunk]...` form.
+    /// sealed one header-sized chunk at a time.
     File {
         reader: PlaintextReader,
-        /// Final bytes emitted before the nonce/plaintext stream.
+        /// Final bytes emitted before the plaintext stream — the key tag and,
+        /// for an encrypted home, the sealed-blob header.
         prefix: Bytes,
         /// `Some` seals each chunk under the scope's key; `None` passes the
         /// plaintext through (a browsable home).
-        sealer: Option<ChunkSealer>,
-        /// The base nonce still owed before the first sealed chunk (encrypted only).
-        nonce_pending: bool,
+        sealer: Option<SealedBlobSealer>,
         /// Whether any plaintext chunk has been sealed — distinguishes a truly
-        /// empty file (which still seals one tag-only chunk, matching
-        /// `EncryptionService::encrypt`) from one that produced chunks and then
+        /// empty file (which still seals one tag-only chunk, so opening it
+        /// authenticates its emptiness) from one that produced chunks and then
         /// drained.
         sealed_any: bool,
         eof: bool,
@@ -478,31 +477,31 @@ impl BlobSource {
                 reader,
                 prefix,
                 sealer,
-                nonce_pending,
                 sealed_any,
                 eof,
             } => {
                 if !prefix.is_empty() {
                     return Ok(Some(std::mem::take(prefix)));
                 }
-                if *nonce_pending {
-                    *nonce_pending = false;
-                    if let Some(s) = sealer {
-                        return Ok(Some(Bytes::copy_from_slice(&s.base_nonce())));
-                    }
-                }
                 if *eof {
                     return Ok(None);
                 }
+                // Each read is exactly one chunk of the size this blob's header
+                // declares, so the sealer's framing and the reader's stride are
+                // the same number by construction.
+                let stride = match sealer {
+                    Some(s) => s.header().chunk_size().get() as usize,
+                    None => DEFAULT_BLOB_CHUNK_SIZE.get() as usize,
+                };
                 let chunk = reader
-                    .next_chunk(CHUNK_SIZE)
+                    .next_chunk(stride)
                     .await
                     .map_err(CloudHomeError::Transport)?;
                 if chunk.is_empty() {
                     *eof = true;
-                    // A sealed empty file still emits one tag-only chunk, matching
-                    // `EncryptionService::encrypt`; a plaintext file (or a sealed
-                    // one that already produced chunks) ends here.
+                    // A sealed empty file still emits one tag-only chunk, so a
+                    // reader authenticates its emptiness; a plaintext file (or a
+                    // sealed one that already produced chunks) ends here.
                     if let Some(s) = sealer {
                         if !*sealed_any {
                             *sealed_any = true;
@@ -548,17 +547,15 @@ impl BlobBody {
     pub(crate) fn from_file_with_prefix(
         len: u64,
         reader: PlaintextReader,
-        sealer: Option<ChunkSealer>,
+        sealer: Option<SealedBlobSealer>,
         prefix: Vec<u8>,
     ) -> Self {
-        let nonce_pending = sealer.is_some();
         BlobBody {
             len,
             source: BlobSource::File {
                 reader,
                 prefix: Bytes::from(prefix),
                 sealer,
-                nonce_pending,
                 sealed_any: false,
                 eof: false,
             },
@@ -956,7 +953,8 @@ mod retryable_tests {
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
-    use crate::encryption::{EncryptionService, CHUNK_SIZE};
+    use crate::encryption::EncryptionService;
+    const CHUNK_SIZE: usize = DEFAULT_BLOB_CHUNK_SIZE.get() as usize;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -975,11 +973,15 @@ mod streaming_tests {
         let path = dir.path().join("blob.bin");
         std::fs::write(&path, plaintext).unwrap();
         let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let header = crate::encryption::SealedBlobHeader::new(
+            crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
+            plaintext.len() as u64,
+        );
         let body = BlobBody::from_file_with_prefix(
-            crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
+            header.sealed_len(),
             reader,
-            Some(service.sealer(plaintext.len() as u64, b"storage-cloud-test")),
-            Vec::new(),
+            Some(service.blob_sealer(header, b"storage-cloud-test")),
+            header.to_bytes().to_vec(),
         );
         (dir, body)
     }
@@ -1017,8 +1019,16 @@ mod streaming_tests {
                     expected_len,
                     "streamed length wrong for len={len} min={min}"
                 );
+                let header = crate::encryption::SealedBlobHeader::parse(&sealed).unwrap();
+                assert_eq!(header.plaintext_len(), len as u64);
                 assert_eq!(
-                    service.decrypt(&sealed, b"storage-cloud-test").unwrap(),
+                    service
+                        .blob_opener(header, b"storage-cloud-test")
+                        .open_chunks(
+                            0..header.chunk_count(),
+                            &sealed[crate::encryption::SEALED_BLOB_HEADER_LEN..],
+                        )
+                        .unwrap(),
                     plaintext,
                     "sealed stream failed to round-trip for len={len} min={min}"
                 );

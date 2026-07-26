@@ -258,6 +258,68 @@ async fn create_exact_blob_object(
     stored
 }
 
+/// Upload one blob to a **browsable** home: stored in the clear at a readable
+/// path, with no key tag, no header, and no per-chunk tags. The counterpart of
+/// [`create_exact_blob_object`], whose home seals.
+async fn create_browsable_blob_object(
+    storage: &TestStore,
+    spool_dir: &std::path::Path,
+    id: &str,
+    namespace: &str,
+    cloud_path: &str,
+    bytes: &[u8],
+) -> crate::blob::locator::StoredBlobRef {
+    let content_hash = ObjectHash::digest(bytes);
+    let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
+    let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
+    crate::local_blob::write_atomic(&plaintext_path, bytes)
+        .await
+        .expect("write browsable blob plaintext");
+    let (uploader, registration, _) = storage
+        .founder_device_authority()
+        .await
+        .expect("load browsable founder device authority");
+    let authority = crate::sync::storage::BlobWriteAuthority::new(&uploader, &registration)
+        .expect("validate browsable blob write authority");
+    let locator = crate::blob::locator::BlobLocator::browsable(
+        namespace,
+        id,
+        uploader.clone(),
+        cloud_path,
+        bytes.len() as u64,
+        content_hash,
+    )
+    .expect("build browsable blob locator");
+    let slot = storage
+        .allocate_blob_slot(&locator, &authority)
+        .await
+        .expect("allocate browsable blob slot");
+    storage
+        .seal_blob_to_spool(
+            &locator,
+            &authority,
+            crate::sync::storage::BlobSpoolProtection::Browsable,
+            &plaintext_path,
+            &spool_path,
+        )
+        .await
+        .expect("stage browsable blob");
+    let stored = storage
+        .prepare_blob_object(&locator, &authority, slot, &spool_path)
+        .await
+        .expect("prepare browsable blob");
+    storage
+        .create_blob_object_from_file(
+            &stored,
+            &authority,
+            &spool_path,
+            &crate::storage::cloud::no_progress(),
+        )
+        .await
+        .expect("create browsable blob");
+    stored
+}
+
 async fn register_external_blob(db: &Database, table: &str, row_id: &str, path: &std::path::Path) {
     let reference = db
         .row_blob_ref(table, row_id)
@@ -585,9 +647,84 @@ async fn install_exact_remote_blob_binding_for_row_with_owner(
     owner: crate::sync::store_commit::StoreBatchCommitRef,
 ) {
     let stored = create_exact_blob_object(storage, spool_dir, id, namespace, bytes).await;
+    bind_stored_blob_to_row(db, &stored, table, id, owner).await;
+}
+
+/// Plant a blob-bearing row whose `kind` column carries the readable cloud path
+/// a browsable blob is keyed at. The shared planter writes a fixed `kind`, which
+/// a browsable locator can never match.
+async fn plant_browsable_blob_row(db: &Database, blob_id: &str, cloud_path: &str, bytes: &[u8]) {
+    let note = format!("note-{blob_id}");
+    let blob_id = blob_id.to_string();
+    let cloud_path = cloud_path.to_string();
+    let size = bytes.len() as u64;
+    let hash = crate::blob::content_hash(bytes);
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES (?1, 'browsable-test', 1, '0000000001000-0000-dev1', '2026-01-01')",
+            [note.as_str()],
+        )
+        .map_err(crate::database::DbError::from)?;
+        conn.execute(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '0000000001000-0000-dev1', '2026-01-01')",
+            rusqlite::params![
+                blob_id.as_str(),
+                note.as_str(),
+                cloud_path.as_str(),
+                size as i64,
+                hash
+            ],
+        )
+        .map_err(crate::database::DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("plant the browsable blob row");
+}
+
+/// Publish the owner commit a blob binding hangs off. The installers above do
+/// this inline for opaque blobs; a browsable blob needs the same commit before
+/// it can bind.
+async fn browsable_owner_commit(
+    db: &Database,
+    storage: &TestStore,
+) -> crate::sync::store_commit::StoreBatchCommitRef {
+    let source_db = open_test_db();
+    let changeset = capture_bytes(
+        &source_db,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+          VALUES ('browsable-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let sequence = crate::sync::store::StoreDatabase::new(db)
+        .latest_local_store_position()
+        .await
+        .expect("load the browsable test producer position")
+        .map_or(1, |reference| reference.coord.sequence() + 1);
+    storage
+        .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish the browsable blob owner commit")
+}
+
+/// Bind an already-uploaded blob to a row, so a read resolves that row to that
+/// exact stored object. Split from the installers above so a browsable blob
+/// binds through the same path an opaque one does — the binding is about the
+/// row, not about how the object is protected.
+async fn bind_stored_blob_to_row(
+    db: &Database,
+    stored: &crate::blob::locator::StoredBlobRef,
+    table: &str,
+    id: &str,
+    owner: crate::sync::store_commit::StoreBatchCommitRef,
+) {
     let locator = stored.locator().clone();
 
-    let record = RemoteObjectRecord::activated_blob(&stored, owner)
+    let record = RemoteObjectRecord::activated_blob(stored, owner)
         .expect("record exact activated remote blob");
     record
         .validate()
@@ -1385,17 +1522,16 @@ fn a_blob_stream_is_send_and_sync() {
     assert_send_sync::<crate::blob::cache::BlobStream>();
 }
 
-/// The cost contract of the stream, measured at the cloud: many ranges off one
-/// opened stream download the exact object **once**, not once per range. A media
-/// host probing a codec header issues ~20 small ranges to start one track, so a
-/// per-range download makes the cost of starting playback the blob's whole size
-/// times the number of probes, regardless of how few bytes each probe wants.
+/// The cost contract of the stream, measured at the cloud: ranges off an
+/// uncached Remote stream fetch only the chunks they cover — the object is never
+/// downloaded, not per range and not once per stream. A media host probing a
+/// codec header issues ~20 small ranges to start one track, so anything that
+/// reads the whole object makes starting playback cost the blob's size.
 ///
 /// The counter is the discriminator. Asserting only that the bytes are correct
-/// passes either way — the regression served correct bytes, just at whole-object
-/// cost per call.
+/// passes either way — a whole-object fetch serves correct bytes too.
 #[tokio::test]
-async fn many_ranges_off_one_stream_download_the_cloud_object_once() {
+async fn ranges_off_an_uncached_stream_never_download_the_object() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
     let (tmp, ld) = temp_store_dir();
@@ -1407,18 +1543,21 @@ async fn many_ranges_off_one_stream_download_the_cloud_object_once() {
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &full)
             .await;
 
-    // The blob is in neither cache folder, so opening the stream is a cloud miss.
+    // The blob is in neither cache folder, so the stream reads the cloud object.
     assert!(!pinned_path(&ld, &reference).exists());
     assert!(!cache_path(&ld, &reference).exists());
 
-    let downloads_before = storage.home.exact_stream_read_count();
+    let whole_reads_before = (
+        storage.home.exact_stream_read_count(),
+        storage.home.exact_full_read_count(),
+    );
     let stream = open_blob_stream(&db, &ld, Some(&storage.storage), &reference)
         .await
         .expect("open a stream over a non-cached Remote blob");
     assert_eq!(
         stream.plaintext_size(),
         full.len() as u64,
-        "the stream reports the plaintext length it proved on open",
+        "the stream reports the blob's plaintext length",
     );
 
     // Every range a codec probe would ask for, including a 1-byte read and the
@@ -1445,19 +1584,103 @@ async fn many_ranges_off_one_stream_download_the_cloud_object_once() {
     }
 
     assert_eq!(
-        storage.home.exact_stream_read_count() - downloads_before,
-        1,
-        "{} ranges off one opened stream must download the exact object once",
+        (
+            storage.home.exact_stream_read_count(),
+            storage.home.exact_full_read_count(),
+        ),
+        whole_reads_before,
+        "{} ranges off one opened stream fetched no whole object",
         windows.len(),
+    );
+    assert!(
+        !storage.home.exact_range_reads().is_empty(),
+        "the ranges were served by ranged requests, not from somewhere else",
     );
 }
 
-/// Opening a stream over a Remote cache miss populates the evictable cache, the
-/// same populate a whole `read_blob` miss performs. Without it, each newly opened
-/// stream over the same blob would re-download the whole object — the per-range
-/// cost moved to per-stream rather than removed.
+/// The receipt for the browsable carve-out. A home that stores plaintext in the
+/// clear has no per-chunk tags, so a range read there could not tell a tampered
+/// object from a real one. Ranged reading is refused for those blobs and the
+/// stream materializes the whole blob instead — which is where the row's content
+/// hash still applies, and this proves it does rather than asserting it in prose.
+///
+/// Same-length tampering, so only a content check can catch it: a length check
+/// would pass.
 #[tokio::test]
-async fn opening_a_stream_over_a_remote_miss_populates_the_cache() {
+async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
+    const CLOUD_PATH: &str = "Artist/Album/track.flac";
+    // A browsable blob is keyed at a readable cloud path, so its declaration
+    // names the column holding one. `kind` carries it for this table.
+    let db = open_test_db_with_blob(
+        BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy)
+            .with_cloud_path_column("kind"),
+    );
+    let storage =
+        TestStore::create_browsable(&db, "browsable-store", crate::keys::UserKeypair::generate())
+            .await
+            .expect("create a browsable test Store");
+    let (tmp, ld) = temp_store_dir();
+
+    let full = ramp(5000);
+    plant_browsable_blob_row(&db, "browsable-track", CLOUD_PATH, &full).await;
+    let owner = browsable_owner_commit(&db, &storage).await;
+    let stored = create_browsable_blob_object(
+        &storage,
+        tmp.path(),
+        "browsable-track",
+        "audio",
+        CLOUD_PATH,
+        &full,
+    )
+    .await;
+    bind_stored_blob_to_row(&db, &stored, "note_photos", "browsable-track", owner).await;
+    let reference = db
+        .row_blob_ref("note_photos", "browsable-track")
+        .await
+        .expect("load the browsable row blob reference");
+
+    // Untampered, the stream serves ranges — through the whole-object path, so
+    // the cache is populated (unlike a sealed blob's ranged read).
+    let stream = open_blob_stream(&db, &ld, Some(&storage.storage), &reference)
+        .await
+        .expect("open a stream over a browsable blob");
+    assert_eq!(
+        stream.read_at(100, 50).await.expect("serve a range"),
+        &full[100..150]
+    );
+    assert!(
+        cache_path(&ld, &reference).exists(),
+        "a browsable blob takes the materializing path, which populates the cache",
+    );
+
+    // Now tamper the stored object with same-length bytes and read it fresh.
+    clear_cache(&ld).await.expect("drop the populated cache");
+    storage
+        .home
+        .replace_exact_object(stored.object().slot(), vec![b'!'; full.len()]);
+    let refused = open_blob_stream(&db, &ld, Some(&storage.storage), &reference)
+        .await
+        .err()
+        .expect("a tampered browsable object must not open a stream");
+    assert!(
+        matches!(
+            refused,
+            BlobCacheError::Storage(_) | BlobCacheError::LocalIntegrity { .. }
+        ),
+        "the whole-object path refuses the tampered bytes: {refused:?}",
+    );
+    assert!(
+        !cache_path(&ld, &reference).exists(),
+        "refused bytes are never published into the cache",
+    );
+}
+
+/// A stream over a Remote cache miss does **not** populate the cache: populating
+/// means downloading the whole object, which is the cost the ranged read exists
+/// to remove — a stream that asks for a kilobyte must not pay for the blob. A
+/// whole [`read_blob`] still populates, because it reads every byte anyway.
+#[tokio::test]
+async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
     let (tmp, ld) = temp_store_dir();
@@ -1482,37 +1705,30 @@ async fn opening_a_stream_over_a_remote_miss_populates_the_cache() {
         "the fetched range matches the plaintext slice",
     );
 
-    // The whole plaintext landed in the evictable cache — never a truncated file,
-    // and never the kept folder (a fetch-on-read populates `cache/` only).
     assert!(
-        !pinned_path(&ld, &reference).exists(),
-        "a fetch-on-read must not write the exact locator pinned path",
-    );
-    assert!(
-        cache_path(&ld, &reference).exists(),
-        "opening a stream over a cache miss populates the exact locator cache path",
-    );
-    assert_eq!(
-        std::fs::read(cache_path(&ld, &reference)).expect("read the populated cache file"),
-        full,
-        "the populated cache file holds the whole plaintext, not the range that was read",
+        !pinned_path(&ld, &reference).exists() && !cache_path(&ld, &reference).exists(),
+        "a ranged read populates neither cache folder — it never held the whole blob",
     );
 
-    // With the cloud copy gone, a second stream is served entirely from that
-    // populated file: no download at all.
+    // The whole read is the operation that populates, and after it a stream over
+    // the same blob is served from the cache file with no cloud read at all.
+    read_blob(&db, &ld, Some(&storage.storage), &reference)
+        .await
+        .expect("a whole read of the same blob");
+    assert!(cache_path(&ld, &reference).exists());
     storage
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
         .expect("delete exact remote blob");
-    let downloads_before = storage.home.exact_stream_read_count();
+    let reads_before = storage.home.exact_range_reads().len();
     let second = read_one_range(&db, &ld, Some(&storage.storage), &reference, offset, len)
         .await
-        .expect("a second stream is served from the populated cache");
+        .expect("a stream over the populated cache");
     assert_eq!(second, &full[offset as usize..(offset + len) as usize]);
     assert_eq!(
-        storage.home.exact_stream_read_count(),
-        downloads_before,
-        "a stream opened over a cache hit downloads nothing",
+        storage.home.exact_range_reads().len(),
+        reads_before,
+        "a stream opened over a cache hit reads nothing from the cloud",
     );
 }
 
@@ -1813,20 +2029,17 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     );
 }
 
-/// The boundary of what holding the file can prove, stated as a test rather than
-/// left to be discovered. The stream is bound to an inode, so an **in-place**
-/// rewrite of that inode — not a replacement of the name — changes what later
-/// ranges read, and no range read can notice: the row carries one hash for the
-/// whole blob, so re-checking it per range is exactly the whole-file scan a stream
-/// exists to avoid.
+/// A local source answers a read with its current bytes. The stream holds the
+/// file it opened, so replacing the *path* cannot redirect a range, but a
+/// rewrite of that same file is what the file now says and is what the stream
+/// serves. There is no per-range check to catch it and none is wanted: a blob's
+/// bytes are checked against the hash its row declares at publication, where
+/// they become canonical synced content, and a read is a read.
 ///
-/// This reaches only files the user owns and may edit in place. coven's own copies
-/// — the local store and both cache folders — are only ever published by
-/// temp-then-rename or hard-link, never written in place, so for those the
-/// replacement case above is the only one reachable. A whole `read_blob` re-proves
-/// the file and still rejects the rewrite.
+/// A whole `read_blob` still re-checks, because reading the whole blob is what
+/// makes the check free — it reads every byte either way.
 #[tokio::test]
-async fn an_in_place_rewrite_of_the_user_s_own_file_reaches_a_live_stream() {
+async fn a_local_stream_serves_the_file_s_current_bytes() {
     let (tmp, ld) = temp_store_dir();
     let full = ramp(5000);
     let (offset, len) = (1234u64, 1000u64);
@@ -1847,7 +2060,7 @@ async fn an_in_place_rewrite_of_the_user_s_own_file_reaches_a_live_stream() {
         stream
             .read_at(offset, len)
             .await
-            .expect("the first range is served from the proved file"),
+            .expect("the first range is served from the opened file"),
         &full[offset as usize..(offset + len) as usize],
     );
 
@@ -1859,46 +2072,51 @@ async fn an_in_place_rewrite_of_the_user_s_own_file_reaches_a_live_stream() {
         stream
             .read_at(offset, len)
             .await
-            .expect("a range after the in-place rewrite still reads the held file"),
+            .expect("a range after the rewrite reads the held file"),
         &rewritten[offset as usize..(offset + len) as usize],
-        "an in-place rewrite of the held inode reaches the stream — the limit of what \
-         proving the file at open can cover",
     );
 
-    // The whole read re-proves the file, so it rejects the rewrite outright.
+    // The whole read reads every byte anyway, so it still checks them.
     assert!(matches!(
         read_blob(&db, &ld, None, &reference).await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
-    // So does the next stream: proving happens on open, and this file no longer
-    // matches the row.
-    assert!(matches!(
-        open_blob_stream(&db, &ld, None, &reference).await,
-        Err(BlobCacheError::LocalIntegrity { .. })
-    ));
 }
 
-/// A file corrupted **before** the stream opens is refused at open — the stream is
-/// never created, so no range is ever served from bytes the row does not name.
-/// Proving the whole file on first open is what makes this hold for both local
-/// sources, with same-length corruption (which only the content hash can catch).
+/// The receipt that a local stream costs its ranges and nothing else: a stream
+/// opens over a local file whose bytes no longer match the row's declared hash,
+/// and serves ranges of it. Under a design that proved the whole file at open,
+/// this open failed — proving means reading every byte, which is exactly the
+/// scan the stream exists to avoid. Integrity has one home, and it is
+/// publication, not the read path.
+///
+/// The length is still checked for an external file: it is the registered fact
+/// the ref carries, and a range is bounded by it.
 #[tokio::test]
-async fn a_file_tampered_before_the_stream_opens_is_refused() {
+async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     let (tmp, ld) = temp_store_dir();
     let full = ramp(5000);
+    let corrupt = vec![b'!'; full.len()];
 
     let external_db = read_test_db("audio");
     plant_blob_row(&external_db, "strm-ext3", false, &full).await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
     register_external_blob(&external_db, "note_photos", "strm-ext3", &external_path).await;
-    std::fs::write(&external_path, vec![b'!'; full.len()])
-        .expect("write same-length external corruption");
+    std::fs::write(&external_path, &corrupt).expect("write same-length external corruption");
     let external = external_db
         .row_blob_ref("note_photos", "strm-ext3")
         .await
         .expect("load external row reference");
+    let stream = open_blob_stream(&external_db, &ld, None, &external)
+        .await
+        .expect("a local stream opens without reading the file's content");
+    assert_eq!(
+        stream.read_at(100, 50).await.expect("serve a range"),
+        &corrupt[100..150],
+    );
+    // The whole read still refuses: it reads every byte, so it checks them.
     assert!(matches!(
-        open_blob_stream(&external_db, &ld, None, &external).await,
+        read_blob(&external_db, &ld, None, &external).await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 
@@ -1916,9 +2134,37 @@ async fn a_file_tampered_before_the_stream_opens_is_refused() {
         .row_blob_ref("note_photos", "strm-hst3")
         .await
         .expect("load host-local row reference");
+    let stream = open_blob_stream(&host_db, &ld, None, &host)
+        .await
+        .expect("a local-store stream opens the same way");
+    assert_eq!(stream.read_at(0, 4).await.expect("serve a range"), b"????");
     assert!(matches!(
-        open_blob_stream(&host_db, &ld, None, &host).await,
+        read_blob(&host_db, &ld, None, &host).await,
         Err(BlobCacheError::LocalIntegrity { .. })
+    ));
+}
+
+/// An external file whose length no longer matches its registered size is
+/// refused at open: the length is the ref's own recorded fact and every range is
+/// bounded by it.
+#[tokio::test]
+async fn a_relengthened_external_file_is_refused_at_open() {
+    let (tmp, ld) = temp_store_dir();
+    let full = ramp(5000);
+
+    let db = read_test_db("audio");
+    plant_blob_row(&db, "strm-ext4", false, &full).await;
+    let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
+    register_external_blob(&db, "note_photos", "strm-ext4", &path).await;
+    std::fs::write(&path, &full[..full.len() - 1]).expect("truncate the external file");
+    let reference = db
+        .row_blob_ref("note_photos", "strm-ext4")
+        .await
+        .expect("load external row reference");
+
+    assert!(matches!(
+        open_blob_stream(&db, &ld, None, &reference).await,
+        Err(BlobCacheError::ExternalSizeMismatch { .. })
     ));
 }
 

@@ -74,6 +74,12 @@ pub struct InMemoryCloudHome {
     exact_stream_read_max_inflight: Arc<AtomicUsize>,
     exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     exact_delete_count: Arc<AtomicUsize>,
+    /// Every ranged exact read this home has served, as `(start, end)` stored
+    /// offsets. What a test counts to say a read cost the bytes it asked for and
+    /// no more — a full read is counted separately, by `exact_full_read_count`
+    /// and `exact_stream_read_count`, so reintroducing a whole-object fetch
+    /// shows up as a full read rather than hiding inside the range total.
+    exact_range_reads: Arc<Mutex<Vec<(u64, u64)>>>,
     fail_exact_delete_on: Arc<AtomicUsize>,
     fail_exact_delete_of: Arc<Mutex<Option<TargetedDeleteFailure>>>,
 }
@@ -124,6 +130,7 @@ impl InMemoryCloudHome {
             exact_stream_read_max_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_barrier: Arc::new(Mutex::new(None)),
             exact_delete_count: Arc::new(AtomicUsize::new(0)),
+            exact_range_reads: Arc::new(Mutex::new(Vec::new())),
             fail_exact_delete_on: Arc::new(AtomicUsize::new(0)),
             fail_exact_delete_of: Arc::new(Mutex::new(None)),
         }
@@ -220,6 +227,25 @@ impl InMemoryCloudHome {
 
     pub fn exact_full_read_count(&self) -> usize {
         self.exact_full_read_count.load(Ordering::SeqCst)
+    }
+
+    /// Every ranged exact read served so far, as `(start, end)` stored offsets.
+    pub fn exact_range_reads(&self) -> Vec<(u64, u64)> {
+        self.exact_range_reads.lock().unwrap().clone()
+    }
+
+    /// Total stored bytes ranged reads have transferred.
+    pub fn exact_range_read_bytes(&self) -> u64 {
+        self.exact_range_reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(start, end)| end - start)
+            .sum()
+    }
+
+    pub fn clear_exact_range_reads(&self) {
+        self.exact_range_reads.lock().unwrap().clear();
     }
 
     pub fn exact_stream_read_count(&self) -> usize {
@@ -338,6 +364,16 @@ impl InMemoryCloudHome {
     pub fn remove_exact_object(&self, slot: &ObjectSlot) {
         let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
         self.writes.lock().unwrap().remove(&key);
+    }
+
+    /// The bytes currently stored at one exact slot, without counting a read.
+    pub fn stored_exact_object(&self, slot: &ObjectSlot) -> Vec<u8> {
+        self.writes
+            .lock()
+            .unwrap()
+            .get(&Self::exact_storage_key(slot).expect("test exact slot is valid"))
+            .cloned()
+            .expect("exact slot exists")
     }
 
     /// Replace bytes at one exact slot without changing its locator.
@@ -747,16 +783,32 @@ impl ExactSlotStorage for InMemoryCloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        let bytes = InMemoryCloudHome::read_exact(self, slot).await?;
-        let start = start as usize;
-        let end = (end as usize).min(bytes.len());
-        if start > bytes.len() {
-            return Err(CloudHomeError::NotFound(format!(
-                "range past end of {}",
-                slot.logical_key()
-            )));
-        }
-        Ok(bytes[start..end].to_vec())
+        // Served straight out of the bucket rather than through `read_exact`, so
+        // the full-read counter keeps meaning "something fetched a whole object"
+        // and a ranged read never inflates it.
+        let key = Self::exact_storage_key(slot)?;
+        let bytes = self
+            .writes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
+        // A range past the object's end is refused, not clamped: a short answer
+        // to a range request is the provider ignoring it, which a caller must
+        // see rather than splice.
+        let window = bytes
+            .get(start as usize..end as usize)
+            .ok_or_else(|| {
+                CloudHomeError::NotFound(format!(
+                    "range {start}..{end} past the {} bytes of {}",
+                    bytes.len(),
+                    slot.logical_key()
+                ))
+            })?
+            .to_vec();
+        self.exact_range_reads.lock().unwrap().push((start, end));
+        Ok(window)
     }
 
     async fn read_at_to_file(

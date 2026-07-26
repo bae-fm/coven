@@ -1958,6 +1958,43 @@ impl TestStore {
         Box::pin(Self::create_with_home(db, store_id, signer, home)).await
     }
 
+    /// A store whose home keeps blobs **browsable**: stored in the clear under
+    /// readable paths. The counterpart of [`Self::create`], whose home is opaque
+    /// (sealed under the store key, hashed paths). The pair is fixed per home,
+    /// so a test that needs the browsable verification story needs this store.
+    pub async fn create_browsable(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+    ) -> Result<Self, String> {
+        let home = std::sync::Arc::new(
+            crate::storage::cloud::test_utils::InMemoryCloudHome::new().with_provider_binding(
+                crate::sync::storage::ResolvedProviderBinding {
+                    store: crate::sync::storage::StoreProviderBinding::GoogleDrive {
+                        corpus: crate::sync::storage::GoogleDriveCorpus::SharedDrive {
+                            drive_id: "test-drive".to_string(),
+                            folder_id: "test-folder".to_string(),
+                        },
+                    },
+                    device: crate::sync::storage::ProviderDeviceBinding {
+                        principal: crate::sync::storage::ProviderPrincipalId::GoogleDrive {
+                            permission_id: "test-permission".to_string(),
+                        },
+                    },
+                },
+            ),
+        );
+        Box::pin(Self::create_with_protection(
+            db,
+            store_id,
+            signer,
+            home,
+            crate::sync::cloud_storage::CloudCipher::Plaintext,
+            crate::sync::cloud_storage::BlobPathScheme::Plain,
+        ))
+        .await
+    }
+
     pub async fn create_with_provider_binding(
         db: &Database,
         store_id: &str,
@@ -1977,13 +2014,32 @@ impl TestStore {
         signer: UserKeypair,
         home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Self, String> {
+        Box::pin(Self::create_with_protection(
+            db,
+            store_id,
+            signer,
+            home,
+            crate::sync::cloud_storage::CloudCipher::Encrypted(
+                crate::encryption::EncryptionService::from_key([42; 32]),
+            ),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        ))
+        .await
+    }
+
+    async fn create_with_protection(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        cipher: crate::sync::cloud_storage::CloudCipher,
+        blob_paths: crate::sync::cloud_storage::BlobPathScheme,
+    ) -> Result<Self, String> {
         let storage = std::sync::Arc::new(
             crate::sync::cloud_storage::CloudSyncStorage::new(
                 home.clone(),
-                crate::sync::cloud_storage::CloudCipher::Encrypted(
-                    crate::encryption::EncryptionService::from_key([42; 32]),
-                ),
-                crate::sync::cloud_storage::BlobPathScheme::Hashed,
+                cipher,
+                blob_paths,
                 store_id,
                 signer.clone(),
             )

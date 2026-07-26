@@ -1899,6 +1899,15 @@ impl SyncStorage for FaultingStorage<'_> {
             .await
     }
 
+    async fn open_blob_range_reader(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, crate::sync::storage::StorageError>
+    {
+        self.inner.open_blob_range_reader(blob, protection).await
+    }
+
     async fn delete_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
