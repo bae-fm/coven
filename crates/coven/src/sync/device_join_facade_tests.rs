@@ -120,6 +120,227 @@ impl FacadeFixture {
     }
 }
 
+impl FacadeFixture {
+    /// The joining device's side, over this fixture's home.
+    async fn join_over_test_home(
+        &self,
+        scanned: &[u8],
+        join_request: &str,
+        timing: crate::DeviceJoinTransportTiming,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<crate::DeviceJoinTransportOutcome, crate::BootstrapError> {
+        crate::join_with_scanned_invite_over_test_home(
+            scanned,
+            join_request,
+            self.layout.clone(),
+            self.tables.clone(),
+            test_migrations(),
+            Arc::new(crate::SystemClock),
+            self.home.clone(),
+            timing,
+            |_status| {},
+            cancel,
+        )
+        .await
+    }
+
+    async fn close_over_test_home(
+        &self,
+        scanned: &[u8],
+        join_request: &str,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<(), crate::BootstrapError> {
+        crate::close_scanned_invite_join_over_test_home(
+            scanned,
+            join_request,
+            self.layout.clone(),
+            self.tables.clone(),
+            test_migrations(),
+            Arc::new(crate::SystemClock),
+            self.home.clone(),
+            timing,
+        )
+        .await
+    }
+
+    /// Whether the attempt's slot for `kind` holds nothing.
+    async fn slot_is_empty(
+        &self,
+        invite: &crate::DeviceJoinInvite,
+        kind: crate::DeviceJoinTransportKind,
+    ) -> bool {
+        let slot = invite
+            .bundle
+            .transport
+            .slots
+            .get(&kind)
+            .expect("every kind has a slot");
+        crate::ExactSlotStorage::read_at(self.home.as_ref(), slot)
+            .await
+            .is_err()
+    }
+}
+
+/// A deadline short enough that a side with no counterpart running gives up
+/// promptly. It bounds only the wait for an artifact, never the work between.
+fn one_shot() -> crate::DeviceJoinTransportTiming {
+    crate::DeviceJoinTransportTiming {
+        poll: Duration::from_millis(2),
+        deadline: Duration::from_millis(300),
+    }
+}
+
+/// Run a test body on a thread with room for these flows' poll frames, carrying
+/// its own runtime because the join is not `Send`.
+fn on_a_deep_stack<Body, Fut>(body: Body)
+where
+    Body: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build the test runtime")
+                .block_on(body());
+        })
+        .expect("spawn the test thread")
+        // Carry the body's own panic across the thread boundary rather than
+        // reporting an opaque join failure in its place.
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+/// A host can cancel an invited join through its handle, and the joining device
+/// closes its own side through the same facade — leaving the attempt's slots
+/// gone and nothing pending on either side.
+#[test]
+fn a_facade_only_host_cancels_an_invited_join() {
+    on_a_deep_stack(run_a_facade_only_host_cancels_an_invited_join);
+}
+
+async fn run_a_facade_only_host_cancels_an_invited_join() {
+    let fixture = FacadeFixture::build("facade-device-cancel").await;
+    let join_request = crate::generate_join_request(None).expect("generate the join request");
+    let invite = fixture
+        .handle
+        .begin_device_invite(&join_request, crate::MemberRole::Member)
+        .await
+        .expect("mint the scannable invite");
+    let scanned = invite.to_bytes();
+    let cancel = tokio::sync::watch::channel(false).1;
+
+    // Advance far enough that the owner has an activated attempt to cancel:
+    // each side runs alone until it has nothing left to answer.
+    for _ in 0..2 {
+        let _ = Box::pin(fixture.join_over_test_home(&scanned, &join_request, one_shot(), &cancel))
+            .await;
+        let _ = Box::pin(fixture.handle.drive_device_join(
+            &invite,
+            crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+            None,
+            one_shot(),
+        ))
+        .await;
+    }
+
+    let closing = fixture.close_over_test_home(&scanned, &join_request, timing());
+    // A connected handle runs its sync loop, which publishes Store operations
+    // of its own. A commit that loses that race is refused *before it
+    // persists*, so the unwind resumes from its journal and the caller retries
+    // the whole operation — the contract every Store write here keeps. The
+    // assertion is that it converges, not that it wins the first race.
+    // A connected handle runs its sync loop, which publishes Store operations
+    // of its own. A commit that loses that race is refused *before it
+    // persists*, so the unwind resumes from its journal and the caller retries
+    // the whole operation — the contract every Store write here keeps. The
+    // assertion is that it converges, not that it wins the first race.
+    let cancelling = async {
+        let mut attempts = Vec::new();
+        for _ in 0..5 {
+            match fixture.handle.cancel_device_invite(&invite, timing()).await {
+                Ok(activation) => return Ok(activation),
+                Err(error) => attempts.push(error.to_string()),
+            }
+        }
+        Err(attempts)
+    };
+    let (cancelled, closed) = tokio::join!(Box::pin(cancelling), Box::pin(closing));
+    let cancelled = match cancelled {
+        Ok(activation) => activation,
+        Err(attempts) => panic!(
+            "the owner's handle never carried the cancellation to its cleanup: {attempts:#?}; \
+             the joining device's side ended {closed:?}"
+        ),
+    };
+    closed.expect("the joining device closes its side");
+
+    assert_eq!(
+        cancelled.receipt.attempt_id, invite.bundle.offer.attempt_id,
+        "the cleanup settled this attempt",
+    );
+    for kind in crate::DeviceJoinTransportKind::ALL {
+        assert!(
+            fixture.slot_is_empty(&invite, kind).await,
+            "{kind:?} slot outlived the cancelled attempt",
+        );
+    }
+}
+
+/// A host can abandon an invited join before the joining device has done
+/// anything with it, and the joining device's next run reads the abandonment in
+/// place of the artifact it was waiting for.
+#[test]
+fn a_facade_only_host_abandons_an_invited_join() {
+    on_a_deep_stack(run_a_facade_only_host_abandons_an_invited_join);
+}
+
+async fn run_a_facade_only_host_abandons_an_invited_join() {
+    let fixture = FacadeFixture::build("facade-device-abandon").await;
+    let join_request = crate::generate_join_request(None).expect("generate the join request");
+    let invite = fixture
+        .handle
+        .begin_device_invite(&join_request, crate::MemberRole::Member)
+        .await
+        .expect("mint the scannable invite");
+    let scanned = invite.to_bytes();
+    let cancel = tokio::sync::watch::channel(false).1;
+
+    // The joining device publishes its access request and waits.
+    let waited =
+        Box::pin(fixture.join_over_test_home(&scanned, &join_request, one_shot(), &cancel)).await;
+    assert!(
+        waited.is_err(),
+        "the joining device waits for an admitting side that is not running",
+    );
+
+    let abandonment = fixture
+        .handle
+        .abandon_device_invite(&invite)
+        .await
+        .expect("the owner abandons the attempt through its handle");
+
+    match Box::pin(fixture.join_over_test_home(&scanned, &join_request, timing(), &cancel))
+        .await
+        .expect("the joining device accepts the abandonment")
+    {
+        crate::DeviceJoinTransportOutcome::Abandoned(observed) => {
+            assert_eq!(observed, abandonment)
+        }
+        crate::DeviceJoinTransportOutcome::Joined(_) => {
+            panic!("an abandoned attempt must not produce a member config")
+        }
+    }
+    for kind in crate::DeviceJoinTransportKind::ALL {
+        assert!(
+            fixture.slot_is_empty(&invite, kind).await,
+            "{kind:?} slot outlived the abandoned attempt",
+        );
+    }
+}
+
 /// A host holding nothing but `coven` can admit a device end to end: the owner
 /// mints one payload from the joining device's request, and the two sides run
 /// to a saved member config without either naming an engine type.

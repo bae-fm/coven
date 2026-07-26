@@ -60,12 +60,43 @@ impl DeviceJoinInvite {
     }
 }
 
-/// Join a store from a scanned invite: one call from the payload the owner's
-/// device displayed to this device's saved [`Config`].
+/// Build the joining device's client from a scanned payload.
 ///
 /// The arguments after the payload are this device's own — the join request it
 /// generated, and the same custody, schema, and provider wiring
 /// [`DeviceJoinClient::new`] takes, since that is what this constructs.
+#[allow(clippy::too_many_arguments)]
+fn scanned_invite_client(
+    invite: &DeviceJoinInvite,
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    key_custody: crate::custody::KeyCustody,
+    identity_custody: crate::identity_custody::IdentityCustody,
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
+    cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    clock: crate::clock::ClockRef,
+) -> Result<DeviceJoinClient, BootstrapError> {
+    DeviceJoinClient::new(
+        &invite.invite_code,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        custom_s3_exact_slots,
+        key_custody,
+        identity_custody,
+        oauth_tokens,
+        cloudkit_ops,
+        clock,
+    )
+}
+
+/// Join a store from a scanned invite: one call from the payload the owner's
+/// device displayed to this device's saved [`crate::Config`], or to the owner's
+/// abandonment of the attempt.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_with_scanned_invite(
     invite: &[u8],
@@ -84,8 +115,8 @@ pub async fn join_with_scanned_invite(
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;
-    let client = DeviceJoinClient::new(
-        &invite.invite_code,
+    scanned_invite_client(
+        &invite,
         join_request_code,
         layout,
         synced_tables,
@@ -96,17 +127,78 @@ pub async fn join_with_scanned_invite(
         oauth_tokens,
         cloudkit_ops,
         clock,
-    )?;
-    client
-        .join_via_transport(&invite.bundle, timing, on_status, cancel)
-        .await
+    )?
+    .join_via_transport(&invite.bundle, timing, on_status, cancel)
+    .await
 }
 
-/// Test-only: join from a scanned invite over an injected cloud home, the way
+/// Close this device's side of a join the owner cancelled, and discard the
+/// pending join state the attempt left behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn close_scanned_invite_join(
+    invite: &[u8],
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    key_custody: crate::custody::KeyCustody,
+    identity_custody: crate::identity_custody::IdentityCustody,
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
+    cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    clock: crate::clock::ClockRef,
+    timing: DeviceJoinTransportTiming,
+) -> Result<(), BootstrapError> {
+    let invite = DeviceJoinInvite::from_bytes(invite)?;
+    scanned_invite_client(
+        &invite,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        custom_s3_exact_slots,
+        key_custody,
+        identity_custody,
+        oauth_tokens,
+        cloudkit_ops,
+        clock,
+    )?
+    .close_device_join_via_transport(&invite.bundle, timing)
+    .await
+}
+
+/// Test-only: the joining device's client over an injected cloud home, the way
 /// [`CovenHandle::connect_sync_with_test_home`](crate::CovenHandle) injects one
 /// for the admitting side. The provider knobs a real device reads from its
 /// invite code are fixed here, since the home is supplied outright — including
 /// the exact-slot capability, which the injected home has by construction.
+#[cfg(any(test, feature = "test-utils"))]
+fn scanned_invite_test_client(
+    invite: &DeviceJoinInvite,
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    clock: crate::clock::ClockRef,
+    home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
+) -> Result<DeviceJoinClient, BootstrapError> {
+    Ok(scanned_invite_client(
+        invite,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        clock,
+    )?
+    .with_test_bootstrap_home(home))
+}
+
+/// Test-only counterpart of [`join_with_scanned_invite`].
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn join_with_scanned_invite_over_test_home(
@@ -122,23 +214,44 @@ pub async fn join_with_scanned_invite_over_test_home(
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;
-    let client = DeviceJoinClient::new(
-        &invite.invite_code,
+    scanned_invite_test_client(
+        &invite,
         join_request_code,
         layout,
         synced_tables,
         migrations,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
-        None,
-        None,
         clock,
+        home,
     )?
-    .with_test_bootstrap_home(home);
-    client
-        .join_via_transport(&invite.bundle, timing, on_status, cancel)
-        .await
+    .join_via_transport(&invite.bundle, timing, on_status, cancel)
+    .await
+}
+
+/// Test-only counterpart of [`close_scanned_invite_join`].
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn close_scanned_invite_join_over_test_home(
+    invite: &[u8],
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    clock: crate::clock::ClockRef,
+    home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
+    timing: DeviceJoinTransportTiming,
+) -> Result<(), BootstrapError> {
+    let invite = DeviceJoinInvite::from_bytes(invite)?;
+    scanned_invite_test_client(
+        &invite,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        clock,
+        home,
+    )?
+    .close_device_join_via_transport(&invite.bundle, timing)
+    .await
 }
 
 /// How a join driven through the transport ended for the joining device.

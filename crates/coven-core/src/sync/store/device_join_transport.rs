@@ -984,7 +984,6 @@ pub async fn cancel_device_join_via_transport(
     store: &Store,
     identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
-    attempt: crate::sync::store_commit::DeviceJoinAttemptRef,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
@@ -1007,7 +1006,7 @@ pub async fn cancel_device_join_via_transport(
         Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
         _ => {
             let cancellation =
-                cancel_and_publish(store, identity_signer, &transport, attempt_id, attempt).await?;
+                cancel_and_publish(store, identity_signer, &transport, attempt_id).await?;
             let administrator_terminal = store
                 .close_device_provider_admission(identity_signer, cancellation.clone())
                 .await?;
@@ -1050,19 +1049,36 @@ pub async fn cancel_device_join_via_transport(
 /// The attempt's cancellation, taken from the owner journal when it already
 /// holds one — `cancel_device_join` refuses to run again once the unwind has
 /// moved on to preparing the cleanup receipt.
+///
+/// The attempt reference the first cancellation needs comes from the journal
+/// too, rather than from a caller: the journal is what decided which attempt
+/// this join activated, so a supplied reference could only agree with it or be
+/// wrong.
 async fn cancel_and_publish(
     store: &Store,
     identity_signer: &UserKeypair,
     transport: &DeviceJoinTransport<'_>,
     attempt_id: DeviceJoinAttemptId,
-    attempt: crate::sync::store_commit::DeviceJoinAttemptRef,
 ) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
     let cancellation = match owner_status(store, attempt_id).await? {
         Some(
             DeviceJoinStatus::CleanupPending { cancellation, .. }
             | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
         ) => cancellation,
-        _ => store.cancel_device_join(identity_signer, attempt).await?,
+        Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
+            store
+                .cancel_device_join(
+                    identity_signer,
+                    bootstrap.publication_authorization.attempt.clone(),
+                )
+                .await?
+        }
+        other => {
+            return Err(DeviceJoinError::Store(format!(
+                "device join {attempt_id} has no attempt to cancel: {other:?}"
+            ))
+            .into())
+        }
     };
     transport
         .publish(&DeviceJoinAction::TransferCancellation(
