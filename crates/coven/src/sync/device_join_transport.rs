@@ -13,10 +13,20 @@ use tokio::sync::watch;
 use crate::config::Config;
 use crate::sync::join::{BootstrapError, DeviceJoinClient};
 use crate::sync::store::{
-    DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation, DeviceJoinCleanupActivation,
-    DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStatus, DeviceJoinTransport,
-    DeviceJoinTransportTiming, DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
+    DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStatus,
+    DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
+    DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
+
+/// How a join driven through the transport ended for the joining device.
+#[derive(Clone, Debug)]
+pub enum DeviceJoinTransportOutcome {
+    /// The device is a member: its store is saved and its config returned.
+    Joined(Config),
+    /// The owner gave up on the attempt before it completed.
+    Abandoned(DeviceJoinAbandonment),
+}
 
 impl DeviceJoinClient {
     /// Join through the transport: one call from the scanned offer bundle to a
@@ -32,7 +42,7 @@ impl DeviceJoinClient {
         timing: DeviceJoinTransportTiming,
         on_status: impl Fn(&str),
         cancel: &watch::Receiver<bool>,
-    ) -> Result<Config, BootstrapError> {
+    ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let storage = self.transport_storage().await?;
         let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
         let attempt_id = bundle.offer.attempt_id;
@@ -52,13 +62,25 @@ impl DeviceJoinClient {
                         .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
                         .await?;
                 }
+                Some(DeviceJoinStatus::Abandoned { abandonment }) => {
+                    return self.accept_abandonment(&transport, abandonment).await;
+                }
                 Some(DeviceJoinStatus::AwaitingProviderAdmission { request }) => {
                     transport
                         .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
                         .await?;
-                    let approval = transport
-                        .await_artifact::<DeviceProviderAdmissionApproval>(timing)
-                        .await?;
+                    // The owner may give up on the attempt while this device
+                    // waits, so the wait watches the abandonment slot alongside
+                    // the approval rather than sitting out its deadline.
+                    let approval = match transport
+                        .await_step::<DeviceProviderAdmissionApproval>(timing)
+                        .await?
+                    {
+                        DeviceJoinStep::Continue(approval) => approval,
+                        DeviceJoinStep::Abandoned(abandonment) => {
+                            return self.accept_abandonment(&transport, abandonment).await;
+                        }
+                    };
                     let registration_request = self.prepare_registration_request(approval).await?;
                     transport
                         .publish(&DeviceJoinAction::TransferRegistrationRequest(
@@ -124,10 +146,23 @@ impl DeviceJoinClient {
         transport: &DeviceJoinTransport<'_>,
         activation: DeviceJoinActivation,
         on_status: &impl Fn(&str),
-    ) -> Result<Config, BootstrapError> {
+    ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let config = self.complete_device_join(activation, on_status).await?;
         transport.delete_attempt_slots().await?;
-        Ok(config)
+        Ok(DeviceJoinTransportOutcome::Joined(config))
+    }
+
+    /// Record the owner's abandonment and clear the attempt's namespace: the
+    /// abandonment is the last artifact either side publishes, and this device
+    /// has just read it.
+    async fn accept_abandonment(
+        &self,
+        transport: &DeviceJoinTransport<'_>,
+        abandonment: DeviceJoinAbandonment,
+    ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
+        let accepted = self.accept_device_join_abandonment(abandonment).await?;
+        transport.delete_attempt_slots().await?;
+        Ok(DeviceJoinTransportOutcome::Abandoned(accepted))
     }
 
     /// Carry a cancelled attempt through the transport to its activated
@@ -143,14 +178,36 @@ impl DeviceJoinClient {
     ) -> Result<(), BootstrapError> {
         let storage = self.transport_storage().await?;
         let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
+        let attempt_id = bundle.offer.attempt_id;
 
-        let cancellation = transport
-            .await_artifact::<DeviceJoinCancellation>(timing)
-            .await?;
-        let terminal = self.close_pending_device_join(cancellation).await?;
-        transport
-            .publish(&DeviceJoinAction::TransferJoinerTerminal(terminal))
-            .await?;
+        match self.device_join_status(attempt_id)? {
+            // The cleanup already landed; all that is left is clearing the
+            // namespace, which a run that died before it would not have done.
+            Some(DeviceJoinStatus::CleanupActivated { activation }) => {
+                if self
+                    .resume_device_joins()?
+                    .contains(&DeviceJoinAction::CompleteCleanup(activation.clone()))
+                {
+                    self.complete_cancelled_device_join(activation).await?;
+                }
+                transport.delete_attempt_slots().await?;
+                return Ok(());
+            }
+            Some(DeviceJoinStatus::JoinerClosed { terminal }) => {
+                transport
+                    .publish(&DeviceJoinAction::TransferJoinerTerminal(terminal))
+                    .await?;
+            }
+            _ => {
+                let cancellation = transport
+                    .await_artifact::<DeviceJoinCancellation>(timing)
+                    .await?;
+                let terminal = self.close_pending_device_join(cancellation).await?;
+                transport
+                    .publish(&DeviceJoinAction::TransferJoinerTerminal(terminal))
+                    .await?;
+            }
+        }
 
         let activation = transport
             .await_artifact::<DeviceJoinCleanupActivation>(timing)

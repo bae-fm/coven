@@ -692,10 +692,10 @@ pub use coven_core::sync::store::{
 // The storage-mediated device-join transport: the offer bundle a host encodes
 // as its join code, the slot namespace it names, and the two role drivers.
 pub use coven_core::sync::store::{
-    cancel_device_join_via_transport, drive_device_join, DeviceJoinApproval,
-    DeviceJoinApprovalPolicy, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming,
+    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
+    DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportError,
+    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
 };
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
@@ -786,6 +786,7 @@ pub use storage::cloud::{
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
+pub use sync::device_join_transport::DeviceJoinTransportOutcome;
 pub use sync::join::{BootstrapError, DeviceJoinClient};
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
 pub use sync::restore_code::{

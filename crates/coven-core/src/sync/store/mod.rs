@@ -111,10 +111,11 @@ pub use device_join::{
     ProvisionalDeviceBootstrap, SlotDisposition,
 };
 pub use device_join_transport::{
-    cancel_device_join_via_transport, drive_device_join, DeviceJoinApproval,
-    DeviceJoinApprovalPolicy, DeviceJoinArtifact, DeviceJoinOfferBundle, DeviceJoinRoles,
-    DeviceJoinTransport, DeviceJoinTransportError, DeviceJoinTransportKind,
-    DeviceJoinTransportParams, DeviceJoinTransportTiming,
+    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinArtifact, DeviceJoinDriveOutcome,
+    DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming,
 };
 pub use error::StoreError;
 pub(crate) use membership::apply_key_rotation;

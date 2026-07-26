@@ -364,6 +364,21 @@ impl DeviceJoinOfferBundle {
     }
 }
 
+/// What a joining device found while waiting for its next artifact: the
+/// artifact, or the owner's abandonment of the attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeviceJoinStep<T> {
+    Continue(T),
+    Abandoned(DeviceJoinAbandonment),
+}
+
+/// How a driven join ended for the admitting side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeviceJoinDriveOutcome {
+    Activated(DeviceJoinActivation),
+    Abandoned(DeviceJoinAbandonment),
+}
+
 /// How often to look for a counterpart's artifact, and how long to keep
 /// looking before giving up on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -580,12 +595,54 @@ impl<'a> DeviceJoinTransport<'a> {
         }
     }
 
+    /// Poll for the next artifact of type `T`, or for the owner's abandonment
+    /// of the whole attempt, whichever appears first.
+    ///
+    /// The owner may give up on an attempt while the joining device is waiting
+    /// for the next step, so every joiner wait watches both slots. A wait that
+    /// watched only its own kind would sit until its deadline against an
+    /// abandonment already published.
+    pub async fn await_step<T: DeviceJoinArtifact>(
+        &self,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinStep<T>, DeviceJoinTransportError> {
+        let kind = T::KIND;
+        let polled = tokio::time::timeout(timing.deadline, async {
+            loop {
+                if let Some(action) = self.read(DeviceJoinTransportKind::Abandonment).await? {
+                    return DeviceJoinAbandonment::from_action(action)
+                        .map(DeviceJoinStep::Abandoned)
+                        .ok_or(DeviceJoinTransportError::KindMismatch {
+                            kind: DeviceJoinTransportKind::Abandonment,
+                        });
+                }
+                if let Some(action) = self.read(kind).await? {
+                    return T::from_action(action)
+                        .map(DeviceJoinStep::Continue)
+                        .ok_or(DeviceJoinTransportError::KindMismatch { kind });
+                }
+                tokio::time::sleep(timing.poll).await;
+            }
+        })
+        .await;
+        match polled {
+            Ok(step) => step,
+            Err(_) => Err(DeviceJoinTransportError::Timeout {
+                kind,
+                producer: kind.producer(),
+            }),
+        }
+    }
+
     /// Remove every slot this attempt reserved.
     ///
-    /// Called once the exchange has a terminal both sides have consumed — the
-    /// joiner's completed join, or the activated cleanup that ends a
-    /// cancellation. There is no sweep behind this: an attempt that reaches
-    /// neither terminal keeps its slots until its cancellation removes them.
+    /// Called once the exchange has reached an end the joining device has
+    /// consumed — its completed join, its accepted abandonment, or its accepted
+    /// cleanup activation. The joining device is the last reader on all three,
+    /// which is why the deletion is its to make: the owner has no artifact by
+    /// which it could learn that the joiner read the last thing it published.
+    /// There is no sweep behind this — an attempt that reaches none of those
+    /// ends keeps its slots until its cancellation removes them.
     pub async fn delete_attempt_slots(&self) -> Result<(), DeviceJoinTransportError> {
         for kind in DeviceJoinTransportKind::ALL {
             let prepared = match self
@@ -673,10 +730,22 @@ pub async fn drive_device_join(
     policy: DeviceJoinApprovalPolicy<'_>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     timing: DeviceJoinTransportTiming,
-) -> Result<DeviceJoinActivation, DeviceJoinTransportError> {
+) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
     let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
     let attempt_id = bundle.offer.attempt_id;
+
+    // An abandoned attempt has no further step to drive. Publishing it here is
+    // what lets a driver started after the abandonment still deliver it to a
+    // joining device that has not seen it yet.
+    if let Some(DeviceJoinStatus::Abandoned { abandonment }) =
+        owner_status(store, attempt_id).await?
+    {
+        transport
+            .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+            .await?;
+        return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
+    }
 
     // The admitting side produces four artifacts in a fixed order, each after
     // one of the joiner's. Every phase below starts from its role journal's
@@ -795,9 +864,11 @@ pub async fn drive_device_join(
     }
 
     if !roles.owner {
-        return transport
-            .await_artifact::<DeviceJoinActivation>(timing)
-            .await;
+        return Ok(DeviceJoinDriveOutcome::Activated(
+            transport
+                .await_artifact::<DeviceJoinActivation>(timing)
+                .await?,
+        ));
     }
 
     let activation = match owner_status(store, attempt_id).await? {
@@ -819,7 +890,26 @@ pub async fn drive_device_join(
     transport
         .publish(&DeviceJoinAction::TransferActivation(activation.clone()))
         .await?;
-    Ok(activation)
+    Ok(DeviceJoinDriveOutcome::Activated(activation))
+}
+
+/// Give up on an attempt and publish the abandonment, so a joining device
+/// waiting on its next artifact learns the join is over instead of waiting out
+/// its deadline.
+pub async fn abandon_device_join_via_transport(
+    store: &Store,
+    identity_signer: &UserKeypair,
+    bundle: &DeviceJoinOfferBundle,
+) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
+    let roles = driver_roles(store, &bundle.offer).await?;
+    let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
+    let abandonment = store
+        .abandon_device_join(identity_signer, bundle.offer.clone())
+        .await?;
+    transport
+        .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+        .await?;
+    Ok(abandonment)
 }
 
 async fn admin_status(
@@ -842,12 +932,18 @@ async fn owner_status(
         .await?)
 }
 
-/// Cancel an attempt and carry the unwind to its activated cleanup, removing
-/// the attempt's transport slots once both sides' terminals are settled.
+/// Cancel an attempt and carry the unwind to its activated cleanup.
 ///
 /// The joiner's own closure travels through the transport: the owner publishes
 /// the cancellation, waits for the joiner's terminal, and settles the receipt
-/// against both terminals.
+/// against both terminals. Like the admitting driver, every step starts from
+/// the role journal's durable state, so a run that died mid-unwind resumes
+/// where it stopped rather than replaying a step its journal is already past.
+///
+/// The attempt's slots are not deleted here. The joining device reads the
+/// cleanup activation this publishes last, and the owner has no artifact by
+/// which it could learn that read had happened — so the deletion belongs to the
+/// joiner, at the point it accepts that activation.
 pub async fn cancel_device_join_via_transport(
     store: &Store,
     identity_signer: &UserKeypair,
@@ -857,33 +953,46 @@ pub async fn cancel_device_join_via_transport(
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
     let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
-    let cancellation = store.cancel_device_join(identity_signer, attempt).await?;
-    transport
-        .publish(&DeviceJoinAction::TransferCancellation(
-            cancellation.clone(),
-        ))
-        .await?;
+    let attempt_id = bundle.offer.attempt_id;
 
-    let administrator_terminal = store
-        .close_device_provider_admission(identity_signer, cancellation.clone())
-        .await?;
-    transport
-        .publish(&DeviceJoinAction::TransferProviderAdminTerminal(
-            administrator_terminal.clone(),
-        ))
-        .await?;
-
-    let joiner_terminal = transport
-        .await_artifact::<JoinerJoinTerminal>(timing)
-        .await?;
-    let receipt = store
-        .prepare_device_join_cleanup(
-            identity_signer,
-            cancellation,
-            administrator_terminal,
-            joiner_terminal,
-        )
-        .await?;
+    let receipt = match owner_status(store, attempt_id).await? {
+        // The unwind already reached its end; republish what it settled on.
+        Some(DeviceJoinStatus::CleanupActivated { activation }) => {
+            transport
+                .publish(&DeviceJoinAction::TransferCleanupActivation(
+                    activation.clone(),
+                ))
+                .await?;
+            store
+                .complete_owner_device_join_cleanup(activation.clone())
+                .await?;
+            return Ok(activation);
+        }
+        Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
+        _ => {
+            let cancellation =
+                cancel_and_publish(store, identity_signer, &transport, attempt_id, attempt).await?;
+            let administrator_terminal = store
+                .close_device_provider_admission(identity_signer, cancellation.clone())
+                .await?;
+            transport
+                .publish(&DeviceJoinAction::TransferProviderAdminTerminal(
+                    administrator_terminal.clone(),
+                ))
+                .await?;
+            let joiner_terminal = transport
+                .await_artifact::<JoinerJoinTerminal>(timing)
+                .await?;
+            store
+                .prepare_device_join_cleanup(
+                    identity_signer,
+                    cancellation,
+                    administrator_terminal,
+                    joiner_terminal,
+                )
+                .await?
+        }
+    };
     transport
         .publish(&DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
         .await?;
@@ -899,12 +1008,34 @@ pub async fn cancel_device_join_via_transport(
     store
         .complete_owner_device_join_cleanup(activation.clone())
         .await?;
-    transport.delete_attempt_slots().await?;
     Ok(activation)
 }
 
-/// Which admitting roles this device holds, decided by the registration it is
-/// activated under against the two the offer names.
+/// The attempt's cancellation, taken from the owner journal when it already
+/// holds one — `cancel_device_join` refuses to run again once the unwind has
+/// moved on to preparing the cleanup receipt.
+async fn cancel_and_publish(
+    store: &Store,
+    identity_signer: &UserKeypair,
+    transport: &DeviceJoinTransport<'_>,
+    attempt_id: DeviceJoinAttemptId,
+    attempt: crate::sync::store_commit::DeviceJoinAttemptRef,
+) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
+    let cancellation = match owner_status(store, attempt_id).await? {
+        Some(
+            DeviceJoinStatus::CleanupPending { cancellation, .. }
+            | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
+        ) => cancellation,
+        _ => store.cancel_device_join(identity_signer, attempt).await?,
+    };
+    transport
+        .publish(&DeviceJoinAction::TransferCancellation(
+            cancellation.clone(),
+        ))
+        .await?;
+    Ok(cancellation)
+}
+
 async fn driver_roles(
     store: &Store,
     offer: &DeviceJoinOffer,
