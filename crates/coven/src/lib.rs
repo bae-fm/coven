@@ -598,6 +598,8 @@ pub(crate) mod storage {
 pub(crate) mod sync {
     pub(crate) use coven_core::sync::*;
 
+    #[cfg(test)]
+    mod device_join_facade_tests;
     pub(crate) mod device_join_transport;
     #[cfg(test)]
     mod device_join_transport_tests;
@@ -786,7 +788,11 @@ pub use storage::cloud::{
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
-pub use sync::device_join_transport::DeviceJoinTransportOutcome;
+#[cfg(any(test, feature = "test-utils"))]
+pub use sync::device_join_transport::join_with_scanned_invite_over_test_home;
+pub use sync::device_join_transport::{
+    join_with_scanned_invite, DeviceJoinInvite, DeviceJoinTransportOutcome,
+};
 pub use sync::join::{BootstrapError, DeviceJoinClient};
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
 pub use sync::restore_code::{

@@ -335,6 +335,41 @@ pub struct DeviceJoinOfferBundle {
     pub transport: DeviceJoinTransportParams,
 }
 
+impl Store {
+    /// Begin a join for `member_pubkey` and mint the bundle that carries it.
+    ///
+    /// The provider administrator is this store's founder grant, read from the
+    /// signed protocol root rather than taken from the caller: a host driving
+    /// the default transport has one administrator to choose from, and making
+    /// it name that grant would only give it a way to name the wrong one.
+    /// Allocating the attempt's slots needs this store's storage, which is why
+    /// minting the bundle lives here rather than above the crate boundary.
+    pub async fn begin_device_join_bundle(
+        &self,
+        identity_signer: &UserKeypair,
+        member_pubkey: &str,
+    ) -> Result<DeviceJoinOfferBundle, DeviceJoinTransportError> {
+        let root = crate::sync::store_objects::load_store_protocol_root(
+            &**self.storage(),
+            self.store_root(),
+        )
+        .await
+        .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+        let offer = self
+            .begin_device_join(
+                identity_signer,
+                member_pubkey,
+                root.value
+                    .descriptor
+                    .founder_provider_admin
+                    .grant_id
+                    .clone(),
+            )
+            .await?;
+        DeviceJoinOfferBundle::allocate(&**self.storage(), offer).await
+    }
+}
+
 impl DeviceJoinOfferBundle {
     /// Mint a bundle for an offer the owner has just made: allocate the
     /// attempt's slots and its seal key.

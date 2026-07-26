@@ -72,6 +72,10 @@ pub enum SyncError {
     Circle(#[from] crate::sync::store::CircleOperationError),
     #[error("device join: {0}")]
     DeviceJoin(#[from] crate::DeviceJoinError),
+    #[error("device join transport: {0}")]
+    DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
+    #[error("invalid join request code: {0}")]
+    InvalidJoinRequest(String),
     #[error("{0}")]
     Database(#[from] DbError),
     #[error("blob upload drain failed: {0}")]

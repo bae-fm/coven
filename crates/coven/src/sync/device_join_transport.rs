@@ -19,6 +19,128 @@ use crate::sync::store::{
     DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
 
+/// Everything a joining device needs, in the one blob a host renders as a join
+/// code.
+///
+/// Two things come from different places and neither is derivable from the
+/// other: the invite code carries the cloud home's credentials and the store
+/// key wrapped to this member, and the bundle carries the attempt's slots and
+/// seal key. A device that scanned only one of them cannot join.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinInvite {
+    pub version: u32,
+    pub invite_code: String,
+    pub bundle: DeviceJoinOfferBundle,
+}
+
+impl DeviceJoinInvite {
+    pub(crate) fn new(invite_code: String, bundle: DeviceJoinOfferBundle) -> Self {
+        Self {
+            version: crate::sync::store_commit::STORE_PROTOCOL_VERSION,
+            invite_code,
+            bundle,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("device join invite serialization cannot fail")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BootstrapError> {
+        let invite: Self = serde_json::from_slice(bytes)
+            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
+        if invite.version != crate::sync::store_commit::STORE_PROTOCOL_VERSION {
+            return Err(BootstrapError::InvalidCode(format!(
+                "device join invite version {} is not supported",
+                invite.version
+            )));
+        }
+        Ok(invite)
+    }
+}
+
+/// Join a store from a scanned invite: one call from the payload the owner's
+/// device displayed to this device's saved [`Config`].
+///
+/// The arguments after the payload are this device's own — the join request it
+/// generated, and the same custody, schema, and provider wiring
+/// [`DeviceJoinClient::new`] takes, since that is what this constructs.
+#[allow(clippy::too_many_arguments)]
+pub async fn join_with_scanned_invite(
+    invite: &[u8],
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    key_custody: crate::custody::KeyCustody,
+    identity_custody: crate::identity_custody::IdentityCustody,
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
+    cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    clock: crate::clock::ClockRef,
+    timing: DeviceJoinTransportTiming,
+    on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
+) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
+    let invite = DeviceJoinInvite::from_bytes(invite)?;
+    let client = DeviceJoinClient::new(
+        &invite.invite_code,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        custom_s3_exact_slots,
+        key_custody,
+        identity_custody,
+        oauth_tokens,
+        cloudkit_ops,
+        clock,
+    )?;
+    client
+        .join_via_transport(&invite.bundle, timing, on_status, cancel)
+        .await
+}
+
+/// Test-only: join from a scanned invite over an injected cloud home, the way
+/// [`CovenHandle::connect_sync_with_test_home`](crate::CovenHandle) injects one
+/// for the admitting side. The provider knobs a real device reads from its
+/// invite code are fixed here, since the home is supplied outright — including
+/// the exact-slot capability, which the injected home has by construction.
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn join_with_scanned_invite_over_test_home(
+    invite: &[u8],
+    join_request_code: &str,
+    layout: crate::store_dir::StoreLayout,
+    synced_tables: Vec<crate::sync::session::SyncedTable>,
+    migrations: Vec<crate::migration::Migration>,
+    clock: crate::clock::ClockRef,
+    home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
+    timing: DeviceJoinTransportTiming,
+    on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
+) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
+    let invite = DeviceJoinInvite::from_bytes(invite)?;
+    let client = DeviceJoinClient::new(
+        &invite.invite_code,
+        join_request_code,
+        layout,
+        synced_tables,
+        migrations,
+        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        clock,
+    )?
+    .with_test_bootstrap_home(home);
+    client
+        .join_via_transport(&invite.bundle, timing, on_status, cancel)
+        .await
+}
+
 /// How a join driven through the transport ended for the joining device.
 #[derive(Clone, Debug)]
 pub enum DeviceJoinTransportOutcome {
