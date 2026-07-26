@@ -5887,6 +5887,156 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
     .expect("the later predecessor head covers the first access activation");
 }
 
+/// The owner's registration-acceptance step is single-shot, and it is the
+/// device's own sync loop it has to survive.
+///
+/// The step composes the join attempt against one exact position on the owner's
+/// own Store stream: the attempt carries that position as its `bootstrap_cut`,
+/// and pull refuses an attempt whose cut is not its commit's predecessor cut.
+/// The attempt object is created once, at the slot the offer signed, so a new
+/// position would need a new attempt body the offer will not admit. The step
+/// also advances its journal past `Offered` before that commit activates, and
+/// the state it lands in carries no prepared object to resume from — so a step
+/// that loses its position leaves the owner with no way forward and the joining
+/// device waiting on an artifact that is never coming.
+///
+/// The same device runs a sync loop that publishes its queued writes at that
+/// very position. The step cannot lose to it: the turn to author this device's
+/// own stream is taken when the position is read, travels inside the plan, and
+/// is released only after the head that takes the position is published. The
+/// drain waits for that turn, and a queued write that finds its position taken
+/// re-prepares against the winner — it is the one composer that can lose a
+/// position safely.
+#[tokio::test]
+async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_loop() {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = Arc::new(cycle_test_store(&owner_db, &owner).await);
+    let member = UserKeypair::generate();
+    let approval = prepare_same_principal_approval_fixture(
+        &owner_db,
+        &storage,
+        &owner,
+        &member,
+        "contended-join-member",
+    )
+    .await;
+    let request = crate::sync::store::prepare_device_registration_request(
+        &approval.pending,
+        &storage.storage,
+        None,
+        &member,
+        approval.approval,
+    )
+    .await
+    .expect("prepare the joining device's registration request");
+
+    // A row of the owner's own, queued as a Store write: the sync loop now
+    // holds a head addressed to the same position the acceptance composes
+    // against.
+    host_exec(
+        &owner_db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('queued', 'queued by the owner', NULL, 1, \
+         '0000000001000-0000-owner', '2026-01-01')",
+    )
+    .await;
+    let device_id = owner_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read the owner's device id")
+        .expect("the owner's store has an activated local device");
+    let (_write_dir, store_dir) = temp_store_dir();
+    {
+        let writer = crate::sync::store::Store::authorize_borrowed(&storage.storage, &owner_db)
+            .await
+            .expect("authorize the owner's Store writer");
+        assert!(
+            writer
+                .prepare_pending_store_write(&device_id, T0, &owner, &store_dir)
+                .await
+                .expect("prepare the owner's queued Store write"),
+            "the owner's row queues a Store write for the sync loop to publish",
+        );
+    }
+
+    let mut test_points = owner_db.observe_test_points();
+    let (position_held, resume_acceptance) =
+        owner_db.arm_test_pause(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld);
+    let accept_db = owner_db.clone();
+    let accept_storage = storage.clone();
+    let accept_authorization = approval.authorization.clone();
+    let accept_owner = owner.clone();
+    let acceptance = tokio::spawn(async move {
+        Box::pin(crate::sync::store::accept_device_registration_request(
+            &crate::sync::store::StoreDatabase::new(&accept_db),
+            &accept_storage.storage,
+            &accept_authorization,
+            &accept_owner,
+            request,
+        ))
+        .await
+    });
+
+    // Hold the acceptance exactly where it has read the position and not yet
+    // published the head that takes it — the window the sync loop used to
+    // publish into.
+    position_held.notified().await;
+    let drain_db = owner_db.clone();
+    let drain_storage = storage.clone();
+    let drain = tokio::spawn(async move {
+        let writer =
+            crate::sync::store::Store::authorize_borrowed(&drain_storage.storage, &drain_db)
+                .await
+                .expect("authorize the owner's Store writer");
+        Box::pin(writer.drain_store_writes()).await
+    });
+    // Uploading its commit is the step immediately before the drain would create
+    // the head that takes the position. While the acceptance holds that
+    // position, the drain must not get that far — it is still waiting for the
+    // turn. Reaching it means the position was taken out from under a step that
+    // cannot survive losing it.
+    let reached_the_position = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(point) = test_points.recv().await {
+            if matches!(
+                point,
+                crate::database::DatabaseTestPoint::StoreWriteCommitUploaded { .. }
+            ) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(
+        reached_the_position.is_err(),
+        "the sync loop reached the acceptance's position while the acceptance held it",
+    );
+    resume_acceptance.notify_one();
+
+    let accepted = acceptance
+        .await
+        .expect("join the acceptance task")
+        .expect("the acceptance keeps the position it composed against");
+    let drained = drain
+        .await
+        .expect("join the sync loop drain task")
+        .expect("the sync loop resolves losing the position");
+    assert_eq!(
+        accepted
+            .publication_authorization
+            .attempt_activation
+            .coord
+            .sequence(),
+        2,
+        "the acceptance activates at the position it read, not one past it",
+    );
+    assert_eq!(
+        drained, 0,
+        "the queued write found its position taken and re-prepares instead",
+    );
+}
+
 #[tokio::test]
 async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
     let owner = UserKeypair::generate();

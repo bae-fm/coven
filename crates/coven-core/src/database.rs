@@ -307,12 +307,26 @@ struct DatabaseState {
 pub enum DatabaseTestPoint {
     LocalBlobCleanupRequested,
     LocalBlobCleanupAcquired,
-    LocalBlobCleanupBeforeFilesystem { namespace: String, blob_id: String },
+    LocalBlobCleanupBeforeFilesystem {
+        namespace: String,
+        blob_id: String,
+    },
     LocalBlobCleanupFinished,
-    PullAfterRemoteCommit { device_id: String, seq: u64 },
-    StoreWriteCommitUploaded { write_id: WriteId },
-    StoreWriteHeadReadBack { write_id: WriteId },
+    PullAfterRemoteCommit {
+        device_id: String,
+        seq: u64,
+    },
+    StoreWriteCommitUploaded {
+        write_id: WriteId,
+    },
+    StoreWriteHeadReadBack {
+        write_id: WriteId,
+    },
     StoreDeviceExclusionCandidateStaged,
+    /// The owner's device-join acceptance has read the position its attempt
+    /// will be bound to and holds the turn to author it, but has not yet
+    /// published the head that takes it.
+    DeviceJoinAttemptPositionHeld,
 }
 
 #[cfg(any(test, feature = "test-utils"))]

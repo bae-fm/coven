@@ -237,7 +237,11 @@ pub(crate) async fn activate_store_operation_commit(
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreError> {
-    let prepared = prepare_candidate(database, storage, plan, batch).await?;
+    // Borrowed, not consumed: `plan` holds this device's turn to author its own
+    // stream, and it must still be held when the head below takes the position
+    // the plan was composed against. Dropping it here would let another local
+    // writer take that position mid-activation.
+    let prepared = prepare_candidate_borrowed(database, storage, &plan, batch).await?;
     match publish_prepared_store_operation(database, storage, Box::new(prepared)).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {
@@ -249,8 +253,20 @@ pub(crate) async fn activate_store_operation_commit(
         StoreOperationPublicationOutcome::Reprepared => Err(StoreError::InvalidOutbound(
             "Store operation was reprepared during immediate activation".to_string(),
         )),
-        StoreOperationPublicationOutcome::RepreparedCandidate(_)
-        | StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
+        // Adopting an already-published head means the head at this position is
+        // this exact candidate's own. This candidate was composed here, under a
+        // write id minted for this call, so no head published before it can
+        // carry its bytes — reaching this is a broken store, not a lost race.
+        StoreOperationPublicationOutcome::RepreparedCandidate(_) => {
+            Err(StoreError::InvalidOutbound(
+                "Store operation adopted a published head for a candidate composed in this call"
+                    .to_string(),
+            ))
+        }
+        // A different commit holds this device's head slot at the sequence this
+        // operation composed against. Nothing was persisted, so the caller
+        // re-derives from durable state and runs the operation again.
+        StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
             Err(StoreError::ActivationConflict)
         }
     }

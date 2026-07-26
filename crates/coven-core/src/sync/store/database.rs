@@ -63,7 +63,19 @@ pub(crate) struct StoreDatabaseRuntime {
     /// Serializes staging and publication of the one exact snapshot generation
     /// held in `outbound_store_snapshot`.
     snapshot_publication: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes this device's authorship of its own Store stream: reading the
+    /// position a commit extends, and publishing the head that takes it.
+    ///
+    /// The device owns that stream, so two of its own writers contending for one
+    /// position is an implementation accident with no meaning in the protocol —
+    /// not a conflict any peer could observe. Held across the pair, it cannot
+    /// happen.
+    own_stream_authorship: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
+
+/// This device's exclusive turn to author its own next Store commit, held from
+/// reading the position through publishing the head that takes it.
+pub(in crate::sync::store) type OwnStreamAuthorship = tokio::sync::OwnedMutexGuard<()>;
 
 #[derive(Clone)]
 pub struct StoreDatabase {
@@ -122,6 +134,21 @@ impl StoreDatabase {
         &self,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.device_exclusion.clone().lock_owned().await
+    }
+
+    /// Wait for this device's turn to author its own next Store commit.
+    ///
+    /// Every path that reads the local position to compose a commit, and every
+    /// path that publishes a device head, takes this and holds it across the
+    /// pair. Never taken twice in one call chain: a composer holds it until its
+    /// candidate is either activated or durably persisted, and a publisher of an
+    /// already-persisted candidate takes it for that publication alone.
+    pub(in crate::sync::store) async fn author_own_stream(&self) -> OwnStreamAuthorship {
+        self.runtime
+            .own_stream_authorship
+            .clone()
+            .lock_owned()
+            .await
     }
 
     pub(in crate::sync::store) async fn lock_snapshot_publication(

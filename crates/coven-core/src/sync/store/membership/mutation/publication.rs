@@ -455,6 +455,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
         &publication.head,
         publication.head_ref.clone(),
     )?;
+    let _authorship = database.author_own_stream().await;
     operations::publish_prepared_store_membership_operation(
         database,
         storage,

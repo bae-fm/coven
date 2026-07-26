@@ -2836,11 +2836,16 @@ async fn drive_reclaim_candidate(
                     .await?;
             }
         }
-        match Box::pin(super::operations::publish_prepared_store_operation(
-            database, storage, candidate,
-        ))
-        .await?
-        {
+        // Scoped to the publication alone: the arms below re-derive a plan,
+        // which takes this same turn.
+        let outcome = {
+            let _authorship = database.author_own_stream().await;
+            Box::pin(super::operations::publish_prepared_store_operation(
+                database, storage, candidate,
+            ))
+            .await?
+        };
+        match outcome {
             super::operations::StoreOperationPublicationOutcome::Activated(_) => {
                 return Ok(());
             }

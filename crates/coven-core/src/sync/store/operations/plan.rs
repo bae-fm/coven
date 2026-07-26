@@ -44,6 +44,11 @@ pub(crate) struct DeviceJoinRegistrationActivation {
 }
 
 pub(crate) struct StoreOperationPlanCommon {
+    /// This device's turn to author its own next Store commit, taken when the
+    /// position this plan's order extends was read. A plan is the live claim on
+    /// that position: hold it until the commit has published its head, or until
+    /// the candidate is durably persisted for a later publisher to activate.
+    pub(super) _authorship: super::super::database::OwnStreamAuthorship,
     pub(super) root: StoreRootRef,
     pub(super) registration_ref: StoreDeviceRegistrationRef,
     pub(super) registration: Box<StoreDeviceRegistration>,
@@ -73,6 +78,7 @@ impl std::ops::Deref for StoreOperationCommitPlan {
 impl StoreOperationPlanCommon {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        authorship: super::super::database::OwnStreamAuthorship,
         root: StoreRootRef,
         registration_ref: StoreDeviceRegistrationRef,
         registration: StoreDeviceRegistration,
@@ -85,6 +91,7 @@ impl StoreOperationPlanCommon {
         owner_grant: Option<super::membership::MembershipGrantId>,
     ) -> Self {
         Self {
+            _authorship: authorship,
             root,
             registration_ref,
             registration: Box::new(registration),
@@ -145,6 +152,9 @@ impl StoreOperationCommitPlan {
 }
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
+    /// This device's turn to author its own next Store commit, taken when the
+    /// position this plan's order extends was read.
+    authorship: super::super::database::OwnStreamAuthorship,
     root: StoreRootRef,
     registration_ref: StoreDeviceRegistrationRef,
     registration: Box<StoreDeviceRegistration>,
@@ -224,6 +234,7 @@ impl MergeConflictResolutionCommitPlan {
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(StoreOperationCommitPlan {
             common: StoreOperationPlanCommon {
+                _authorship: self.authorship,
                 root: self.root,
                 registration_ref: self.registration_ref,
                 registration: self.registration,
@@ -322,10 +333,10 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
 ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(database, device_id, keypair).await?;
-    let previous = database.latest_local_store_position().await?;
-    let dependencies =
-        super::store_commit::CommitFrontier::from_refs(database.materialized_frontier().await?)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let base = database.local_commit_base().await?;
+    let previous = base.predecessor;
+    let dependencies = super::store_commit::CommitFrontier::from_refs(base.frontier)
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: super::store_commit::StreamActivation::device_authorized_stream_id(
@@ -352,6 +363,7 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
     .await
     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     Ok(MergeConflictResolutionCommitPlan {
+        authorship: base.authorship,
         root,
         registration_ref,
         registration: Box::new(registration),

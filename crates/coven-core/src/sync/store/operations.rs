@@ -74,12 +74,11 @@ pub(crate) async fn prepare_plan(
 ) -> Result<StoreOperationCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(database, device_id, keypair).await?;
-    let previous = database.latest_local_store_position().await?;
-    let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
-        database.materialized_frontier().await?,
-    )
-    .map(|frontier| frontier.commits().clone())
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let base = database.local_commit_base().await?;
+    let previous = base.predecessor;
+    let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(base.frontier)
+        .map(|frontier| frontier.commits().clone())
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let seq = next_store_sequence(previous.as_ref())?;
     let coord = StoreCommitCoord {
         stream_id: crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
@@ -118,6 +117,7 @@ pub(crate) async fn prepare_plan(
         })?;
     Ok(StoreOperationCommitPlan::new(
         StoreOperationPlanCommon::new(
+            base.authorship,
             root,
             registration_ref,
             registration,
@@ -134,10 +134,33 @@ pub(crate) async fn prepare_plan(
     ))
 }
 
+/// Compose a candidate and release this device's turn to author its own stream.
+///
+/// Consuming the plan is what releases the turn, and that is what a composer
+/// which *stages* its candidate wants. Holding the turn past composition buys a
+/// staged candidate nothing — its position can be taken between staging and
+/// publication either way — while stalling every other writer on this device
+/// until the staging is durable, and stalling one under a paused test point
+/// deadlocks whoever waits behind it.
+///
+/// [`activate_store_operation_commit`] is the one caller that must keep the
+/// turn, because it publishes against the position it just read; it uses
+/// [`prepare_candidate_borrowed`] and holds the plan across the publication.
 pub(crate) async fn prepare_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     plan: StoreOperationCommitPlan,
+    batch: StoreOperationBatch,
+) -> Result<PreparedStoreOperationCommit, StoreError> {
+    prepare_candidate_borrowed(database, storage, &plan, batch).await
+}
+
+/// Compose a candidate without consuming the plan, leaving the turn it holds in
+/// the caller's hands. Only for a caller that publishes under that same turn.
+pub(crate) async fn prepare_candidate_borrowed(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    plan: &StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<PreparedStoreOperationCommit, StoreError> {
     let db = database.sqlite();

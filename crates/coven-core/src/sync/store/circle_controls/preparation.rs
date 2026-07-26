@@ -1295,7 +1295,11 @@ pub(super) async fn prepare_circle_operation_request(
                     "circle creator is not a current Store writer".to_string(),
                 )
             })?;
-        let base = database.latest_local_store_position().await?;
+        let commit_base = database.local_commit_base().await?;
+        // Held until this request's candidate is durably staged, so the position
+        // its order extends is still this device's next one when it lands.
+        let _authorship = commit_base.authorship;
+        let base = commit_base.predecessor;
         let seq = base
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence() + 1);
@@ -1304,10 +1308,9 @@ pub(super) async fn prepare_circle_operation_request(
             &author_registration,
             crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(
-            database.materialized_frontier().await?,
-        )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let dependencies =
+            crate::sync::store_commit::CommitFrontier::from_refs(commit_base.frontier)
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let coord = StoreCommitCoord {
             stream_id,
             sequence: seq,

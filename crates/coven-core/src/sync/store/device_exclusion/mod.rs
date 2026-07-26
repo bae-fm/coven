@@ -1046,9 +1046,17 @@ async fn publish_device_exclusion_candidate(
             "active exclusion operation has no activation candidate".to_string(),
         )
     })?;
-    let publish =
-        super::operations::publish_prepared_store_operation(database, storage, Box::new(candidate));
-    let publication = Box::new(Box::pin(publish).await?);
+    // Scoped to the publication alone: the arms below re-derive a plan, which
+    // takes this same turn.
+    let publication = Box::new({
+        let _authorship = database.author_own_stream().await;
+        let publish = super::operations::publish_prepared_store_operation(
+            database,
+            storage,
+            Box::new(candidate),
+        );
+        Box::pin(publish).await?
+    });
     match publication.as_ref() {
         StoreOperationPublicationOutcome::Activated(_) => {
             **operation = Box::pin(

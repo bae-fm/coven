@@ -375,6 +375,9 @@ pub(crate) async fn accept_device_registration_request(
         identity_signer,
     )
     .await?;
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
+        .await;
     let cut = plan.predecessor_cut()?;
     if !crate::sync::store::pull::history_cut_covers(
         storage,

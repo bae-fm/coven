@@ -720,6 +720,7 @@ impl AuthorizedStore<'_> {
                 &candidate,
             )
             .await?;
+            let _authorship = self.database().author_own_stream().await;
             match Box::pin(operations::publish_prepared(
                 self.database(),
                 self.storage(),

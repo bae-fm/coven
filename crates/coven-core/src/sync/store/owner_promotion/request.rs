@@ -39,10 +39,15 @@ async fn resume_request_publication_state(
             }
             OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
                 let head = candidate.head_ref();
-                let outcome = crate::sync::store::operations::publish_prepared_store_operation(
-                    database, storage, candidate,
-                )
-                .await?;
+                // Scoped to the publication alone: the arms below re-derive a
+                // plan, which takes this same turn.
+                let outcome = {
+                    let _authorship = database.author_own_stream().await;
+                    crate::sync::store::operations::publish_prepared_store_operation(
+                        database, storage, candidate,
+                    )
+                    .await?
+                };
                 let next_state = match outcome {
                     StoreOperationPublicationOutcome::Activated(commit) => {
                         let activation = OwnerPromotionRequestActivation { commit, head };

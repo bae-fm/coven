@@ -12,6 +12,22 @@ use crate::sync::store_commit::{
 };
 use crate::write::WriteId;
 use rusqlite::OptionalExtension;
+use std::collections::BTreeMap;
+
+/// One reading of the local ledger: the author's own latest position, the
+/// materialized frontier it belongs to, and this device's turn to author the
+/// commit that extends it. See [`StoreDatabase::local_commit_base`].
+///
+/// The turn is part of the reading rather than something a caller remembers to
+/// take: the position is only true for as long as no other local writer can
+/// take it. Hold this value until the commit composed from it has published its
+/// head, or until the candidate is durably persisted for a later publisher to
+/// activate.
+pub(crate) struct LocalCommitBase {
+    pub(crate) authorship: super::OwnStreamAuthorship,
+    pub(crate) predecessor: Option<StoreBatchCommitRef>,
+    pub(crate) frontier: BTreeMap<String, StoreBatchCommitRef>,
+}
 
 impl StoreDatabase {
     pub(crate) async fn oldest_prepared_store_write(
@@ -283,6 +299,48 @@ impl StoreDatabase {
             }
         }
         Ok(loaded)
+    }
+
+    /// The local device's own latest position and the materialized frontier
+    /// that position belongs to, read as one state of the ledger.
+    ///
+    /// A commit order names one history, and both halves of it come from the
+    /// same table. Reading them separately lets one of this device's own
+    /// activations land in between, which leaves its own stream in the frontier
+    /// one commit ahead of the position it extends. Such an order has no
+    /// predecessor cut at all — the cut is the frontier with the predecessor
+    /// inserted, and those two then contradict each other on the author's own
+    /// stream — so every operation composed from it is refused. The device
+    /// driving an operation also runs its sync loop, so that is the ordinary
+    /// case rather than a hostile one.
+    ///
+    /// Taking this device's turn to author its own stream is part of the read:
+    /// the position returned stays this device's next position for as long as
+    /// the returned [`LocalCommitBase`] is held.
+    pub(crate) async fn local_commit_base(&self) -> Result<LocalCommitBase, DbError> {
+        let authorship = self.author_own_stream().await;
+        let (predecessor, frontier) = self
+            .database
+            .call(move |conn| {
+                let (root, registration, _) = local_store_authority_on(conn)?;
+                let stream_id =
+                    crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                        root.store_root_hash,
+                        &registration,
+                        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    )
+                    .to_string();
+                Ok((
+                    StoreDatabase::latest_position_for_device_on(conn, &stream_id)?,
+                    StoreDatabase::materialized_frontier_on(conn, None)?,
+                ))
+            })
+            .await?;
+        Ok(LocalCommitBase {
+            authorship,
+            predecessor,
+            frontier,
+        })
     }
 
     pub(crate) async fn latest_local_store_position(

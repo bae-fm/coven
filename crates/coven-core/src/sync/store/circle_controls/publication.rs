@@ -512,6 +512,11 @@ pub(super) async fn publish_circle_operation(
         ));
     }
     {
+        // Creating the head takes a position on this device's own stream, and
+        // the activation below is what records the position as taken. A writer
+        // that read the position between the two would compose against one this
+        // operation has already claimed, so both run on one turn.
+        let _authorship = database.author_own_stream().await;
         let head = journal.operation().policy.head.clone();
         let commit_bytes = journal.operation().commit_bytes.clone();
         let commit_hash = journal.operation().commit_ref.commit_hash;
@@ -550,10 +555,10 @@ pub(super) async fn publish_circle_operation(
             &head.to_bytes(),
         )
         .await?;
+        database
+            .activate_circle_operation(journal, verified)
+            .await?;
     }
-    database
-        .activate_circle_operation(journal, verified)
-        .await?;
     Ok(())
 }
 

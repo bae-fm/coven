@@ -17,6 +17,13 @@ pub(crate) async fn drain_store_writes(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreError> {
+    // Each candidate here takes a position on this device's own stream by
+    // publishing its head, so this waits its turn behind any operation composing
+    // against that same position. Queued writes are the one composer that can
+    // lose a position safely — they re-prepare against the winner — but nothing
+    // else can, so they must not be the ones to take it out from under an
+    // operation that is mid-activation.
+    let _authorship = database.author_own_stream().await;
     #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
