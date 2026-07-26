@@ -791,6 +791,34 @@ impl DeviceJoinClient {
         )
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
         let database = crate::sync::store::StoreDatabase::from_database(db.clone());
+        // Converge over everything the owner published after this device's
+        // bootstrap before materializing the commit that activates the join.
+        //
+        // The attempt pins `bootstrap_cut` and its activation together, so the
+        // bootstrap covers exactly that pair. The outcome activation is composed
+        // later, against whatever the owner's frontier has become by then — so
+        // every Store commit the owner published in between sits between the
+        // bootstrapped history and the commit to materialize. The activation
+        // resolves its predecessor device state out of the local history, which
+        // has to hold those commits and the row data they carry.
+        on_status("Catching up on store history...");
+        let routing_encryption = EncryptionService::from(join.keyring.clone());
+        let membership = crate::sync::store::load_cycle_membership(&join.storage, &database)
+            .await
+            .map_err(BootstrapError::Pull)?;
+        Box::pin(crate::sync::store::pull_store_commits(
+            &database,
+            db.synced_tables(),
+            &join.storage,
+            self.code.store_root.store_root_hash,
+            &store_dir,
+            membership.chain.as_ref().ok_or_else(|| {
+                BootstrapError::Membership("membership is unresolved".to_string())
+            })?,
+            None,
+            Some(&routing_encryption),
+        ))
+        .await?;
         let joined = crate::sync::store::materialize_joined_store_activation(
             &database,
             &join.storage,

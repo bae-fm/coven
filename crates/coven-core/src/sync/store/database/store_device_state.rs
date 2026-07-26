@@ -29,13 +29,24 @@ pub(crate) fn load_store_device_snapshot_on(
 ) -> Result<ResolvedStoreDeviceState, DbError> {
     let exact = serde_json::to_string(reference)
         .map_err(|error| DbError::Message(format!("serialize Store commit ref: {error}")))?;
+    // An absent row is not a database fault: it means this device's local Store
+    // history does not cover `reference`, so no state was ever recorded for it.
+    // The caller resolved a history cut it has not materialized — name that
+    // rather than letting an anonymous "no rows" carry it up.
     let raw: String = conn
         .query_row(
             "SELECT state FROM store_device_state_snapshots WHERE commit_ref = ?1",
             [exact],
             |row| row.get(0),
         )
-        .map_err(DbError::from)?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => DbError::Message(format!(
+                "local Store history does not cover {}/{}, so it holds no device state for it",
+                reference.coord.stream_id,
+                reference.coord.sequence()
+            )),
+            other => DbError::from(other),
+        })?;
     let state: ResolvedStoreDeviceState = serde_json::from_str(&raw)
         .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))?;
     state

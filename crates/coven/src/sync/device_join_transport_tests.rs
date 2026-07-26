@@ -67,8 +67,13 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 struct TransportFixture {
     owner: UserKeypair,
     owner_store: crate::sync::store::Store,
+    owner_db: crate::database::Database,
     owner_database: crate::sync::store::StoreDatabase,
     owner_storage: Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
+    /// commit of the owner's while a join is mid-flight.
+    owner_test_store: TestStore,
+    owner_store_dir: crate::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
     provider_admin_grant: crate::ProviderAdminGrantId,
     member_pubkey: String,
@@ -85,6 +90,7 @@ struct TransportFixture {
     access_administrator: Option<crate::sync::test_helpers::TestDropboxAccessAdministrator>,
     _app: tempfile::TempDir,
     _snapshot: tempfile::TempDir,
+    _owner_store_tmp: tempfile::TempDir,
 }
 
 /// The Dropbox namespace a cross-principal fixture's store lives in.
@@ -236,12 +242,17 @@ impl TransportFixture {
                     namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
                 },
             );
+        let (owner_store_tmp, owner_store_dir) = temp_store_dir();
+        let home = store.home.clone();
         Self {
             owner,
             owner_store,
+            owner_db,
             owner_database,
             owner_storage,
-            home: store.home.clone(),
+            owner_test_store: store,
+            owner_store_dir,
+            home,
             provider_admin_grant,
             member_pubkey,
             invite_code: encode(&invite),
@@ -252,7 +263,33 @@ impl TransportFixture {
             access_administrator,
             _app: app,
             _snapshot: snapshot_dir,
+            _owner_store_tmp: owner_store_tmp,
         }
+    }
+
+    /// Publish one ordinary Store commit of the owner's — a row write, the kind
+    /// a connected host's sync loop publishes on its own cadence — and return
+    /// the commit it landed at.
+    async fn publish_owner_row(&self, id: &str) -> crate::sync::store_commit::StoreBatchCommitRef {
+        host_exec(
+            &self.owner_db,
+            &format!(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('{id}', '{id}', 1, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z')"
+            ),
+        )
+        .await;
+        assert!(
+            self.owner_test_store
+                .publish_pending(&self.owner_db, &self.owner_store_dir)
+                .await
+                .expect("publish the owner's own Store write"),
+            "the owner's row write produced no Store commit",
+        );
+        latest_local_store_position_fixture(&self.owner_db)
+            .await
+            .expect("read the owner's latest Store position")
+            .expect("the owner's write landed at a Store commit")
     }
 
     /// A fresh joining client, as a relaunched app would construct it: nothing
@@ -386,11 +423,9 @@ fn slot(bundle: &DeviceJoinOfferBundle, kind: DeviceJoinTransportKind) -> &Objec
 
 /// The whole admission runs through the transport: neither driver is handed an
 /// artifact, and the joining device ends with a saved member config.
-#[tokio::test]
-async fn transport_carries_a_whole_join_between_two_drivers() {
-    tokio::spawn(run_transport_carries_a_whole_join_between_two_drivers())
-        .await
-        .expect("device join transport task");
+#[test]
+fn transport_carries_a_whole_join_between_two_drivers() {
+    on_a_deep_stack(run_transport_carries_a_whole_join_between_two_drivers);
 }
 
 async fn run_transport_carries_a_whole_join_between_two_drivers() {
@@ -484,11 +519,9 @@ async fn run_the_offer_bundle_round_trips_through_its_encoded_form() {
 /// The same admission when the joining device is on a different provider
 /// account than the owner: the protocol adds its cross-principal probe, and the
 /// transport carries the larger artifacts without knowing they grew.
-#[tokio::test]
-async fn transport_carries_a_cross_principal_join() {
-    tokio::spawn(run_transport_carries_a_cross_principal_join())
-        .await
-        .expect("cross-principal join task");
+#[test]
+fn transport_carries_a_cross_principal_join() {
+    on_a_deep_stack(run_transport_carries_a_cross_principal_join);
 }
 
 async fn run_transport_carries_a_cross_principal_join() {
@@ -559,11 +592,9 @@ fn one_shot() -> DeviceJoinTransportTiming {
 /// the counterpart that is not running. Every restart resumes from the durable
 /// journal and the slots, republishing what it already published — byte for
 /// byte — and reading back what it already consumed.
-#[tokio::test]
-async fn each_side_resumes_from_every_artifact_boundary() {
-    tokio::spawn(run_each_side_resumes_from_every_artifact_boundary())
-        .await
-        .expect("crash and resume task");
+#[test]
+fn each_side_resumes_from_every_artifact_boundary() {
+    on_a_deep_stack(run_each_side_resumes_from_every_artifact_boundary);
 }
 
 async fn run_each_side_resumes_from_every_artifact_boundary() {
@@ -680,6 +711,104 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
             "{kind:?} slot outlived the completed join",
         );
     }
+}
+
+/// The owner keeps writing to its own Store while a join is mid-flight, so the
+/// commit that activates the join outcome is not the joining device's bootstrap
+/// commit's successor. The joining device converges over the owner's
+/// intervening history and completes.
+///
+/// An owner whose sync loop is running is the ordinary case, not an unusual
+/// one: `bootstrap_cut` is fixed when the attempt is signed, while the outcome
+/// activation is composed against whatever the owner's frontier has become.
+#[test]
+fn a_join_completes_across_the_owners_own_commits() {
+    on_a_deep_stack(run_a_join_completes_across_the_owners_own_commits);
+}
+
+async fn run_a_join_completes_across_the_owners_own_commits() {
+    let fixture = TransportFixture::build("device-join-across-owner-commits").await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+
+    let join_once = |timing| {
+        let client = fixture.client();
+        let bundle = &bundle;
+        let cancel = &cancel;
+        async move {
+            client
+                .join_via_transport(bundle, timing, |_status| {}, cancel)
+                .await
+        }
+    };
+
+    // Run both sides to the point where the joining device has bootstrapped its
+    // store, published its readiness, and is waiting for the activation.
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::ProviderAdmissionApproval,
+    );
+    assert_owner_waited_for(
+        fixture.drive_owner_with(&bundle, one_shot()).await,
+        DeviceJoinTransportKind::RegistrationRequest,
+    );
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::ProviderReadyBootstrap,
+    );
+    assert_owner_waited_for(
+        fixture.drive_owner_with(&bundle, one_shot()).await,
+        DeviceJoinTransportKind::Readiness,
+    );
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::Activation,
+    );
+
+    // The owner commits work of its own before it activates the outcome, so the
+    // outcome activation's predecessor is a commit the joining device's
+    // bootstrap never covered.
+    let intervening = fixture.publish_owner_row("owner-writes-mid-join").await;
+    let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+    let (_, activation_commit) = load_exact_materialized_commit(
+        &fixture.owner_db,
+        &*fixture.owner_storage,
+        &activation.outcome_activation.coord.stream_id.to_string(),
+        activation.outcome_activation.coord.sequence(),
+    )
+    .await
+    .expect("load the outcome activation commit")
+    .expect("the owner materialized its outcome activation");
+    assert!(
+        activation_commit
+            .value
+            .order
+            .predecessor_cut()
+            .expect("the outcome activation declares a predecessor cut")
+            .0
+            .values()
+            .any(|reference| reference == &intervening),
+        "the owner's own commit did not land between the attempt and the outcome",
+    );
+
+    let config = joined(Box::pin(join_once(timing())).await);
+    assert!(config.store_dir.config_path().exists());
+    // Completing is not enough: the joining device has to hold the row the
+    // owner's intervening commit carried, which is what converging over that
+    // commit rather than stepping past it means.
+    let joined_db = rusqlite::Connection::open(config.store_dir.db_path())
+        .expect("open the joined device's database");
+    assert_eq!(
+        joined_db
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE id = 'owner-writes-mid-join'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count the owner's intervening row"),
+        1,
+        "the joining device completed without the row the owner wrote mid-join",
+    );
 }
 
 fn assert_joiner_waited_for(
