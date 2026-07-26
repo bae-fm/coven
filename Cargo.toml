@@ -30,3 +30,9 @@ large_enum_variant = "allow"
 # scratch (the flows fit in <512 KiB again) and speeds its crypto-heavy tests.
 [profile.test.package.coven-core]
 opt-level = 1
+
+# The coven crate's device-join drivers stack the same deep async frames on
+# top of coven-core's; unoptimized poll-frame layout overflows CI's default
+# test-thread stack just as it did for coven-core.
+[profile.test.package.coven]
+opt-level = 1
