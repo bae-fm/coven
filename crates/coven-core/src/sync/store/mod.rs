@@ -22,6 +22,7 @@ pub(in crate::sync) use database::record_verified_circle_activations_for_test;
 pub use database::{HostWriteBlobStaging, StoreDatabase};
 mod device_exclusion;
 mod device_join;
+mod device_join_transport;
 mod error;
 mod membership;
 mod operations;
@@ -108,6 +109,12 @@ pub use device_join::{
     JoinerResponseDisposition, ProviderAdminJoinClosure, ProviderAdminJoinTerminal,
     ProviderChallengeDisposition, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap, SlotDisposition,
+};
+pub use device_join_transport::{
+    cancel_device_join_via_transport, drive_device_join, DeviceJoinApproval,
+    DeviceJoinApprovalPolicy, DeviceJoinArtifact, DeviceJoinOfferBundle, DeviceJoinRoles,
+    DeviceJoinTransport, DeviceJoinTransportError, DeviceJoinTransportKind,
+    DeviceJoinTransportParams, DeviceJoinTransportTiming,
 };
 pub use error::StoreError;
 pub(crate) use membership::apply_key_rotation;

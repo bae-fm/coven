@@ -598,6 +598,9 @@ pub(crate) mod storage {
 pub(crate) mod sync {
     pub(crate) use coven_core::sync::*;
 
+    pub(crate) mod device_join_transport;
+    #[cfg(test)]
+    mod device_join_transport_tests;
     pub(crate) mod join;
     #[cfg(test)]
     mod join_tests;
@@ -685,6 +688,14 @@ pub use coven_core::sync::store::{
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
+};
+// The storage-mediated device-join transport: the offer bundle a host encodes
+// as its join code, the slot namespace it names, and the two role drivers.
+pub use coven_core::sync::store::{
+    cancel_device_join_via_transport, drive_device_join, DeviceJoinApproval,
+    DeviceJoinApprovalPolicy, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming,
 };
 pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{

@@ -1626,12 +1626,13 @@ pub async fn promote_active_member_fixture(
     Ok(finalized)
 }
 
-#[cfg(test)]
-pub(crate) struct TestDropboxAccessAdministrator {
-    pub(crate) namespace_id: String,
+/// Grants a Dropbox shared-folder membership to whichever peer account asks —
+/// the provider-side step a cross-principal admission needs before the joining
+/// device can write to the store's namespace.
+pub struct TestDropboxAccessAdministrator {
+    pub namespace_id: String,
 }
 
-#[cfg(test)]
 #[async_trait::async_trait]
 impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccessAdministrator {
     async fn grant_member_access(

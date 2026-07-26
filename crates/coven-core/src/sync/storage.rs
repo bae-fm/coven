@@ -23,6 +23,7 @@ pub(crate) enum ProtectedObjectDomain {
     DeviceJoinOutcome,
     DeviceJoinAbandonment,
     DeviceJoinCleanupReceipt,
+    DeviceJoinTransport,
     StoreDeviceExclusionProposal,
     StoreDeviceExclusionOutcome,
     StoreReclaimEvidence,
@@ -248,6 +249,14 @@ impl ProtectedObjectDomain {
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
                     component_count: 3,
                     fixed_components: &[(0, "store-v1"), (1, "device-join-cleanup-receipts")],
+                }]),
+                extension: ".json",
+            },
+            Self::DeviceJoinTransport => ProtocolObjectMetadata {
+                aad_label: b"device-join-transport",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-transport")],
                 }]),
                 extension: ".json",
             },
@@ -555,6 +564,10 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
     pub const DeviceJoinCleanupReceipt: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinCleanupReceipt);
+    /// Device-join artifacts in transit. The bytes carry their own per-attempt
+    /// seal, so the storage layer stores them as it received them.
+    pub const DeviceJoinTransport: RecipientSealedProtocolObjectDomain =
+        RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinTransport);
     pub const StoreDeviceExclusionProposal: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionProposal);
     pub const StoreDeviceExclusionOutcome: SignedStoreProtocolObjectDomain =

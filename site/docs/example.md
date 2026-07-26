@@ -303,7 +303,23 @@ On the teammate's device,
 journal and turns the transferred offer, approval, provider-ready bootstrap,
 and activation into the corresponding access request, registration request,
 readiness proof, and installed `Config`. The owner handles the other side with
-the device-join methods on `CovenHandle`. `handle.remove_member(...)` appends a
+the device-join methods on `CovenHandle`.
+
+Handing those artifacts between the two devices is the host's to arrange, and
+coven ships one way to do it. Each artifact travels as a create-once object in
+the store's own cloud home, under a namespace for that join attempt, sealed
+with a key minted for it — so the storage provider carries the exchange without
+reading it. The owner mints a
+[`DeviceJoinOfferBundle`](rustdoc:struct:coven::DeviceJoinOfferBundle) (the
+offer plus that namespace and key) for the joining device to scan or type in;
+from there
+[`join_via_transport`](rustdoc:struct:coven::DeviceJoinClient) on the joining
+side and [`drive_device_join`](rustdoc:fn:coven::drive_device_join) on the
+owner's carry the join to a saved `Config`. Hosts that would rather deliver the
+artifacts themselves — over a local network, a relay, a QR per step — keep
+using the `DeviceJoinAction` surface directly.
+
+`handle.remove_member(...)` appends a
 fresh key generation the removed member never receives. The signed membership
 chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).
 

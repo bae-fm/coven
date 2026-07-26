@@ -50,6 +50,8 @@ pub enum BootstrapError {
     StoreRegistration(#[from] crate::sync::store::StoreRegistrationError),
     #[error("Store device join: {0}")]
     DeviceJoin(#[from] crate::DeviceJoinError),
+    #[error("Store device join transport: {0}")]
+    DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
     #[error("storage: {0}")]
     Storage(#[from] crate::sync::storage::StorageError),
     #[error("config: {0}")]
@@ -870,18 +872,38 @@ impl DeviceJoinClient {
         .await
     }
 
+    /// Plaintext storage over the joining device's cloud home.
+    ///
+    /// Both the pre-key bootstrap reads and the device-join transport go
+    /// through this: the transport's objects carry their own per-attempt seal,
+    /// so they need no store key — which is what lets a joiner publish its
+    /// access request before it has unwrapped the store keyring at all.
+    pub(crate) async fn transport_storage(&self) -> Result<CloudSyncStorage, BootstrapError> {
+        let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+        let cloud = self.build_cloud_home().await?;
+        self.plaintext_storage(cloud.home, &signer)
+    }
+
+    fn plaintext_storage(
+        &self,
+        home: Arc<dyn CloudHome>,
+        signer: &UserKeypair,
+    ) -> Result<CloudSyncStorage, BootstrapError> {
+        Ok(CloudSyncStorage::new(
+            home,
+            CloudCipher::Plaintext,
+            BlobPathScheme::for_storage(HomeStorage::Opaque),
+            self.code.store_id.clone(),
+            signer.clone(),
+        )?)
+    }
+
     async fn build_storage(
         &self,
         signer: &UserKeypair,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let cloud = self.build_cloud_home().await?;
-        let bootstrap_storage = CloudSyncStorage::new(
-            cloud.home.clone(),
-            CloudCipher::Plaintext,
-            BlobPathScheme::for_storage(HomeStorage::Opaque),
-            self.code.store_id.clone(),
-            signer.clone(),
-        )?;
+        let bootstrap_storage = self.plaintext_storage(cloud.home.clone(), signer)?;
         let encryption = unwrap_store_keyring(
             &bootstrap_storage,
             signer,

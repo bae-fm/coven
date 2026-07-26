@@ -782,6 +782,17 @@ impl StoreDatabase {
             .await
     }
 
+    /// The exact registration this device is activated under, or `None` before
+    /// it has one. This is the identity a signed artifact names when it names a
+    /// device, so it is what a role check compares against.
+    pub(crate) async fn local_activated_registration_ref(
+        &self,
+    ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
+        self.database
+            .call(local_activated_registration_ref_on)
+            .await
+    }
+
     pub(crate) async fn local_blob_write_authority(
         &self,
     ) -> Result<(StoreDeviceRegistrationRef, StoreDeviceRegistration), DbError> {
