@@ -72,10 +72,10 @@ use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::db::{
     apply_coven_schema, expected_coven_schema_manifest, is_reserved_table_name,
-    live_coven_schema_manifest, CovenSchemaManifest, ExternalBlob, OutboxEntry, OutboxOperation,
+    live_coven_schema_manifest, CovenSchemaManifest, OutboxEntry, OutboxOperation,
     OutboxUploadState,
 };
-pub use crate::db::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
+pub use crate::db::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};

@@ -125,7 +125,7 @@ pub mod sync;
 
 pub use database::DbError;
 // The durable make-remote queue's read shapes, which a host renders.
-pub use db::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
+pub use db::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 
 /// The exact `rusqlite` coven owns the connection through. The host runs its app
 /// SQL via [`CovenHandle::sql`] / [`CovenHandle::write`] against this same crate

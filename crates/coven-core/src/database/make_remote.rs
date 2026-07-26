@@ -266,6 +266,22 @@ impl Database {
         .map_err(DbError::from)
     }
 
+    /// The user's own file behind a row's blob, or `None` when the row has no
+    /// external registration.
+    ///
+    /// `None` is an absence, not a failure: a row whose blob coven keeps its
+    /// own copy of, or one whose registration was cleared, simply has no user
+    /// file to point at. A row that does have one is validated against the
+    /// row's own size and hash, so the path returned is the file the row means.
+    pub async fn external_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<Option<ExternalBlob>, DbError> {
+        let reference = self.row_blob_ref(table, row_id).await?;
+        self.external_blob_for_row(&reference).await
+    }
+
     pub(crate) async fn external_blob_for_row(
         &self,
         reference: &RowBlobRef,

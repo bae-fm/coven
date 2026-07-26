@@ -649,7 +649,8 @@ pub use coven_core::{
 // Blob descriptors, cache error, the host-implemented transition observer.
 pub use coven_core::{
     BlobCacheError, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    MakeRemoteProgress, Provenance, QueuedDelete, QueuedUpload, RowBlobAuthority, RowBlobRef,
+    ExternalBlob, MakeRemoteProgress, Provenance, QueuedDelete, QueuedUpload, RowBlobAuthority,
+    RowBlobRef,
 };
 // A host computes a blob's content hash at import and writes it into the row's
 // declared hash column — including for a file it registers rather than hands

@@ -1044,6 +1044,27 @@ impl CovenHandle {
         self.db().queued_uploads_for_root(root_table, root_id).await
     }
 
+    /// Where the user's own file for a row's blob lives on disk, or `None`
+    /// when the row has no external registration.
+    ///
+    /// This is the read that mirrors
+    /// [`SqlContext::register_external_blob`](crate::SqlContext::register_external_blob):
+    /// a host that needs the original file itself — to re-read its tags, to
+    /// find an artifact it produced — asks here rather than reading coven's
+    /// copy, because for a user-provided blob there is no copy.
+    ///
+    /// `None` means no registration, which is an ordinary answer: a row whose
+    /// blobs coven copies, or one whose registration was cleared, has no user
+    /// file to name. A registration that disagrees with the row it belongs to
+    /// is an error, not a `None`.
+    pub async fn external_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<Option<crate::ExternalBlob>, crate::DbError> {
+        self.db().external_blob(table, row_id).await
+    }
+
     /// Every cloud tombstone the durable queue is holding, oldest first.
     ///
     /// A tombstone is queued by

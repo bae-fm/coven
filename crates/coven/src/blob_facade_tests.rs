@@ -546,3 +546,54 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
         "a local-only blob has no cloud object to remove, got {refused:?}",
     );
 }
+
+/// A host that needs the user's actual file — to re-read its tags, to find what
+/// it produced — asks the handle where it is, and gets `None` once the row no
+/// longer points at one.
+#[tokio::test]
+async fn the_handle_reports_where_a_row_s_user_file_lives() {
+    crate::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let handle = open_local(crate::StoreDir::new(tmp.path()));
+    let user_dir = tempfile::tempdir().expect("user directory");
+
+    let bytes = b"the original the host still needs to read".to_vec();
+    let path = user_dir.path().join("original.flac");
+    std::fs::write(&path, &bytes).expect("write the user's file");
+    write_note_with_external_photo(&handle, "note-1", "photo-1", &path, &bytes)
+        .await
+        .expect("register the user's file");
+
+    let external = handle
+        .external_blob("note_photos", "photo-1")
+        .await
+        .expect("read the registration")
+        .expect("a registered row names its file");
+    assert_eq!(external.path, path, "the host gets the file it registered");
+    assert_eq!(
+        external.size,
+        bytes.len() as u64,
+        "with the length the row was registered at",
+    );
+    // The file itself is where the bytes are — coven never copied them.
+    assert_eq!(
+        std::fs::read(&external.path).expect("read the user's file directly"),
+        bytes,
+    );
+
+    handle
+        .sql(|sql| {
+            sql.clear_external_blob("note_photos", "photo-1")?;
+            Ok(())
+        })
+        .await
+        .expect("clear the registration");
+    assert_eq!(
+        handle
+            .external_blob("note_photos", "photo-1")
+            .await
+            .expect("read the cleared registration"),
+        None,
+        "a cleared registration is an absence, not a failure",
+    );
+}
