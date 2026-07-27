@@ -662,71 +662,9 @@ pub(crate) fn install_snapshot_blob_graph(
                     "snapshot blob binding differs from its remote object".to_string(),
                 ));
             }
-            let object_id = blob.remote.object_id();
-            let existing = tx
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-            let remote = if let Some(existing) = existing {
-                let mut existing: crate::sync::remote_object::RemoteObjectRecord =
-                    serde_json::from_str(&existing)
-                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-                for owner in blob.remote.snapshot_owners() {
-                    existing
-                        .merge_snapshot_owner(blob.bindings[0].blob(), owner.clone())
-                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-                }
-                existing
-            } else {
-                blob.remote.clone()
-            };
-            tx.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
-                 ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
-                rusqlite::params![
-                    object_id.to_string(),
-                    serde_json::to_string(&remote)
-                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
-                ],
-            )
-            .map_err(|error| {
+            crate::database::install_snapshot_blob_plan_on(&tx, blob).map_err(|error| {
                 SnapshotError::ClearFailed(format!("install snapshot blob: {error}"))
             })?;
-            tx.execute(
-                "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
-                 ON CONFLICT(remote_object_id) DO NOTHING",
-                rusqlite::params![
-                    object_id.to_string(),
-                    blob.bindings[0].blob().locator().locator_hash().to_string(),
-                ],
-            )
-            .map_err(|error| {
-                SnapshotError::ClearFailed(format!("install snapshot locator: {error}"))
-            })?;
-            for binding in &blob.bindings {
-                tx.execute(
-                    "INSERT INTO row_blob_locators
-                 (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
-                    rusqlite::params![
-                        binding.table(),
-                        binding.row_id(),
-                        binding.column(),
-                        binding.row_stamp(),
-                        serde_json::to_string(&blob.authority)
-                            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
-                        object_id.to_string(),
-                    ],
-                )
-                .map_err(|error| {
-                    SnapshotError::ClearFailed(format!("install snapshot row blob: {error}"))
-                })?;
-            }
         }
         tx.commit()
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
@@ -3032,5 +2970,181 @@ mod tests {
             })
             .expect("check snapshot blob foreign keys");
         assert_eq!(foreign_key_violations, 0);
+    }
+
+    fn blob_graph_activation(label: &str) -> crate::sync::store_commit::StreamActivationId {
+        let registration_bytes = format!("{label} snapshot registration");
+        let registration = crate::sync::store_commit::StoreDeviceRegistrationRef {
+            device_id: format!("{:0>64}", label.len())
+                .parse()
+                .expect("valid blob graph test device id"),
+            registration_hash: crate::sync::store_commit::ObjectHash::digest(
+                registration_bytes.as_bytes(),
+            ),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/snapshot-registration.json"
+                ))
+                .expect("valid blob graph registration slot"),
+                registration_bytes.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(registration_bytes.as_bytes()),
+            ),
+        };
+        crate::sync::store_commit::StreamActivation::device_authorized(
+            crate::sync::store_commit::ObjectHash::digest(format!("{label} Store root").as_bytes()),
+            registration,
+            crate::sync::store_commit::DeviceStreamAnchor::StoreSnapshots {
+                first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                    "store-v1/test/{label}/snapshots/1.json"
+                ))
+                .expect("valid blob graph activation slot"),
+            },
+        )
+        .activation_id()
+    }
+
+    fn blob_graph_binding(
+        row_id: &str,
+        stamp: &str,
+        bytes: &[u8],
+    ) -> crate::sync::audience_package::RowBlobLocatorBinding {
+        let plaintext_hash = crate::sync::store_commit::ObjectHash::digest(bytes);
+        let uploader_bytes = b"blob graph test uploader registration";
+        let uploader = crate::sync::store_commit::StoreDeviceRegistrationRef {
+            device_id: "aa".repeat(32).parse().expect("valid blob graph device id"),
+            registration_hash: crate::sync::store_commit::ObjectHash::digest(uploader_bytes),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/devices/blob-graph-test-uploader.json".to_string(),
+                )
+                .expect("valid blob graph uploader slot"),
+                uploader_bytes.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(uploader_bytes),
+            ),
+        };
+        let locator = crate::blob::locator::BlobLocator::browsable(
+            "images",
+            row_id,
+            uploader,
+            format!("photos/{row_id}.bin"),
+            bytes.len() as u64,
+            plaintext_hash,
+        )
+        .expect("valid blob graph locator");
+        let slot = crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+            .expect("valid blob graph object slot");
+        let object = crate::sync::storage::ExactObjectRef::new(
+            slot,
+            bytes.len() as u64,
+            crate::sync::store_commit::ObjectHash::digest(bytes),
+        );
+        crate::sync::audience_package::RowBlobLocatorBinding::new(
+            "photos",
+            row_id,
+            stamp,
+            "id",
+            crate::blob::locator::StoredBlobRef::new(locator, object)
+                .expect("valid blob graph stored blob"),
+        )
+        .expect("valid blob graph row binding")
+    }
+
+    /// The image installer's `ON CONFLICT ... DO NOTHING` on `row_blob_locators`
+    /// keeps whatever binding the image already carries. When that pre-existing
+    /// binding at the same row stamp points at different exact content, the
+    /// install must fail loudly instead of shipping an image whose row binding
+    /// contradicts the prepared blob.
+    #[test]
+    fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
+        let dir = tempfile::tempdir().expect("blob graph conflict directory");
+        let image_path = dir.path().join("image.db");
+        let owner = crate::sync::remote_object::SnapshotObjectOwner {
+            activation: blob_graph_activation("conflict"),
+            generation: 0,
+        };
+        let existing = blob_graph_binding(
+            "photo-conflict",
+            "0000000001000-0000-owner",
+            b"existing blob bytes",
+        );
+        let existing_remote =
+            crate::sync::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+                existing.blob(),
+                owner.clone(),
+            )
+            .expect("activate existing blob graph object");
+        {
+            let connection = Connection::open(&image_path).expect("open blob graph image");
+            crate::db::apply_coven_schema(&connection).expect("apply blob graph schema");
+            connection
+                .execute(
+                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                    rusqlite::params![
+                        existing_remote.object_id().to_string(),
+                        serde_json::to_string(&existing_remote)
+                            .expect("serialize existing blob graph object"),
+                    ],
+                )
+                .expect("install existing blob graph object");
+            connection
+                .execute(
+                    "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)",
+                    rusqlite::params![
+                        existing_remote.object_id().to_string(),
+                        existing.blob().locator().locator_hash().to_string(),
+                    ],
+                )
+                .expect("install existing blob graph locator");
+            connection
+                .execute(
+                    "INSERT INTO row_blob_locators
+                     (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        existing.table(),
+                        existing.row_id(),
+                        existing.column(),
+                        existing.row_stamp(),
+                        serde_json::to_string(&crate::sync::audience_package::PackageAudience::Store)
+                            .expect("serialize existing blob graph audience"),
+                        existing_remote.object_id().to_string(),
+                    ],
+                )
+                .expect("install existing blob graph row binding");
+            connection
+                .close()
+                .map_err(|(_, error)| error)
+                .expect("close blob graph image");
+        }
+        let image = std::fs::read(&image_path).expect("read blob graph image");
+
+        // Same row, column, and stamp; different content, so a different
+        // locator and object.
+        let replacement = blob_graph_binding(
+            "photo-conflict",
+            "0000000001000-0000-owner",
+            b"replacement blob bytes",
+        );
+        let replacement_remote =
+            crate::sync::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+                replacement.blob(),
+                owner,
+            )
+            .expect("activate replacement blob graph object");
+        let prepared = crate::database::PreparedSnapshotBlob {
+            bindings: vec![replacement],
+            authority: crate::sync::audience_package::PackageAudience::Store,
+            remote: replacement_remote,
+            spool_path: None,
+        };
+        let store_dir = crate::store_dir::StoreDir::new(dir.path());
+        let error = install_snapshot_blob_graph(image, &[prepared], &store_dir)
+            .expect_err("a conflicting existing row binding must fail the image install");
+        assert!(
+            error
+                .to_string()
+                .contains("already bound to different exact content"),
+            "{error}"
+        );
     }
 }
