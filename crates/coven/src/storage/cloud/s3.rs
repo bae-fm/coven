@@ -15,9 +15,9 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    combine_cleanup_failure, range_header, require_logical_slot, BlobBody, CloudAccessOutcome,
-    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
-    PartSink, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, pump_body_into_sink, range_header, require_logical_slot, BlobBody,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -283,7 +283,7 @@ impl S3CloudHome {
     async fn append_create_only(
         &self,
         key: &str,
-        mut body: BlobBody,
+        body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         if body.len() <= self.multipart_threshold() {
@@ -293,37 +293,10 @@ impl S3CloudHome {
             progress(length);
             return Ok(());
         }
-        let mut sink = self
+        let sink = self
             .open_multipart_sink(key, MultipartCompletion::CreateOnly)
             .await?;
-        let total = body.len();
-        let mut offset = 0;
-        loop {
-            let part = match body.next_part(sink.part_size()).await {
-                Ok(Some(part)) => part,
-                Ok(None) if offset == total => break,
-                Ok(None) => {
-                    let operation = CloudHomeError::Transport(format!(
-                        "append {key}: upload body ended after {offset} of {total} bytes"
-                    ));
-                    let cleanup = sink.abort().await;
-                    return Err(combine_cleanup_failure(operation, cleanup));
-                }
-                Err(operation) => {
-                    let cleanup = sink.abort().await;
-                    return Err(combine_cleanup_failure(operation, cleanup));
-                }
-            };
-            let length = part.len() as u64;
-            let is_last = offset + length >= total;
-            if let Err(operation) = sink.send_part(part, offset, is_last).await {
-                let cleanup = sink.abort().await;
-                return Err(combine_cleanup_failure(operation, cleanup));
-            }
-            offset += length;
-            progress(offset);
-        }
-        sink.finish().await
+        pump_body_into_sink(key, body, sink, progress).await
     }
 }
 

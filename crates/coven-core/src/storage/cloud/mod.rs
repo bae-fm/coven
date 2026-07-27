@@ -692,7 +692,7 @@ async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> 
 async fn write_blob<C: CloudHome + ?Sized>(
     home: &C,
     key: &str,
-    mut body: BlobBody,
+    body: BlobBody,
     progress: &UploadProgress<'_>,
 ) -> Result<(), CloudHomeError> {
     if body.len() <= home.multipart_threshold() {
@@ -702,7 +702,23 @@ async fn write_blob<C: CloudHome + ?Sized>(
         progress(n);
         return Ok(());
     }
-    let mut sink = home.open_multipart(key, body.len()).await?;
+    let sink = home.open_multipart(key, body.len()).await?;
+    pump_body_into_sink(key, body, sink, progress).await
+}
+
+/// Stream `body` into `sink` one part at a time, reporting cumulative progress
+/// and aborting the sink if the body or a send fails, then finish it.
+///
+/// This is the pump for sinks whose upload is settled by [`PartSink::finish`].
+/// Backends whose final part *is* the commit, or that publish on an explicit
+/// call afterwards, run their own loop — the completion protocol is the part
+/// that differs between them, so it is not a parameter here.
+pub async fn pump_body_into_sink(
+    key: &str,
+    mut body: BlobBody,
+    mut sink: BoxPartSink<'_>,
+    progress: &UploadProgress<'_>,
+) -> Result<(), CloudHomeError> {
     let part_size = sink.part_size();
     let total = body.len();
     let mut offset = 0u64;
