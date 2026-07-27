@@ -35,6 +35,36 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok(verified)
     }
 
+    pub(crate) async fn authenticate_bytes(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+        bytes: &[u8],
+    ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
+        if let Some(commit) = self.commits.get(reference) {
+            if commit.value().to_bytes() == bytes {
+                return Ok(commit.clone());
+            }
+            return Err(StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(StoreProtocolError::Malformed(
+                    "supplied Store commit bytes differ from the authenticated operation input"
+                        .to_string(),
+                )),
+            });
+        }
+        let verified = verify_commit_bytes_at_root(
+            self.storage,
+            self.root,
+            &self.verified_root,
+            reference,
+            bytes.to_vec(),
+        )
+        .await?;
+        self.commits.insert(reference.clone(), verified.clone());
+        Ok(verified)
+    }
+
     pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
         &self.verified_root
     }
@@ -209,6 +239,23 @@ async fn load_verified_commit_at_root_impl(
         .read_protocol_object(&context, &reference.object, &semantic_prefix)
         .await
         .map_err(StoreObjectError::Storage)?;
+    verify_commit_bytes_at_root(storage, root, root_value, reference, bytes).await
+}
+
+async fn verify_commit_bytes_at_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
+    reference: &StoreBatchCommitRef,
+    bytes: Vec<u8>,
+) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
+    let semantic_prefix =
+        super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })?;
     #[derive(serde::Deserialize)]
     struct StoreCommitAuthorProjection {
         author_registration: StoreDeviceRegistrationRef,

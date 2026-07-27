@@ -276,7 +276,7 @@ pub(crate) async fn verify_merge_commit_currently_materialized(
 
 pub(super) async fn apply_candidate(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     store_dir: &StoreDir,
@@ -374,7 +374,7 @@ pub(super) async fn apply_candidate(
     }
     let circle_packages = match load_applicable_circle_packages(
         database,
-        commit_verifier,
+        history_verifier.commit_verifier(),
         storage,
         root,
         commit_ref,
@@ -446,6 +446,7 @@ pub(super) async fn apply_candidate(
         database,
         storage,
         root,
+        history_verifier,
         merge_candidate,
         packages,
         device_operations,
@@ -1273,6 +1274,7 @@ async fn commit_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     merge_candidate: &MergeCandidate,
     packages: Vec<PreparedMergeMaterializationPackage>,
     device_operations: VerifiedStoreDeviceOperations,
@@ -1372,14 +1374,18 @@ async fn commit_candidate(
         .map_err(|error| {
             StorePullError::Database(format!("open prepared Merge history summary: {error}"))
         })?;
+    history_verifier
+        .commit_verifier()
+        .remember(candidate.verified.clone())
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
     let retractions = Box::pin(verified_terminal_merge_retractions(
         database,
         storage,
         root,
+        history_verifier,
         &merge_candidate.activation_head,
         &merge_candidate.activation_head_object,
-        commit_ref,
-        commit,
+        &candidate.verified,
         &authorized_predecessor,
         predecessor_membership,
         &device_operations,

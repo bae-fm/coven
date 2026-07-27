@@ -143,8 +143,8 @@ pub(crate) use registration_authority::{
     verify_merge_membership_state_ref,
 };
 use registration_validation::load_merge_commit_registrations;
+use replay::verified_terminal_merge_retractions;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
-use replay::{replay_merge_device_history, verified_terminal_merge_retractions};
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store) use snapshot_authority::{
     verify_snapshot_stability, verify_snapshots_for_acknowledgement,
@@ -559,7 +559,7 @@ pub fn pull_store_commits<'a>(
                         })?;
                         match Box::pin(apply_candidate(
                             database,
-                            history_verifier.commit_verifier(),
+                            &mut history_verifier,
                             storage,
                             &root,
                             store_dir,

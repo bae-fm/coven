@@ -1,54 +1,42 @@
 use super::*;
 
-pub(super) async fn replay_merge_device_history(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    tip: &StoreBatchCommitRef,
-) -> Result<
-    (
-        ResolvedStoreDeviceState,
-        VerifiedStoreDeviceOperations,
-        StoreBatchCommit,
-        Option<VerifiedCircleActivations>,
-    ),
-    StorePullError,
-> {
-    let history = verify_merge_history_refs(storage, root, [tip.clone()]).await?;
-    let verified = history.commits.get(tip).ok_or_else(|| {
-        StorePullError::Database(
-            "author exclusion activation is absent from its verified history".to_string(),
-        )
-    })?;
-    Ok((
-        verified.predecessor_state.clone(),
-        verified.operations.clone(),
-        verified.verified.value().clone(),
-        verified
-            .membership_control
-            .as_ref()
-            .map(|control| control.activations.clone()),
-    ))
-}
-
 pub(super) async fn verified_terminal_merge_retractions(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     activation_head: &StoreDeviceHead,
     activation_head_object: &ExactObjectRef,
-    activation_commit_ref: &StoreBatchCommitRef,
-    activation_commit: &StoreBatchCommit,
+    activation_commit: &VerifiedStoreBatchCommit,
     activation_predecessor_state: &ResolvedStoreDeviceState,
     activation_predecessor_membership: &MembershipChain,
     device_operations: &VerifiedStoreDeviceOperations,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
 ) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StorePullError> {
     let retained = Box::pin(database.retained_merge_replay_inputs()).await?;
+    let mut verified_retained = BTreeMap::new();
+    for materialization in &retained {
+        let verified = history_verifier
+            .commit_verifier()
+            .authenticate_bytes(
+                materialization.commit_ref(),
+                &materialization.commit().to_bytes(),
+            )
+            .await?;
+        if verified.value() != materialization.commit() {
+            return Err(StorePullError::Database(
+                "retained Merge materialization differs from its authenticated commit".to_string(),
+            ));
+        }
+        verified_retained.insert(materialization.commit_ref().clone(), verified);
+    }
+    let activation_commit_ref = activation_commit.reference();
+    let activation_commit_value = activation_commit.value();
     let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
         head_hash: activation_head.head_hash(),
         object: activation_head_object.clone(),
     };
-    let current_membership_ref = &activation_commit.membership_state;
+    let current_membership_ref = &activation_commit_value.membership_state;
     let MembershipStatus::Resolved(current_resolved) = activation_predecessor_membership.status()
     else {
         return Err(StorePullError::Database(
@@ -57,20 +45,23 @@ pub(super) async fn verified_terminal_merge_retractions(
     };
     let mut retractions = Vec::new();
     for materialization in &retained {
+        let candidate = verified_retained
+            .get(materialization.commit_ref())
+            .expect("every retained Merge materialization was authenticated");
         let mut locator = Box::pin(database.author_exclusion_activation_for_candidate(
             materialization.commit_ref().clone(),
-            materialization.commit().author_registration.clone(),
+            candidate.value().author_registration.clone(),
         ))
         .await?;
         if locator.is_none() {
             let expected_stream =
                 super::store_commit::StreamActivation::device_authorized_stream_id(
                     root.store_root_hash,
-                    &materialization.commit().author_registration,
+                    &candidate.value().author_registration,
                     super::store_commit::StreamAnchorDomain::StoreAnnouncements,
                 );
             for (exclusion, accepted_cut) in device_operations.exclusions() {
-                if exclusion.proposal.target != materialization.commit().author_registration {
+                if exclusion.proposal.target != candidate.value().author_registration {
                     continue;
                 }
                 let accepted_cut = &accepted_cut.0;
@@ -89,7 +80,7 @@ pub(super) async fn verified_terminal_merge_retractions(
             }
         }
         let Some(locator) = locator else {
-            let Some(authority) = materialization.commit().membership_authority.as_ref() else {
+            let Some(authority) = candidate.value().membership_authority.as_ref() else {
                 continue;
             };
             let predecessor_membership =
@@ -123,12 +114,12 @@ pub(super) async fn verified_terminal_merge_retractions(
             let nonactivation = Box::pin(verify_membership_grant_revocation_nonactivation(
                 storage,
                 root,
+                history_verifier,
                 grant_id,
                 current_membership_ref,
                 activation_commit_ref,
                 &activation_head_ref,
-                materialization.commit_ref(),
-                materialization.commit(),
+                candidate,
                 materialization.activation_head(),
                 materialization.activation_head_object(),
             ))
@@ -140,15 +131,14 @@ pub(super) async fn verified_terminal_merge_retractions(
             verify_author_exclusion_nonactivation_with_verified_operation(
                 storage,
                 root,
+                history_verifier.commit_verifier(),
                 &locator,
                 activation_head,
                 activation_head_object,
-                activation_commit_ref,
                 activation_commit,
                 activation_predecessor_state,
                 device_operations,
-                materialization.commit_ref(),
-                materialization.commit(),
+                candidate,
                 materialization.activation_head(),
                 materialization.activation_head_object(),
             ),
@@ -171,7 +161,10 @@ pub(super) async fn verified_terminal_merge_retractions(
             if verified_by_reference.contains_key(materialization.commit_ref()) {
                 continue;
             }
-            let dependency = commit_predecessor_references(materialization.commit())
+            let candidate = verified_retained
+                .get(materialization.commit_ref())
+                .expect("every retained Merge materialization was authenticated");
+            let dependency = commit_predecessor_references(candidate.value())
                 .into_iter()
                 .filter_map(|reference| {
                     verified_by_reference
@@ -182,19 +175,15 @@ pub(super) async fn verified_terminal_merge_retractions(
             let Some((_dependency_reference, dependency)) = dependency else {
                 continue;
             };
-            let author = Box::pin(database.activated_store_device_registration(
-                materialization.commit().author_registration.clone(),
-            ))
-            .await?;
             let verified =
                 super::remote_object::VerifiedCandidateNonactivation::dependency_retraction(
                     dependency,
                     super::store_commit::StoreBatchCommitDeletionTarget {
                         coord: materialization.commit_ref().coord.clone(),
                         object: materialization.commit_ref().object.clone(),
-                        canonical_signed_bytes: materialization.commit().to_bytes(),
+                        canonical_signed_bytes: candidate.value().to_bytes(),
                     },
-                    &author,
+                    candidate.author(),
                     materialization.activation_head_object().clone(),
                 )
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
