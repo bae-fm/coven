@@ -232,6 +232,7 @@ pub(super) async fn verified_terminal_merge_retractions(
 
 pub(crate) fn replay_retained_merge_projection_on(
     live: &rusqlite::Transaction<'_>,
+    retained_merge_materializations: &mut crate::sync::store::database::RetainedMergeMaterializationCache,
     blob_decls: &BlobDecls,
     gates: &super::gate::Gates,
     synced_tables: &[SyncedTable],
@@ -281,7 +282,10 @@ pub(crate) fn replay_retained_merge_projection_on(
         }
     }
     let retained =
-        crate::sync::store::database::StoreDatabase::load_retained_merge_replay_inputs_on(live)?;
+        crate::sync::store::database::StoreDatabase::cached_retained_merge_replay_inputs_on(
+            live,
+            retained_merge_materializations,
+        )?;
     let circle_epochs =
         crate::sync::store::database::StoreDatabase::circle_replay_epoch_index_on(live)?;
     let active_references = retained

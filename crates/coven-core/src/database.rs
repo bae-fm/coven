@@ -201,9 +201,25 @@ pub(crate) fn authorize_host_sql(
 ) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
 
-    if context
-        .database_name
-        .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))
+    let mutates_coven_table = match context.action {
+        AuthAction::Delete { table_name }
+        | AuthAction::Insert { table_name }
+        | AuthAction::CreateTable { table_name }
+        | AuthAction::DropTable { table_name }
+        | AuthAction::CreateVtable { table_name, .. }
+        | AuthAction::DropVtable { table_name, .. } => is_reserved_table_name(table_name),
+        AuthAction::Update { table_name, .. }
+        | AuthAction::CreateIndex { table_name, .. }
+        | AuthAction::DropIndex { table_name, .. }
+        | AuthAction::CreateTrigger { table_name, .. }
+        | AuthAction::DropTrigger { table_name, .. }
+        | AuthAction::AlterTable { table_name, .. } => is_reserved_table_name(table_name),
+        _ => false,
+    };
+    if mutates_coven_table
+        || context
+            .database_name
+            .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))
         || matches!(
             context.action,
             AuthAction::Detach { database_name }

@@ -1090,8 +1090,7 @@ impl StoreDatabase {
         };
         let retained =
             Self::load_retained_merge_materialization_by_ref_on(conn, &activation_commit)?;
-        let verified = retained.as_verified()?;
-        let mut matches = verified
+        let mut matches = retained
             .circle_activations()
             .circles()
             .iter()

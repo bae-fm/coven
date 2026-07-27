@@ -44,10 +44,12 @@ use crate::sync::remote_object::{
 use crate::sync::storage::PreparedExactObject;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
+use materialization_models::OwnedVerifiedMergeMaterialization;
 
 pub use audience_blob_staging::HostWriteBlobStaging;
+pub(crate) use retained_merge_replay::RetainedMergeMaterializationCache;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct StoreDatabaseRuntime {
     /// Serializes complete membership-chain loads that share this database, so a
     /// load cannot return an older chain after another load commits a newer floor.
@@ -63,6 +65,10 @@ pub(crate) struct StoreDatabaseRuntime {
     /// Serializes staging and publication of the one exact snapshot generation
     /// held in `outbound_store_snapshot`.
     snapshot_publication: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Retained Merge inputs verified when this database opened, extended only
+    /// by fully opening newly retained inputs on the owned connection.
+    retained_merge_materializations:
+        std::sync::Arc<std::sync::Mutex<RetainedMergeMaterializationCache>>,
     /// Serializes this device's authorship of its own Store stream: reading the
     /// position a commit extends, and publishing the head that takes it.
     ///
@@ -71,6 +77,24 @@ pub(crate) struct StoreDatabaseRuntime {
     /// not a conflict any peer could observe. Held across the pair, it cannot
     /// happen.
     own_stream_authorship: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl StoreDatabaseRuntime {
+    pub(crate) fn new(
+        retained_merge_materializations: Vec<OwnedVerifiedMergeMaterialization>,
+    ) -> Result<Self, DbError> {
+        Ok(Self {
+            membership_load: Default::default(),
+            membership_mutation: Default::default(),
+            store_creation: Default::default(),
+            device_exclusion: Default::default(),
+            snapshot_publication: Default::default(),
+            retained_merge_materializations: std::sync::Arc::new(std::sync::Mutex::new(
+                RetainedMergeMaterializationCache::from_verified(retained_merge_materializations)?,
+            )),
+            own_stream_authorship: Default::default(),
+        })
+    }
 }
 
 /// This device's exclusive turn to author its own next Store commit, held from
@@ -155,6 +179,12 @@ impl StoreDatabase {
         &self,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.snapshot_publication.clone().lock_owned().await
+    }
+
+    pub(in crate::sync::store) fn retained_merge_materialization_cache(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<RetainedMergeMaterializationCache>> {
+        self.runtime.retained_merge_materializations.clone()
     }
 
     #[cfg(test)]

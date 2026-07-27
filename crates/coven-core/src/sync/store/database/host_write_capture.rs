@@ -900,4 +900,32 @@ mod tests {
         assert!(panic.is_err());
         assert_guard_removed();
     }
+
+    #[test]
+    fn host_sql_cannot_mutate_coven_owned_tables() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
+
+        let error = StoreDatabase::run_host_sql_on(&conn, || {
+            conn.execute(
+                "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .expect_err("host SQL must not write Coven bookkeeping");
+        assert!(error.to_string().contains("not authorized"));
+
+        let stored: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM protocol_state WHERE key = 'host-owned'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query protocol state after refused host write");
+        assert!(!stored);
+    }
 }

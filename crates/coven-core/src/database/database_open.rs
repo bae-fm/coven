@@ -186,6 +186,27 @@ fn validate_sync_routing_contract(
     Ok(())
 }
 
+fn validate_durable_coven_state(
+    conn: &Connection,
+) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, DbError> {
+    let foreign_key_violation: Option<(String, Option<i64>, String, i64)> = conn
+        .query_row(
+            "SELECT \"table\", rowid, parent, fkid
+             FROM pragma_foreign_key_check
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    if let Some((table, rowid, parent, foreign_key)) = foreign_key_violation {
+        return Err(DbError::Message(format!(
+            "Store database foreign key {foreign_key} from {table} row {rowid:?} to {parent} is invalid"
+        )));
+    }
+    crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn)
+}
+
 impl DatabaseCore {
     pub(super) fn open(
         path: &Path,
@@ -275,6 +296,7 @@ impl DatabaseCore {
             }
         };
         let sync_routing_hash = sync_routing_contract.hash();
+        let retained_merge_materializations = validate_durable_coven_state(&conn)?;
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
         // `_updated_at`).
@@ -312,7 +334,7 @@ impl DatabaseCore {
             blob_tombstone_grace,
             transfer_limits,
         };
-        let state = core.state();
+        let state = core.state(retained_merge_materializations)?;
 
         Ok((core, state, stamper))
     }
@@ -354,6 +376,7 @@ impl DatabaseCore {
             .map_err(|error| DbError::Message(error.to_string()))?;
         validate_sync_routing_contract(&pinned_routing_contract, &sync_routing_contract)?;
         let sync_routing_hash = sync_routing_contract.hash();
+        let retained_merge_materializations = validate_durable_coven_state(&conn)?;
 
         let synced_tables = Arc::new(synced_tables);
 
@@ -378,12 +401,15 @@ impl DatabaseCore {
             blob_tombstone_grace,
             transfer_limits,
         };
-        let state = core.state();
+        let state = core.state(retained_merge_materializations)?;
         Ok((core, state))
     }
 
-    fn state(&self) -> DatabaseState {
-        DatabaseState {
+    fn state(
+        &self,
+        retained_merge_materializations: Vec<crate::database::OwnedVerifiedMergeMaterialization>,
+    ) -> Result<DatabaseState, DbError> {
+        Ok(DatabaseState {
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,
@@ -392,7 +418,9 @@ impl DatabaseCore {
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
             transfer_limits: self.transfer_limits,
-            store_runtime: crate::sync::store::StoreDatabaseRuntime::default(),
+            store_runtime: crate::sync::store::StoreDatabaseRuntime::new(
+                retained_merge_materializations,
+            )?,
             local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
             ids: Arc::new(crate::id_provider::UuidProvider),
             write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -400,7 +428,7 @@ impl DatabaseCore {
             test_pause_points: Arc::new(TestPausePoints::default()),
             #[cfg(any(test, feature = "test-utils"))]
             merge_materialization_failure: Arc::new(std::sync::Mutex::new(None)),
-        }
+        })
     }
 
     pub(super) fn connection(&self) -> &Connection {

@@ -251,23 +251,6 @@ impl OwnedVerifiedMergeMaterialization {
         })
     }
 
-    pub(crate) fn as_verified(&self) -> Result<VerifiedMergeMaterialization<'_>, DbError> {
-        VerifiedMergeMaterialization::verify(
-            &self.root,
-            &self.commit,
-            &self.commit_ref,
-            &self.registrations,
-            &self.device_operations,
-            &self.circle_activations,
-            &self.activation_head,
-            &self.activation_head_object,
-            &self.history_summary,
-            self.membership_objects.as_ref(),
-            &self.packages,
-            self.package_application,
-        )
-    }
-
     pub(crate) fn input_hash(&self) -> ObjectHash {
         self.input_hash
     }

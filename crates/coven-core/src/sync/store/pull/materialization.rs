@@ -1457,6 +1457,7 @@ async fn commit_candidate(
         .to_vec();
     #[cfg(any(test, feature = "test-utils"))]
     let materialization_failure = db.merge_materialization_failure_injection();
+    let retained_merge_materializations = database.retained_merge_materialization_cache();
     let applied = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -1484,6 +1485,12 @@ async fn commit_candidate(
                 materialization,
             )?;
             if matches!(applied.outcome, ApplyOutcome::Applied(_)) {
+                let mut retained_merge_materializations =
+                    retained_merge_materializations.lock().map_err(|_| {
+                        DbError::Message(
+                            "retained Merge materialization cache lock is poisoned".to_string(),
+                        )
+                    })?;
                 #[cfg(any(test, feature = "test-utils"))]
                 if materialization_failure.reach(
                     crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
@@ -1511,7 +1518,11 @@ async fn commit_candidate(
                     .collect::<Result<BTreeSet<_>, _>>()?;
                 if !retractions.is_empty() {
                     applied.write_status_notifications =
-                        crate::sync::store::database::StoreDatabase::retract_verified_merge_materializations_on(&tx, retractions)?;
+                        crate::sync::store::database::StoreDatabase::retract_verified_merge_materializations_on(
+                            &tx,
+                            &mut retained_merge_materializations,
+                            retractions,
+                        )?;
                     #[cfg(any(test, feature = "test-utils"))]
                     if materialization_failure.reach(
                         crate::database::MergeMaterializationFailurePoint::RetractionDeletion,
@@ -1528,6 +1539,7 @@ async fn commit_candidate(
                 {
                     let replay = replay_retained_merge_projection_on(
                         &tx,
+                        &mut retained_merge_materializations,
                         &blob_decls,
                         &gates,
                         &synced_tables,

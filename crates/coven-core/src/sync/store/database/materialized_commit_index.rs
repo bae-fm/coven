@@ -26,8 +26,16 @@ impl StoreDatabase {
     pub(crate) async fn retained_merge_replay_inputs(
         &self,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        let cache = self.retained_merge_materialization_cache();
         self.database
-            .call(Self::load_retained_merge_replay_inputs_on)
+            .call(move |conn| {
+                let mut cache = cache.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
+                Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)
+            })
             .await
     }
 
@@ -134,7 +142,6 @@ impl StoreDatabase {
             frontier.insert(
                 device_id.clone(),
                 Self::parse_materialized_commit_row_on(
-                    conn,
                     &device_id,
                     seq,
                     &reference,
@@ -191,7 +198,6 @@ impl StoreDatabase {
     }
 
     pub(super) fn parse_materialized_commit_row_on(
-        conn: &Connection,
         stream_id: &str,
         sequence: u64,
         encoded: &str,
@@ -209,15 +215,13 @@ impl StoreDatabase {
                 "materialized coordinate {stream_id}/{sequence} has no retained input hash"
             ))
         })?;
-        let retained = Self::load_retained_merge_materialization_on(
-            conn, stream_id, sequence, &reference, input_hash,
+        input_hash.parse::<crate::sync::store_commit::ObjectHash>().map_err(
+            |error| {
+                DbError::Message(format!(
+                    "materialized coordinate {stream_id}/{sequence} retained input hash is invalid: {error}"
+                ))
+            },
         )?;
-        retained.as_verified()?;
-        if retained.input_hash().to_string() != input_hash {
-            return Err(DbError::Message(format!(
-                "materialized coordinate {stream_id}/{sequence} differs from its opened input"
-            )));
-        }
         Ok(reference)
     }
 
@@ -243,7 +247,6 @@ impl StoreDatabase {
         .map_err(DbError::from)?
         .map(|(encoded, retained_commit_ref, retained_input_hash)| {
             Self::parse_materialized_commit_row_on(
-                conn,
                 stream_id,
                 sequence,
                 &encoded,
@@ -287,7 +290,6 @@ impl StoreDatabase {
         if let Some((seq, reference, retained_commit_ref, retained_input_hash)) = materialized {
             let seq = Database::sequence_from_sqlite(device_id, seq)?;
             references.push(Self::parse_materialized_commit_row_on(
-                conn,
                 device_id,
                 seq,
                 &reference,

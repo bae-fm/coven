@@ -275,6 +275,9 @@ impl super::AuthorizedStore<'_> {
             self.store_root().store_root_hash,
         )
         .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        let retained_merge_materializations =
+            crate::sync::store::database::StoreDatabase::from_database(self.db().clone())
+                .retained_merge_materialization_cache();
         self.db()
             .call(move |connection| {
                 // The successor bootstrap image is the accepted-history projection
@@ -286,8 +289,15 @@ impl super::AuthorizedStore<'_> {
                 let transaction = connection
                     .unchecked_transaction()
                     .map_err(crate::database::DbError::from)?;
+                let mut retained_merge_materializations =
+                    retained_merge_materializations.lock().map_err(|_| {
+                        crate::database::DbError::Message(
+                            "retained Merge materialization cache lock is poisoned".to_string(),
+                        )
+                    })?;
                 let replay = super::pull::replay_retained_merge_projection_on(
                     &transaction,
+                    &mut retained_merge_materializations,
                     &blob_decls,
                     &gates,
                     &tables,
@@ -1747,9 +1757,6 @@ async fn resolve_restorer_circle_access(
             StoreDatabase::load_retained_merge_materialization_by_ref_on(conn, &commit_lookup)
         })
         .await
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-    owned
-        .as_verified()
         .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
     let commit = owned.commit().clone();
     let reference = owned

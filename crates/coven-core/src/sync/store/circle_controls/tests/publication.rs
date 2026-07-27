@@ -963,11 +963,21 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     .expect("derive bootstrap replay routing key");
     let replay_historical_id = blob_id.to_string();
     let replay_late_id = late_id.to_string();
+    let retained_merge_materializations =
+        crate::sync::store::database::StoreDatabase::new(&member_db)
+            .retained_merge_materialization_cache();
     let (retained_count, retained_late_count, sabotaged_count, sabotaged_late_count) = member_db
         .call(move |connection| {
             let tx = connection.unchecked_transaction().map_err(DbError::from)?;
+            let mut retained_merge_materializations =
+                retained_merge_materializations.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
             let retained = crate::sync::store::pull::replay_retained_merge_projection_on(
                 &tx,
+                &mut retained_merge_materializations,
                 &replay_blob_decls,
                 &replay_gates,
                 &replay_tables,
@@ -991,6 +1001,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 .map_err(DbError::from)?;
             let sabotaged = crate::sync::store::pull::replay_retained_merge_projection_on(
                 &tx,
+                &mut retained_merge_materializations,
                 &replay_blob_decls,
                 &replay_gates,
                 &replay_tables,
@@ -1064,11 +1075,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                     &transaction,
                     &activation_commit,
                 )?;
-                let verified = retained.as_verified()?;
                 let error = StoreDatabase::record_circle_bootstrap_coverage_on(
                     &transaction,
                     &activation_commit,
-                    verified.circle_activations(),
+                    retained.circle_activations(),
                 )
                 .expect_err("idempotent bootstrap recording must reject a changed image hash");
                 assert!(

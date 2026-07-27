@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
 use crate::blob::{local_files, CacheFill, Provenance};
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::migration::Migration;
@@ -1957,7 +1958,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
 }
 
 #[tokio::test]
-async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
+async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_open() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = capture_bytes(
@@ -1974,7 +1975,20 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
         .await
         .expect("publish retained-input fixture");
     let stream_id = commit_stream_id(&commit);
-    let target = open_test_db();
+    let target_dir = tempfile::tempdir().expect("create retained-input database directory");
+    let target_path = target_dir.path().join("target.sqlite");
+    let open_target = || {
+        Database::open(
+            &target_path,
+            test_synced_tables(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "test-device".to_string(),
+            &test_migrations(),
+        )
+        .map(|(database, _)| database)
+    };
+    let target = open_target().expect("open retained-input target");
 
     pull_into(&target, &storage, &temp_store_dir().1).await;
 
@@ -2097,16 +2111,31 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
     assert!(encoded.contains(&package_application));
     let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
     replace_retained_merge_input(&target, stream_id.clone(), missing_receiver).await;
-    let error = store_database(&target)
-        .materialized_frontier()
+    let error = match store_database(&target)
+        .retained_merge_materialization(commit.clone())
         .await
-        .expect_err("a retained package must carry its receive-time conflict bound");
+    {
+        Ok(_) => panic!("a retained package must carry its receive-time conflict bound"),
+        Err(error) => error,
+    };
     assert!(error
         .to_string()
         .contains("package application does not match its applied packages"));
 
     replace_retained_merge_input(&target, stream_id.clone(), canonical_input.clone()).await;
 
+    let verified_before_corruption = store_database(&target)
+        .retained_merge_replay_inputs()
+        .await
+        .expect("load verified retained Merge history")
+        .into_iter()
+        .map(|materialization| {
+            (
+                materialization.commit_ref().clone(),
+                materialization.input_hash(),
+            )
+        })
+        .collect::<Vec<_>>();
     let corrupt_stream = stream_id.clone();
     target
         .call(move |conn| {
@@ -2120,10 +2149,27 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption() {
         })
         .await
         .expect("corrupt retained Merge input");
-    let error = store_database(&target)
-        .materialized_frontier()
+    let verified_after_corruption = store_database(&target)
+        .retained_merge_replay_inputs()
         .await
-        .expect_err("corrupt retained Merge input must invalidate its materialization");
+        .expect("the open connection retains its verified Merge history")
+        .into_iter()
+        .map(|materialization| {
+            (
+                materialization.commit_ref().clone(),
+                materialization.input_hash(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verified_after_corruption, verified_before_corruption,
+        "raw backing-byte changes cannot replace connection-owned verified history"
+    );
+    drop(target);
+    let error = match open_target() {
+        Ok(_) => panic!("corrupt retained Merge input must prevent database open"),
+        Err(error) => error,
+    };
     assert!(error
         .to_string()
         .contains("input hash differs from its bytes"));
